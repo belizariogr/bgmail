@@ -58,6 +58,43 @@ impl MailboxKind {
     }
 }
 
+/// A unified mailbox shown at the top of the sidebar, above the per-account
+/// groups. It aggregates the same logical mailbox across every account (e.g. a
+/// single inbox spanning all accounts). For now it is just a label + icon in the
+/// mock; the actual aggregation arrives with the real mail layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalMailbox {
+    Inbox,
+    Flagged,
+    Drafts,
+    Sent,
+}
+
+impl GlobalMailbox {
+    /// All global mailboxes, in the order they appear at the top of the sidebar.
+    pub const ALL: [GlobalMailbox; 4] = [
+        GlobalMailbox::Inbox,
+        GlobalMailbox::Flagged,
+        GlobalMailbox::Drafts,
+        GlobalMailbox::Sent,
+    ];
+
+    /// Localization key for this global mailbox's display name.
+    fn name_key(self) -> Key {
+        match self {
+            GlobalMailbox::Inbox => Key::MailboxInbox,
+            GlobalMailbox::Flagged => Key::MailboxFlagged,
+            GlobalMailbox::Drafts => Key::MailboxDrafts,
+            GlobalMailbox::Sent => Key::MailboxSent,
+        }
+    }
+
+    /// Localized display name for the given language.
+    pub fn display_name(self, language: Language) -> &'static str {
+        self.name_key().tr(language)
+    }
+}
+
 /// A mailbox within an account. Standard mailboxes derive their (localized) name
 /// from [`MailboxKind`]; custom folders carry an explicit [`label`].
 #[derive(Debug, Clone)]
@@ -559,6 +596,23 @@ mod tests {
         assert_eq!(
             custom[0].display_name(Language::English),
             SharedString::from("Clients")
+        );
+    }
+
+    #[test]
+    fn global_mailboxes_are_localized() {
+        assert_eq!(
+            GlobalMailbox::Flagged.display_name(Language::English),
+            "Flagged"
+        );
+        assert_eq!(
+            GlobalMailbox::Flagged.display_name(Language::Portuguese),
+            "Sinalizadas"
+        );
+        // The unified inbox reuses the standard inbox label.
+        assert_eq!(
+            GlobalMailbox::Inbox.display_name(Language::English),
+            MailboxKind::Inbox.display_name(Language::English)
         );
     }
 

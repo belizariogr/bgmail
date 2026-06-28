@@ -7,10 +7,13 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use std::f32::consts::FRAC_PI_2;
+
 use gpui::{
-    canvas, ease_in_out, size, Animation, AnimationExt as _, AppContext as _, Bounds, Context,
-    DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, ScrollHandle,
-    TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
+    canvas, ease_in_out, radians, size, svg, Animation, AnimationExt as _, AppContext as _, Bounds,
+    Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    ScrollHandle, Svg, TitlebarOptions, Transformation, Window, WindowBounds, WindowControlArea,
+    WindowHandle, WindowOptions,
 };
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
@@ -19,12 +22,12 @@ use ui::{
     Scrollbar, ScrollbarState,
 };
 
-use crate::data::{self, Account, MailboxKind, Message, MessageBody};
+use crate::data::{self, Account, GlobalMailbox, MailboxKind, Message, MessageBody};
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::web_view::{email_document, EmailWebView, WEBVIEW_SUPPORTED};
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
-const SIDEBAR_MIN_WIDTH: f32 = 250.0;
+const SIDEBAR_MIN_WIDTH: f32 = 150.0;
 /// Minimum width of the message list, in pixels.
 const LIST_MIN_WIDTH: f32 = 350.0;
 /// Minimum width reserved for the reading pane (e-mail content), in pixels.
@@ -43,9 +46,18 @@ const FOLD_ANIM_MS: u64 = 90;
 /// so the list never snaps at the end of the transition.
 const SIDEBAR_ROW_HEIGHT: f32 = 32.0;
 /// Fixed square footprint of the account header's disclosure chevron, in pixels.
-/// The right/down glyphs have different advances, so a fixed box keeps the
-/// header from shifting as it animates between them.
+/// Keeping the box constant stops the header from shifting as the chevron rotates.
 const CHEVRON_BOX: f32 = 16.0;
+/// Rendered size of the chevron glyph itself, in pixels.
+const CHEVRON_ICON: f32 = 12.0;
+/// Left indentation applied to every mailbox/folder row (i.e. everything that
+/// isn't an account header), so the rows read as nested under their account and
+/// the sidebar gains a tree-like feel. This indents the whole row (highlight
+/// included).
+const ITEM_INDENT: f32 = 16.0;
+/// Extra left padding inside each sidebar row, nudging its icon/text to the right
+/// while the hover/selection highlight keeps filling the full row.
+const ITEM_PADDING: f32 = 4.0;
 /// Width of the expanded search field in the toolbar, in pixels.
 const SEARCH_FIELD_WIDTH: f32 = 220.0;
 /// Width of the collapsed search button (icon only), in pixels.
@@ -76,6 +88,16 @@ enum ResizeHandle {
 /// Drag payload used to resize a column by dragging its right-edge handle.
 #[derive(Debug, Clone, Copy)]
 struct ResizeDrag(ResizeHandle);
+
+/// What is currently selected in the sidebar: a global (unified) mailbox at the
+/// top, or a specific mailbox within an account group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Selection {
+    /// A unified mailbox spanning all accounts.
+    Global(GlobalMailbox),
+    /// A mailbox within an account: `(account index, mailbox index)`.
+    Mailbox(usize, usize),
+}
 
 /// An in-flight fold (collapse/expand) animation for one sidebar account.
 #[derive(Debug, Clone, Copy)]
@@ -135,12 +157,33 @@ fn mailbox_icon(kind: MailboxKind) -> IconName {
     }
 }
 
+fn global_mailbox_icon(kind: GlobalMailbox) -> IconName {
+    match kind {
+        GlobalMailbox::Inbox => IconName::Inbox,
+        GlobalMailbox::Flagged => IconName::Flag,
+        GlobalMailbox::Drafts => IconName::Drafts,
+        GlobalMailbox::Sent => IconName::Sent,
+    }
+}
+
+/// A right-pointing chevron rendered from an SVG (so it can be rotated, unlike
+/// the font-glyph icons) at the given color, rotated `angle` radians about its
+/// center. 0 points right (collapsed); `FRAC_PI_2` points down (expanded).
+fn chevron_svg(color: Hsla, angle: f32) -> Svg {
+    svg()
+        .w(px(CHEVRON_ICON))
+        .h(px(CHEVRON_ICON))
+        .text_color(color)
+        .path(ui::CHEVRON_RIGHT)
+        .with_transformation(Transformation::rotate(radians(angle)))
+}
+
 /// Application state (mock).
 pub struct RootView {
     accounts: Vec<Account>,
     messages: Vec<Message>,
-    /// Selected (account index, mailbox index) in the sidebar.
-    selected_mailbox: (usize, usize),
+    /// Current sidebar selection (a global mailbox or an account's mailbox).
+    selected_mailbox: Selection,
     /// Indices of the accounts whose mailbox list is collapsed (target state).
     collapsed_accounts: HashSet<usize>,
     /// Fold animations currently playing, keyed by account index. An entry is
@@ -195,7 +238,7 @@ impl RootView {
         Self {
             accounts: data::sample_accounts(),
             messages: data::sample_messages(),
-            selected_mailbox: (0, 0),
+            selected_mailbox: Selection::Global(GlobalMailbox::Inbox),
             collapsed_accounts: HashSet::new(),
             fold_anim: HashMap::new(),
             fold_seq: 0,
@@ -453,9 +496,12 @@ impl RootView {
     /// and inside the list's own header otherwise.
     fn render_list_controls(&self, show_count: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let language = cx.language();
-        let (account_idx, mailbox_idx) = self.selected_mailbox;
-        let mailbox = &self.accounts[account_idx].mailboxes[mailbox_idx];
-        let list_title = mailbox.display_name(language);
+        let list_title: SharedString = match self.selected_mailbox {
+            Selection::Global(global) => global.display_name(language).into(),
+            Selection::Mailbox(account_idx, mailbox_idx) => {
+                self.accounts[account_idx].mailboxes[mailbox_idx].display_name(language)
+            }
+        };
         let list_count = locale::message_count(language, self.messages.len());
 
         h_flex()
@@ -756,6 +802,8 @@ impl RootView {
             }))
             .pt_2();
 
+        content = content.child(self.render_global_section(cx));
+
         for (account_idx, account) in self.accounts.iter().enumerate() {
             content = content.child(self.render_account(account_idx, account, cx));
         }
@@ -803,6 +851,64 @@ impl RootView {
             .on_drag(ResizeDrag(kind), |_, _, _, cx| cx.new(|_| Empty))
     }
 
+    /// Aggregated unread count for a global (unified) mailbox. In the mock this
+    /// is derived from the sample data; it will come from the real mail layer
+    /// later. Inbox sums every account's inbox; Flagged counts starred messages.
+    fn global_unread(&self, global: GlobalMailbox) -> usize {
+        match global {
+            GlobalMailbox::Inbox => self
+                .accounts
+                .iter()
+                .flat_map(|account| account.mailboxes.iter())
+                .filter(|mailbox| mailbox.kind == MailboxKind::Inbox)
+                .map(|mailbox| mailbox.unread)
+                .sum(),
+            GlobalMailbox::Flagged => self.messages.iter().filter(|m| m.starred).count(),
+            GlobalMailbox::Drafts | GlobalMailbox::Sent => 0,
+        }
+    }
+
+    /// The unified mailboxes pinned to the top of the sidebar, above the account
+    /// groups. They are not nested under any account (no indentation), and a thin
+    /// divider separates them from the groups below.
+    fn render_global_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = cx.language();
+        let divider = cx.theme().colors().border_variant;
+
+        let mut section = v_flex().px_2().pb_2();
+        for global in GlobalMailbox::ALL {
+            let selected = self.selected_mailbox == Selection::Global(global);
+            let count = self.global_unread(global);
+            let badge = (count > 0).then(|| self.render_count_badge(count, selected, cx));
+
+            let mut item = ListItem::new(("global", global as usize))
+                .selected(selected)
+                .inset(px(ITEM_PADDING))
+                .start_slot(
+                    Icon::new(global_mailbox_icon(global))
+                        .size(IconSize::Small)
+                        .color(if selected {
+                            Color::Accent
+                        } else {
+                            Color::Muted
+                        }),
+                )
+                .child(Label::new(global.display_name(language)).size(LabelSize::Small))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.selected_mailbox = Selection::Global(global);
+                    cx.notify();
+                }));
+
+            if let Some(badge) = badge {
+                item = item.end_slot(badge);
+            }
+
+            section = section.child(div().h(px(SIDEBAR_ROW_HEIGHT)).flex_shrink_0().child(item));
+        }
+
+        section.child(div().h(px(1.0)).mx_2().mt_1().bg(divider))
+    }
+
     fn render_account(
         &self,
         account_idx: usize,
@@ -810,6 +916,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let language = cx.language();
+        let chevron_color = cx.theme().colors().text_muted;
         let section = v_flex().px_2().pb_3().child(
             h_flex()
                 .id(("account-header", account_idx))
@@ -838,7 +945,7 @@ impl RootView {
                     .detach();
                     cx.notify();
                 }))
-                .child(self.render_account_chevron(account_idx))
+                .child(self.render_account_chevron(account_idx, chevron_color))
                 .child(
                     Label::new(account.name.clone())
                         .size(LabelSize::XSmall)
@@ -853,7 +960,7 @@ impl RootView {
 
         let mut list = v_flex();
         for (mailbox_idx, mailbox) in account.mailboxes.iter().enumerate() {
-            let selected = self.selected_mailbox == (account_idx, mailbox_idx);
+            let selected = self.selected_mailbox == Selection::Mailbox(account_idx, mailbox_idx);
             let badge = if mailbox.unread > 0 {
                 Some(self.render_count_badge(mailbox.unread, selected, cx))
             } else {
@@ -862,6 +969,7 @@ impl RootView {
 
             let mut item = ListItem::new(("mailbox", account_idx * 100 + mailbox_idx))
                 .selected(selected)
+                .inset(px(ITEM_PADDING))
                 .start_slot(
                     Icon::new(mailbox_icon(mailbox.kind))
                         .size(IconSize::Small)
@@ -873,7 +981,7 @@ impl RootView {
                 )
                 .child(Label::new(mailbox.display_name(language)).size(LabelSize::Small))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.selected_mailbox = (account_idx, mailbox_idx);
+                    this.selected_mailbox = Selection::Mailbox(account_idx, mailbox_idx);
                     cx.notify();
                 }));
 
@@ -882,16 +990,24 @@ impl RootView {
             }
 
             // Each row is pinned to a fixed height so the accordion animation
-            // below can compute the list's total height exactly.
-            list = list.child(div().h(px(SIDEBAR_ROW_HEIGHT)).flex_shrink_0().child(item));
+            // below can compute the list's total height exactly. The whole row
+            // (highlight included) is indented so it reads as nested under its
+            // account header.
+            list = list.child(
+                div()
+                    .h(px(SIDEBAR_ROW_HEIGHT))
+                    .flex_shrink_0()
+                    .pl(px(ITEM_INDENT))
+                    .child(item),
+            );
         }
 
         // While a fold animation is in flight, play it as an accordion: the list
         // lives inside an `overflow_hidden` box whose height grows (expand) or
-        // shrinks (collapse), so the rows below slide down and up. No opacity is
-        // involved — it's a pure vertical reveal. Keyed by token so each toggle
-        // replays from the start; once cleared the list renders at its natural
-        // (and identical) height, so there is no snap at the end.
+        // shrinks (collapse), so the rows below slide down and up. It also fades
+        // in/out so the reveal isn't purely geometric. Keyed by token so each
+        // toggle replays from the start; once cleared the list renders at its
+        // natural (and identical) height and full opacity, so there is no snap.
         let content_height = px(account.mailboxes.len() as f32 * SIDEBAR_ROW_HEIGHT);
         let list_el = match self.fold_anim.get(&account_idx).copied() {
             Some(anim) => div()
@@ -902,7 +1018,7 @@ impl RootView {
                     Animation::new(Duration::from_millis(FOLD_ANIM_MS)).with_easing(ease_in_out),
                     move |el, delta| {
                         let shown = if anim.collapsing { 1.0 - delta } else { delta };
-                        el.h(content_height * shown)
+                        el.h(content_height * shown).opacity(shown)
                     },
                 )
                 .into_any_element(),
@@ -913,45 +1029,28 @@ impl RootView {
     }
 
     /// The account header's disclosure chevron, rendered inside a fixed-size box
-    /// so the right/down glyphs (which have different advances) never shift the
-    /// header. It points down when expanded and right when collapsed; during a
-    /// fold it cross-dissolves between the two glyphs (font glyphs can't be
-    /// rotated, so the orientation change reads as a quick flip through zero
-    /// opacity), keyed by token so it replays per toggle.
-    fn render_account_chevron(&self, account_idx: usize) -> gpui::AnyElement {
+    /// so it never shifts the header. It points right when collapsed and down
+    /// when expanded; during a fold it animates by rotating between the two
+    /// (0 ↔ 90°), keyed by token so it replays per toggle.
+    fn render_account_chevron(&self, account_idx: usize, color: Hsla) -> gpui::AnyElement {
         let inner = match self.fold_anim.get(&account_idx).copied() {
-            Some(anim) => {
-                let (from, to) = if anim.collapsing {
-                    (IconName::ChevronDown, IconName::ChevronRight)
-                } else {
-                    (IconName::ChevronRight, IconName::ChevronDown)
-                };
-                div()
-                    .with_animation(
-                        ("account-chevron", anim.token),
-                        Animation::new(Duration::from_millis(FOLD_ANIM_MS))
-                            .with_easing(ease_in_out),
-                        move |_, delta| {
-                            let glyph = if delta < 0.5 { from } else { to };
-                            // 1 at the endpoints, dipping to 0 at the midpoint.
-                            let opacity = (2.0 * delta - 1.0).abs();
-                            div()
-                                .opacity(opacity)
-                                .child(Icon::new(glyph).size(IconSize::XSmall).color(Color::Muted))
-                        },
-                    )
-                    .into_any_element()
-            }
+            Some(anim) => chevron_svg(color, 0.0)
+                .with_animation(
+                    ("account-chevron", anim.token),
+                    Animation::new(Duration::from_millis(FOLD_ANIM_MS)).with_easing(ease_in_out),
+                    move |chevron, delta| {
+                        let t = if anim.collapsing { 1.0 - delta } else { delta };
+                        chevron.with_transformation(Transformation::rotate(radians(t * FRAC_PI_2)))
+                    },
+                )
+                .into_any_element(),
             None => {
-                let glyph = if self.is_account_collapsed(account_idx) {
-                    IconName::ChevronRight
+                let angle = if self.is_account_collapsed(account_idx) {
+                    0.0
                 } else {
-                    IconName::ChevronDown
+                    FRAC_PI_2
                 };
-                Icon::new(glyph)
-                    .size(IconSize::XSmall)
-                    .color(Color::Muted)
-                    .into_any_element()
+                chevron_svg(color, angle).into_any_element()
             }
         };
 
@@ -1660,6 +1759,43 @@ mod tests {
         assert!(!view.show_sidebar);
         view.toggle_sidebar();
         assert!(view.show_sidebar);
+    }
+
+    #[test]
+    fn default_selection_is_global_inbox() {
+        let view = RootView::new();
+        assert_eq!(
+            view.selected_mailbox,
+            Selection::Global(GlobalMailbox::Inbox)
+        );
+    }
+
+    #[test]
+    fn global_inbox_sums_every_account_inbox() {
+        let view = RootView::new();
+        let expected: usize = view
+            .accounts
+            .iter()
+            .flat_map(|a| a.mailboxes.iter())
+            .filter(|m| m.kind == MailboxKind::Inbox)
+            .map(|m| m.unread)
+            .sum();
+        assert_eq!(view.global_unread(GlobalMailbox::Inbox), expected);
+        assert!(expected > 0);
+    }
+
+    #[test]
+    fn global_flagged_counts_starred_messages() {
+        let view = RootView::new();
+        let starred = view.messages.iter().filter(|m| m.starred).count();
+        assert_eq!(view.global_unread(GlobalMailbox::Flagged), starred);
+    }
+
+    #[test]
+    fn global_drafts_and_sent_have_no_unread() {
+        let view = RootView::new();
+        assert_eq!(view.global_unread(GlobalMailbox::Drafts), 0);
+        assert_eq!(view.global_unread(GlobalMailbox::Sent), 0);
     }
 
     #[test]

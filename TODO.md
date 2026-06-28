@@ -28,13 +28,22 @@
       floats over the content with a dismissable scrim (`sync_layout`/`resize` +
       tests)
 - ✅ Collapsible account groups in the sidebar: clicking an account header folds
-      its mailbox list with an accordion animation (height grow/shrink, fixed
-      duration regardless of item count) and the disclosure chevron cross-fades
-      between right/down inside a fixed-size box. Per-account `FoldAnim` state +
-      token-guarded finalize timer; rows pinned to a fixed height so the height
-      math never snaps (`toggle_account`/`clear_fold`/`account_list_visible` +
-      tests). Custom user folders supported (`MailboxKind::Custom` +
-      `Mailbox::label`/`custom`), with the Work account seeded with five.
+      its mailbox list with an accordion animation (height grow/shrink + fade,
+      fixed duration regardless of item count) and the disclosure chevron rotates
+      0↔90° (an SVG served from `ui::Assets`, since font glyphs can't rotate)
+      inside a fixed-size box. Per-account `FoldAnim` state + token-guarded
+      finalize timer; rows pinned to a fixed height so the height math never snaps
+      (`toggle_account`/`clear_fold`/`account_list_visible` + tests). Custom user
+      folders supported (`MailboxKind::Custom` + `Mailbox::label`/`custom`), with
+      the Work account seeded with five. Webview HTML rebuild memoized
+      (`last_webview_sig`) so animation frames don't re-theme the reader.
+- ✅ Unified (global) mailboxes pinned to the top of the sidebar above the
+      account groups — Inbox, Flagged, Drafts, Sent (`data::GlobalMailbox`,
+      localized; new `MailboxFlagged` key). Sidebar selection generalized to a
+      `Selection` enum (`Global` | `Mailbox`), defaulting to the unified inbox;
+      aggregated counts via `global_unread` (mock: inbox sums every account,
+      flagged counts starred). Will fan out across all accounts once the mail
+      layer lands.
 - ✅ Draggable title bar: the whole top toolbar moves the window (arm on
       mouse-down, start on first move so toolbar buttons still click; double-click
       runs the platform title-bar action). Portable `window_drag` helper —

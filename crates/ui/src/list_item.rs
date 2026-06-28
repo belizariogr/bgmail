@@ -1,4 +1,4 @@
-use gpui::{AnyElement, ClickEvent};
+use gpui::{px, AnyElement, ClickEvent, Pixels};
 
 use crate::prelude::*;
 
@@ -12,6 +12,7 @@ type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub struct ListItem {
     id: ElementId,
     selected: bool,
+    inset: Pixels,
     start_slot: Option<AnyElement>,
     end_slot: Option<AnyElement>,
     children: Vec<AnyElement>,
@@ -24,6 +25,7 @@ impl ListItem {
         Self {
             id: id.into(),
             selected: false,
+            inset: px(0.0),
             start_slot: None,
             end_slot: None,
             children: Vec::new(),
@@ -34,6 +36,14 @@ impl ListItem {
     /// Marks the row as selected.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Extra left padding applied to the row's content (start slot, text, …)
+    /// without moving the row's hover/selection background, which keeps filling
+    /// the full width. Useful to inset content while the highlight stays put.
+    pub fn inset(mut self, inset: Pixels) -> Self {
+        self.inset = inset;
         self
     }
 
@@ -75,7 +85,8 @@ impl RenderOnce for ListItem {
             .id(self.id)
             .w_full()
             .gap_2()
-            .px_2()
+            .pl(px(8.0) + self.inset)
+            .pr_2()
             .py_1()
             .rounded_md()
             .when(self.selected, |el| el.bg(selected_bg))

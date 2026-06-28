@@ -42,6 +42,7 @@ pub enum Key {
     MailboxJunk,
     MailboxTrash,
     MailboxArchive,
+    MailboxFlagged,
 
     SettingsGeneral,
     SettingsAccounts,
@@ -84,6 +85,8 @@ impl Key {
             (MailboxTrash, P) => "Lixeira",
             (MailboxArchive, E) => "Archive",
             (MailboxArchive, P) => "Arquivo",
+            (MailboxFlagged, E) => "Flagged",
+            (MailboxFlagged, P) => "Sinalizadas",
 
             (SettingsGeneral, E) => "General",
             (SettingsGeneral, P) => "Geral",
@@ -182,13 +185,14 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 23] = [
+    const ALL_KEYS: [Key; 24] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
         Key::MailboxJunk,
         Key::MailboxTrash,
         Key::MailboxArchive,
+        Key::MailboxFlagged,
         Key::SettingsGeneral,
         Key::SettingsAccounts,
         Key::SettingsAppearance,

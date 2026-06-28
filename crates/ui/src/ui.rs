@@ -11,6 +11,7 @@
 
 pub mod prelude;
 
+mod assets;
 mod button;
 mod color;
 mod icon;
@@ -18,6 +19,7 @@ mod label;
 mod list_item;
 mod scrollbar;
 
+pub use assets::*;
 pub use button::*;
 pub use color::*;
 pub use icon::*;
