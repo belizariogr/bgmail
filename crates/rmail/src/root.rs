@@ -4,13 +4,13 @@
 //! and a status bar), using the components from the `ui` crate. All interaction
 //! here is "mock" — only item selection, theme toggling and language switching.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use gpui::{
-    canvas, size, AppContext as _, Bounds, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla,
-    MouseButton, MouseDownEvent, ScrollHandle, TitlebarOptions, Window, WindowBounds,
-    WindowControlArea, WindowHandle, WindowOptions,
+    canvas, ease_in_out, size, Animation, AnimationExt as _, AppContext as _, Bounds, Context,
+    DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, ScrollHandle,
+    TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
 };
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
@@ -34,6 +34,8 @@ const READER_MIN_WIDTH: f32 = 400.0;
 const NARROW_BREAKPOINT: f32 = 1100.0;
 /// Hit area (width) of the draggable divider between two columns, in pixels.
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
+/// Duration of the sidebar fold (collapse/expand) animation, in milliseconds.
+const FOLD_ANIM_MS: u64 = 160;
 /// Width of the expanded search field in the toolbar, in pixels.
 const SEARCH_FIELD_WIDTH: f32 = 220.0;
 /// Width of the collapsed search button (icon only), in pixels.
@@ -64,6 +66,16 @@ enum ResizeHandle {
 /// Drag payload used to resize a column by dragging its right-edge handle.
 #[derive(Debug, Clone, Copy)]
 struct ResizeDrag(ResizeHandle);
+
+/// An in-flight fold (collapse/expand) animation for one sidebar account.
+#[derive(Debug, Clone, Copy)]
+struct FoldAnim {
+    /// True while collapsing (animating closed); false while expanding.
+    collapsing: bool,
+    /// Unique token used to (re)key the GPUI animation so it replays on every
+    /// toggle, and to let a stale finalize timer detect a newer toggle.
+    token: u64,
+}
 
 /// Active section of the settings screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,8 +130,13 @@ pub struct RootView {
     messages: Vec<Message>,
     /// Selected (account index, mailbox index) in the sidebar.
     selected_mailbox: (usize, usize),
-    /// Indices of the accounts whose mailbox list is collapsed in the sidebar.
+    /// Indices of the accounts whose mailbox list is collapsed (target state).
     collapsed_accounts: HashSet<usize>,
+    /// Fold animations currently playing, keyed by account index. An entry is
+    /// present only while the collapse/expand transition is in flight.
+    fold_anim: HashMap<usize, FoldAnim>,
+    /// Monotonic counter handing out unique [`FoldAnim`] tokens.
+    fold_seq: u64,
     /// Index of the message selected in the list.
     selected_message: usize,
     /// Whether the accounts sidebar is visible (toggled from the toolbar).
@@ -164,6 +181,8 @@ impl RootView {
             messages: data::sample_messages(),
             selected_mailbox: (0, 0),
             collapsed_accounts: HashSet::new(),
+            fold_anim: HashMap::new(),
+            fold_seq: 0,
             selected_message: 3,
             show_sidebar: true,
             sidebar_width: px(SIDEBAR_MIN_WIDTH),
@@ -297,16 +316,54 @@ impl RootView {
         self.show_sidebar = !self.show_sidebar;
     }
 
-    /// Whether the given account's mailbox list is currently collapsed.
+    /// Whether the given account's mailbox list is collapsed (target state).
     fn is_account_collapsed(&self, account_idx: usize) -> bool {
         self.collapsed_accounts.contains(&account_idx)
     }
 
-    /// Collapse or expand the given account's mailbox list in the sidebar.
-    fn toggle_account(&mut self, account_idx: usize) {
-        if !self.collapsed_accounts.remove(&account_idx) {
+    /// Toggles an account between collapsed and expanded, starting the fold
+    /// animation and returning its descriptor so the caller can schedule the
+    /// finalize timer that clears it once the transition completes.
+    fn toggle_account(&mut self, account_idx: usize) -> FoldAnim {
+        let collapsing = !self.collapsed_accounts.contains(&account_idx);
+        if collapsing {
             self.collapsed_accounts.insert(account_idx);
+        } else {
+            self.collapsed_accounts.remove(&account_idx);
         }
+        self.fold_seq += 1;
+        let anim = FoldAnim {
+            collapsing,
+            token: self.fold_seq,
+        };
+        self.fold_anim.insert(account_idx, anim);
+        anim
+    }
+
+    /// Clears a finished fold animation, but only if it is still the current one
+    /// (a newer toggle bumps the token, so a stale timer is ignored). Returns
+    /// whether the state changed and a re-render is therefore warranted.
+    fn clear_fold(&mut self, account_idx: usize, token: u64) -> bool {
+        if self
+            .fold_anim
+            .get(&account_idx)
+            .is_some_and(|anim| anim.token == token)
+        {
+            self.fold_anim.remove(&account_idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether the account's mailbox list should be rendered: while expanded, or
+    /// while a collapse animation is still playing it out.
+    fn account_list_visible(&self, account_idx: usize) -> bool {
+        !self.is_account_collapsed(account_idx)
+            || self
+                .fold_anim
+                .get(&account_idx)
+                .is_some_and(|anim| anim.collapsing)
     }
 
     /// Whether the sidebar occupies a column in the layout (vs. hidden or
@@ -722,13 +779,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let language = cx.language();
-        let collapsed = self.is_account_collapsed(account_idx);
-        let chevron = if collapsed {
-            IconName::ChevronRight
-        } else {
-            IconName::ChevronDown
-        };
-        let mut section = v_flex().px_2().pb_3().child(
+        let section = v_flex().px_2().pb_3().child(
             h_flex()
                 .id(("account-header", account_idx))
                 .px_2()
@@ -738,14 +789,24 @@ impl RootView {
                 .cursor_pointer()
                 .hover(|el| el.bg(cx.theme().colors().element_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_account(account_idx);
+                    let token = this.toggle_account(account_idx).token;
+                    // Clear the animation once it has played out so the list and
+                    // chevron settle into their final (static) state.
+                    let timer = cx
+                        .background_executor()
+                        .timer(Duration::from_millis(FOLD_ANIM_MS + 30));
+                    cx.spawn(async move |this, cx| {
+                        timer.await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this.clear_fold(account_idx, token) {
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
                     cx.notify();
                 }))
-                .child(
-                    Icon::new(chevron)
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
-                )
+                .child(self.render_account_chevron(account_idx))
                 .child(
                     Label::new(account.name.clone())
                         .size(LabelSize::XSmall)
@@ -754,10 +815,11 @@ impl RootView {
                 ),
         );
 
-        if collapsed {
+        if !self.account_list_visible(account_idx) {
             return section;
         }
 
+        let mut list = v_flex();
         for (mailbox_idx, mailbox) in account.mailboxes.iter().enumerate() {
             let selected = self.selected_mailbox == (account_idx, mailbox_idx);
             let badge = if mailbox.unread > 0 {
@@ -787,10 +849,72 @@ impl RootView {
                 item = item.end_slot(badge);
             }
 
-            section = section.child(item);
+            list = list.child(item);
         }
 
-        section
+        // While a fold animation is in flight, fade and slide the list — forward
+        // when expanding, reversed when collapsing (so it also animates out).
+        // `top` uses relative positioning so the slide never reflows the accounts
+        // below. Keyed by token so each toggle replays from the start. Once the
+        // animation is cleared the list renders statically at full opacity.
+        let list_el = match self.fold_anim.get(&account_idx).copied() {
+            Some(anim) => list
+                .relative()
+                .with_animation(
+                    ("account-reveal", anim.token),
+                    Animation::new(Duration::from_millis(FOLD_ANIM_MS)).with_easing(ease_in_out),
+                    move |list, delta| {
+                        let shown = if anim.collapsing { 1.0 - delta } else { delta };
+                        list.opacity(shown).top(px(-6.0 * (1.0 - shown)))
+                    },
+                )
+                .into_any_element(),
+            None => list.into_any_element(),
+        };
+
+        section.child(list_el)
+    }
+
+    /// The account header's disclosure chevron. It points down when expanded and
+    /// right when collapsed; during a fold it cross-dissolves between the two
+    /// glyphs (font glyphs can't be rotated, so the orientation change reads as a
+    /// quick flip through zero opacity), keyed by token so it replays per toggle.
+    fn render_account_chevron(&self, account_idx: usize) -> gpui::AnyElement {
+        match self.fold_anim.get(&account_idx).copied() {
+            Some(anim) => {
+                let (from, to) = if anim.collapsing {
+                    (IconName::ChevronDown, IconName::ChevronRight)
+                } else {
+                    (IconName::ChevronRight, IconName::ChevronDown)
+                };
+                div()
+                    .with_animation(
+                        ("account-chevron", anim.token),
+                        Animation::new(Duration::from_millis(FOLD_ANIM_MS))
+                            .with_easing(ease_in_out),
+                        move |_, delta| {
+                            let glyph = if delta < 0.5 { from } else { to };
+                            // 1 at the endpoints, dipping to 0 at the midpoint.
+                            let opacity = (2.0 * delta - 1.0).abs();
+                            div()
+                                .opacity(opacity)
+                                .child(Icon::new(glyph).size(IconSize::XSmall).color(Color::Muted))
+                        },
+                    )
+                    .into_any_element()
+            }
+            None => {
+                let glyph = if self.is_account_collapsed(account_idx) {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                };
+                Icon::new(glyph)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted)
+                    .into_any_element()
+            }
+        }
     }
 
     fn render_count_badge(
@@ -1500,12 +1624,51 @@ mod tests {
     #[test]
     fn toggle_account_collapses_and_expands() {
         let mut view = RootView::new();
-        view.toggle_account(1);
+        let collapsing = view.toggle_account(1);
+        assert!(collapsing.collapsing);
         assert!(view.is_account_collapsed(1));
         // Other accounts are unaffected.
         assert!(!view.is_account_collapsed(0));
-        view.toggle_account(1);
+        let expanding = view.toggle_account(1);
+        assert!(!expanding.collapsing);
         assert!(!view.is_account_collapsed(1));
+    }
+
+    #[test]
+    fn toggle_account_hands_out_unique_tokens() {
+        let mut view = RootView::new();
+        let first = view.toggle_account(0).token;
+        let second = view.toggle_account(0).token;
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn collapsing_account_stays_visible_until_finalized() {
+        let mut view = RootView::new();
+        let anim = view.toggle_account(2);
+        // Mid-collapse the list is still rendered so it can animate out.
+        assert!(view.is_account_collapsed(2));
+        assert!(view.account_list_visible(2));
+        // Once the animation finalizes the list is gone.
+        assert!(view.clear_fold(2, anim.token));
+        assert!(!view.account_list_visible(2));
+    }
+
+    #[test]
+    fn clear_fold_ignores_stale_token() {
+        let mut view = RootView::new();
+        let stale = view.toggle_account(0).token;
+        // A second toggle supersedes the first, bumping the token.
+        let _current = view.toggle_account(0);
+        assert!(!view.clear_fold(0, stale));
+        // The current animation is untouched and still in flight.
+        assert!(view.fold_anim.contains_key(&0));
+    }
+
+    #[test]
+    fn expanded_account_is_visible_without_animation() {
+        let view = RootView::new();
+        assert!(view.account_list_visible(0));
     }
 
     #[test]
