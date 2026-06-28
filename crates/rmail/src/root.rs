@@ -1716,6 +1716,10 @@ impl RootView {
                             .items_center()
                             .justify_center()
                             .text_color(on_accent)
+                            .text_size(px(14.0))
+                            // Tight line height so the glyph (not the looser line
+                            // box) is what gets centered vertically.
+                            .line_height(px(14.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(initial),
                     )
