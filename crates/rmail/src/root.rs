@@ -622,6 +622,24 @@ impl RootView {
         }
     }
 
+    /// Selects a sidebar mailbox and redraws. See [`Self::apply_mailbox_selection`]
+    /// for the dismissal behavior in the narrow layout.
+    fn select_mailbox(&mut self, selection: Selection, cx: &mut Context<Self>) {
+        self.apply_mailbox_selection(selection);
+        cx.notify();
+    }
+
+    /// Core of [`Self::select_mailbox`], without the redraw (so it is unit-testable
+    /// without a window context). Sets the selection and, in the narrow layout —
+    /// where the sidebar floats over the content as an overlay — dismisses it
+    /// (like a mobile navigation drawer). When docked, the sidebar stays put.
+    fn apply_mailbox_selection(&mut self, selection: Selection) {
+        self.selected_mailbox = selection;
+        if self.narrow {
+            self.show_sidebar = false;
+        }
+    }
+
     /// Marks the given scrollbar as just-scrolled and schedules a re-render once
     /// the auto-hide window elapses, so the bar fades out after scrolling stops.
     fn note_scroll(
@@ -1174,8 +1192,7 @@ impl RootView {
                         .single_line(),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.selected_mailbox = Selection::Global(global);
-                    cx.notify();
+                    this.select_mailbox(Selection::Global(global), cx);
                 }));
 
             if let Some(badge) = badge {
@@ -1264,8 +1281,7 @@ impl RootView {
                         .single_line(),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.selected_mailbox = Selection::Mailbox(account_idx, mailbox_idx);
-                    cx.notify();
+                    this.select_mailbox(Selection::Mailbox(account_idx, mailbox_idx), cx);
                 }));
 
             if let Some(badge) = badge {
@@ -2340,6 +2356,26 @@ mod tests {
         assert!(!view.show_sidebar);
         view.toggle_sidebar();
         assert!(view.show_sidebar);
+    }
+
+    #[test]
+    fn selecting_in_narrow_layout_dismisses_floating_sidebar() {
+        let mut view = RootView::new(Config::default());
+        view.narrow = true;
+        view.show_sidebar = true;
+        view.apply_mailbox_selection(Selection::Global(GlobalMailbox::Sent));
+        assert_eq!(view.selected_mailbox, Selection::Global(GlobalMailbox::Sent));
+        assert!(!view.show_sidebar, "narrow selection should close the sidebar");
+    }
+
+    #[test]
+    fn selecting_in_wide_layout_keeps_sidebar_open() {
+        let mut view = RootView::new(Config::default());
+        view.narrow = false;
+        view.show_sidebar = true;
+        view.apply_mailbox_selection(Selection::Mailbox(0, 0));
+        assert_eq!(view.selected_mailbox, Selection::Mailbox(0, 0));
+        assert!(view.show_sidebar, "docked sidebar should stay open");
     }
 
     #[test]
