@@ -214,6 +214,9 @@ pub fn init(language: Language, cx: &mut App) {
 /// Replaces the active language (updates the UI on the next render).
 pub fn set_language(language: Language, cx: &mut App) {
     cx.set_global(GlobalLanguage(language));
+    // Like the theme, the language is a global read at render time; redraw every
+    // open window so the change applies live everywhere, not just here.
+    cx.refresh_windows();
 }
 
 /// Reads the active language from a context.

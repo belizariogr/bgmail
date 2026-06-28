@@ -265,6 +265,10 @@ pub fn init(appearance: Appearance, cx: &mut App) {
 /// Replaces the active theme.
 pub fn set_theme(theme: Theme, cx: &mut App) {
     cx.set_global(GlobalTheme(Arc::new(theme)));
+    // The theme is a global that views read at render time but don't observe, so
+    // every open window must be redrawn for the change to show immediately (not
+    // just the window that triggered it).
+    cx.refresh_windows();
 }
 
 /// Toggles between the light and dark theme, returning the new appearance.
