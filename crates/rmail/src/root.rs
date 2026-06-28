@@ -35,7 +35,17 @@ const NARROW_BREAKPOINT: f32 = 1100.0;
 /// Hit area (width) of the draggable divider between two columns, in pixels.
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 /// Duration of the sidebar fold (collapse/expand) animation, in milliseconds.
-const FOLD_ANIM_MS: u64 = 160;
+/// It is fixed (not proportional to the number of rows), so a long list folds in
+/// the same time as a short one.
+const FOLD_ANIM_MS: u64 = 90;
+/// Fixed height of a sidebar row (account header and mailbox rows alike), in
+/// pixels. Pinning it keeps the fold (accordion) animation's height math exact,
+/// so the list never snaps at the end of the transition.
+const SIDEBAR_ROW_HEIGHT: f32 = 32.0;
+/// Fixed square footprint of the account header's disclosure chevron, in pixels.
+/// The right/down glyphs have different advances, so a fixed box keeps the
+/// header from shifting as it animates between them.
+const CHEVRON_BOX: f32 = 16.0;
 /// Width of the expanded search field in the toolbar, in pixels.
 const SEARCH_FIELD_WIDTH: f32 = 220.0;
 /// Width of the collapsed search button (icon only), in pixels.
@@ -121,6 +131,7 @@ fn mailbox_icon(kind: MailboxKind) -> IconName {
         MailboxKind::Junk => IconName::Junk,
         MailboxKind::Trash => IconName::Trash,
         MailboxKind::Archive => IconName::Archive,
+        MailboxKind::Custom => IconName::Folder,
     }
 }
 
@@ -172,6 +183,11 @@ pub struct RootView {
     /// text selection and copy are handled by the OS engine. `None` on targets
     /// without a webview backend (Linux) or until it has been created.
     email_webview: Option<EmailWebView>,
+    /// Inputs that last produced the webview document (selected message index and
+    /// the theme colors it was themed with). Used to skip rebuilding the HTML on
+    /// every render — e.g. on every frame of an animation — when nothing that
+    /// affects the document has changed.
+    last_webview_sig: Option<(usize, Hsla, Hsla, Hsla)>,
 }
 
 impl RootView {
@@ -197,6 +213,7 @@ impl RootView {
             sidebar_scroll: ScrollHandle::new(),
             sidebar_scrollbar: None,
             email_webview: None,
+            last_webview_sig: None,
         }
     }
 
@@ -213,6 +230,20 @@ impl RootView {
     /// on screen so it doesn't float over other views.
     fn sync_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let colors = cx.theme().colors();
+        // The document depends only on the selected message and the theme colors.
+        // Re-rendering happens on every animation frame, so skip the (potentially
+        // large) HTML rebuild + diff entirely when none of those inputs changed.
+        let signature = (
+            self.selected_message,
+            colors.background,
+            colors.text,
+            colors.accent,
+        );
+        if self.email_webview.is_some() && self.last_webview_sig == Some(signature) {
+            return;
+        }
+        self.last_webview_sig = Some(signature);
+
         let document = email_document(
             colors.background,
             colors.text,
@@ -424,7 +455,7 @@ impl RootView {
         let language = cx.language();
         let (account_idx, mailbox_idx) = self.selected_mailbox;
         let mailbox = &self.accounts[account_idx].mailboxes[mailbox_idx];
-        let list_title = mailbox.kind.display_name(language).to_string();
+        let list_title = mailbox.display_name(language);
         let list_count = locale::message_count(language, self.messages.len());
 
         h_flex()
@@ -782,8 +813,9 @@ impl RootView {
         let section = v_flex().px_2().pb_3().child(
             h_flex()
                 .id(("account-header", account_idx))
+                .h(px(SIDEBAR_ROW_HEIGHT))
+                .items_center()
                 .px_2()
-                .py_1()
                 .gap_2()
                 .rounded_md()
                 .cursor_pointer()
@@ -839,7 +871,7 @@ impl RootView {
                             Color::Muted
                         }),
                 )
-                .child(Label::new(mailbox.kind.display_name(language)).size(LabelSize::Small))
+                .child(Label::new(mailbox.display_name(language)).size(LabelSize::Small))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.selected_mailbox = (account_idx, mailbox_idx);
                     cx.notify();
@@ -849,23 +881,28 @@ impl RootView {
                 item = item.end_slot(badge);
             }
 
-            list = list.child(item);
+            // Each row is pinned to a fixed height so the accordion animation
+            // below can compute the list's total height exactly.
+            list = list.child(div().h(px(SIDEBAR_ROW_HEIGHT)).flex_shrink_0().child(item));
         }
 
-        // While a fold animation is in flight, fade and slide the list — forward
-        // when expanding, reversed when collapsing (so it also animates out).
-        // `top` uses relative positioning so the slide never reflows the accounts
-        // below. Keyed by token so each toggle replays from the start. Once the
-        // animation is cleared the list renders statically at full opacity.
+        // While a fold animation is in flight, play it as an accordion: the list
+        // lives inside an `overflow_hidden` box whose height grows (expand) or
+        // shrinks (collapse), so the rows below slide down and up. No opacity is
+        // involved — it's a pure vertical reveal. Keyed by token so each toggle
+        // replays from the start; once cleared the list renders at its natural
+        // (and identical) height, so there is no snap at the end.
+        let content_height = px(account.mailboxes.len() as f32 * SIDEBAR_ROW_HEIGHT);
         let list_el = match self.fold_anim.get(&account_idx).copied() {
-            Some(anim) => list
-                .relative()
+            Some(anim) => div()
+                .overflow_hidden()
+                .child(list)
                 .with_animation(
                     ("account-reveal", anim.token),
                     Animation::new(Duration::from_millis(FOLD_ANIM_MS)).with_easing(ease_in_out),
-                    move |list, delta| {
+                    move |el, delta| {
                         let shown = if anim.collapsing { 1.0 - delta } else { delta };
-                        list.opacity(shown).top(px(-6.0 * (1.0 - shown)))
+                        el.h(content_height * shown)
                     },
                 )
                 .into_any_element(),
@@ -875,12 +912,14 @@ impl RootView {
         section.child(list_el)
     }
 
-    /// The account header's disclosure chevron. It points down when expanded and
-    /// right when collapsed; during a fold it cross-dissolves between the two
-    /// glyphs (font glyphs can't be rotated, so the orientation change reads as a
-    /// quick flip through zero opacity), keyed by token so it replays per toggle.
+    /// The account header's disclosure chevron, rendered inside a fixed-size box
+    /// so the right/down glyphs (which have different advances) never shift the
+    /// header. It points down when expanded and right when collapsed; during a
+    /// fold it cross-dissolves between the two glyphs (font glyphs can't be
+    /// rotated, so the orientation change reads as a quick flip through zero
+    /// opacity), keyed by token so it replays per toggle.
     fn render_account_chevron(&self, account_idx: usize) -> gpui::AnyElement {
-        match self.fold_anim.get(&account_idx).copied() {
+        let inner = match self.fold_anim.get(&account_idx).copied() {
             Some(anim) => {
                 let (from, to) = if anim.collapsing {
                     (IconName::ChevronDown, IconName::ChevronRight)
@@ -914,7 +953,17 @@ impl RootView {
                     .color(Color::Muted)
                     .into_any_element()
             }
-        }
+        };
+
+        div()
+            .w(px(CHEVRON_BOX))
+            .h(px(CHEVRON_BOX))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(inner)
+            .into_any_element()
     }
 
     fn render_count_badge(

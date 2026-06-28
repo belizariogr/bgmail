@@ -76,7 +76,7 @@ impl RenderOnce for ListItem {
             .w_full()
             .gap_2()
             .px_2()
-            .py_1p5()
+            .py_1()
             .rounded_md()
             .when(self.selected, |el| el.bg(selected_bg))
             .when(!self.selected, |el| el.hover(move |el| el.bg(hover_bg)))

@@ -27,6 +27,14 @@
       Below a 900px window width the sidebar auto-collapses and, once reopened,
       floats over the content with a dismissable scrim (`sync_layout`/`resize` +
       tests)
+- ✅ Collapsible account groups in the sidebar: clicking an account header folds
+      its mailbox list with an accordion animation (height grow/shrink, fixed
+      duration regardless of item count) and the disclosure chevron cross-fades
+      between right/down inside a fixed-size box. Per-account `FoldAnim` state +
+      token-guarded finalize timer; rows pinned to a fixed height so the height
+      math never snaps (`toggle_account`/`clear_fold`/`account_list_visible` +
+      tests). Custom user folders supported (`MailboxKind::Custom` +
+      `Mailbox::label`/`custom`), with the Work account seeded with five.
 - ✅ Draggable title bar: the whole top toolbar moves the window (arm on
       mouse-down, start on first move so toolbar buttons still click; double-click
       runs the platform title-bar action). Portable `window_drag` helper —

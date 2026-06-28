@@ -31,38 +31,69 @@ pub enum MailboxKind {
     Junk,
     Trash,
     Archive,
+    /// A user-created folder. Its name is not derived from the kind (there is no
+    /// localization key); it is carried on [`Mailbox::label`] instead.
+    Custom,
 }
 
 impl MailboxKind {
-    /// Localization key for this mailbox's display name.
-    fn name_key(self) -> Key {
+    /// Localization key for this mailbox's display name, if it has one. Custom
+    /// folders carry their own (non-localized) label, so they have no key.
+    fn name_key(self) -> Option<Key> {
         match self {
-            MailboxKind::Inbox => Key::MailboxInbox,
-            MailboxKind::Drafts => Key::MailboxDrafts,
-            MailboxKind::Sent => Key::MailboxSent,
-            MailboxKind::Junk => Key::MailboxJunk,
-            MailboxKind::Trash => Key::MailboxTrash,
-            MailboxKind::Archive => Key::MailboxArchive,
+            MailboxKind::Inbox => Some(Key::MailboxInbox),
+            MailboxKind::Drafts => Some(Key::MailboxDrafts),
+            MailboxKind::Sent => Some(Key::MailboxSent),
+            MailboxKind::Junk => Some(Key::MailboxJunk),
+            MailboxKind::Trash => Some(Key::MailboxTrash),
+            MailboxKind::Archive => Some(Key::MailboxArchive),
+            MailboxKind::Custom => None,
         }
     }
 
-    /// Localized display name for the given language.
+    /// Localized display name for a standard kind (empty for [`MailboxKind::Custom`],
+    /// which has no built-in name — see [`Mailbox::display_name`]).
     pub fn display_name(self, language: Language) -> &'static str {
-        self.name_key().tr(language)
+        self.name_key().map_or("", |key| key.tr(language))
     }
 }
 
-/// A mailbox within an account. The display name is derived from [`MailboxKind`]
-/// so it can be localized at render time.
+/// A mailbox within an account. Standard mailboxes derive their (localized) name
+/// from [`MailboxKind`]; custom folders carry an explicit [`label`].
 #[derive(Debug, Clone)]
 pub struct Mailbox {
     pub kind: MailboxKind,
     pub unread: usize,
+    /// Explicit display name for custom folders. `None` for standard mailboxes,
+    /// which are named from their kind.
+    pub label: Option<SharedString>,
 }
 
 impl Mailbox {
     fn new(kind: MailboxKind, unread: usize) -> Self {
-        Self { kind, unread }
+        Self {
+            kind,
+            unread,
+            label: None,
+        }
+    }
+
+    /// A user-created folder with an explicit name and a plain folder icon.
+    fn custom(name: impl Into<SharedString>, unread: usize) -> Self {
+        Self {
+            kind: MailboxKind::Custom,
+            unread,
+            label: Some(name.into()),
+        }
+    }
+
+    /// Display name: the custom label when present, otherwise the localized name
+    /// derived from the kind.
+    pub fn display_name(&self, language: Language) -> SharedString {
+        match &self.label {
+            Some(name) => name.clone(),
+            None => self.kind.display_name(language).into(),
+        }
     }
 }
 
@@ -120,7 +151,19 @@ pub fn sample_accounts() -> Vec<Account> {
         Account {
             name: "Work".into(),
             email: "you@company.com".into(),
-            mailboxes: default_mailboxes(2),
+            // The standard mailboxes plus a handful of user-created folders, to
+            // exercise a longer, custom list in the sidebar.
+            mailboxes: {
+                let mut mailboxes = default_mailboxes(2);
+                mailboxes.extend([
+                    Mailbox::custom("Clients", 4),
+                    Mailbox::custom("Invoices", 0),
+                    Mailbox::custom("Travel", 1),
+                    Mailbox::custom("Receipts", 0),
+                    Mailbox::custom("Projects", 9),
+                ]);
+                mailboxes
+            },
         },
         Account {
             name: "University".into(),
@@ -484,9 +527,48 @@ mod tests {
         let accounts = sample_accounts();
         assert_eq!(accounts.len(), 5);
         for account in &accounts {
-            assert_eq!(account.mailboxes.len(), 6);
+            // Every account starts with the six standard mailboxes.
+            assert!(account.mailboxes.len() >= 6);
             assert_eq!(account.mailboxes[0].kind, MailboxKind::Inbox);
+            for (mailbox, expected) in account.mailboxes.iter().zip([
+                MailboxKind::Inbox,
+                MailboxKind::Drafts,
+                MailboxKind::Sent,
+                MailboxKind::Junk,
+                MailboxKind::Trash,
+                MailboxKind::Archive,
+            ]) {
+                assert_eq!(mailbox.kind, expected);
+            }
         }
+    }
+
+    #[test]
+    fn work_account_has_custom_folders() {
+        let accounts = sample_accounts();
+        let work = &accounts[1];
+        assert_eq!(work.name, "Work");
+        // Six standard mailboxes plus five custom folders.
+        assert_eq!(work.mailboxes.len(), 11);
+        let custom: Vec<_> = work
+            .mailboxes
+            .iter()
+            .filter(|m| m.kind == MailboxKind::Custom)
+            .collect();
+        assert_eq!(custom.len(), 5);
+        assert_eq!(
+            custom[0].display_name(Language::English),
+            SharedString::from("Clients")
+        );
+    }
+
+    #[test]
+    fn custom_folder_name_is_not_localized() {
+        let folder = Mailbox::custom("Clients", 2);
+        assert_eq!(
+            folder.display_name(Language::English),
+            folder.display_name(Language::Portuguese)
+        );
     }
 
     #[test]
