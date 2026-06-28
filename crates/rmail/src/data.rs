@@ -198,6 +198,11 @@ pub fn sample_accounts() -> Vec<Account> {
                     Mailbox::custom("Travel", 1),
                     Mailbox::custom("Receipts", 0),
                     Mailbox::custom("Projects", 9),
+                    // 80-character name to exercise single-line ellipsis truncation.
+                    Mailbox::custom(
+                        "A Very Long Custom Folder Name Created Specifically To Test Ellipsis Truncation!",
+                        3,
+                    ),
                 ]);
                 mailboxes
             },
@@ -592,14 +597,14 @@ mod tests {
         let accounts = sample_accounts();
         let work = &accounts[1];
         assert_eq!(work.name, "Work");
-        // Six standard mailboxes plus five custom folders.
-        assert_eq!(work.mailboxes.len(), 11);
+        // Six standard mailboxes plus six custom folders.
+        assert_eq!(work.mailboxes.len(), 12);
         let custom: Vec<_> = work
             .mailboxes
             .iter()
             .filter(|m| m.kind == MailboxKind::Custom)
             .collect();
-        assert_eq!(custom.len(), 5);
+        assert_eq!(custom.len(), 6);
         assert_eq!(
             custom[0].display_name(Language::English),
             SharedString::from("Clients")
