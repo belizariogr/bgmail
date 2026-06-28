@@ -1,4 +1,4 @@
-use gpui::ClickEvent;
+use gpui::{ClickEvent, MouseButton};
 
 use crate::prelude::*;
 
@@ -83,7 +83,12 @@ impl RenderOnce for Button {
             .hover(move |el| el.bg(hover_bg))
             .child(self.label)
             .when_some(self.on_click, |el, handler| {
+                // Swallow the mouse-down so an enclosing draggable container (e.g.
+                // the title bar) doesn't treat clicking the button as the start of
+                // a window drag. The click itself still fires (its pending-down is
+                // recorded before this runs).
                 el.cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |event, window, cx| handler(event, window, cx))
             })
     }
@@ -161,7 +166,9 @@ impl RenderOnce for IconButton {
             .hover(move |el| el.bg(hover_bg))
             .child(Icon::new(self.icon).size(self.size).color(color))
             .when_some(self.on_click, |el, handler| {
+                // See `Button`: keep title-bar dragging from swallowing button clicks.
                 el.cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |event, window, cx| handler(event, window, cx))
             })
     }

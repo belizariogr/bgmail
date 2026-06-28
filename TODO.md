@@ -93,9 +93,16 @@
       dependency-free base64 (RFC 4648 vectors), the data URI shape and the image
       magic bytes (guards against a mislabeled WebP).
 - ✅ Rudimentary persisted settings (`crates/rmail/src/config.rs`): main window
-      position + size (from `window_bounds`, windowed-only so maximize/fullscreen
-      doesn't clobber it) and the two resizable column widths (sidebar default
-      200px, min 150px; list), stored as JSON at
+      position + size (the *restored* bounds — while maximized the full-screen
+      frame is never persisted), a       `maximized` flag plus the maximized frame (macOS zoom via
+      `Window::is_maximized`). On reopen it starts maximized without flicker —
+      Windows/Linux open with `WindowBounds::Maximized`; macOS opens *windowed
+      directly at the saved maximized frame* (GPUI's zoom is async and animates).
+      Dragging the title bar restores to the saved size under the cursor (manual
+      `setFrame` on macOS, native elsewhere). Persistence is armed only after the
+      window settles, so opening never overwrites the saved layout. Also the two
+      resizable column widths (sidebar default 200px, min 150px; list), stored as
+      JSON at
       `~/.config/rMail/config.json` on every platform (fixed path; home resolved
       via `HOME`/`USERPROFILE`, no extra dep). Loaded at startup (clamped to the
       window/column minimums); saved best-effort on a background thread, debounced

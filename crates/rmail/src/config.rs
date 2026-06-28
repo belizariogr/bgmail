@@ -22,10 +22,20 @@ pub struct Config {
     pub window_x: f32,
     /// Y position (top edge) of the main window, in screen coordinates.
     pub window_y: f32,
-    /// Width of the main window.
+    /// Width of the main window (the *restored* size, ignoring maximize).
     pub window_width: f32,
-    /// Height of the main window.
+    /// Height of the main window (the *restored* size, ignoring maximize).
     pub window_height: f32,
+    /// Whether the window was maximized (macOS: zoomed). When set, the app reopens
+    /// maximized but restores to the saved position/size once moved.
+    pub maximized: bool,
+    /// The maximized frame (position + size). Saved so the window can open
+    /// directly at this size when `maximized` is set, avoiding the
+    /// restore-then-maximize flicker on macOS.
+    pub max_x: f32,
+    pub max_y: f32,
+    pub max_width: f32,
+    pub max_height: f32,
     /// Width of the accounts/folders sidebar.
     pub sidebar_width: f32,
     /// Width of the message list column.
@@ -40,6 +50,11 @@ impl Default for Config {
             window_y: 0.0,
             window_width: 1100.0,
             window_height: 720.0,
+            maximized: false,
+            max_x: 0.0,
+            max_y: 0.0,
+            max_width: 0.0,
+            max_height: 0.0,
             sidebar_width: 200.0,
             list_width: 360.0,
         }
@@ -110,6 +125,11 @@ mod tests {
             window_y: 64.0,
             window_width: 1280.0,
             window_height: 800.0,
+            maximized: true,
+            max_x: 0.0,
+            max_y: 25.0,
+            max_width: 1512.0,
+            max_height: 945.0,
             sidebar_width: 200.0,
             list_width: 420.0,
         };
@@ -142,6 +162,11 @@ mod tests {
             window_y: 30.0,
             window_width: 999.0,
             window_height: 555.0,
+            maximized: false,
+            max_x: 0.0,
+            max_y: 0.0,
+            max_width: 0.0,
+            max_height: 0.0,
             sidebar_width: 160.0,
             list_width: 400.0,
         };

@@ -12,9 +12,11 @@ mod root;
 mod web_view;
 mod window_drag;
 
+use std::time::Duration;
+
 use gpui::{
     actions, point, px, size, App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem,
-    TitlebarOptions, WindowBounds, WindowOptions,
+    TitlebarOptions, WindowOptions,
 };
 
 use root::RootView;
@@ -56,9 +58,25 @@ fn main() {
                 point(px(settings.window_x), px(settings.window_y)),
                 size(px(win_width), px(win_height)),
             );
+            // The saved maximized frame, used on macOS to open directly at the
+            // maximized size (no flicker). Falls back to the restored bounds if it
+            // was never recorded.
+            let max_bounds = if settings.max_width > 0.0 && settings.max_height > 0.0 {
+                Bounds::new(
+                    point(px(settings.max_x), px(settings.max_y)),
+                    size(px(settings.max_width), px(settings.max_height)),
+                )
+            } else {
+                bounds
+            };
+            // Per-platform initial bounds: on macOS opens windowed directly at the
+            // maximized frame; elsewhere uses the OS maximized state. Either way the
+            // restored `bounds` is the size/position to restore to on move.
+            let window_bounds =
+                window_drag::initial_window_bounds(bounds, settings.maximized, max_bounds);
             cx.open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_bounds: Some(window_bounds),
                     window_min_size: Some(size(px(800.0), px(480.0))),
                     titlebar: Some(TitlebarOptions {
                         title: Some("rMail".into()),
@@ -75,6 +93,16 @@ fn main() {
                         cx.on_app_quit(|view: &mut RootView, _cx| {
                             view.persist_now();
                             async {}
+                        })
+                        .detach();
+                        // Arm persistence only after the initial window state has
+                        // settled, so the opening sequence can't overwrite the
+                        // saved position/size.
+                        cx.spawn(async move |view, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(700))
+                                .await;
+                            let _ = view.update(cx, |view, _| view.enable_persistence());
                         })
                         .detach();
                         RootView::new(settings)

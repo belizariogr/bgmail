@@ -12,8 +12,8 @@ use std::f32::consts::FRAC_PI_2;
 use gpui::{
     canvas, ease_in_out, point, radians, size, svg, Animation, AnimationExt as _, AppContext as _,
     Bounds, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
-    Point, ScrollHandle, Size, Svg, TitlebarOptions, Transformation, Window, WindowBounds,
-    WindowControlArea, WindowHandle, WindowOptions,
+    MouseMoveEvent, Point, ScrollHandle, Size, Svg, TitlebarOptions, Transformation, Window,
+    WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
 };
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
@@ -59,6 +59,10 @@ const ITEM_INDENT: f32 = 16.0;
 /// Extra left padding inside each sidebar row, nudging its icon/text to the right
 /// while the hover/selection highlight keeps filling the full row.
 const ITEM_PADDING: f32 = 4.0;
+/// Distance (pixels) the cursor must travel after a toolbar mouse-down before it
+/// counts as a window drag. Below this it's treated as a click, so clicking the
+/// title bar never accidentally starts a move (which would un-maximize).
+const DRAG_THRESHOLD: f32 = 6.0;
 /// Width of the expanded search field in the toolbar, in pixels.
 const SEARCH_FIELD_WIDTH: f32 = 220.0;
 /// Width of the collapsed search button (icon only), in pixels.
@@ -208,16 +212,32 @@ pub struct RootView {
     window_width: Pixels,
     /// Last observed windowed (non-maximized) position and size of the main
     /// window, tracked at render time and persisted so it reopens where/how the
-    /// user left it.
+    /// user left it. While maximized these keep the pre-maximize values (the
+    /// restore target), so we never persist the full-screen frame.
     window_origin: Point<Pixels>,
     window_size: Size<Pixels>,
+    /// Whether the window is currently maximized (macOS: zoomed). Persisted so the
+    /// app reopens maximized.
+    maximized: bool,
+    /// Last observed maximized frame. Persisted so the window can open directly at
+    /// this size when reopening maximized (avoids the macOS zoom flicker).
+    max_origin: Point<Pixels>,
+    max_size: Size<Pixels>,
     /// Monotonic counter handing out tokens for the debounced settings save, so a
     /// burst of changes (e.g. a live drag) only writes the file once it settles.
     save_seq: u64,
+    /// Gate that suppresses persistence during startup. It is flipped on shortly
+    /// after launch, once the initial window state (including a restored maximize)
+    /// has settled, so the opening sequence never overwrites the saved sizes.
+    persist_ready: bool,
     /// Set on mouse-down in the draggable toolbar; the actual window move only
-    /// starts on the first subsequent mouse-move, so plain clicks on toolbar
-    /// buttons still register.
+    /// starts once the cursor leaves a small threshold around [`Self::drag_start`],
+    /// so plain clicks (and their sub-pixel jitter) never start a drag — which
+    /// matters because starting a drag also un-maximizes the window.
     should_move: bool,
+    /// Cursor position captured on the toolbar mouse-down, used as the origin for
+    /// the drag threshold.
+    drag_start: Point<Pixels>,
     /// Destination URL of the link currently under the cursor in the reader's
     /// webview (empty when none). Shown centered in the status bar.
     hovered_link: String,
@@ -253,6 +273,8 @@ impl RootView {
             px(settings.window_width.max(800.0)),
             px(settings.window_height.max(480.0)),
         );
+        let max_origin = point(px(settings.max_x), px(settings.max_y));
+        let max_size = size(px(settings.max_width), px(settings.max_height));
         Self {
             accounts: data::sample_accounts(),
             messages: data::sample_messages(),
@@ -268,8 +290,13 @@ impl RootView {
             window_width: px(settings.window_width),
             window_origin,
             window_size,
+            maximized: settings.maximized,
+            max_origin,
+            max_size,
             save_seq: 0,
+            persist_ready: false,
             should_move: false,
+            drag_start: point(px(0.0), px(0.0)),
             hovered_link: String::new(),
             settings_window: None,
             list_scroll: ScrollHandle::new(),
@@ -283,8 +310,17 @@ impl RootView {
 
     /// Writes the current settings to disk immediately (synchronous, best-effort).
     /// Used to flush on close, bypassing the debounced [`Self::request_save`].
+    /// No-op until persistence is armed, so closing mid-startup can't clobber the
+    /// saved sizes.
     pub(crate) fn persist_now(&self) {
-        config::save(&self.current_config());
+        if self.persist_ready {
+            config::save(&self.current_config());
+        }
+    }
+
+    /// Arms settings persistence once the initial window state has settled.
+    pub(crate) fn enable_persistence(&mut self) {
+        self.persist_ready = true;
     }
 
     /// Snapshot of the persisted settings, taken from the live layout state.
@@ -294,6 +330,11 @@ impl RootView {
             window_y: f32::from(self.window_origin.y),
             window_width: f32::from(self.window_size.width),
             window_height: f32::from(self.window_size.height),
+            maximized: self.maximized,
+            max_x: f32::from(self.max_origin.x),
+            max_y: f32::from(self.max_origin.y),
+            max_width: f32::from(self.max_size.width),
+            max_height: f32::from(self.max_size.height),
             sidebar_width: f32::from(self.sidebar_width),
             list_width: f32::from(self.list_width),
         }
@@ -304,6 +345,9 @@ impl RootView {
     /// once it has been quiet for a short moment. The write runs on a background
     /// thread and is best-effort.
     fn request_save(&mut self, cx: &mut Context<Self>) {
+        if !self.persist_ready {
+            return;
+        }
         self.save_seq += 1;
         let token = self.save_seq;
         let timer = cx.background_executor().timer(Duration::from_millis(500));
@@ -698,10 +742,15 @@ impl RootView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, _| {
+                    // The native click count already honors the platform's
+                    // double-click time/distance, so a slow click-pause-click is
+                    // two single clicks, not a double-click.
                     if event.click_count == 2 {
+                        this.should_move = false;
                         window.titlebar_double_click();
                     } else {
                         this.should_move = true;
+                        this.drag_start = event.position;
                     }
                 }),
             )
@@ -710,10 +759,17 @@ impl RootView {
                 cx.listener(|this, _, _, _| this.should_move = false),
             )
             .on_mouse_down_out(cx.listener(|this, _, _, _| this.should_move = false))
-            .on_mouse_move(cx.listener(|this, _, window, _| {
-                if this.should_move {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, _| {
+                if !this.should_move {
+                    return;
+                }
+                // Only begin the drag once the cursor has clearly moved, so a plain
+                // click (with minor jitter) doesn't start a move / un-maximize.
+                let dx = f32::from(event.position.x - this.drag_start.x).abs();
+                let dy = f32::from(event.position.y - this.drag_start.y).abs();
+                if dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD {
                     this.should_move = false;
-                    crate::window_drag::start_window_drag(window);
+                    crate::window_drag::start_window_drag(window, this.maximized, this.window_size);
                 }
             }))
             // Segment 1: over the sidebar — traffic-light spacing + sidebar toggle
@@ -1732,13 +1788,31 @@ impl Render for RootView {
         // Reconcile responsive state with the live window width before laying out.
         self.sync_layout(window.viewport_size().width);
 
-        // Persist (debounced) whenever the window has been moved or resized. Only
-        // windowed bounds are tracked, so maximizing/fullscreen doesn't clobber
-        // the position/size we restore to.
-        if let WindowBounds::Windowed(bounds) = window.window_bounds() {
-            if bounds.origin != self.window_origin || bounds.size != self.window_size {
-                self.window_origin = bounds.origin;
-                self.window_size = bounds.size;
+        // Persist (debounced) the maximize state and, while *not* maximized, the
+        // window position/size. When maximized we deliberately keep the previous
+        // (restore) bounds so the full-screen frame is never persisted. Skipped
+        // entirely until persistence is armed, so startup never overwrites the
+        // saved layout.
+        if self.persist_ready {
+            let maximized = window.is_maximized();
+            let mut changed = maximized != self.maximized;
+            self.maximized = maximized;
+            if let WindowBounds::Windowed(bounds) = window.window_bounds() {
+                if maximized {
+                    // Capture the maximized frame so we can reopen directly at it,
+                    // while keeping the restore (non-maximized) bounds untouched.
+                    if bounds.origin != self.max_origin || bounds.size != self.max_size {
+                        self.max_origin = bounds.origin;
+                        self.max_size = bounds.size;
+                        changed = true;
+                    }
+                } else if bounds.origin != self.window_origin || bounds.size != self.window_size {
+                    self.window_origin = bounds.origin;
+                    self.window_size = bounds.size;
+                    changed = true;
+                }
+            }
+            if changed {
                 self.request_save(cx);
             }
         }
