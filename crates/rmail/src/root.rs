@@ -27,7 +27,7 @@ use crate::config::{self, Config};
 use crate::data::{self, Account, GlobalMailbox, MailboxKind, Message, MessageBody};
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::web_view::{
-    email_document, ContextMenuLabels, EmailWebView, HostEvent, WEBVIEW_SUPPORTED,
+    email_document, ContextMenuLabels, DocumentColors, EmailWebView, HostEvent, WEBVIEW_SUPPORTED,
 };
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
@@ -199,6 +199,18 @@ fn chevron_svg(color: Hsla, angle: f32) -> Svg {
         .with_transformation(Transformation::rotate(radians(angle)))
 }
 
+/// Memoization key for the reader webview: the set of inputs that affect the
+/// rendered HTML document. When unchanged between renders (e.g. across animation
+/// frames) the expensive HTML rebuild + diff is skipped.
+#[derive(Clone, Copy, PartialEq)]
+struct WebviewSignature {
+    selected: usize,
+    colors: DocumentColors,
+    language: Language,
+    load_remote: bool,
+    reader_white_background: bool,
+}
+
 /// Application state (mock).
 pub struct RootView {
     accounts: Vec<Account>,
@@ -280,7 +292,7 @@ pub struct RootView {
     /// the theme colors it was themed with). Used to skip rebuilding the HTML on
     /// every render — e.g. on every frame of an animation — when nothing that
     /// affects the document has changed.
-    last_webview_sig: Option<(usize, Hsla, Hsla, Hsla, Language, bool, bool)>,
+    last_webview_sig: Option<WebviewSignature>,
     /// Whether to load remote content (e.g. images) in e-mail bodies. Persisted;
     /// off by default to block tracking pixels until the user opts in.
     load_remote_images: bool,
@@ -453,15 +465,22 @@ impl RootView {
         } else {
             (colors.background, colors.text)
         };
-        let signature = (
-            self.selected_message,
-            body_bg,
-            body_text,
-            colors.accent,
+        // Context-menu popups always follow the app theme (dark in dark mode),
+        // even when the page is forced white.
+        let doc_colors = DocumentColors {
+            background: body_bg,
+            text: body_text,
+            accent: colors.accent,
+            menu_bg: colors.background,
+            menu_text: colors.text,
+        };
+        let signature = WebviewSignature {
+            selected: self.selected_message,
+            colors: doc_colors,
             language,
             load_remote,
-            self.reader_white_background,
-        );
+            reader_white_background: self.reader_white_background,
+        };
         if self.email_webview.is_some() && self.last_webview_sig == Some(signature) {
             return;
         }
@@ -469,9 +488,7 @@ impl RootView {
 
         let empty_shown: HashSet<String> = HashSet::new();
         let rendered = email_document(
-            body_bg,
-            body_text,
-            colors.accent,
+            doc_colors,
             &self.messages[self.selected_message].body,
             ContextMenuLabels {
                 image_open: Key::CtxOpenImage.tr(language),
@@ -1775,7 +1792,6 @@ impl RootView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            
                             .text_color(on_accent)
                             .text_size(px(15.0))
                             // Tight line height so the glyph (not the looser line
@@ -2069,8 +2085,12 @@ impl SettingsView {
                             ),
                     )
                     .child(
+                        // Forcing a white reader only makes sense against a dark
+                        // theme; in light mode the page is already light, so the
+                        // toggle is disabled.
                         Switch::new("reader-white-bg", reader_white)
                             .label(Key::ReaderWhiteBackground.tr(language))
+                            .disabled(appearance == Appearance::Light)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let _ = this.root.update(cx, |root, cx| {
                                     root.set_reader_white_background(!reader_white, cx);

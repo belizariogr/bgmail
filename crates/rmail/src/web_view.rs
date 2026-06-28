@@ -61,10 +61,21 @@ pub struct RenderedEmail {
     pub blocked_images: usize,
 }
 
+/// Theme colors used when rendering a message document. The page (`background`,
+/// `text`) can be forced white independently of the popups (`menu_bg`,
+/// `menu_text`), which always follow the app theme so context menus stay dark in
+/// dark mode even when the reader is kept light.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DocumentColors {
+    pub background: Hsla,
+    pub text: Hsla,
+    pub accent: Hsla,
+    pub menu_bg: Hsla,
+    pub menu_text: Hsla,
+}
+
 pub fn email_document(
-    background: Hsla,
-    text: Hsla,
-    accent: Hsla,
+    colors: DocumentColors,
     body: &MessageBody,
     labels: ContextMenuLabels,
     load_remote: bool,
@@ -88,7 +99,7 @@ pub fn email_document(
          data-rm-link-open=\"{link_open}\" data-rm-link-copy=\"{link_copy}\" \
          data-rm-sel-copy=\"{sel_copy}\" data-rm-copy-key=\"{copy_key}\">\
          {inner}</body></html>",
-        css = document_css(background, text, accent),
+        css = document_css(colors),
         img_open = escape_html(labels.image_open),
         img_download = escape_html(labels.image_download),
         img_show = escape_html(labels.image_show),
@@ -107,10 +118,18 @@ pub fn email_document(
 /// Theme-aware stylesheet shared by every rendered message. Colors come straight
 /// from the active theme so the webview matches the surrounding UI (incl. dark
 /// mode), instead of the engine's default white page.
-fn document_css(background: Hsla, text: Hsla, accent: Hsla) -> String {
+fn document_css(colors: DocumentColors) -> String {
+    let DocumentColors {
+        background,
+        text,
+        accent,
+        menu_bg,
+        menu_text,
+    } = colors;
     let scheme = if background.l < 0.5 { "dark" } else { "light" };
     format!(
-        ":root {{ color-scheme: {scheme}; --rm-bg: {bg}; --rm-fg: {fg}; --rm-accent: {accent}; }}\
+        ":root {{ color-scheme: {scheme}; --rm-bg: {bg}; --rm-fg: {fg}; --rm-accent: {accent}; \
+           --rm-menu-bg: {menu_bg}; --rm-menu-fg: {menu_fg}; }}\
          html, body {{ margin: 0; padding: 16px 24px; background: {bg}; color: {fg}; \
            font: 14px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; \
            -webkit-font-smoothing: antialiased; overflow-wrap: anywhere; }}\
@@ -139,6 +158,10 @@ fn document_css(background: Hsla, text: Hsla, accent: Hsla) -> String {
         bg = css_color(background),
         fg = css_color(text),
         accent = css_color(accent),
+        // Context-menu colors follow the app theme even when the page is forced
+        // white, so popups stay dark in dark mode (see the menu CSS in the script).
+        menu_bg = css_color(menu_bg),
+        menu_fg = css_color(menu_text),
         // A subtle fill for code blocks/inline code, derived from the text color.
         soft = css_color_alpha(text, 0.08),
         // A slightly stronger line for the blocked-image placeholder border.
@@ -395,10 +418,10 @@ const CONTENT_SCRIPT: &str = r#"(function () {
     s.id = STYLE_ID;
     s.textContent =
       '.rm-ctx{position:fixed;z-index:2147483647;min-width:200px;padding:4px;border-radius:8px;' +
-      'border:1px solid color-mix(in srgb, var(--rm-fg) 16%, var(--rm-bg));' +
-      'background:color-mix(in srgb, var(--rm-fg) 6%, var(--rm-bg));' +
+      'border:1px solid color-mix(in srgb, var(--rm-menu-fg) 16%, var(--rm-menu-bg));' +
+      'background:color-mix(in srgb, var(--rm-menu-fg) 6%, var(--rm-menu-bg));' +
       'box-shadow:0 8px 24px rgba(0,0,0,.28);overflow:hidden;' +
-      'font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--rm-fg);' +
+      'font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--rm-menu-fg);' +
       'user-select:none;-webkit-user-select:none;}' +
       '.rm-ctx button{display:flex;align-items:center;justify-content:space-between;gap:24px;' +
       'width:100%;text-align:left;border:0;background:transparent;color:inherit;padding:7px 12px;' +
@@ -1109,6 +1132,18 @@ mod tests {
         MessageBody::Html("<p>Hello <strong>world</strong></p>".into())
     }
 
+    /// Builds [`DocumentColors`] for tests, using the page colors for the menu
+    /// too (the white-page/dark-menu split is exercised separately).
+    fn doc_colors(background: Hsla, text: Hsla, accent: Hsla) -> DocumentColors {
+        DocumentColors {
+            background,
+            text,
+            accent,
+            menu_bg: background,
+            menu_text: text,
+        }
+    }
+
     fn labels() -> ContextMenuLabels<'static> {
         ContextMenuLabels {
             image_open: "Open image in browser",
@@ -1269,9 +1304,11 @@ mod tests {
     #[test]
     fn document_wraps_html_body_verbatim() {
         let doc = email_document(
-            hsla(0.0, 0.0, 0.1, 1.0),
-            hsla(0.0, 0.0, 0.9, 1.0),
-            hsla(0.6, 0.7, 0.5, 1.0),
+            doc_colors(
+                hsla(0.0, 0.0, 0.1, 1.0),
+                hsla(0.0, 0.0, 0.9, 1.0),
+                hsla(0.6, 0.7, 0.5, 1.0),
+            ),
             &body_html(),
             labels(),
             true,
@@ -1292,9 +1329,11 @@ mod tests {
     fn document_escapes_and_wraps_plain_text() {
         let body = MessageBody::Text("1 < 2 & 3".into());
         let doc = email_document(
-            hsla(0.0, 0.0, 0.95, 1.0),
-            hsla(0.0, 0.0, 0.1, 1.0),
-            hsla(0.6, 0.7, 0.5, 1.0),
+            doc_colors(
+                hsla(0.0, 0.0, 0.95, 1.0),
+                hsla(0.0, 0.0, 0.1, 1.0),
+                hsla(0.6, 0.7, 0.5, 1.0),
+            ),
             &body,
             labels(),
             true,
@@ -1542,9 +1581,11 @@ mod tests {
             "<p>safe</p><iframe src=\"x\"></iframe><input><video></video>".into(),
         );
         let doc = email_document(
-            hsla(0.0, 0.0, 0.1, 1.0),
-            hsla(0.0, 0.0, 0.9, 1.0),
-            hsla(0.6, 0.7, 0.5, 1.0),
+            doc_colors(
+                hsla(0.0, 0.0, 0.1, 1.0),
+                hsla(0.0, 0.0, 0.9, 1.0),
+                hsla(0.6, 0.7, 0.5, 1.0),
+            ),
             &body,
             labels(),
             true,
@@ -1568,28 +1609,21 @@ mod tests {
         );
         let none = HashSet::new();
         // Loading off → the image is present and blocked.
-        let blocked = email_document(colors.0, colors.1, colors.2, &body, labels(), false, &none);
+        let colors = doc_colors(colors.0, colors.1, colors.2);
+        let blocked = email_document(colors, &body, labels(), false, &none);
         assert!(blocked.has_remote);
         assert_eq!(blocked.blocked_images, 1);
         // Loading on → present but nothing blocked.
-        let allowed = email_document(colors.0, colors.1, colors.2, &body, labels(), true, &none);
+        let allowed = email_document(colors, &body, labels(), true, &none);
         assert!(allowed.has_remote);
         assert_eq!(allowed.blocked_images, 0);
         // Loading off but this image individually shown → present, not blocked.
         let shown: HashSet<String> = [url.to_string()].into_iter().collect();
-        let revealed = email_document(colors.0, colors.1, colors.2, &body, labels(), false, &shown);
+        let revealed = email_document(colors, &body, labels(), false, &shown);
         assert!(revealed.has_remote);
         assert_eq!(revealed.blocked_images, 0);
         // A message with no remote resources never reports remote content.
-        let local = email_document(
-            colors.0,
-            colors.1,
-            colors.2,
-            &body_html(),
-            labels(),
-            false,
-            &none,
-        );
+        let local = email_document(colors, &body_html(), labels(), false, &none);
         assert!(!local.has_remote);
         assert_eq!(local.blocked_images, 0);
     }
@@ -1597,9 +1631,11 @@ mod tests {
     #[test]
     fn document_embeds_escaped_menu_labels() {
         let doc = email_document(
-            hsla(0.0, 0.0, 0.1, 1.0),
-            hsla(0.0, 0.0, 0.9, 1.0),
-            hsla(0.6, 0.7, 0.5, 1.0),
+            doc_colors(
+                hsla(0.0, 0.0, 0.1, 1.0),
+                hsla(0.0, 0.0, 0.9, 1.0),
+                hsla(0.6, 0.7, 0.5, 1.0),
+            ),
             &body_html(),
             ContextMenuLabels {
                 image_open: "Open \"image\"",

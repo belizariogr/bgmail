@@ -12,6 +12,7 @@ type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub struct Switch {
     id: ElementId,
     checked: bool,
+    disabled: bool,
     label: Option<SharedString>,
     on_click: Option<ClickHandler>,
 }
@@ -22,6 +23,7 @@ impl Switch {
         Self {
             id: id.into(),
             checked,
+            disabled: false,
             label: None,
             on_click: None,
         }
@@ -30,6 +32,12 @@ impl Switch {
     /// Adds a text label shown to the right of the track.
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Greys the switch out and ignores clicks (the handler is never called).
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -47,9 +55,19 @@ impl RenderOnce for Switch {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = cx.theme().colors();
         let is_on = self.checked;
+        let disabled = self.disabled;
 
         let thumb_color = colors.text;
-        let thumb_opacity = if is_on { 1.0 } else { 0.5 };
+        let thumb_opacity = match (disabled, is_on) {
+            (true, _) => 0.2,
+            (false, true) => 1.0,
+            (false, false) => 0.5,
+        };
+        let label_color = if disabled {
+            Color::Disabled
+        } else {
+            Color::Default
+        };
 
         // On: a soft accent-tinted track; off: a neutral filled track. Mirrors
         // Zed's translucent fill so the thumb (the theme's text color) reads on
@@ -82,7 +100,9 @@ impl RenderOnce for Switch {
                     .bg(bg_color)
                     .border_1()
                     .border_color(border_color)
-                    .group_hover(group_id.clone(), move |el| el.bg(hover_bg))
+                    .when(!disabled, |el| {
+                        el.group_hover(group_id.clone(), move |el| el.bg(hover_bg))
+                    })
                     .child(
                         div()
                             .size(px(12.0))
@@ -98,9 +118,9 @@ impl RenderOnce for Switch {
             .items_center()
             .child(track)
             .when_some(self.label, |el, label| {
-                el.child(Label::new(label).size(LabelSize::Small))
+                el.child(Label::new(label).size(LabelSize::Small).color(label_color))
             })
-            .when_some(self.on_click, |el, handler| {
+            .when_some(self.on_click.filter(|_| !disabled), |el, handler| {
                 // Swallow the mouse-down so an enclosing draggable container can't
                 // treat the toggle as the start of a drag (mirrors `Button`).
                 el.cursor_pointer()
