@@ -16,12 +16,14 @@ mod color;
 mod icon;
 mod label;
 mod list_item;
+mod scrollbar;
 
 pub use button::*;
 pub use color::*;
 pub use icon::*;
 pub use label::*;
 pub use list_item::*;
+pub use scrollbar::*;
 
 pub use prelude::{h_flex, v_flex};
 

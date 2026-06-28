@@ -25,6 +25,16 @@ fn hex(value: u32) -> Hsla {
     rgb(value).into()
 }
 
+/// Like [`hex`], but overrides the alpha channel (`0.0..=1.0`). Used for
+/// translucent surfaces such as scrollbar thumbs.
+#[inline]
+fn hexa(value: u32, alpha: f32) -> Hsla {
+    Hsla {
+        a: alpha,
+        ..hex(value)
+    }
+}
+
 /// Theme appearance: light or dark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Appearance {
@@ -106,6 +116,11 @@ pub struct ThemeColors {
     /// Background of the side panel (accounts/mailboxes list).
     pub panel_background: Hsla,
 
+    /// Scrollbar thumb (translucent, drawn over the scrollable content).
+    pub scrollbar_thumb: Hsla,
+    /// Scrollbar thumb when hovered or being dragged.
+    pub scrollbar_thumb_hover: Hsla,
+
     /// Success color (e.g. connection established).
     pub success: Hsla,
     /// Warning color.
@@ -173,6 +188,9 @@ impl Theme {
                 status_bar_background: hex(0x181818),
                 panel_background: hex(0x181818),
 
+                scrollbar_thumb: hexa(0xa1a1a1, 0.4),
+                scrollbar_thumb_hover: hexa(0xc0c0c0, 0.7),
+
                 success: hex(0x89d185),
                 warning: hex(0xcca700),
                 error: hex(0xf14c4c),
@@ -214,6 +232,9 @@ impl Theme {
                 title_bar_background: hex(0xf8f8f8),
                 status_bar_background: hex(0xf8f8f8),
                 panel_background: hex(0xf8f8f8),
+
+                scrollbar_thumb: hexa(0x6b6b6b, 0.35),
+                scrollbar_thumb_hover: hexa(0x4b4b4b, 0.55),
 
                 success: hex(0x1a7f37),
                 warning: hex(0xbf8803),

@@ -87,7 +87,8 @@ fn default_mailboxes(inbox_unread: usize) -> Vec<Mailbox> {
     ]
 }
 
-/// Sample accounts (a Gmail and an IMAP one).
+/// Sample accounts. Several are provided so the sidebar overflows and exercises
+/// its scrollbar.
 pub fn sample_accounts() -> Vec<Account> {
     vec![
         Account {
@@ -99,6 +100,21 @@ pub fn sample_accounts() -> Vec<Account> {
             name: "Work".into(),
             email: "you@company.com".into(),
             mailboxes: default_mailboxes(2),
+        },
+        Account {
+            name: "University".into(),
+            email: "you@university.edu".into(),
+            mailboxes: default_mailboxes(5),
+        },
+        Account {
+            name: "Newsletters".into(),
+            email: "you@news.example".into(),
+            mailboxes: default_mailboxes(12),
+        },
+        Account {
+            name: "Side Project".into(),
+            email: "hello@sideproject.dev".into(),
+            mailboxes: default_mailboxes(0),
         },
     ]
 }
@@ -186,6 +202,106 @@ pub fn sample_messages() -> Vec<Message> {
             false,
             "Sun",
         ),
+        (
+            "Figma",
+            "updates@figma.com",
+            "Sara commented on your design",
+            "\"Love the new toolbar layout!\" — see the comment and reply in the file.",
+            true,
+            false,
+            false,
+            "Sun",
+        ),
+        (
+            "Linear",
+            "notifications@linear.app",
+            "3 issues assigned to you",
+            "RMAIL-42, RMAIL-47 and RMAIL-51 are now in your current cycle.",
+            true,
+            false,
+            false,
+            "Sat",
+        ),
+        (
+            "Dr. Helena Costa",
+            "helena.costa@clinic.com",
+            "Appointment reminder",
+            "Just a reminder about your check-up next Tuesday at 10:00. Reply to reschedule.",
+            false,
+            false,
+            false,
+            "Sat",
+        ),
+        (
+            "AWS Billing",
+            "no-reply@aws.amazon.com",
+            "Your June invoice is ready",
+            "Your AWS invoice for June is available. Total: $128.74 across 6 services.",
+            false,
+            false,
+            true,
+            "Fri",
+        ),
+        (
+            "Carlos Mendes",
+            "carlos@designstudio.com",
+            "Logo concepts v2",
+            "Attached are three refined directions. My favorite is the second one — thoughts?",
+            true,
+            true,
+            true,
+            "Fri",
+        ),
+        (
+            "Spotify",
+            "no-reply@spotify.com",
+            "Your 2026 Wrapped is almost here",
+            "We've been crunching the numbers on your most-played tracks this year.",
+            false,
+            false,
+            false,
+            "Thu",
+        ),
+        (
+            "Project Phoenix",
+            "ci@phoenix.dev",
+            "Build #1042 passed",
+            "All 318 tests passed on main. Deployment to staging is ready for approval.",
+            false,
+            false,
+            false,
+            "Thu",
+        ),
+        (
+            "Anna Becker",
+            "anna.becker@partner.com",
+            "Contract signed",
+            "Great news — the contract is fully signed. I've attached the countersigned PDF.",
+            true,
+            false,
+            true,
+            "Wed",
+        ),
+        (
+            "Booking.com",
+            "confirmations@booking.com",
+            "Your reservation is confirmed",
+            "Your stay in Lisbon (Aug 12–16) is confirmed. View directions and check-in info.",
+            false,
+            false,
+            false,
+            "Wed",
+        ),
+        (
+            "Team Standup",
+            "calendar@company.com",
+            "Daily standup in 15 minutes",
+            "Reminder: the daily standup starts at 09:30. Join the call from your calendar.",
+            false,
+            false,
+            false,
+            "Tue",
+        ),
     ];
 
     raw.into_iter()
@@ -196,9 +312,35 @@ pub fn sample_messages() -> Vec<Message> {
                 subject: subject.into(),
                 preview: preview.into(),
                 body: format!(
-                    "{preview}\n\nThis is a sample message body used in the rMail visual mock. \
-                     The real content will be rendered from HTML/text once the domain layer is \
-                     implemented.\n\nBest regards,\n{sender}"
+                    "{preview}\n\n\
+                     This is a sample message body used in the rMail visual mock. The real \
+                     content will be rendered from HTML/text once the domain layer is implemented.\n\n\
+                     For now we keep the text intentionally long so the reading pane overflows \
+                     vertically and we can exercise its scrollbar. Lorem ipsum dolor sit amet, \
+                     consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et \
+                     dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation \
+                     ullamco laboris nisi ut aliquip ex ea commodo consequat.\n\n\
+                     Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore \
+                     eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, \
+                     sunt in culpa qui officia deserunt mollit anim id est laborum.\n\n\
+                     Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium \
+                     doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore \
+                     veritatis et quasi architecto beatae vitae dicta sunt explicabo.\n\n\
+                     Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, \
+                     sed quia consequuntur magni dolores eos qui ratione voluptatem sequi \
+                     nesciunt. Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet.\n\n\
+                     Ut enim ad minima veniam, quis nostrum exercitationem ullam corporis suscipit \
+                     laboriosam, nisi ut aliquid ex ea commodi consequatur. Quis autem vel eum iure \
+                     reprehenderit qui in ea voluptate velit esse quam nihil molestiae consequatur.\n\n\
+                     At vero eos et accusamus et iusto odio dignissimos ducimus qui blanditiis \
+                     praesentium voluptatum deleniti atque corrupti quos dolores et quas molestias \
+                     excepturi sint occaecati cupiditate non provident, similique sunt in culpa.\n\n\
+                     Et harum quidem rerum facilis est et expedita distinctio. Nam libero tempore, \
+                     cum soluta nobis est eligendi optio cumque nihil impedit quo minus id quod \
+                     maxime placeat facere possimus, omnis voluptas assumenda est, omnis dolor.\n\n\
+                     Temporibus autem quibusdam et aut officiis debitis aut rerum necessitatibus \
+                     saepe eveniet ut et voluptates repudiandae sint et molestiae non recusandae.\n\n\
+                     Best regards,\n{sender}"
                 )
                 .into(),
                 time: time.into(),
@@ -217,7 +359,7 @@ mod tests {
     #[test]
     fn accounts_have_default_mailboxes() {
         let accounts = sample_accounts();
-        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts.len(), 5);
         for account in &accounts {
             assert_eq!(account.mailboxes.len(), 6);
             assert_eq!(account.mailboxes[0].kind, MailboxKind::Inbox);

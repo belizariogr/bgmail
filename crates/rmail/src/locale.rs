@@ -62,6 +62,8 @@ pub enum Key {
     SoundOnNewEmail,
     Enabled,
     Disabled,
+
+    SearchPlaceholder,
 }
 
 impl Key {
@@ -118,7 +120,18 @@ impl Key {
             (Enabled, P) => "Ativadas",
             (Disabled, E) => "Disabled",
             (Disabled, P) => "Desativado",
+
+            (SearchPlaceholder, E) => "Search",
+            (SearchPlaceholder, P) => "Buscar",
         }
+    }
+}
+
+/// Message list header: number of messages in the current mailbox.
+pub fn message_count(language: Language, count: usize) -> String {
+    match language {
+        Language::English => format!("{count} messages"),
+        Language::Portuguese => format!("{count} mensagens"),
     }
 }
 
@@ -169,7 +182,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 22] = [
+    const ALL_KEYS: [Key; 23] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -192,6 +205,7 @@ mod tests {
         Key::SoundOnNewEmail,
         Key::Enabled,
         Key::Disabled,
+        Key::SearchPlaceholder,
     ];
 
     #[test]

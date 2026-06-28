@@ -91,6 +91,10 @@ pub enum IconName {
     Account,
     Attachment,
     Mail,
+    Sidebar,
+    Filter,
+    More,
+    Folder,
 }
 
 impl IconName {
@@ -118,6 +122,10 @@ impl IconName {
             IconName::Account => (FaStyle::Solid, '\u{f2bd}'), // circle-user
             IconName::Attachment => (FaStyle::Solid, '\u{f0c6}'), // paperclip
             IconName::Mail => (FaStyle::Solid, '\u{f0e0}'),  // envelope
+            IconName::Sidebar => (FaStyle::Solid, '\u{f0db}'), // table-columns
+            IconName::Filter => (FaStyle::Solid, '\u{f0b0}'), // filter
+            IconName::More => (FaStyle::Solid, '\u{f141}'),  // ellipsis
+            IconName::Folder => (FaStyle::Solid, '\u{f07b}'), // folder
         }
     }
 }
@@ -175,7 +183,7 @@ mod tests {
 
     /// Every icon must map to a codepoint in the Private Use Area (where
     /// FontAwesome places its glyphs).
-    const ALL: [IconName; 21] = [
+    const ALL: [IconName; 25] = [
         IconName::Inbox,
         IconName::Sent,
         IconName::Drafts,
@@ -197,6 +205,10 @@ mod tests {
         IconName::Account,
         IconName::Attachment,
         IconName::Mail,
+        IconName::Sidebar,
+        IconName::Filter,
+        IconName::More,
+        IconName::Folder,
     ];
 
     #[test]
