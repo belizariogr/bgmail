@@ -510,6 +510,14 @@ impl RootView {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
             HostEvent::ImageShown(url) => self.image_shown(url, cx),
+            HostEvent::BodyMouseDown => {
+                // A click inside the webview never reaches the GPUI overlay's
+                // outside-click catcher, so close the privacy dropdown here.
+                if self.privacy_menu_open {
+                    self.privacy_menu_open = false;
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -2231,6 +2239,15 @@ impl Render for RootView {
             .bg(background)
             .text_color(text)
             .font_family("Helvetica")
+            // Any click on the GPUI UI dismisses a context menu open inside the
+            // webview: such clicks neither blur the webview nor reach its DOM, so
+            // the menu would otherwise linger. Capture phase so it still fires
+            // when children stop propagation (e.g. buttons).
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| {
+                if let Some(webview) = &this.email_webview {
+                    webview.dismiss_context_menu();
+                }
+            }))
             .child(self.render_toolbar(cx))
             .child(body)
             .child(self.render_status_bar(cx))

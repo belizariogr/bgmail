@@ -295,6 +295,9 @@ enum IpcMessage<'a> {
     /// "Show remote image" — the user revealed a blocked image (payload is its
     /// URL); the host records it so it stays shown and updates the blocked count.
     ShowImage(&'a str),
+    /// A mouse press landed inside the webview (no payload). Lets the host close
+    /// any open GPUI overlay, since those clicks never reach GPUI's catcher.
+    BodyMouseDown,
 }
 
 /// Parses an IPC message produced by [`CONTENT_SCRIPT`]. Returns `None` for an
@@ -307,6 +310,7 @@ fn parse_ipc_message(message: &str) -> Option<IpcMessage<'_>> {
         "D" => Some(IpcMessage::DownloadImage(payload)),
         "C" => Some(IpcMessage::CopyToClipboard(payload)),
         "S" => Some(IpcMessage::ShowImage(payload)),
+        "B" => Some(IpcMessage::BodyMouseDown),
         _ => None,
     }
 }
@@ -322,6 +326,9 @@ pub enum HostEvent {
     CopyToClipboard(String),
     /// The user revealed a blocked remote image (payload is its URL).
     ImageShown(String),
+    /// A mouse press landed inside the webview; the host dismisses any open GPUI
+    /// overlay (those clicks never reach GPUI's outside-click catcher).
+    BodyMouseDown,
 }
 
 /// Injected into every rendered message. Two responsibilities:
@@ -466,10 +473,17 @@ const CONTENT_SCRIPT: &str = r#"(function () {
   }, true);
   document.addEventListener('mousedown', function (e) {
     if (menu && !menu.contains(e.target)) closeMenu();
+    // Report the click so the host can dismiss any GPUI overlay (e.g. the
+    // privacy dropdown): clicks on the webview don't reach GPUI's catcher.
+    send('B', '');
   }, true);
   document.addEventListener('scroll', closeMenu, true);
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeMenu(); });
   window.addEventListener('blur', closeMenu);
+  // Exposed so the host can dismiss the menu when the user clicks the GPUI UI
+  // outside the webview: clicks on sibling native views don't blur the webview
+  // nor deliver a 'mousedown' here, so the menu would otherwise linger.
+  window.__rmCloseMenu = closeMenu;
 })();"#;
 
 /// Quotes a string as an AppleScript string literal (escaping `\` and `"`), so
@@ -832,6 +846,9 @@ mod platform {
             Some(IpcMessage::ShowImage(url)) => {
                 let _ = to_host.try_send(HostEvent::ImageShown(url.to_string()));
             }
+            Some(IpcMessage::BodyMouseDown) => {
+                let _ = to_host.try_send(HostEvent::BodyMouseDown);
+            }
             None => {}
         }
     }
@@ -1016,6 +1033,15 @@ mod platform {
             self.set_visible(true);
         }
 
+        /// Closes any custom context menu currently open inside the document.
+        /// Clicking a sibling GPUI view neither blurs the webview nor delivers a
+        /// DOM event, so the host calls this on any outside click to dismiss it.
+        pub fn dismiss_context_menu(&self) {
+            let _ = self
+                .webview
+                .evaluate_script("window.__rmCloseMenu&&window.__rmCloseMenu()");
+        }
+
         fn set_visible(&mut self, visible: bool) {
             if self.visible != visible && self.webview.set_visible(visible).is_ok() {
                 self.visible = visible;
@@ -1045,6 +1071,7 @@ mod platform {
         pub fn set_html(&mut self, _html: &str) {}
         pub fn set_notify_text(&self, _body: String) {}
         pub fn position(&mut self, _bounds: Bounds<Pixels>) {}
+        pub fn dismiss_context_menu(&self) {}
     }
 }
 
