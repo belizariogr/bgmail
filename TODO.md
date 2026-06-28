@@ -165,8 +165,21 @@
         vectors (`expression(`/`-moz-binding`/`behavior:`/`url(javascript:`).
       Everything else — including inline styles, tables and links — is preserved
       verbatim; a rewrite failure drops the body rather than render unsanitized.
-      Not yet done (privacy, separate item): blocking remote images / external CSS
-      loads (tracking pixels), which needs a "load images" UI affordance.
+- ✅ Remote-content (tracking-pixel) blocking, **user-configurable**. New
+      persisted `Config.load_remote_images` (default **off**; `#[serde(default)]`
+      keeps old config files loading). When off, `sanitize_html`/`neutralize_attributes`
+      strip remote (`http(s)`/protocol-relative — `is_remote_url`) URL attributes
+      and `srcset`; inline `data:` images always render. Threaded through
+      `email_document(load_remote)` and `RootView.sync_webview` (added to the
+      memoization `signature` so toggling rebuilds the doc). A new **Privacy**
+      settings section (shield icon) hosts an on/off control wired to the main
+      view via a `WeakEntity<RootView>` (`set_load_remote_images` → persist +
+      re-render). Sample rich body now embeds one remote `<img>` next to the
+      inline one so the toggle is observable. Localized (EN/PT) label + hint.
+      CSS `url(...)` (background images, web fonts, `@import`) in inline `style`
+      and `<style>` blocks is also neutralized when blocking, via a blunt textual
+      pass (`strip_css_urls`, `url(...)` → `url()`) — deliberately not a CSS
+      parser. `<link>`/media/iframes are removed outright regardless.
 - ✅ Scrollbar fade animation for list/sidebar (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)

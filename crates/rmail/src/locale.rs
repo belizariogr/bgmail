@@ -48,6 +48,7 @@ pub enum Key {
     SettingsAccounts,
     SettingsAppearance,
     SettingsNotifications,
+    SettingsPrivacy,
 
     SettingsTitle,
     ThemeLabel,
@@ -63,6 +64,9 @@ pub enum Key {
     SoundOnNewEmail,
     Enabled,
     Disabled,
+
+    RemoteImagesLabel,
+    RemoteImagesHint,
 
     SearchPlaceholder,
 
@@ -103,6 +107,8 @@ impl Key {
             (SettingsAppearance, P) => "Aparência",
             (SettingsNotifications, E) => "Notifications",
             (SettingsNotifications, P) => "Notificações",
+            (SettingsPrivacy, E) => "Privacy",
+            (SettingsPrivacy, P) => "Privacidade",
 
             (SettingsTitle, E) => "Settings",
             (SettingsTitle, P) => "Configurações",
@@ -130,6 +136,15 @@ impl Key {
             (Enabled, P) => "Ativadas",
             (Disabled, E) => "Disabled",
             (Disabled, P) => "Desativado",
+
+            (RemoteImagesLabel, E) => "Load remote images",
+            (RemoteImagesLabel, P) => "Carregar imagens remotas",
+            (RemoteImagesHint, E) => {
+                "Off by default. Remote images can track when and where you open a message."
+            }
+            (RemoteImagesHint, P) => {
+                "Desativado por padrão. Imagens remotas podem rastrear quando e onde você abre uma mensagem."
+            }
 
             (SearchPlaceholder, E) => "Search",
             (SearchPlaceholder, P) => "Buscar",
@@ -205,7 +220,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 30] = [
+    const ALL_KEYS: [Key; 33] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -217,6 +232,7 @@ mod tests {
         Key::SettingsAccounts,
         Key::SettingsAppearance,
         Key::SettingsNotifications,
+        Key::SettingsPrivacy,
         Key::SettingsTitle,
         Key::ThemeLabel,
         Key::ThemeLight,
@@ -229,6 +245,8 @@ mod tests {
         Key::SoundOnNewEmail,
         Key::Enabled,
         Key::Disabled,
+        Key::RemoteImagesLabel,
+        Key::RemoteImagesHint,
         Key::SearchPlaceholder,
         Key::CtxOpenImage,
         Key::CtxDownloadImage,

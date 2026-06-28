@@ -95,6 +95,7 @@ pub enum IconName {
     Filter,
     More,
     Folder,
+    Shield,
 }
 
 impl IconName {
@@ -126,6 +127,7 @@ impl IconName {
             IconName::Filter => (FaStyle::Solid, '\u{f0b0}'), // filter
             IconName::More => (FaStyle::Solid, '\u{f141}'),  // ellipsis
             IconName::Folder => (FaStyle::Solid, '\u{f07b}'), // folder
+            IconName::Shield => (FaStyle::Solid, '\u{f3ed}'), // shield-halved
         }
     }
 }
@@ -183,7 +185,7 @@ mod tests {
 
     /// Every icon must map to a codepoint in the Private Use Area (where
     /// FontAwesome places its glyphs).
-    const ALL: [IconName; 25] = [
+    const ALL: [IconName; 26] = [
         IconName::Inbox,
         IconName::Sent,
         IconName::Drafts,
@@ -209,6 +211,7 @@ mod tests {
         IconName::Filter,
         IconName::More,
         IconName::Folder,
+        IconName::Shield,
     ];
 
     #[test]

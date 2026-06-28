@@ -478,9 +478,13 @@ fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> Sha
          <blockquote>\"Simplicity is the ultimate sophistication.\"</blockquote>\
          <pre>fn main() {{\n    println!(\"Hello, rMail!\");\n}}</pre>\
          <hr>\
-         <p>Messages can embed images; local ones render inline, remote ones \
-         show as a placeholder:</p>\
-         <p><img src=\"{image_src}\" alt=\"Embedded image\" width=\"{width}\" height=\"{height}\"></p>\
+         <p>Messages can embed images; inline (<code>data:</code>) ones always \
+         render, while remote ones load only when you allow remote content in \
+         Settings &rsaquo; Privacy:</p>\
+         <p><img src=\"{image_src}\" alt=\"Inline image\" width=\"{width}\" height=\"{height}\"></p>\
+         <p><img src=\"https://picsum.photos/seed/rmail/{width}/{height}\" \
+         alt=\"Remote image (blocked unless you allow remote content)\" \
+         width=\"{width}\" height=\"{height}\"></p>\
          <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor \
          incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud \
          exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure \

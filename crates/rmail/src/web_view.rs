@@ -42,16 +42,18 @@ pub struct ContextMenuLabels<'a> {
 /// Builds a self-contained HTML document for `body`, themed to match the current
 /// app colors. Plain-text bodies are HTML-escaped and wrapped so they keep their
 /// line breaks and wrap to the pane width. `labels` localize the custom image
-/// context menu.
+/// context menu. When `load_remote` is false, remote resources (e.g. tracking
+/// pixels) are stripped from HTML bodies; inline `data:` images always render.
 pub fn email_document(
     background: Hsla,
     text: Hsla,
     accent: Hsla,
     body: &MessageBody,
     labels: ContextMenuLabels,
+    load_remote: bool,
 ) -> String {
     let inner = match body {
-        MessageBody::Html(html) => sanitize_html(html),
+        MessageBody::Html(html) => sanitize_html(html, load_remote),
         MessageBody::Text(plain) => format!("<pre class=\"plain\">{}</pre>", escape_html(plain)),
     };
 
@@ -483,10 +485,15 @@ const URL_ATTRIBUTES: &[&str] = &[
 /// 2. Surviving elements have their XSS-bearing attributes neutralized
 ///    (see [`neutralize_attributes`]).
 ///
+/// `load_remote` is a user preference: when false, attributes pointing at remote
+/// (`http(s)`/protocol-relative) resources are stripped so e-mails can't load
+/// tracking pixels; inline `data:` images are kept regardless. XSS neutralization
+/// happens either way.
+///
 /// Everything else — including inline `style`, tables and links — is preserved
 /// verbatim. If rewriting fails for any reason we drop the body entirely rather
 /// than risk rendering unsanitized content.
-fn sanitize_html(html: &str) -> String {
+fn sanitize_html(html: &str, load_remote: bool) -> String {
     use lol_html::{element, rewrite_str, RewriteStrSettings};
 
     let settings = RewriteStrSettings::new()
@@ -495,22 +502,72 @@ fn sanitize_html(html: &str) -> String {
             Ok(())
         }))
         .append_element_content_handler(element!("*", |el| {
-            neutralize_attributes(el);
+            neutralize_attributes(el, load_remote);
             Ok(())
         }));
 
-    rewrite_str(html, settings).unwrap_or_default()
+    let sanitized = rewrite_str(html, settings).unwrap_or_default();
+    if load_remote {
+        sanitized
+    } else {
+        // CSS `url(...)` (background images, web fonts, `@import`) also fetches
+        // remote resources, in both inline `style` and `<style>` blocks. Blank
+        // them too. By preference this is a blunt textual pass, not a CSS parser.
+        strip_css_urls(&sanitized)
+    }
 }
 
-/// Strips the XSS-bearing attributes from a *surviving* element while keeping the
-/// element itself:
+/// Empties the contents of every CSS `url(...)` in `css` — `url(http://x.png)`
+/// becomes `url()` — so stylesheets can't fetch remote resources. This is a
+/// deliberately blunt textual pass (equivalent to the regex `url\([^)]*\)` →
+/// `url()`); it does not parse CSS and makes no attempt to tell remote from
+/// inline `data:` URLs, since when remote loading is off neither should fetch.
+fn strip_css_urls(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(idx) = find_url_open(rest) {
+        out.push_str(&rest[..idx]);
+        out.push_str("url(");
+        let after = &rest[idx + 4..];
+        match after.find(')') {
+            Some(close) => {
+                out.push(')');
+                rest = &after[close + 1..];
+            }
+            // Unterminated `url(`: drop everything that follows.
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Byte index of the next case-insensitive `url(` in `s`, if any. `url(` is ASCII,
+/// so the index is always a valid char boundary.
+fn find_url_open(s: &str) -> Option<usize> {
+    s.as_bytes().windows(4).position(|w| {
+        w[0].eq_ignore_ascii_case(&b'u')
+            && w[1].eq_ignore_ascii_case(&b'r')
+            && w[2].eq_ignore_ascii_case(&b'l')
+            && w[3] == b'('
+    })
+}
+
+/// Strips the unwanted attributes from a *surviving* element while keeping the
+/// element itself. Always removed:
 /// - every inline event handler (`on*`),
 /// - `contenteditable` (a reader is not an editor),
 /// - link/source attributes whose value uses a dangerous scheme
 ///   (see [`is_dangerous_url`]),
 /// - `style` declarations carrying legacy CSS script vectors
 ///   (see [`style_has_script_vector`]).
-fn neutralize_attributes(el: &mut Element) {
+///
+/// When `load_remote` is false, also removed: link/source attributes (and
+/// `srcset`) pointing at remote resources, so the message can't phone home.
+fn neutralize_attributes(el: &mut Element, load_remote: bool) {
     // `attributes()` borrows the element, so collect the doomed names first and
     // only mutate (`remove_attribute`) once the borrow is released.
     let doomed: Vec<String> = el
@@ -518,10 +575,15 @@ fn neutralize_attributes(el: &mut Element) {
         .iter()
         .filter_map(|attr| {
             let name = attr.name(); // lower-cased by the parser
+            let value = attr.value();
+            let is_url_attr = URL_ATTRIBUTES.contains(&name.as_str());
             let drop = name.starts_with("on")
                 || name == "contenteditable"
-                || (URL_ATTRIBUTES.contains(&name.as_str()) && is_dangerous_url(&attr.value()))
-                || (name == "style" && style_has_script_vector(&attr.value()));
+                || (is_url_attr && is_dangerous_url(&value))
+                || (name == "style" && style_has_script_vector(&value))
+                || (!load_remote
+                    && ((is_url_attr && is_remote_url(&value))
+                        || (name == "srcset" && !value.trim().is_empty())));
             drop.then_some(name)
         })
         .collect();
@@ -563,6 +625,26 @@ fn is_dangerous_url(value: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether a URL value loads a resource from the network (so it leaks an "opened"
+/// signal / IP address when rendered). Covers explicit `http`/`https` schemes and
+/// protocol-relative URLs (`//host/...`). Inline `data:`, `cid:` (embedded
+/// attachments), fragments and relative paths are treated as local/safe.
+fn is_remote_url(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    if trimmed.starts_with("//") {
+        return true;
+    }
+    let Some(colon) = trimmed.find(':') else {
+        return false;
+    };
+    let scheme: String = trimmed[..colon]
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(scheme.as_str(), "http" | "https")
 }
 
 /// Whether an inline `style` value carries a legacy CSS script vector. These are
@@ -1016,6 +1098,7 @@ mod tests {
             hsla(0.6, 0.7, 0.5, 1.0),
             &body_html(),
             labels(),
+            true,
         );
         assert!(doc.starts_with("<!DOCTYPE html>"));
         assert!(doc.contains("<p>Hello <strong>world</strong></p>"));
@@ -1032,6 +1115,7 @@ mod tests {
             hsla(0.6, 0.7, 0.5, 1.0),
             &body,
             labels(),
+            true,
         );
         assert!(doc.contains("<pre class=\"plain\">1 &lt; 2 &amp; 3</pre>"));
         // A light background selects the light color scheme.
@@ -1053,7 +1137,7 @@ mod tests {
              <meta http-equiv=\"refresh\" content=\"0;url=https://evil.test\">\
              <canvas></canvas><dialog>d</dialog>\
              <p>tail</p>";
-        let clean = sanitize_html(dirty);
+        let clean = sanitize_html(dirty, true);
 
         assert!(clean.contains("<p>keep</p>"));
         assert!(clean.contains("<p>tail</p>"));
@@ -1093,7 +1177,7 @@ mod tests {
              <animate attributeName=\"x\"></animate>\
              <set attributeName=\"onload\" to=\"alert(1)\"></set>\
              </svg>";
-        let clean = sanitize_html(dirty);
+        let clean = sanitize_html(dirty, true);
         let lower = clean.to_ascii_lowercase();
         assert!(clean.contains("<svg"));
         assert!(clean.contains("<rect"));
@@ -1109,6 +1193,7 @@ mod tests {
     fn sanitize_strips_event_handlers_and_contenteditable() {
         let clean = sanitize_html(
             "<div contenteditable=\"true\" onclick=\"steal()\" ONERROR=\"x\">text</div>",
+            true,
         );
         let lower = clean.to_ascii_lowercase();
         assert!(clean.contains("<div"));
@@ -1124,6 +1209,7 @@ mod tests {
             "<a href=\"javascript:alert(1)\">a</a>\
              <a href=\"vbscript:msgbox(1)\">b</a>\
              <img src=\"data:image/svg+xml,<svg/>\">",
+            true,
         );
         let lower = clean.to_ascii_lowercase();
         assert!(!lower.contains("javascript:"));
@@ -1155,6 +1241,7 @@ mod tests {
         let clean = sanitize_html(
             "<p style=\"width:expression(alert(1))\">a</p>\
              <p style=\"background:url(javascript:alert(1))\">b</p>",
+            true,
         );
         let lower = clean.to_ascii_lowercase();
         assert!(!lower.contains("expression("));
@@ -1165,10 +1252,78 @@ mod tests {
     fn sanitize_preserves_safe_markup_and_inline_styles() {
         let html = "<p style=\"color:red\">Hi <a href=\"https://ex.test\">link</a> \
              <img src=\"data:image/png;base64,AAAA\"></p>";
-        let clean = sanitize_html(html);
+        let clean = sanitize_html(html, true);
         assert!(clean.contains("style=\"color:red\""));
         assert!(clean.contains("<a href=\"https://ex.test\">link</a>"));
         assert!(clean.contains("<img src=\"data:image/png;base64,AAAA\">"));
+    }
+
+    #[test]
+    fn is_remote_url_detects_network_resources() {
+        assert!(is_remote_url("http://tracker.test/p.gif"));
+        assert!(is_remote_url("https://tracker.test/p.gif"));
+        assert!(is_remote_url("  HTTPS://Tracker.test"));
+        assert!(is_remote_url("//tracker.test/p.gif")); // protocol-relative
+                                                        // Local / inline resources are not remote.
+        assert!(!is_remote_url("data:image/png;base64,AAAA"));
+        assert!(!is_remote_url("cid:part1@mail"));
+        assert!(!is_remote_url("/relative.png"));
+        assert!(!is_remote_url("#frag"));
+        assert!(!is_remote_url("images/logo.png"));
+    }
+
+    #[test]
+    fn sanitize_blocks_remote_resources_when_disabled() {
+        let html = "<img src=\"https://tracker.test/pixel.gif\" \
+             srcset=\"https://tracker.test/2x.gif 2x\">\
+             <img src=\"data:image/png;base64,AAAA\">";
+        let clean = sanitize_html(html, false);
+        assert!(!clean.contains("tracker.test"));
+        assert!(!clean.contains("srcset"));
+        // Both <img> elements survive; only the remote sources are dropped, and
+        // the inline data: image is untouched.
+        assert!(clean.contains("data:image/png;base64,AAAA"));
+        assert_eq!(clean.matches("<img").count(), 2);
+    }
+
+    #[test]
+    fn sanitize_keeps_remote_resources_when_enabled() {
+        let html = "<img src=\"https://cdn.test/pixel.gif\">";
+        let clean = sanitize_html(html, true);
+        assert!(clean.contains("https://cdn.test/pixel.gif"));
+    }
+
+    #[test]
+    fn strip_css_urls_empties_every_url() {
+        assert_eq!(
+            strip_css_urls("a{background:url(http://x/y.png) no-repeat}"),
+            "a{background:url() no-repeat}"
+        );
+        // Case-insensitive, multiple occurrences, and quotes/whitespace inside.
+        assert_eq!(
+            strip_css_urls("URL( 'http://a' ) and url(\"data:image/png;base64,AAA\")"),
+            "url() and url()"
+        );
+        // Unterminated url( drops the remainder.
+        assert_eq!(strip_css_urls("x url(http://a"), "x url(");
+        // No url(): untouched.
+        assert_eq!(strip_css_urls("color: red"), "color: red");
+    }
+
+    #[test]
+    fn sanitize_blocks_css_url_resources_when_disabled() {
+        let html = "<style>.hero{background-image:url(https://tracker.test/bg.png)}</style>\
+             <p style=\"background:url('https://tracker.test/inline.png')\">hi</p>";
+        let clean = sanitize_html(html, false);
+        assert!(!clean.contains("tracker.test"));
+        assert_eq!(clean.matches("url()").count(), 2);
+    }
+
+    #[test]
+    fn sanitize_keeps_css_url_resources_when_enabled() {
+        let html = "<p style=\"background:url('https://cdn.test/bg.png')\">hi</p>";
+        let clean = sanitize_html(html, true);
+        assert!(clean.contains("https://cdn.test/bg.png"));
     }
 
     #[test]
@@ -1182,6 +1337,7 @@ mod tests {
             hsla(0.6, 0.7, 0.5, 1.0),
             &body,
             labels(),
+            true,
         );
         assert!(doc.contains("<p>safe</p>"));
         assert!(!doc.contains("<iframe"));
@@ -1204,6 +1360,7 @@ mod tests {
                 selection_copy: "Copy",
                 copy_shortcut: "\u{2318}C",
             },
+            true,
         );
         // Labels ride on the body as data-* attributes, HTML-escaped.
         assert!(doc.contains("data-rm-img-open=\"Open &quot;image&quot;\""));

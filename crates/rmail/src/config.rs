@@ -40,6 +40,11 @@ pub struct Config {
     pub sidebar_width: f32,
     /// Width of the message list column.
     pub list_width: f32,
+    /// Whether to load remote content (e.g. images fetched over `http(s)`) in
+    /// e-mail bodies. Off by default: remote resources are a privacy leak
+    /// (tracking pixels reveal when/where a message was opened), so the user opts
+    /// in. Inline `data:` images are unaffected and always render.
+    pub load_remote_images: bool,
 }
 
 impl Default for Config {
@@ -57,6 +62,7 @@ impl Default for Config {
             max_height: 0.0,
             sidebar_width: 200.0,
             list_width: 360.0,
+            load_remote_images: false,
         }
     }
 }
@@ -132,10 +138,20 @@ mod tests {
             max_height: 945.0,
             sidebar_width: 200.0,
             list_width: 420.0,
+            load_remote_images: true,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn remote_images_are_blocked_by_default() {
+        // Privacy: a fresh install (and any config predating the field) must not
+        // load tracking pixels until the user opts in.
+        assert!(!Config::default().load_remote_images);
+        let parsed: Config = serde_json::from_str(r#"{ "sidebar_width": 175.0 }"#).unwrap();
+        assert!(!parsed.load_remote_images);
     }
 
     #[test]
@@ -169,6 +185,7 @@ mod tests {
             max_height: 0.0,
             sidebar_width: 160.0,
             list_width: 400.0,
+            load_remote_images: false,
         };
         save_to(&path, &config).unwrap();
         assert_eq!(load_from(path.clone()), config);

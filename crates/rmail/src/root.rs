@@ -13,7 +13,8 @@ use gpui::{
     canvas, ease_in_out, point, radians, size, svg, Animation, AnimationExt as _, AppContext as _,
     Bounds, ClipboardItem, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton,
     MouseDownEvent, MouseMoveEvent, Point, ScrollHandle, Size, Svg, TitlebarOptions,
-    Transformation, Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
+    Transformation, WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle,
+    WindowOptions,
 };
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
@@ -124,14 +125,16 @@ enum SettingsSection {
     Accounts,
     Appearance,
     Notifications,
+    Privacy,
 }
 
 impl SettingsSection {
-    const ALL: [SettingsSection; 4] = [
+    const ALL: [SettingsSection; 5] = [
         SettingsSection::General,
         SettingsSection::Accounts,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
+        SettingsSection::Privacy,
     ];
 
     fn title_key(self) -> Key {
@@ -140,6 +143,7 @@ impl SettingsSection {
             SettingsSection::Accounts => Key::SettingsAccounts,
             SettingsSection::Appearance => Key::SettingsAppearance,
             SettingsSection::Notifications => Key::SettingsNotifications,
+            SettingsSection::Privacy => Key::SettingsPrivacy,
         }
     }
 
@@ -149,6 +153,7 @@ impl SettingsSection {
             SettingsSection::Accounts => IconName::Account,
             SettingsSection::Appearance => IconName::Star,
             SettingsSection::Notifications => IconName::Flag,
+            SettingsSection::Privacy => IconName::Shield,
         }
     }
 }
@@ -267,7 +272,10 @@ pub struct RootView {
     /// the theme colors it was themed with). Used to skip rebuilding the HTML on
     /// every render — e.g. on every frame of an animation — when nothing that
     /// affects the document has changed.
-    last_webview_sig: Option<(usize, Hsla, Hsla, Hsla, Language)>,
+    last_webview_sig: Option<(usize, Hsla, Hsla, Hsla, Language, bool)>,
+    /// Whether to load remote content (e.g. images) in e-mail bodies. Persisted;
+    /// off by default to block tracking pixels until the user opts in.
+    load_remote_images: bool,
 }
 
 impl RootView {
@@ -314,6 +322,7 @@ impl RootView {
             sidebar_scrollbar: None,
             email_webview: None,
             last_webview_sig: None,
+            load_remote_images: settings.load_remote_images,
         }
     }
 
@@ -346,6 +355,7 @@ impl RootView {
             max_height: f32::from(self.max_size.height),
             sidebar_width: f32::from(self.sidebar_width),
             list_width: f32::from(self.list_width),
+            load_remote_images: self.load_remote_images,
         }
     }
 
@@ -396,6 +406,7 @@ impl RootView {
             colors.text,
             colors.accent,
             language,
+            self.load_remote_images,
         );
         if self.email_webview.is_some() && self.last_webview_sig == Some(signature) {
             return;
@@ -420,6 +431,7 @@ impl RootView {
                     "Ctrl+C"
                 },
             },
+            self.load_remote_images,
         );
         let notify_body = Key::ImageDownloaded.tr(language).to_string();
 
@@ -468,6 +480,16 @@ impl RootView {
         }
     }
 
+    /// Toggles whether remote content loads in e-mail bodies, persisting the new
+    /// preference and re-rendering so the open message is re-sanitized.
+    fn set_load_remote_images(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.load_remote_images != value {
+            self.load_remote_images = value;
+            self.request_save(cx);
+            cx.notify();
+        }
+    }
+
     /// Opens the preferences in their own window (like Zed). If it is already
     /// open, just brings it to the front rather than spawning a duplicate.
     fn open_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -483,6 +505,7 @@ impl RootView {
         }
 
         let accounts = self.accounts.clone();
+        let root = cx.entity().downgrade();
         let bounds = Bounds::centered(None, size(px(760.0), px(560.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -496,7 +519,7 @@ impl RootView {
         };
 
         if let Ok(handle) = cx.open_window(options, |_window, cx| {
-            cx.new(|_| SettingsView::new(accounts))
+            cx.new(|_| SettingsView::new(accounts, root))
         }) {
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             self.settings_window = Some(handle);
@@ -1612,13 +1635,18 @@ impl RootView {
 struct SettingsView {
     accounts: Vec<Account>,
     section: SettingsSection,
+    /// Back-reference to the main view, used to read and toggle preferences that
+    /// live there (e.g. loading remote images). Weak so the settings window can
+    /// outlive nothing it shouldn't.
+    root: WeakEntity<RootView>,
 }
 
 impl SettingsView {
-    fn new(accounts: Vec<Account>) -> Self {
+    fn new(accounts: Vec<Account>, root: WeakEntity<RootView>) -> Self {
         Self {
             accounts,
             section: SettingsSection::General,
+            root,
         }
     }
 
@@ -1742,6 +1770,44 @@ impl SettingsView {
                     Key::Disabled.tr(language),
                 ))
                 .into_any_element(),
+            SettingsSection::Privacy => {
+                let load_remote = self
+                    .root
+                    .upgrade()
+                    .map(|root| root.read(cx).load_remote_images)
+                    .unwrap_or(false);
+                v_flex()
+                    .gap_2()
+                    .child(
+                        Label::new(Key::RemoteImagesLabel.tr(language))
+                            .weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(
+                        Label::new(Key::RemoteImagesHint.tr(language))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .pt_1()
+                            .child(self.remote_images_button(
+                                "remote-on",
+                                Key::Enabled.tr(language),
+                                load_remote,
+                                true,
+                                cx,
+                            ))
+                            .child(self.remote_images_button(
+                                "remote-off",
+                                Key::Disabled.tr(language),
+                                !load_remote,
+                                false,
+                                cx,
+                            )),
+                    )
+                    .into_any_element()
+            }
         };
 
         v_flex()
@@ -1779,6 +1845,31 @@ impl SettingsView {
             );
         }
         row
+    }
+
+    /// One button of the remote-images on/off segmented control. `selected` marks
+    /// the active choice (filled); clicking sets the preference to `value` on the
+    /// main view.
+    fn remote_images_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        selected: bool,
+        value: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        Button::new(id, label)
+            .style(if selected {
+                ButtonStyle::Filled
+            } else {
+                ButtonStyle::Subtle
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let _ = this
+                    .root
+                    .update(cx, |root, cx| root.set_load_remote_images(value, cx));
+                cx.notify();
+            }))
     }
 }
 
