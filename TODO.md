@@ -1,62 +1,71 @@
 # TODO — rMail
 
-> Fonte de verdade do progresso. **Mantenha atualizado** (ver regra 8 em
-> [`AGENTS.md`](AGENTS.md)). Legenda: ✅ feito · 🔄 em andamento · ⬜ pendente.
+> Source of truth for progress. **Keep it up to date** (see rule 8 in
+> [`AGENTS.md`](AGENTS.md)). Legend: ✅ done · 🔄 in progress · ⬜ pending.
 
-## Etapa 0 — Fundação & Planejamento
-- ✅ Definir visão, arquitetura e escopo (`docs/PLANEJAMENTO.md`)
-- ✅ Escrever regras para agentes (`AGENTS.md`)
-- ✅ Criar este `TODO.md`
-- ✅ Configurar workspace Cargo + toolchain fixada (`rust-toolchain.toml`)
+## Stage 0 — Foundation & Planning
+- ✅ Define vision, architecture and scope (`docs/PLANEJAMENTO.md`)
+- ✅ Write the rules for agents (`AGENTS.md`)
+- ✅ Create this `TODO.md`
+- ✅ Set up the Cargo workspace + pinned toolchain (`rust-toolchain.toml`)
 - ✅ `.gitignore`
 
-## Etapa 1 — Mock visual (atual)
-- ✅ Crate `theme`: `ThemeColors`, tema escuro (VSCode Dark Modern) e claro
-      (VSCode Light Modern), `ActiveTheme`, toggle + testes
-- ✅ Crate `ui`: prelúdio, `Color`, `Label`, `Icon`, `Button`, `IconButton`,
-      `ListItem`, helpers `h_flex`/`v_flex`
-- ✅ Dados de exemplo (`crates/rmail/src/data.rs`) + testes
-- ✅ Layout 3 colunas estilo Mail do macOS (barra lateral, lista, leitor)
-- ✅ Toolbar unificada com titlebar transparente + barra de status
-- ✅ Alternância de tema claro/escuro em tempo real
-- ✅ Tela de configurações estilo Zed (Geral/Contas/Aparência/Notificações)
-- ✅ Primeiro build do workspace (`cargo build --workspace`), `cargo clippy`
-      sem warnings e `cargo test --workspace` passando; app inicia sem travar
-- ✅ macOS/Xcode 26: Metal Toolchain desacoplado — `xcodebuild -downloadComponent
-      MetalToolchain` + `.cargo/config.toml` forçando `TOOLCHAINS = "com.apple.dt.toolchain.Metal"`
-      (o build script do `gpui` usa `xcrun -sdk macosx metal`, que não acha o stub)
-- 🔄 **Medir o tempo de inicialização** com instrumentação (ainda informal)
-- ⬜ Testes de UI com `gpui::TestAppContext` (após estabilizar o mock)
-- ⬜ Ícones SVG (substituir glifos Unicode) — fase de polimento
-- ⬜ Campo de busca funcional (filtra a lista mock)
-- ⬜ Tela/painel de composição de e-mail (mock)
-- ⬜ Redimensionamento das colunas (divisórias arrastáveis)
+## Stage 1 — Visual mock (current)
+- ✅ `theme` crate: `ThemeColors`, dark theme (VSCode Dark Modern) and light
+      (VSCode Light Modern), `ActiveTheme`, toggle + tests
+- ✅ `ui` crate: prelude, `Color`, `Label`, `Icon`, `Button`, `IconButton`,
+      `ListItem`, `h_flex`/`v_flex` helpers
+- ✅ Sample data (`crates/rmail/src/data.rs`) + tests
+- ✅ macOS Mail-style three-column layout (sidebar, list, reader)
+- ✅ Unified toolbar with transparent titlebar + status bar
+- ✅ Real-time light/dark theme switching
+- ✅ Zed-style settings screen (General/Accounts/Appearance/Notifications)
+- ✅ First workspace build (`cargo build --workspace`), `cargo clippy` with no
+      warnings and `cargo test --workspace` passing; app starts without crashing
+- ✅ macOS/Xcode 26: unbundled Metal Toolchain — `xcodebuild -downloadComponent
+      MetalToolchain` + `.cargo/config.toml` forcing
+      `TOOLCHAINS = "com.apple.dt.toolchain.Metal"` (gpui's build script uses
+      `xcrun -sdk macosx metal`, which does not find the stub)
+- ✅ Icons via the FontAwesome 6 Free font (replacing the Unicode glyphs):
+      fonts embedded and registered in `ui::init`, `IconName` maps to style
+      (solid/regular via weight) + codepoint; solid/regular resolve to distinct
+      fonts (verified at runtime)
+- ✅ Localization (i18n): `crates/rmail/src/locale.rs` with `Language`
+      (English default + Brazilian Portuguese), a string catalog and an
+      `ActiveLanguage` global; UI resolves strings at render time, with a
+      language picker in the General settings. English is the default everywhere.
+- 🔄 **Measure the startup time** with instrumentation (still informal)
+- ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
+- ⬜ Functional search field (filters the mock list)
+- ⬜ E-mail composition screen/panel (mock)
+- ⬜ Column resizing (draggable dividers)
 
-## Etapa 2 — Camada de domínio
-- ⬜ Crate `mail_core`: `Account`, `Mailbox`, `Message`, `Thread`, `Attachment`
-- ⬜ Crate `storage`: persistência local (SQLite) + testes
-- ⬜ Máquina de estados de sincronização
+## Stage 2 — Domain layer
+- ⬜ `mail_core` crate: `Account`, `Mailbox`, `Message`, `Thread`, `Attachment`
+- ⬜ `storage` crate: local persistence (SQLite) + tests
+- ⬜ Synchronization state machine
 
-## Etapa 3 — Conectividade
-- ⬜ Crate `protocols`: traits genéricas (Fetch/Send) + IMAP/POP3/SMTP
+## Stage 3 — Connectivity
+- ⬜ `protocols` crate: generic traits (Fetch/Send) + IMAP/POP3/SMTP
 - ⬜ Gmail via OAuth2 + API
-- ⬜ Crate `accounts`: gerência de contas e credenciais (keychain por plataforma)
+- ⬜ `accounts` crate: account and credential management (per-platform keychain)
 
-## Etapa 4 — Recursos do cliente (ver escopo em PLANEJAMENTO.md §6)
-- ⬜ Ler / marcar lida-não lida
-- ⬜ Compor / responder / responder a todos / encaminhar
-- ⬜ Enviar (SMTP + Gmail)
-- ⬜ Mover / excluir / arquivar / spam
-- ⬜ Favoritar / sinalizar
-- ⬜ Anexos (visualizar, baixar, anexar)
-- ⬜ Busca
+## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
+- ⬜ Read / mark read-unread
+- ⬜ Compose / reply / reply all / forward
+- ⬜ Send (SMTP + Gmail)
+- ⬜ Move / delete / archive / junk
+- ⬜ Star / flag
+- ⬜ Attachments (view, download, attach)
+- ⬜ Search
 
-## Etapa 5 — Polimento
-- ⬜ Atalhos de teclado
-- ⬜ Acessibilidade
-- ⬜ Notificações nativas
-- ⬜ Empacotamento (macOS `.app`, Linux, Windows)
+## Stage 5 — Polish
+- ⬜ Keyboard shortcuts
+- ⬜ Accessibility
+- ⬜ Native notifications
+- ⬜ Packaging (macOS `.app`, Linux, Windows)
 
-## Notas / decisões em aberto
-- Reavaliar GPUI crates.io `0.2.2` vs `main` se faltar alguma API.
-- Definir formato de armazenamento local (SQLite vs arquivos) na Etapa 2.
+## Notes / open decisions
+- Reassess GPUI crates.io `0.2.2` vs `main` if some API is missing.
+- Define the local storage format (SQLite vs files) in Stage 2.
+- Add more UI languages by extending `locale::Language` and the catalog.

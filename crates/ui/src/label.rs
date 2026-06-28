@@ -2,17 +2,17 @@ use gpui::FontWeight;
 
 use crate::prelude::*;
 
-/// Tamanhos de texto disponíveis para [`Label`].
+/// Text sizes available for [`Label`].
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LabelSize {
-    /// 11px — metadados muito discretos.
+    /// 11px — very subtle metadata.
     XSmall,
-    /// 12px — prévia de mensagem, horário.
+    /// 12px — message preview, timestamp.
     Small,
-    /// 14px — texto padrão.
+    /// 14px — default text.
     #[default]
     Default,
-    /// 16px — títulos de seção.
+    /// 16px — section titles.
     Large,
 }
 
@@ -27,10 +27,10 @@ impl LabelSize {
     }
 }
 
-/// Um rótulo de texto temático.
+/// A themed text label.
 ///
 /// ```ignore
-/// Label::new("Caixa de entrada").size(LabelSize::Small).color(Color::Muted)
+/// Label::new("Inbox").size(LabelSize::Small).color(Color::Muted)
 /// ```
 #[derive(IntoElement)]
 pub struct Label {
@@ -42,7 +42,7 @@ pub struct Label {
 }
 
 impl Label {
-    /// Cria um novo rótulo.
+    /// Creates a new label.
     pub fn new(text: impl Into<SharedString>) -> Self {
         Self {
             text: text.into(),
@@ -53,37 +53,37 @@ impl Label {
         }
     }
 
-    /// Define o tamanho do texto.
+    /// Sets the text size.
     pub fn size(mut self, size: LabelSize) -> Self {
         self.size = size;
         self
     }
 
-    /// Define a cor semântica do texto.
+    /// Sets the semantic text color.
     pub fn color(mut self, color: Color) -> Self {
         self.color = color;
         self
     }
 
-    /// Define o peso da fonte.
+    /// Sets the font weight.
     pub fn weight(mut self, weight: FontWeight) -> Self {
         self.weight = weight;
         self
     }
 
-    /// Atalho para texto em negrito.
+    /// Shortcut for bold text.
     pub fn bold(mut self) -> Self {
         self.weight = FontWeight::BOLD;
         self
     }
 
-    /// Atalho para texto semi-negrito.
+    /// Shortcut for semibold text.
     pub fn semibold(mut self) -> Self {
         self.weight = FontWeight::SEMIBOLD;
         self
     }
 
-    /// Trunca o texto em uma única linha com reticências.
+    /// Truncates the text to a single line with an ellipsis.
     pub fn single_line(mut self) -> Self {
         self.single_line = true;
         self

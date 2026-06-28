@@ -1,37 +1,37 @@
 use gpui::{App, Hsla};
 use theme::ActiveTheme;
 
-/// Cores semânticas resolvidas a partir do tema ativo.
+/// Semantic colors resolved from the active theme.
 ///
-/// Em vez de espalhar valores `Hsla` literais pelos componentes, usamos papéis
-/// semânticos (`Default`, `Muted`, `Accent`, ...) que são resolvidos em tempo de
-/// renderização contra o [`theme::Theme`] ativo. Assim, alternar entre claro e
-/// escuro reflete automaticamente em todos os componentes.
+/// Instead of scattering literal `Hsla` values across components, we use
+/// semantic roles (`Default`, `Muted`, `Accent`, ...) that are resolved at
+/// render time against the active [`theme::Theme`]. This way, switching between
+/// light and dark automatically reflects in every component.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Color {
-    /// Cor de texto/ícone padrão.
+    /// Default text/icon color.
     #[default]
     Default,
-    /// Conteúdo atenuado/secundário.
+    /// Muted/secondary content.
     Muted,
-    /// Conteúdo desabilitado.
+    /// Disabled content.
     Disabled,
-    /// Cor de acento (links, contadores, estados ativos).
+    /// Accent color (links, counters, active states).
     Accent,
-    /// Texto sobre superfícies de acento/seleção.
+    /// Text over accent/selection surfaces.
     OnAccent,
-    /// Estado de sucesso.
+    /// Success state.
     Success,
-    /// Estado de aviso.
+    /// Warning state.
     Warning,
-    /// Estado de erro.
+    /// Error state.
     Error,
-    /// Cor arbitrária.
+    /// Arbitrary color.
     Custom(Hsla),
 }
 
 impl Color {
-    /// Resolve a cor semântica para um [`Hsla`] concreto usando o tema ativo.
+    /// Resolves the semantic color to a concrete [`Hsla`] using the active theme.
     pub fn hsla(self, cx: &App) -> Hsla {
         let colors = cx.theme().colors();
         match self {

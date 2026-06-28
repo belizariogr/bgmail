@@ -4,11 +4,10 @@ use crate::prelude::*;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
-/// Uma linha clicável de lista, com estados de hover e seleção.
+/// A clickable list row, with hover and selection states.
 ///
-/// Aceita um *slot* inicial (geralmente um [`Icon`]), conteúdo principal e um
-/// *slot* final (badge/contador). É a base das listas da barra lateral e da
-/// lista de mensagens.
+/// Accepts a start *slot* (usually an [`Icon`]), main content and an end *slot*
+/// (badge/counter). It is the basis for the sidebar lists and the message list.
 #[derive(IntoElement)]
 pub struct ListItem {
     id: ElementId,
@@ -20,7 +19,7 @@ pub struct ListItem {
 }
 
 impl ListItem {
-    /// Cria uma nova linha de lista.
+    /// Creates a new list row.
     pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
@@ -32,31 +31,31 @@ impl ListItem {
         }
     }
 
-    /// Marca a linha como selecionada.
+    /// Marks the row as selected.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
     }
 
-    /// Define o slot inicial (ícone à esquerda).
+    /// Sets the start slot (icon on the left).
     pub fn start_slot(mut self, element: impl IntoElement) -> Self {
         self.start_slot = Some(element.into_any_element());
         self
     }
 
-    /// Define o slot final (badge/contador à direita).
+    /// Sets the end slot (badge/counter on the right).
     pub fn end_slot(mut self, element: impl IntoElement) -> Self {
         self.end_slot = Some(element.into_any_element());
         self
     }
 
-    /// Adiciona um elemento ao conteúdo principal.
+    /// Adds an element to the main content.
     pub fn child(mut self, element: impl IntoElement) -> Self {
         self.children.push(element.into_any_element());
         self
     }
 
-    /// Registra o handler de clique.
+    /// Registers the click handler.
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -83,7 +82,7 @@ impl RenderOnce for ListItem {
             .when(!self.selected, |el| el.hover(move |el| el.bg(hover_bg)))
             .when_some(self.start_slot, |el, slot| el.child(slot))
             .child(
-                // Conteúdo principal ocupa o espaço restante.
+                // Main content takes the remaining space.
                 div()
                     .flex()
                     .flex_col()

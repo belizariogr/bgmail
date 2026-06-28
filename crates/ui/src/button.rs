@@ -2,21 +2,21 @@ use gpui::ClickEvent;
 
 use crate::prelude::*;
 
-/// Estilo visual de um [`Button`].
+/// Visual style of a [`Button`].
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ButtonStyle {
-    /// Fundo sutil que se destaca da superfície (ação secundária).
+    /// Subtle background that stands out from the surface (secondary action).
     #[default]
     Subtle,
-    /// Fundo de acento sólido (ação primária).
+    /// Solid accent background (primary action).
     Filled,
-    /// Sem fundo até receber hover (ação terciária / toolbar).
+    /// No background until hovered (tertiary / toolbar action).
     Ghost,
 }
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
-/// Um botão com rótulo de texto.
+/// A button with a text label.
 #[derive(IntoElement)]
 pub struct Button {
     id: ElementId,
@@ -27,7 +27,7 @@ pub struct Button {
 }
 
 impl Button {
-    /// Cria um novo botão.
+    /// Creates a new button.
     pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         Self {
             id: id.into(),
@@ -38,19 +38,19 @@ impl Button {
         }
     }
 
-    /// Define o estilo do botão.
+    /// Sets the button style.
     pub fn style(mut self, style: ButtonStyle) -> Self {
         self.style = style;
         self
     }
 
-    /// Faz o botão ocupar toda a largura disponível.
+    /// Makes the button span the full available width.
     pub fn full_width(mut self) -> Self {
         self.full_width = true;
         self
     }
 
-    /// Registra o handler de clique.
+    /// Registers the click handler.
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -89,7 +89,7 @@ impl RenderOnce for Button {
     }
 }
 
-/// Um botão composto apenas por um ícone (usado em toolbars).
+/// A button made of only an icon (used in toolbars).
 #[derive(IntoElement)]
 pub struct IconButton {
     id: ElementId,
@@ -101,7 +101,7 @@ pub struct IconButton {
 }
 
 impl IconButton {
-    /// Cria um novo botão de ícone.
+    /// Creates a new icon button.
     pub fn new(id: impl Into<ElementId>, icon: IconName) -> Self {
         Self {
             id: id.into(),
@@ -113,25 +113,25 @@ impl IconButton {
         }
     }
 
-    /// Define o tamanho do ícone.
+    /// Sets the icon size.
     pub fn size(mut self, size: IconSize) -> Self {
         self.size = size;
         self
     }
 
-    /// Define a cor do ícone.
+    /// Sets the icon color.
     pub fn color(mut self, color: Color) -> Self {
         self.color = color;
         self
     }
 
-    /// Marca o botão como selecionado/ativo.
+    /// Marks the button as selected/active.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
     }
 
-    /// Registra o handler de clique.
+    /// Registers the click handler.
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,

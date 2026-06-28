@@ -1,50 +1,64 @@
 # rMail
 
-Um cliente de e-mail de desktop **rápido**, **simples** e **elegante**, escrito em
-Rust sobre o **GPUI** (o framework de UI acelerado por GPU do
+A **fast**, **simple** and **elegant** desktop e-mail client, written in Rust on
+top of **GPUI** (the GPU-accelerated UI framework from
 [Zed](https://github.com/zed-industries/zed)).
 
-> **Status:** protótipo visual (mock). A interface — inspirada no cliente de
-> e-mail do macOS — já está montada com dados de exemplo, para validar o layout e
-> a velocidade de inicialização. A lógica de e-mail (IMAP/POP3/Gmail) será
-> implementada em etapas. Veja [`docs/PLANEJAMENTO.md`](docs/PLANEJAMENTO.md).
+> **Status:** visual prototype (mock). The interface — inspired by the macOS mail
+> client — is already assembled with sample data, to validate the layout and the
+> startup speed. The e-mail logic (IMAP/POP3/Gmail) will be implemented in stages.
+> See [`docs/PLANEJAMENTO.md`](docs/PLANEJAMENTO.md).
 
-## Destaques
+## Highlights
 
-- **Inicialização rápida**: binário nativo, sem Electron/web runtime.
-- **Layout estilo Mail do macOS**: barra lateral de contas, lista de mensagens e
-  painel de leitura, com toolbar unificada e barra de status.
-- **Dois temas**: claro (VSCode *Light Modern*) e escuro (VSCode *Dark Modern*),
-  alternáveis em tempo real.
-- **Multiplataforma**: Windows, Linux e macOS.
+- **Fast startup**: native binary, no Electron/web runtime.
+- **macOS Mail-style layout**: accounts sidebar, message list and reading pane,
+  with a unified toolbar and a status bar.
+- **Two themes**: light (VSCode *Light Modern*) and dark (VSCode *Dark Modern*),
+  switchable at runtime.
+- **Multi-language UI**: English (default) and Brazilian Portuguese, switchable
+  in the settings.
+- **Cross-platform**: Windows, Linux and macOS.
 
-## Como rodar
+## Running
 
-Requer a toolchain Rust definida em `rust-toolchain.toml` (instalada
-automaticamente pelo `rustup`).
+Requires the Rust toolchain defined in `rust-toolchain.toml` (installed
+automatically by `rustup`).
 
 ```bash
-cargo run -p rmail        # abre o protótipo visual
-cargo test --workspace    # roda os testes
+cargo run -p rmail        # opens the visual prototype
+cargo test --workspace    # runs the tests
 cargo clippy --workspace  # lint
 ```
 
-## Estrutura
+### macOS: Metal Toolchain (Xcode 26+)
+
+GPUI compiles Metal shaders at build time. On Xcode 26 the Metal Toolchain was
+unbundled and must be installed separately:
+
+```bash
+xcodebuild -downloadComponent MetalToolchain
+```
+
+The project's `.cargo/config.toml` sets `TOOLCHAINS = "com.apple.dt.toolchain.Metal"`
+so GPUI's `xcrun -sdk macosx metal` build step finds the installed toolchain.
+
+## Structure
 
 ```
 crates/
-├── theme/   # temas e cores (claro/escuro)
-├── ui/      # componentes visuais reutilizáveis (Label, Icon, Button, ListItem…)
-└── rmail/   # binário: janela, layout (mock) e estado da UI
+├── theme/   # themes and colors (light/dark)
+├── ui/      # reusable visual components (Label, Icon, Button, ListItem…)
+└── rmail/   # binary: window, layout (mock), UI state and localization
 ```
 
-## Documentação do projeto
+## Project documentation
 
-- [`docs/PLANEJAMENTO.md`](docs/PLANEJAMENTO.md) — visão, arquitetura, escopo e
-  recursos planejados.
-- [`AGENTS.md`](AGENTS.md) — regras de desenvolvimento para agentes de IA e humanos.
-- [`TODO.md`](TODO.md) — progresso vivo da implementação.
+- [`docs/PLANEJAMENTO.md`](docs/PLANEJAMENTO.md) — vision, architecture, scope and
+  planned features.
+- [`AGENTS.md`](AGENTS.md) — development rules for AI agents and humans.
+- [`TODO.md`](TODO.md) — living implementation progress.
 
-## Licença
+## License
 
 MIT.

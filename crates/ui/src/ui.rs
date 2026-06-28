@@ -1,14 +1,13 @@
 //! # UI
 //!
-//! Biblioteca de componentes visuais do rMail, inspirada no crate `ui` do Zed.
+//! rMail's visual component library, inspired by Zed's `ui` crate.
 //!
-//! Fornece um conjunto pequeno e reutilizável de componentes (`Label`, `Icon`,
-//! `Button`, `IconButton`, `ListItem`) e helpers de layout (`h_flex`, `v_flex`),
-//! todos integrados ao sistema de temas (`theme`).
+//! Provides a small, reusable set of components (`Label`, `Icon`, `Button`,
+//! `IconButton`, `ListItem`) and layout helpers (`h_flex`, `v_flex`), all
+//! integrated with the theme system (`theme`).
 //!
-//! O objetivo é manter a API próxima à do Zed para facilitar a portabilidade de
-//! padrões, evitando porém o "bloat" de recursos não usados por um cliente de
-//! e-mail.
+//! The goal is to keep the API close to Zed's to ease porting patterns, while
+//! avoiding the "bloat" of features an e-mail client does not use.
 
 pub mod prelude;
 
@@ -26,5 +25,11 @@ pub use list_item::*;
 
 pub use prelude::{h_flex, v_flex};
 
-// Reexporta os tipos de tema mais usados para conveniência dos consumidores.
+// Re-export the most used theme types for consumer convenience.
 pub use theme::{ActiveTheme, Appearance, Theme, ThemeColors};
+
+/// Initializes the UI crate by registering the icon fonts (FontAwesome) in
+/// GPUI's text system. Must be called once, before opening windows.
+pub fn init(cx: &mut gpui::App) {
+    icon::init_fonts(cx);
+}

@@ -1,173 +1,176 @@
-# Planejamento do rMail
+# rMail Planning
 
-> Documento de direcionamento para humanos **e agentes de IA**. Antes de escrever
-> qualquer código, leia também o arquivo [`AGENTS.md`](../AGENTS.md) (regras
-> obrigatórias) e o [`TODO.md`](../TODO.md) (estado atual da implementação).
+> Guidance document for humans **and AI agents**. Before writing any code, also
+> read [`AGENTS.md`](../AGENTS.md) (mandatory rules) and [`TODO.md`](../TODO.md)
+> (current implementation state).
 
-## 1. Visão
+## 1. Vision
 
-O **rMail** é um cliente de e-mail de desktop **rápido** (inicialização quase
-instantânea), **simples** e com **design bonito e elegante**. Ele reaproveita a
-base de UI do editor [Zed](https://github.com/zed-industries/zed) — o framework
-**GPUI** e os padrões de componentes do crate `ui` — para entregar uma interface
-nativa, acelerada por GPU e leve.
+**rMail** is a **fast** (near-instant startup), **simple** desktop e-mail client
+with a **beautiful and elegant design**. It reuses the UI foundation of the
+[Zed](https://github.com/zed-industries/zed) editor — the **GPUI** framework and
+the component patterns from the `ui` crate — to deliver a native, GPU-accelerated
+and lightweight interface.
 
-- **Layout**: igual ao do cliente de e-mail do **macOS** (três colunas + toolbar
-  unificada superior + barra de status), porém construído com elementos do Zed.
-- **Plataformas**: Windows, Linux e macOS (GPUI é multiplataforma).
-- **Linguagem**: Rust.
-- **Filosofia**: sem "frescura", mas com acabamento visual impecável.
+- **Layout**: like the **macOS** mail client (three columns + unified top toolbar
+  + status bar), but built with Zed's elements.
+- **Platforms**: Windows, Linux and macOS (GPUI is cross-platform).
+- **Language**: Rust.
+- **Philosophy**: no fluff, but with impeccable visual finish.
 
-> Referência local do Zed: `~/dev/zed`. Consulte sempre que precisar entender um
-> componente, padrão de layout ou API do GPUI.
+> Local Zed reference: `~/dev/zed`. Consult it whenever you need to understand a
+> component, layout pattern or GPUI API.
 
-## 2. Estratégia de execução (por partes)
+## 2. Execution strategy (in parts)
 
-1. **Mock visual (etapa atual).** Construir a interface completa com dados
-   estáticos para validar o layout e — principalmente — a **velocidade de
-   inicialização**. Sem rede, sem persistência, sem lógica de e-mail.
-2. **Camada de domínio.** Modelos (`Account`, `Mailbox`, `Message`, `Thread`),
-   armazenamento local e máquina de estados de sincronização.
-3. **Conectividade.** IMAP/POP3 + SMTP genéricos e, em seguida, **Gmail** (OAuth2).
-4. **Recursos de cliente de e-mail.** Ler, compor, responder, encaminhar, mover,
-   marcar, buscar, anexos (lista completa na seção 6).
-5. **Polimento.** Atalhos de teclado, acessibilidade, animações sutis, empacotamento.
+1. **Visual mock (current stage).** Build the full interface with static data to
+   validate the layout and — most importantly — the **startup speed**. No
+   networking, no persistence, no e-mail logic.
+2. **Domain layer.** Models (`Account`, `Mailbox`, `Message`, `Thread`), local
+   storage and a synchronization state machine.
+3. **Connectivity.** Generic IMAP/POP3 + SMTP and then **Gmail** (OAuth2).
+4. **E-mail client features.** Read, compose, reply, forward, move, mark, search,
+   attachments (full list in section 6).
+5. **Polish.** Keyboard shortcuts, accessibility, subtle animations, packaging.
 
-Cada etapa só começa quando a anterior está testada e estável.
+Each stage only starts once the previous one is tested and stable.
 
-## 3. Por que GPUI / Zed
+## 3. Why GPUI / Zed
 
-- **Inicialização rápida**: binário nativo, sem runtime web/Electron.
-- **Renderização por GPU**: rolagem e redimensionamento fluidos.
-- **Estilo "Tailwind em Rust"**: `div().flex().px_3().bg(...)` — produtivo e legível.
-- **Sistema de temas** maduro, que espelhamos em um crate `theme` enxuto.
+- **Fast startup**: native binary, no web/Electron runtime.
+- **GPU rendering**: smooth scrolling and resizing.
+- **"Tailwind in Rust" style**: `div().flex().px_3().bg(...)` — productive and
+  readable.
+- **Mature theme system**, which we mirror in a lean `theme` crate.
 
-Dependemos do `gpui` **publicado no crates.io** (versão `0.2.2`) para manter o
-projeto **reprodutível e portável**, em vez de depender do checkout local do Zed.
-O crate local em `~/dev/zed` é usado apenas como **referência de leitura**.
+We depend on `gpui` **published on crates.io** (version `0.2.2`) to keep the
+project **reproducible and portable**, rather than depending on the local Zed
+checkout. The local crate in `~/dev/zed` is used only as a **read-only reference**.
 
-## 4. Arquitetura de crates
+## 4. Crate architecture
 
-O projeto é um *workspace* Cargo. A separação em crates favorece reutilização,
-testes isolados e tempos de compilação incremental menores.
+The project is a Cargo *workspace*. Splitting into crates favors reuse, isolated
+testing and shorter incremental compile times.
 
-| Crate            | Papel                                                                 | Status |
+| Crate            | Role                                                                  | Status |
 | ---------------- | --------------------------------------------------------------------- | ------ |
-| `crates/theme`   | Definição de temas e cores (claro/escuro). Espelha o `theme` do Zed.  | ✅ mock |
-| `crates/ui`      | Biblioteca de componentes (`Label`, `Icon`, `Button`, `ListItem`…).   | ✅ mock |
-| `crates/rmail`   | Binário: janela, layout, estado da UI (atualmente o mock).            | ✅ mock |
-| `crates/mail_core` *(futuro)* | Modelos de domínio e regras de negócio, sem dependência de UI. | ⬜ |
-| `crates/storage` *(futuro)*   | Persistência local (SQLite via `sqlez`/`rusqlite`).            | ⬜ |
-| `crates/protocols` *(futuro)* | Abstrações IMAP/POP3/SMTP/Gmail atrás de *traits*.            | ⬜ |
-| `crates/accounts` *(futuro)*  | Gerência de contas e credenciais (keychain por plataforma).   | ⬜ |
+| `crates/theme`   | Theme and color definitions (light/dark). Mirrors Zed's `theme`.      | ✅ mock |
+| `crates/ui`      | Component library (`Label`, `Icon`, `Button`, `ListItem`…).           | ✅ mock |
+| `crates/rmail`   | Binary: window, layout, UI state and localization (currently the mock). | ✅ mock |
+| `crates/mail_core` *(future)* | Domain models and business rules, no UI dependency.      | ⬜ |
+| `crates/storage` *(future)*   | Local persistence (SQLite via `sqlez`/`rusqlite`).       | ⬜ |
+| `crates/protocols` *(future)* | IMAP/POP3/SMTP/Gmail abstractions behind *traits*.       | ⬜ |
+| `crates/accounts` *(future)*  | Account and credential management (per-platform keychain). | ⬜ |
 
-**Regra de dependência:** a UI depende do domínio, nunca o contrário. Domínio e
-protocolos não conhecem o GPUI.
+**Dependency rule:** the UI depends on the domain, never the other way around.
+Domain and protocols do not know about GPUI.
 
-### Multiplataforma sem *bloat*
+### Cross-platform without *bloat*
 
-- Toda funcionalidade dependente de SO (keychain, diretórios de dados,
-  notificações) fica atrás de uma **trait** com implementações por plataforma
-  (`#[cfg(target_os = ...)]`), expostas por uma API única.
-- Preferir crates multiplataforma já existentes (`directories`, `keyring`,
-  `notify-rust`) a reimplementar. Criar abstração própria **somente** quando
-  necessário.
-- Minimizar `unsafe`: idealmente **zero** no nosso código. Qualquer uso deve ser
-  isolado, comentado com justificativa e coberto por testes.
+- All OS-dependent functionality (keychain, data directories, notifications)
+  lives behind a **trait** with per-platform implementations
+  (`#[cfg(target_os = ...)]`), exposed through a single API.
+- Prefer existing cross-platform crates (`directories`, `keyring`,
+  `notify-rust`) over reimplementing. Create a custom abstraction **only** when
+  necessary.
+- Minimize `unsafe`: ideally **zero** in our code. Any use must be isolated,
+  commented with a justification and covered by tests.
 
-## 5. Layout da UI (referência: Mail do macOS)
+## 5. UI layout (reference: macOS Mail)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  ⦿⦿⦿   [✍ novo] [↻]            [↩][↩↩][↪][🗄][⚑][⌦]   [Tema] [⚙]        │  ← Toolbar (titlebar transparente)
+│  ⦿⦿⦿   [✍ new] [↻]            [↩][↩↩][↪][🗄][⚑][⌦]   [Theme] [⚙]        │  ← Toolbar (transparent titlebar)
 ├───────────────┬───────────────────────┬───────────────────────────────┤
-│  CONTAS        │  Caixa de entrada   ⌕ │  Assunto da mensagem          │
-│  ▾ Pessoal     │ ● GitHub      09:42 📎│  ◉  Remetente                  │
-│    ✉ Entrada 7 │   Nova release v0.200 │     remetente@dominio.com  hoje│
-│    ✎ Rascunhos │   A nova versão...    │ ───────────────────────────── │
-│    ↗ Enviados  │ ● Maria       09:05 ★ │  Corpo da mensagem...          │
-│    ⚠ Spam    3 │   Reunião...          │                                │
-│  ▾ Trabalho    │   ...                 │                                │
+│  ACCOUNTS      │  Inbox              ⌕ │  Message subject              │
+│  ▾ Personal    │ ● GitHub      09:42 📎│  ◉  Sender                     │
+│    ✉ Inbox   7 │   New release v0.200  │     sender@domain.com     today│
+│    ✎ Drafts    │   The new version...  │ ───────────────────────────── │
+│    ↗ Sent      │ ● Mary        09:05 ★ │  Message body...               │
+│    ⚠ Junk    3 │   Meeting...          │                                │
+│  ▾ Work        │   ...                 │                                │
 ├───────────────┴───────────────────────┴───────────────────────────────┤
-│  2 contas · 12 mensagens                    9 não lidas · Atualizado    │  ← Status bar
+│  2 accounts · 12 messages                   9 unread · Updated just now │  ← Status bar
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Coluna 1 — Barra lateral** (`panel_background`, ~240px): contas e suas caixas
-  (Entrada, Rascunhos, Enviados, Spam, Lixeira, Arquivo), com contadores de não
-  lidas.
-- **Coluna 2 — Lista de mensagens** (`surface_background`, ~360px): remetente,
-  assunto, prévia, horário, indicador de não lida, estrela e clipe de anexo.
-- **Coluna 3 — Leitor** (`background`, flexível): cabeçalho (assunto, avatar,
-  remetente, data) + corpo.
-- **Toolbar** unificada com a barra de título transparente (estilo macOS).
-- **Tela de configurações** no estilo do Zed: navegação à esquerda + conteúdo à
-  direita (Geral, Contas, Aparência, Notificações).
+- **Column 1 — Sidebar** (`panel_background`, ~240px): accounts and their
+  mailboxes (Inbox, Drafts, Sent, Junk, Trash, Archive), with unread counters.
+- **Column 2 — Message list** (`surface_background`, ~360px): sender, subject,
+  preview, timestamp, unread indicator, star and attachment clip.
+- **Column 3 — Reader** (`background`, flexible): header (subject, avatar, sender,
+  date) + body.
+- **Toolbar** unified with the transparent title bar (macOS style).
+- **Settings screen** in the Zed style: navigation on the left + content on the
+  right (General, Accounts, Appearance, Notifications).
 
-## 6. Recursos de um cliente de e-mail (escopo)
+## 6. E-mail client features (scope)
 
-### MVP (mínimo viável)
-- [ ] Conectar contas: **IMAP/POP3** (genérico) e **Gmail** (OAuth2).
-- [ ] Listar caixas/pastas por conta.
-- [ ] Listar mensagens de uma caixa (com paginação/scroll).
-- [ ] Ler mensagem (texto e HTML básico saneado).
-- [ ] Marcar como lida/não lida.
-- [ ] Compor, **responder**, **responder a todos**, **encaminhar**.
-- [ ] Enviar via **SMTP** (e API do Gmail).
-- [ ] Mover/excluir/arquivar; marcar como spam.
-- [ ] Favoritar (estrela) e sinalizar (flag).
-- [ ] Anexos: visualizar lista, baixar, anexar ao compor.
-- [ ] Busca (assunto/remetente/corpo).
-- [ ] **2 temas**: claro e escuro, com alternância em tempo real.
-- [ ] Tela de configurações.
+### MVP (minimum viable)
+- [ ] Connect accounts: **IMAP/POP3** (generic) and **Gmail** (OAuth2).
+- [ ] List mailboxes/folders per account.
+- [ ] List messages in a mailbox (with pagination/scroll).
+- [ ] Read a message (sanitized basic text and HTML).
+- [ ] Mark as read/unread.
+- [ ] Compose, **reply**, **reply all**, **forward**.
+- [ ] Send via **SMTP** (and the Gmail API).
+- [ ] Move/delete/archive; mark as junk.
+- [ ] Star and flag.
+- [ ] Attachments: view the list, download, attach when composing.
+- [ ] Search (subject/sender/body).
+- [ ] **2 themes**: light and dark, with runtime switching.
+- [ ] Settings screen.
 
-### Pós-MVP (desejável)
-- [ ] Múltiplas contas com caixa unificada.
-- [ ] Threads/conversas agrupadas.
-- [ ] Rascunhos com salvamento automático.
-- [ ] Notificações nativas de novos e-mails.
-- [ ] Atalhos de teclado configuráveis.
-- [ ] Filtros/regras e assinaturas.
-- [ ] Modo offline com sincronização.
+### Post-MVP (desirable)
+- [ ] Multiple accounts with a unified inbox.
+- [ ] Grouped threads/conversations.
+- [ ] Drafts with auto-save.
+- [ ] Native notifications for new e-mail.
+- [ ] Configurable keyboard shortcuts.
+- [ ] Filters/rules and signatures.
+- [ ] Offline mode with synchronization.
 
-## 7. Temas
+## 7. Themes
 
-Dois temas embutidos, alternáveis em tempo de execução:
+Two built-in themes, switchable at runtime:
 
-- **Escuro** — paleta baseada em
+- **Dark** — palette based on
   [`vscode_dark_modern.zed`](https://github.com/kevcamel/vscode_dark_modern.zed)
-  (VSCode *Dark Modern*). Cores-chave: fundo `#1f1f1f`, superfície `#181818`,
-  texto `#cccccc`, acento `#0078d4`, seleção `#04395e`.
-- **Claro** — paleta baseada em
+  (VSCode *Dark Modern*). Key colors: background `#1f1f1f`, surface `#181818`,
+  text `#cccccc`, accent `#0078d4`, selection `#04395e`.
+- **Light** — palette based on
   [`zed-theme-vscode-light-modern`](https://github.com/XiangpengHao/zed-theme-vscode-light-modern)
-  (VSCode *Light Modern*). Cores-chave: fundo `#ffffff`, superfície `#f8f8f8`,
-  texto `#3b3b3b`, acento `#005fb8`.
+  (VSCode *Light Modern*). Key colors: background `#ffffff`, surface `#f8f8f8`,
+  text `#3b3b3b`, accent `#005fb8`.
 
-As cores vivem em `crates/theme/src/theme.rs` (`ThemeColors`). Componentes nunca
-usam cores literais: usam papéis semânticos via `ui::Color` resolvidos contra o
-tema ativo.
+The colors live in `crates/theme/src/theme.rs` (`ThemeColors`). Components never
+use literal colors: they use semantic roles via `ui::Color` resolved against the
+active theme.
 
-## 8. Estratégia de testes
+## 8. Testing strategy
 
-- **Toda função/ação implementada deve ter testes** (regra do projeto).
-- Lógica pura (temas, parsing, domínio, protocolos) → testes unitários `#[cfg(test)]`.
-- Componentes/visual e fluxos de UI → testes com o `test-support` do GPUI
-  (`gpui::TestAppContext`) quando a etapa de lógica começar.
-- Rodar sempre: `cargo test --workspace` e `cargo clippy --workspace -- -D warnings`.
+- **Every function/action implemented must have tests** (project rule).
+- Pure logic (themes, parsing, domain, protocols, localization) → `#[cfg(test)]`
+  unit tests.
+- Visual/component and UI flows → tests with GPUI's `test-support`
+  (`gpui::TestAppContext`) once the logic stage begins.
+- Always run: `cargo test --workspace` and `cargo clippy --workspace -- -D warnings`.
 
-## 9. Decisões registradas
+## 9. Recorded decisions
 
-- **GPUI via crates.io (`0.2.2`)** em vez de path/git para o checkout local — busca
-  reprodutibilidade. (Reavaliar se precisarmos de APIs só presentes no `main`.)
-- **Ícones como glifos Unicode no mock**, abstraídos por `IconName`, para evitar o
-  pipeline de assets nesta fase. Trocar por SVG (como o Zed) na fase de polimento,
-  sem alterar os locais de chamada.
-- **Idioma da UI**: Português (Brasil) por padrão (i18n é pós-MVP).
+- **GPUI via crates.io (`0.2.2`)** instead of path/git to the local checkout —
+  for reproducibility. (Reassess if we need APIs only present on `main`.)
+- **Icons via the FontAwesome 6 Free font**, abstracted by `IconName` (solid and
+  regular variants selected by font weight). The fonts are embedded and registered
+  in GPUI's text system by `ui::init`.
+- **UI language**: English by default, with a localization layer
+  (`crates/rmail/src/locale.rs`) that also ships Brazilian Portuguese and can be
+  switched at runtime from the settings.
 
-## 10. Como rodar
+## 10. How to run
 
 ```bash
-cargo run -p rmail        # abre o mock visual
-cargo test --workspace    # roda os testes
+cargo run -p rmail        # opens the visual mock
+cargo test --workspace    # runs the tests
 cargo clippy --workspace  # lint
 ```

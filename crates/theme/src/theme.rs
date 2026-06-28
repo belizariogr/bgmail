@@ -1,46 +1,46 @@
 //! # Theme
 //!
-//! Sistema de temas do rMail, modelado a partir do crate `theme` do Zed, porém
-//! enxuto e focado nos elementos necessários para um cliente de e-mail.
+//! rMail's theme system, modeled after Zed's `theme` crate, but lean and focused
+//! on the elements an e-mail client needs.
 //!
-//! Um [`Theme`] é uma coleção de cores ([`ThemeColors`]) usada para construir
-//! uma aparência consistente em todos os componentes da UI. Há dois temas
-//! embutidos: escuro (baseado no *VSCode Dark Modern*) e claro (baseado no
-//! *VSCode Light Modern*).
+//! A [`Theme`] is a collection of colors ([`ThemeColors`]) used to build a
+//! consistent appearance across all UI components. There are two built-in
+//! themes: dark (based on *VSCode Dark Modern*) and light (based on *VSCode
+//! Light Modern*).
 //!
-//! O tema ativo é armazenado como um [`gpui::Global`] e acessado através da
-//! trait [`ActiveTheme`], implementada para [`App`]. Isso permite escrever
-//! `cx.theme().colors().background` em qualquer componente.
+//! The active theme is stored as a [`gpui::Global`] and accessed through the
+//! [`ActiveTheme`] trait, implemented for [`App`]. This lets you write
+//! `cx.theme().colors().background` in any component.
 
 use std::sync::Arc;
 
 use gpui::{rgb, App, Global, Hsla};
 
-/// Converte uma cor hexadecimal (`0xRRGGBB`) em [`Hsla`].
+/// Converts a hexadecimal color (`0xRRGGBB`) into [`Hsla`].
 ///
-/// Centraliza a conversão para que as paletas sejam declaradas de forma legível
-/// usando valores hexadecimais, como nos arquivos de tema do VSCode.
+/// Centralizes the conversion so palettes can be declared readably using
+/// hexadecimal values, as in the VSCode theme files.
 #[inline]
 fn hex(value: u32) -> Hsla {
     rgb(value).into()
 }
 
-/// Aparência do tema: claro ou escuro.
+/// Theme appearance: light or dark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Appearance {
-    /// Tema claro.
+    /// Light theme.
     Light,
-    /// Tema escuro.
+    /// Dark theme.
     Dark,
 }
 
 impl Appearance {
-    /// Retorna `true` se a aparência for clara.
+    /// Returns `true` if the appearance is light.
     pub fn is_light(self) -> bool {
         matches!(self, Appearance::Light)
     }
 
-    /// Retorna a aparência oposta (usado pelo botão de alternância de tema).
+    /// Returns the opposite appearance (used by the theme toggle button).
     pub fn toggled(self) -> Self {
         match self {
             Appearance::Light => Appearance::Dark,
@@ -49,96 +49,96 @@ impl Appearance {
     }
 }
 
-/// Conjunto de cores que define a aparência da UI.
+/// Set of colors that defines the UI appearance.
 ///
-/// Os nomes seguem a convenção do Zed (`background`, `surface_background`,
-/// `element_hover`, etc.) para facilitar a portabilidade de componentes.
+/// The names follow Zed's convention (`background`, `surface_background`,
+/// `element_hover`, etc.) to ease porting components.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThemeColors {
-    /// Fundo principal da aplicação e do painel de leitura.
+    /// Main background of the application and the reading pane.
     pub background: Hsla,
-    /// Fundo de superfícies "fixas" como a barra lateral e listas.
+    /// Background of "fixed" surfaces such as the sidebar and lists.
     pub surface_background: Hsla,
-    /// Fundo de superfícies elevadas (menus de contexto, popovers, diálogos).
+    /// Background of elevated surfaces (context menus, popovers, dialogs).
     pub elevated_surface_background: Hsla,
 
-    /// Cor de borda padrão (divisores entre painéis).
+    /// Default border color (dividers between panels).
     pub border: Hsla,
-    /// Borda de menor contraste, para divisões sutis.
+    /// Lower-contrast border, for subtle divisions.
     pub border_variant: Hsla,
-    /// Borda de elemento em foco (foco de teclado).
+    /// Border of a focused element (keyboard focus).
     pub border_focused: Hsla,
 
-    /// Fundo de um elemento interativo (botão, input).
+    /// Background of an interactive element (button, input).
     pub element_background: Hsla,
-    /// Fundo de elemento sob hover do mouse.
+    /// Background of an element under mouse hover.
     pub element_hover: Hsla,
-    /// Fundo de elemento pressionado/ativo.
+    /// Background of a pressed/active element.
     pub element_active: Hsla,
-    /// Fundo de elemento selecionado (ex.: item de lista ativo).
+    /// Background of a selected element (e.g. active list item).
     pub element_selected: Hsla,
 
-    /// Cor de texto padrão.
+    /// Default text color.
     pub text: Hsla,
-    /// Texto atenuado/secundário (prévia de mensagem, horário).
+    /// Muted/secondary text (message preview, timestamp).
     pub text_muted: Hsla,
-    /// Texto desabilitado.
+    /// Disabled text.
     pub text_disabled: Hsla,
-    /// Texto de destaque/acento (links, contadores).
+    /// Accent/highlight text (links, counters).
     pub text_accent: Hsla,
-    /// Texto sobre superfícies selecionadas/acento.
+    /// Text over selected/accent surfaces.
     pub text_on_accent: Hsla,
 
-    /// Cor de preenchimento padrão de ícones.
+    /// Default icon fill color.
     pub icon: Hsla,
-    /// Cor de ícones atenuados.
+    /// Color of muted icons.
     pub icon_muted: Hsla,
-    /// Cor de ícones de acento (estado ativo).
+    /// Color of accent icons (active state).
     pub icon_accent: Hsla,
 
-    /// Cor de acento principal (azul de seleção/realce).
+    /// Primary accent color (selection/highlight blue).
     pub accent: Hsla,
 
-    /// Fundo da barra de título / toolbar superior.
+    /// Background of the title bar / top toolbar.
     pub title_bar_background: Hsla,
-    /// Fundo da barra de status inferior.
+    /// Background of the bottom status bar.
     pub status_bar_background: Hsla,
-    /// Fundo do painel lateral (lista de contas/caixas).
+    /// Background of the side panel (accounts/mailboxes list).
     pub panel_background: Hsla,
 
-    /// Cor de sucesso (ex.: conexão estabelecida).
+    /// Success color (e.g. connection established).
     pub success: Hsla,
-    /// Cor de aviso.
+    /// Warning color.
     pub warning: Hsla,
-    /// Cor de erro.
+    /// Error color.
     pub error: Hsla,
 }
 
-/// Um tema completo: identidade + aparência + cores.
+/// A complete theme: identity + appearance + colors.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
-    /// Nome legível do tema.
+    /// Human-readable theme name.
     pub name: &'static str,
-    /// Se é claro ou escuro.
+    /// Whether it is light or dark.
     pub appearance: Appearance,
-    /// As cores do tema.
+    /// The theme colors.
     pub colors: ThemeColors,
 }
 
 impl Theme {
-    /// Atalho para acessar as cores do tema.
+    /// Shortcut to access the theme colors.
     #[inline]
     pub fn colors(&self) -> &ThemeColors {
         &self.colors
     }
 
-    /// Atalho para a aparência do tema.
+    /// Shortcut for the theme appearance.
     #[inline]
     pub fn appearance(&self) -> Appearance {
         self.appearance
     }
 
-    /// Tema escuro embutido, baseado no *VSCode Dark Modern*.
+    /// Built-in dark theme, based on *VSCode Dark Modern*.
     pub fn dark() -> Self {
         Theme {
             name: "rMail Dark",
@@ -180,7 +180,7 @@ impl Theme {
         }
     }
 
-    /// Tema claro embutido, baseado no *VSCode Light Modern*.
+    /// Built-in light theme, based on *VSCode Light Modern*.
     pub fn light() -> Self {
         Theme {
             name: "rMail Light",
@@ -222,7 +222,7 @@ impl Theme {
         }
     }
 
-    /// Retorna o tema embutido correspondente à [`Appearance`] informada.
+    /// Returns the built-in theme matching the given [`Appearance`].
     pub fn for_appearance(appearance: Appearance) -> Self {
         match appearance {
             Appearance::Light => Theme::light(),
@@ -231,31 +231,31 @@ impl Theme {
     }
 }
 
-/// Estado global que guarda o tema ativo da aplicação.
+/// Global state holding the application's active theme.
 pub struct GlobalTheme(pub Arc<Theme>);
 
 impl Global for GlobalTheme {}
 
-/// Inicializa o sistema de temas no [`App`] com a aparência informada.
+/// Initializes the theme system on [`App`] with the given appearance.
 pub fn init(appearance: Appearance, cx: &mut App) {
     cx.set_global(GlobalTheme(Arc::new(Theme::for_appearance(appearance))));
 }
 
-/// Substitui o tema ativo.
+/// Replaces the active theme.
 pub fn set_theme(theme: Theme, cx: &mut App) {
     cx.set_global(GlobalTheme(Arc::new(theme)));
 }
 
-/// Alterna entre o tema claro e o escuro, retornando a nova aparência.
+/// Toggles between the light and dark theme, returning the new appearance.
 pub fn toggle_appearance(cx: &mut App) -> Appearance {
     let next = cx.global::<GlobalTheme>().0.appearance.toggled();
     set_theme(Theme::for_appearance(next), cx);
     next
 }
 
-/// Trait para acessar o tema ativo a partir de um contexto.
+/// Trait for accessing the active theme from a context.
 pub trait ActiveTheme {
-    /// Retorna o tema ativo.
+    /// Returns the active theme.
     fn theme(&self) -> &Arc<Theme>;
 }
 
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn hex_conversion_is_stable() {
-        // Branco e preto puros devem permanecer nos extremos de luminosidade.
+        // Pure white and black must stay at the extremes of lightness.
         assert!(hex(0xffffff).l > 0.99);
         assert!(hex(0x000000).l < 0.01);
     }

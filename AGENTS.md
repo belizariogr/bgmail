@@ -1,85 +1,88 @@
-# AGENTS.md — Regras para agentes de IA (e humanos)
+# AGENTS.md — Rules for AI agents (and humans)
 
-Este arquivo direciona qualquer agente de IA que trabalhe no **rMail**. Leia-o por
-completo **antes de escrever ou modificar código**. Em caso de conflito, estas
-regras têm prioridade. Consulte também [`docs/PLANEJAMENTO.md`](docs/PLANEJAMENTO.md)
-(visão e arquitetura) e [`TODO.md`](TODO.md) (estado atual).
+This file guides any AI agent working on **rMail**. Read it in full **before
+writing or modifying code**. In case of conflict, these rules take precedence.
+See also [`docs/PLANEJAMENTO.md`](docs/PLANEJAMENTO.md) (vision and architecture)
+and [`TODO.md`](TODO.md) (current state).
 
-## Regras inegociáveis
+## Non-negotiable rules
 
-1. **Siga sempre estas regras.** Releia este arquivo no início de cada sessão de
-   trabalho e mantenha-o em mente em todas as decisões.
-2. **Projeto em Rust usando a base de UI do Zed** (framework GPUI + padrões do
-   crate `ui`). Não introduza outro framework de UI.
-3. **Use o Zed como referência.** O código-fonte está em `~/dev/zed`. Sempre que
-   precisar de um componente, padrão de layout ou API do GPUI, **consulte o Zed**
-   antes de inventar. Espelhe nomes e padrões dele para facilitar portabilidade.
-4. **Melhores práticas e reutilização.** Prefira sempre reaproveitar componentes e
-   funções existentes. Extraia abstrações quando houver repetição — mas **sem criar
-   bloat**: não adicione camadas, traits ou crates "por precaução".
-5. **Crie testes para TODA função/ação implementada.** Nenhuma lógica entra sem
-   teste. Rode `cargo test --workspace` antes de considerar uma tarefa concluída.
-6. **Multiplataforma (Windows, Linux, macOS).** Todo código específico de SO fica
-   atrás de uma abstração (trait + `#[cfg(...)]`) com uma API única e portável.
-   Não vaze detalhes de plataforma para a UI ou para o domínio.
-7. **Minimize `unsafe`.** Meta: **zero** `unsafe` no nosso código. Se for
-   absolutamente necessário, isole-o, comente a justificativa de segurança e
-   cubra-o com testes. Justifique no PR/commit.
-8. **Mantenha o `TODO.md` atualizado.** Ao iniciar uma tarefa, marque-a em
-   andamento; ao concluí-la, marque como feita e adicione os próximos passos
-   descobertos. O `TODO.md` é a fonte de verdade do progresso.
-9. **Performance é requisito, não detalhe.** O app deve **iniciar rápido**. Evite
-   trabalho síncrono pesado na inicialização; carregue dados de forma assíncrona e
-   incremental. Meça antes de otimizar.
-10. **Design bonito e elegante, porém simples.** Nada de "frescura". Espaçamento,
-    alinhamento e hierarquia tipográfica consistentes. Use os papéis de cor
-    semânticos do tema, **nunca** cores hexadecimais soltas nos componentes.
+1. **Always follow these rules.** Re-read this file at the start of each work
+   session and keep it in mind for every decision.
+2. **Rust project using Zed's UI foundation** (GPUI framework + patterns from the
+   `ui` crate). Do not introduce another UI framework.
+3. **Use Zed as a reference.** The source code lives in `~/dev/zed`. Whenever you
+   need a component, layout pattern or GPUI API, **consult Zed** before inventing.
+   Mirror its names and patterns to ease portability.
+4. **Best practices and reuse.** Always prefer reusing existing components and
+   functions. Extract abstractions when there is repetition — but **without
+   creating bloat**: do not add layers, traits or crates "just in case".
+5. **Write tests for EVERY function/action implemented.** No logic lands without
+   a test. Run `cargo test --workspace` before considering a task done.
+6. **Cross-platform (Windows, Linux, macOS).** All OS-specific code lives behind
+   an abstraction (trait + `#[cfg(...)]`) with a single, portable API. Do not leak
+   platform details into the UI or the domain.
+7. **Minimize `unsafe`.** Goal: **zero** `unsafe` in our code. If it is absolutely
+   necessary, isolate it, comment the safety justification, and cover it with
+   tests. Justify it in the PR/commit.
+8. **Keep `TODO.md` up to date.** When you start a task, mark it in progress; when
+   you finish it, mark it done and add the next steps you discovered. `TODO.md` is
+   the source of truth for progress.
+9. **Performance is a requirement, not a detail.** The app must **start fast**.
+   Avoid heavy synchronous work at startup; load data asynchronously and
+   incrementally. Measure before optimizing.
+10. **Beautiful, elegant yet simple design.** No fluff. Consistent spacing,
+    alignment and typographic hierarchy. Use the theme's semantic color roles,
+    **never** loose hex colors in components.
 
-## Fluxo de trabalho esperado
+## Expected workflow
 
-1. Leia `AGENTS.md`, `docs/PLANEJAMENTO.md` e `TODO.md`.
-2. Escolha/atualize um item no `TODO.md` e marque-o em andamento.
-3. Consulte o Zed (`~/dev/zed`) para referências relevantes.
-4. Implemente seguindo os padrões existentes do projeto.
-5. Escreva os testes correspondentes.
-6. Rode `cargo fmt`, `cargo clippy --workspace -- -D warnings` e
+1. Read `AGENTS.md`, `docs/PLANEJAMENTO.md` and `TODO.md`.
+2. Pick/update an item in `TODO.md` and mark it in progress.
+3. Consult Zed (`~/dev/zed`) for relevant references.
+4. Implement following the project's existing patterns.
+5. Write the corresponding tests.
+6. Run `cargo fmt`, `cargo clippy --workspace -- -D warnings` and
    `cargo test --workspace`.
-7. Atualize o `TODO.md` (e a documentação, se necessário).
-8. Faça commits pequenos e descritivos. **Não** commite segredos/credenciais.
+7. Update `TODO.md` (and the documentation, if needed).
+8. Make small, descriptive commits. **Do not** commit secrets/credentials.
 
-## Convenções de código
+## Code conventions
 
-- **Edição**: Rust 2021, toolchain fixada em `rust-toolchain.toml`.
-- **Formatação**: `cargo fmt` (rustfmt padrão). Sem código não formatado.
-- **Lint**: `cargo clippy` sem *warnings* (`-D warnings`).
-- **Nomes**: em inglês para identificadores de código; comentários e textos de UI
-  podem ser em Português (Brasil), que é o idioma padrão do app.
-- **Comentários**: explique o *porquê* (intenção, trade-offs), não o *o quê*. Não
-  narre o óbvio.
-- **Cores**: defina-as apenas em `crates/theme`; componentes usam `ui::Color`.
-- **Componentes**: siga o padrão `#[derive(IntoElement)]` + `impl RenderOnce`, com
-  *builder methods* encadeáveis (como no `ui` do Zed).
-- **Estado de UI**: views são `Entity` com `impl Render`; mutação via
+- **Edition**: Rust 2021, toolchain pinned in `rust-toolchain.toml`.
+- **Formatting**: `cargo fmt` (default rustfmt). No unformatted code.
+- **Lint**: `cargo clippy` with no *warnings* (`-D warnings`).
+- **Names**: English for code identifiers.
+- **Language**: English is the default language of the app and the codebase
+  (identifiers, comments and UI text). The UI also ships a localization layer
+  (`crates/rmail/src/locale.rs`) with English and Brazilian Portuguese; add new
+  user-facing strings as keys there instead of hardcoding them.
+- **Comments**: explain the *why* (intent, trade-offs), not the *what*. Do not
+  narrate the obvious.
+- **Colors**: defined only in `crates/theme`; components use `ui::Color`.
+- **Components**: follow the `#[derive(IntoElement)]` + `impl RenderOnce` pattern,
+  with chainable *builder methods* (as in Zed's `ui`).
+- **UI state**: views are `Entity` with `impl Render`; mutation via
   `cx.listener(...)` + `cx.notify()`.
 
-## Estrutura do repositório
+## Repository structure
 
 ```
 rMail/
-├── AGENTS.md            ← você está aqui (regras)
-├── README.md           ← visão geral e como rodar
-├── TODO.md             ← progresso vivo
+├── AGENTS.md ← you are here (rules)
+├── README.md ← overview and how to run
+├── TODO.md ← living progress
 ├── docs/
-│   └── PLANEJAMENTO.md ← visão, arquitetura e escopo
+│ └── PLANEJAMENTO.md ← vision, architecture and scope
 └── crates/
-    ├── theme/          ← temas e cores (claro/escuro)
-    ├── ui/             ← componentes visuais reutilizáveis
-    └── rmail/          ← binário (janela + layout + estado)
+ ├── theme/ ← themes and colors (light/dark)
+ ├── ui/ ← reusable visual components
+ └── rmail/ ← binary (window + layout + state + localization)
 ```
 
-## Limites de escopo nesta fase (mock)
+## Scope limits in this phase (mock)
 
-- **Não** implemente rede, OAuth, IMAP/SMTP ou persistência ainda. A fase atual é
-  apenas o **mock visual** (ver `docs/PLANEJAMENTO.md`, seção 2).
-- Mantenha os dados de exemplo isolados em `crates/rmail/src/data.rs` para que
-  sejam fáceis de substituir pela camada de domínio real depois.
+- Do **not** implement networking, OAuth, IMAP/SMTP or persistence yet. The
+  current phase is only the **visual mock** (see `docs/PLANEJAMENTO.md`, section 2).
+- Keep the sample data isolated in `crates/rmail/src/data.rs` so it is easy to
+  replace with the real domain layer later.

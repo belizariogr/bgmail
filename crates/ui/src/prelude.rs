@@ -1,4 +1,4 @@
-//! Prelúdio do crate `ui`. Importe com `use ui::prelude::*;` ao construir telas.
+//! Prelude for the `ui` crate. Import it with `use ui::prelude::*;` when building screens.
 
 pub use gpui::prelude::*;
 pub use gpui::{
@@ -10,16 +10,16 @@ pub use theme::ActiveTheme;
 
 pub use crate::{Button, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize, ListItem};
 
-/// Container flexível horizontal com itens centralizados verticalmente.
+/// Horizontal flex container with vertically centered items.
 ///
-/// Equivalente ao `h_flex()` do Zed.
+/// Equivalent to Zed's `h_flex()`.
 pub fn h_flex() -> Div {
     div().flex().flex_row().items_center()
 }
 
-/// Container flexível vertical.
+/// Vertical flex container.
 ///
-/// Equivalente ao `v_flex()` do Zed.
+/// Equivalent to Zed's `v_flex()`.
 pub fn v_flex() -> Div {
     div().flex().flex_col()
 }

@@ -1,8 +1,8 @@
-//! View raiz do protótipo visual do rMail.
+//! Root view of the rMail visual prototype.
 //!
-//! Reproduz o layout do cliente de e-mail do macOS (três colunas + toolbar
-//! superior unificada + barra de status), usando os componentes do crate `ui`.
-//! Toda a interação aqui é "mock" — apenas seleção de itens e troca de tema.
+//! Reproduces the macOS mail client layout (three columns, a unified top toolbar
+//! and a status bar), using the components from the `ui` crate. All interaction
+//! here is "mock" — only item selection, theme toggling and language switching.
 
 use gpui::{Context, FontWeight, Window};
 use theme::{ActiveTheme, Appearance};
@@ -12,15 +12,16 @@ use ui::{
 };
 
 use crate::data::{self, Account, MailboxKind, Message};
+use crate::locale::{self, ActiveLanguage, Key, Language};
 
-/// Tela atualmente exibida.
+/// Currently displayed screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppView {
     Mail,
     Settings,
 }
 
-/// Seção ativa da tela de configurações.
+/// Active section of the settings screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
     General,
@@ -37,12 +38,12 @@ impl SettingsSection {
         SettingsSection::Notifications,
     ];
 
-    fn title(self) -> &'static str {
+    fn title_key(self) -> Key {
         match self {
-            SettingsSection::General => "Geral",
-            SettingsSection::Accounts => "Contas",
-            SettingsSection::Appearance => "Aparência",
-            SettingsSection::Notifications => "Notificações",
+            SettingsSection::General => Key::SettingsGeneral,
+            SettingsSection::Accounts => Key::SettingsAccounts,
+            SettingsSection::Appearance => Key::SettingsAppearance,
+            SettingsSection::Notifications => Key::SettingsNotifications,
         }
     }
 
@@ -67,13 +68,13 @@ fn mailbox_icon(kind: MailboxKind) -> IconName {
     }
 }
 
-/// Estado da aplicação (mock).
+/// Application state (mock).
 pub struct RootView {
     accounts: Vec<Account>,
     messages: Vec<Message>,
-    /// (índice da conta, índice da caixa) selecionada na barra lateral.
+    /// Selected (account index, mailbox index) in the sidebar.
     selected_mailbox: (usize, usize),
-    /// Índice da mensagem selecionada na lista.
+    /// Index of the message selected in the list.
     selected_message: usize,
     view: AppView,
     settings_section: SettingsSection,
@@ -91,7 +92,7 @@ impl RootView {
         }
     }
 
-    // ----- Toolbar superior (barra de título unificada) -------------------
+    // ----- Top toolbar (unified title bar) --------------------------------
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
@@ -99,10 +100,11 @@ impl RootView {
         let border = colors.border;
         let appearance = cx.theme().appearance();
         let theme_label = if appearance == Appearance::Dark {
-            "Escuro"
+            Key::ThemeDark
         } else {
-            "Claro"
-        };
+            Key::ThemeLight
+        }
+        .tr(cx.language());
         let in_settings = self.view == AppView::Settings;
 
         h_flex()
@@ -115,7 +117,7 @@ impl RootView {
             .border_b_1()
             .border_color(border)
             .justify_between()
-            // Reserva espaço para os semáforos do macOS à esquerda.
+            // Reserve space for the macOS traffic lights on the left.
             .child(
                 h_flex()
                     .gap_1()
@@ -164,7 +166,7 @@ impl RootView {
             )
     }
 
-    // ----- Barra lateral (contas e caixas) --------------------------------
+    // ----- Sidebar (accounts and mailboxes) -------------------------------
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
@@ -195,6 +197,7 @@ impl RootView {
         account: &Account,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let language = cx.language();
         let mut section = v_flex().px_2().pb_3().child(
             h_flex()
                 .px_2()
@@ -232,7 +235,7 @@ impl RootView {
                             Color::Muted
                         }),
                 )
-                .child(Label::new(mailbox.name.clone()).size(LabelSize::Small))
+                .child(Label::new(mailbox.kind.display_name(language)).size(LabelSize::Small))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.selected_mailbox = (account_idx, mailbox_idx);
                     cx.notify();
@@ -277,7 +280,7 @@ impl RootView {
             .child(count.to_string())
     }
 
-    // ----- Lista de mensagens ---------------------------------------------
+    // ----- Message list ---------------------------------------------------
 
     fn render_message_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
@@ -296,7 +299,7 @@ impl RootView {
             .border_color(border)
             .overflow_y_scroll();
 
-        // Cabeçalho da lista com o nome da caixa.
+        // List header with the mailbox name.
         list = list.child(
             h_flex()
                 .px_3()
@@ -304,7 +307,10 @@ impl RootView {
                 .justify_between()
                 .border_b_1()
                 .border_color(border)
-                .child(Label::new(mailbox.name.clone()).weight(FontWeight::SEMIBOLD))
+                .child(
+                    Label::new(mailbox.kind.display_name(cx.language()))
+                        .weight(FontWeight::SEMIBOLD),
+                )
                 .child(
                     h_flex().gap_1().child(
                         Icon::new(IconName::Search)
@@ -340,7 +346,7 @@ impl RootView {
             FontWeight::NORMAL
         };
 
-        // Indicador de não-lida (ponto azul) ou espaço equivalente.
+        // Unread indicator (blue dot) or equivalent spacing.
         let unread_dot = div().w(px(8.0)).flex_shrink_0().child(if message.unread {
             div()
                 .size(px(8.0))
@@ -419,7 +425,7 @@ impl RootView {
             }))
     }
 
-    // ----- Painel de leitura ----------------------------------------------
+    // ----- Reading pane ---------------------------------------------------
 
     fn render_reader(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
@@ -443,7 +449,7 @@ impl RootView {
             .h_full()
             .bg(bg)
             .overflow_y_scroll()
-            // Cabeçalho da mensagem.
+            // Message header.
             .child(
                 v_flex()
                     .px_6()
@@ -496,7 +502,7 @@ impl RootView {
                             ),
                     ),
             )
-            // Corpo da mensagem.
+            // Message body.
             .child(
                 div()
                     .px_6()
@@ -507,10 +513,11 @@ impl RootView {
             )
     }
 
-    // ----- Barra de status ------------------------------------------------
+    // ----- Status bar -----------------------------------------------------
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
+        let language = cx.language();
         let total_unread: usize = self
             .accounts
             .iter()
@@ -529,25 +536,26 @@ impl RootView {
             .border_color(colors.border)
             .justify_between()
             .child(
-                Label::new(format!(
-                    "{} contas · {} mensagens",
+                Label::new(locale::status_counts(
+                    language,
                     self.accounts.len(),
-                    self.messages.len()
+                    self.messages.len(),
                 ))
                 .size(LabelSize::XSmall)
                 .color(Color::Muted),
             )
             .child(
-                Label::new(format!("{total_unread} não lidas · Atualizado agora"))
+                Label::new(locale::status_unread(language, total_unread))
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
             )
     }
 
-    // ----- Tela de configurações (estilo Zed) -----------------------------
+    // ----- Settings screen (Zed-style) ------------------------------------
 
     fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
+        let language = cx.language();
 
         let mut nav = v_flex()
             .w(px(220.0))
@@ -559,10 +567,11 @@ impl RootView {
             .p_2()
             .gap_0p5()
             .child(
-                div()
-                    .px_2()
-                    .py_2()
-                    .child(Label::new("Configurações").size(LabelSize::Large).bold()),
+                div().px_2().py_2().child(
+                    Label::new(Key::SettingsTitle.tr(language))
+                        .size(LabelSize::Large)
+                        .bold(),
+                ),
             );
 
         for (ix, section) in SettingsSection::ALL.into_iter().enumerate() {
@@ -577,7 +586,7 @@ impl RootView {
                             Color::Muted
                         },
                     ))
-                    .child(Label::new(section.title()).size(LabelSize::Small))
+                    .child(Label::new(section.title_key().tr(language)).size(LabelSize::Small))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.settings_section = section;
                         cx.notify();
@@ -603,13 +612,24 @@ impl RootView {
     fn render_settings_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let section = self.settings_section;
         let appearance = cx.theme().appearance();
+        let language = cx.language();
 
         let content = match section {
             SettingsSection::General => v_flex()
                 .gap_2()
-                .child(settings_row("Nome do app", "rMail"))
-                .child(settings_row("Versão", env!("CARGO_PKG_VERSION")))
-                .child(settings_row("Idioma", "Português (Brasil)"))
+                .child(settings_row(Key::AppNameLabel.tr(language), "rMail"))
+                .child(settings_row(
+                    Key::VersionLabel.tr(language),
+                    env!("CARGO_PKG_VERSION"),
+                ))
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .gap_4()
+                        .py_1()
+                        .child(Label::new(Key::LanguageLabel.tr(language)).color(Color::Muted))
+                        .child(self.render_language_picker(language, cx)),
+                )
                 .into_any_element(),
             SettingsSection::Accounts => {
                 let mut list = v_flex().gap_2();
@@ -617,18 +637,19 @@ impl RootView {
                     list = list.child(settings_row(account.name.clone(), account.email.clone()));
                 }
                 list.child(
-                    Button::new("add-account", "Adicionar conta…").style(ButtonStyle::Filled),
+                    Button::new("add-account", Key::AddAccount.tr(language))
+                        .style(ButtonStyle::Filled),
                 )
                 .into_any_element()
             }
             SettingsSection::Appearance => v_flex()
                 .gap_3()
-                .child(Label::new("Tema").weight(FontWeight::SEMIBOLD))
+                .child(Label::new(Key::ThemeLabel.tr(language)).weight(FontWeight::SEMIBOLD))
                 .child(
                     h_flex()
                         .gap_2()
                         .child(
-                            Button::new("theme-light", "Claro")
+                            Button::new("theme-light", Key::ThemeLight.tr(language))
                                 .style(if appearance == Appearance::Light {
                                     ButtonStyle::Filled
                                 } else {
@@ -640,7 +661,7 @@ impl RootView {
                                 })),
                         )
                         .child(
-                            Button::new("theme-dark", "Escuro")
+                            Button::new("theme-dark", Key::ThemeDark.tr(language))
                                 .style(if appearance == Appearance::Dark {
                                     ButtonStyle::Filled
                                 } else {
@@ -655,20 +676,56 @@ impl RootView {
                 .into_any_element(),
             SettingsSection::Notifications => v_flex()
                 .gap_2()
-                .child(settings_row("Notificações na área de trabalho", "Ativadas"))
-                .child(settings_row("Som ao receber e-mail", "Desativado"))
+                .child(settings_row(
+                    Key::DesktopNotifications.tr(language),
+                    Key::Enabled.tr(language),
+                ))
+                .child(settings_row(
+                    Key::SoundOnNewEmail.tr(language),
+                    Key::Disabled.tr(language),
+                ))
                 .into_any_element(),
         };
 
         v_flex()
             .p_6()
             .gap_4()
-            .child(Label::new(section.title()).size(LabelSize::Large).bold())
+            .child(
+                Label::new(section.title_key().tr(language))
+                    .size(LabelSize::Large)
+                    .bold(),
+            )
             .child(content)
+    }
+
+    /// Language selector used in the General settings section. Switching the
+    /// language re-renders the whole UI through the locale global.
+    fn render_language_picker(
+        &self,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut row = h_flex().gap_2();
+        for option in Language::ALL {
+            let selected = option == language;
+            row = row.child(
+                Button::new(("language", option as usize), option.label())
+                    .style(if selected {
+                        ButtonStyle::Filled
+                    } else {
+                        ButtonStyle::Subtle
+                    })
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        locale::set_language(option, cx);
+                        cx.notify();
+                    })),
+            );
+        }
+        row
     }
 }
 
-/// Linha "rótulo → valor" usada nas configurações.
+/// A "label → value" row used in the settings.
 fn settings_row(
     label: impl Into<SharedString>,
     value: impl Into<SharedString>,
