@@ -43,6 +43,8 @@ pub(crate) fn init_fonts(cx: &mut App) {
 /// Sizes available for [`Icon`].
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum IconSize {
+    /// 10px.
+    XXSmall,
     /// 12px.
     XSmall,
     /// 14px.
@@ -56,6 +58,7 @@ impl IconSize {
     /// Size of the glyph itself.
     fn glyph(self) -> Pixels {
         match self {
+            IconSize::XXSmall => px(10.0),
             IconSize::XSmall => px(12.0),
             IconSize::Small => px(14.0),
             IconSize::Medium => px(16.0),
@@ -96,6 +99,8 @@ pub enum IconName {
     More,
     Folder,
     Shield,
+    ShieldSolid,
+    Check,
 }
 
 impl IconName {
@@ -128,6 +133,8 @@ impl IconName {
             IconName::More => (FaStyle::Solid, '\u{f141}'),  // ellipsis
             IconName::Folder => (FaStyle::Solid, '\u{f07b}'), // folder
             IconName::Shield => (FaStyle::Solid, '\u{f3ed}'), // shield-halved
+            IconName::ShieldSolid => (FaStyle::Solid, '\u{f132}'), // shield (full)
+            IconName::Check => (FaStyle::Solid, '\u{f00c}'), // check
         }
     }
 }
@@ -185,7 +192,7 @@ mod tests {
 
     /// Every icon must map to a codepoint in the Private Use Area (where
     /// FontAwesome places its glyphs).
-    const ALL: [IconName; 26] = [
+    const ALL: [IconName; 28] = [
         IconName::Inbox,
         IconName::Sent,
         IconName::Drafts,
@@ -212,6 +219,8 @@ mod tests {
         IconName::More,
         IconName::Folder,
         IconName::Shield,
+        IconName::ShieldSolid,
+        IconName::Check,
     ];
 
     #[test]

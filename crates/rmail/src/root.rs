@@ -276,10 +276,13 @@ pub struct RootView {
     /// Whether to load remote content (e.g. images) in e-mail bodies. Persisted;
     /// off by default to block tracking pixels until the user opts in.
     load_remote_images: bool,
-    /// Whether the currently displayed message had remote content withheld.
+    /// Whether the currently displayed message references remote content.
     /// Drives the privacy affordance in the reader header. Recomputed whenever
     /// the webview document is rebuilt.
-    content_blocked: bool,
+    content_has_remote: bool,
+    /// Indices of messages the user explicitly unblocked. Unblocking is per
+    /// message (not the global setting), so other messages keep blocking.
+    unblocked_messages: HashSet<usize>,
     /// Whether the privacy menu (offering to unblock remote content) is open,
     /// and the window-space anchor where it was summoned.
     privacy_menu_open: bool,
@@ -331,7 +334,8 @@ impl RootView {
             email_webview: None,
             last_webview_sig: None,
             load_remote_images: settings.load_remote_images,
-            content_blocked: false,
+            content_has_remote: false,
+            unblocked_messages: HashSet::new(),
             privacy_menu_open: false,
             privacy_menu_pos: point(px(0.0), px(0.0)),
         }
@@ -411,13 +415,17 @@ impl RootView {
         // the language (which localizes the image context menu). Re-rendering
         // happens on every animation frame, so skip the (potentially large) HTML
         // rebuild + diff entirely when none of those inputs changed.
+        // Remote content loads when the global setting is on or the user
+        // unblocked this specific message.
+        let load_remote =
+            self.load_remote_images || self.unblocked_messages.contains(&self.selected_message);
         let signature = (
             self.selected_message,
             colors.background,
             colors.text,
             colors.accent,
             language,
-            self.load_remote_images,
+            load_remote,
         );
         if self.email_webview.is_some() && self.last_webview_sig == Some(signature) {
             return;
@@ -443,12 +451,12 @@ impl RootView {
                     "Ctrl+C"
                 },
             },
-            self.load_remote_images,
+            load_remote,
         );
-        // Surface the "blocked remote content" affordance only when something was
-        // actually withheld; close the menu if a re-render no longer blocks.
-        self.content_blocked = rendered.blocked_remote;
-        if !self.content_blocked {
+        self.content_has_remote = rendered.has_remote;
+        // The unblock menu only makes sense while the shield is in its blocked
+        // (red) state; close it once nothing is blocked for this message.
+        if !self.shield_is_blocked() {
             self.privacy_menu_open = false;
         }
         let document = rendered.html;
@@ -1454,17 +1462,71 @@ impl RootView {
 
     // ----- Reading pane ---------------------------------------------------
 
-    /// Privacy affordance shown on the subject line when the current message has
-    /// remote content withheld: a compact red shield that, on click, opens a
-    /// menu to unblock everything. A same-sized empty slot is reserved when
-    /// nothing is blocked, so the header keeps an identical height either way.
+    /// Whether the reader should show the *blocked* (red) privacy shield for the
+    /// current message: blocking is globally on, the message has remote content,
+    /// and the user hasn't unblocked this specific message yet.
+    fn shield_is_blocked(&self) -> bool {
+        !self.load_remote_images
+            && self.content_has_remote
+            && !self.unblocked_messages.contains(&self.selected_message)
+    }
+
+    /// Whether the reader should show the *loaded* (green) privacy shield: the
+    /// message has remote content that is now showing only because the user
+    /// unblocked this specific message (not the global setting).
+    fn shield_is_loaded(&self) -> bool {
+        !self.load_remote_images
+            && self.content_has_remote
+            && self.unblocked_messages.contains(&self.selected_message)
+    }
+
+    /// Privacy affordance shown on the subject line. A same-sized empty slot is
+    /// reserved when there is nothing to show, so the header keeps an identical
+    /// height either way. When the message has remote content it shows either a
+    /// red shield (blocked — click to open the unblock menu) or a green
+    /// shield-with-check (this message was unblocked).
     fn render_privacy_shield(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let slot = div().flex_shrink_0().size(px(20.0));
-        if !self.content_blocked {
-            return slot.into_any_element();
-        }
         let language = cx.language();
         let colors = cx.theme().colors();
+
+        if self.shield_is_loaded() {
+            // Green shield with a check overlaid in the center, signaling that
+            // this message's remote content is now loaded.
+            return slot
+                .id("privacy-shield")
+                .relative()
+                .flex()
+                .items_center()
+                .justify_center()
+                .tooltip(Tooltip::text(Key::RemoteContentLoaded.tr(language)))
+                .child(
+                    Icon::new(IconName::ShieldSolid)
+                        .size(IconSize::Medium)
+                        .color(Color::Success),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div().relative().top(px(-1.0)).child(
+                                Icon::new(IconName::Check)
+                                    .size(IconSize::XXSmall)
+                                    .color(Color::Custom(colors.background)),
+                            ),
+                        ),
+                )
+                .into_any_element();
+        }
+
+        if !self.shield_is_blocked() {
+            return slot.into_any_element();
+        }
+
         slot.id("privacy-shield")
             .flex()
             .items_center()
@@ -1519,7 +1581,8 @@ impl RootView {
                     .child(Label::new(Key::UnblockRemote.tr(language)).size(LabelSize::Small))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.privacy_menu_open = false;
-                        this.set_load_remote_images(true, cx);
+                        // Unblock only this message, not the global setting.
+                        this.unblocked_messages.insert(this.selected_message);
                         cx.notify();
                     })),
             );

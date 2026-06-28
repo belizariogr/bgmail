@@ -189,15 +189,20 @@
         Localized label `CtxShowImage` (EN/PT) via the `data-rm-img-show` attr.
         Blocked placeholders now use the default cursor (no `context-menu` hint).
       - Reader-header privacy affordance: `email_document` returns a
-        `RenderedEmail { html, blocked_remote }` (the sanitizer reports when it
-        withheld a remote resource); `RootView.content_blocked` caches it. When
-        set, a red shield (`IconName::Shield`, `Color::Error`) renders above the
-        date with a hover tooltip (`BlockedElements`) and, on click, a deferred/
-        anchored dropdown offering "Unblock all remote content" (`UnblockRemote`
-        → `set_load_remote_images(true)`). The native webview is `hide()`-d while
-        the menu is open so its child view can't occlude the GPUI overlay; a
-        full-window catcher closes it on outside click. New `ui::Tooltip` (text)
-        component + EN/PT keys.
+        `RenderedEmail { html, has_remote }` (the sanitizer reports whether the
+        message references any remote resource, regardless of blocking);
+        `RootView.content_has_remote` caches it. On the subject line a compact,
+        fixed-size shield slot (so the header height is identical with or without
+        it) shows one of two states when the message has remote content and the
+        global setting is off: a **red** `Shield` (`Color::Error`, hover tooltip
+        `BlockedElements`) that on click opens a deferred/anchored dropdown
+        "Unblock all remote content" (`UnblockRemote`), or — once unblocked — a
+        **green** `Shield`+`Check` overlay (`Color::Success`, tooltip
+        `RemoteContentLoaded`). Unblocking is **per message** (`RootView
+        .unblocked_messages: HashSet<usize>`, folded into the effective
+        `load_remote` and the webview memoization signature), never the global
+        setting. A full-window catcher closes the menu on outside click. New
+        `ui::Tooltip` (text) component, `IconName::Check`, and EN/PT keys.
 - ✅ Scrollbar fade animation for list/sidebar (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)

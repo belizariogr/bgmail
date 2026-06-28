@@ -69,6 +69,7 @@ pub enum Key {
     RemoteImagesHint,
     BlockedElements,
     UnblockRemote,
+    RemoteContentLoaded,
 
     SearchPlaceholder,
 
@@ -152,6 +153,8 @@ impl Key {
             (BlockedElements, P) => "Há conteúdo bloqueado",
             (UnblockRemote, E) => "Unblock all remote content",
             (UnblockRemote, P) => "Desbloquear todo conteúdo remoto",
+            (RemoteContentLoaded, E) => "Remote content loaded",
+            (RemoteContentLoaded, P) => "Conteúdo remoto carregado",
 
             (SearchPlaceholder, E) => "Search",
             (SearchPlaceholder, P) => "Buscar",
@@ -229,7 +232,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 36] = [
+    const ALL_KEYS: [Key; 37] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -258,6 +261,7 @@ mod tests {
         Key::RemoteImagesHint,
         Key::BlockedElements,
         Key::UnblockRemote,
+        Key::RemoteContentLoaded,
         Key::SearchPlaceholder,
         Key::CtxOpenImage,
         Key::CtxDownloadImage,
