@@ -550,6 +550,15 @@ const URL_ATTRIBUTES: &[&str] = &[
     "longdesc",
 ];
 
+/// URL-bearing attributes that *auto-fetch a remote resource when the document
+/// renders* (so they leak an "opened" signal / the reader's IP). These are the
+/// only ones blocked for remoteness. Navigation and metadata URLs — `href`
+/// (links), `cite`, `ping`, `longdesc`, `action` — act on click or fetch
+/// nothing on render, so they are kept (a blocked `href` would break links).
+/// `srcset` is handled separately. Dangerous-scheme vetting still applies to
+/// every [`URL_ATTRIBUTES`] entry regardless.
+const RESOURCE_ATTRIBUTES: &[&str] = &["src", "poster", "background", "data", "xlink:href"];
+
 /// Sanitizes an e-mail HTML fragment so it can never execute code or load
 /// untrusted active content in the OS web engine.
 ///
@@ -702,7 +711,9 @@ fn neutralize_attributes(
                     blocked_img_src = Some(value.clone());
                 }
             }
-            let is_remote = (is_url_attr && is_remote_url(&value))
+            // Only resource-loading attributes are blocked for remoteness;
+            // navigation/metadata URLs (e.g. a link's `href`) are left intact.
+            let is_remote = (RESOURCE_ATTRIBUTES.contains(&name.as_str()) && is_remote_url(&value))
                 || (name == "srcset" && !value.trim().is_empty());
             let remote_blocked = is_remote && !load_remote && !shown_here;
             let drop = name.starts_with("on")
@@ -1443,6 +1454,20 @@ mod tests {
         // Both <img> elements survive; the inline data: image is untouched.
         assert!(clean.contains("data:image/png;base64,AAAA"));
         assert_eq!(clean.matches("<img").count(), 2);
+    }
+
+    #[test]
+    fn sanitize_keeps_remote_link_href_when_blocking() {
+        // A link's href is navigation (acts on click), not a render-time fetch,
+        // so it must survive even with remote content blocked.
+        let html = "<a href=\"https://example.test/page\">click</a>\
+             <img src=\"https://tracker.test/pixel.gif\">";
+        let clean = sanitize_html(html, false);
+        assert!(clean.contains("href=\"https://example.test/page\""));
+        // The image, by contrast, is still blocked: its URL only survives
+        // out-of-band in data-rm-blocked-src, never as a live src.
+        assert!(clean.contains("data-rm-blocked-src=\"https://tracker.test/pixel.gif\""));
+        assert_eq!(clean.matches("tracker.test").count(), 1);
     }
 
     #[test]
