@@ -12,6 +12,7 @@
 use std::path::Path;
 
 use gpui::{Hsla, Rgba};
+use lol_html::html_content::Element;
 
 use crate::data::MessageBody;
 
@@ -439,18 +440,52 @@ fn applescript_string(input: &str) -> String {
 /// - **Editable/interactive controls** (`input`, `textarea`, `select`, `button`,
 ///   `form`): a reader is not a form host, and our selection "Copy" can't read a
 ///   field's selection anyway. Stripping them avoids dead/confusing affordances.
+/// - **Document/redirect/external-resource heads** (`base`, `meta`, `link`):
+///   `base` rewrites every relative link, `meta[http-equiv=refresh]` redirects the
+///   view, and `link` pulls remote stylesheets/prefetch (tracking). `head`/`title`
+///   are deliberately *kept* so e-mails that ship a full document don't lose their
+///   `<style>`.
+/// - **Misc scripting surfaces** (`canvas`, `dialog`, `portal`).
+///
+/// `svg` is intentionally **kept** (some e-mails use inline vector art), but its
+/// scriptable parts are removed: `script` (covered above), `foreignobject` (hosts
+/// arbitrary HTML) and the SMIL animation family (`animate`, `animatetransform`,
+/// `animatemotion`, `set`) which can assign event-handler attributes at runtime.
 const DISALLOWED_ELEMENTS: &str = "script, object, embed, applet, \
      iframe, frame, frameset, \
      video, audio, source, track, \
-     input, textarea, select, button, form";
+     input, textarea, select, button, form, \
+     base, meta, link, canvas, dialog, portal, \
+     foreignobject, animate, animatetransform, animatemotion, set";
 
-/// Removes the elements we never render (see [`DISALLOWED_ELEMENTS`]) and strips
-/// `contenteditable` from any surviving element, using a real HTML parser so that
-/// malformed markup can't smuggle them through (as a regex pass could). Everything
-/// else — including inline styles — is preserved verbatim.
+/// URL-bearing attributes whose value we vet against dangerous schemes.
+const URL_ATTRIBUTES: &[&str] = &[
+    "href",
+    "src",
+    "action",
+    "formaction",
+    "xlink:href",
+    "poster",
+    "background",
+    "cite",
+    "data",
+    "ping",
+    "longdesc",
+];
+
+/// Sanitizes an e-mail HTML fragment so it can never execute code or load
+/// untrusted active content in the OS web engine.
 ///
-/// If rewriting fails for any reason we drop the body entirely rather than risk
-/// rendering unsanitized content.
+/// A real streaming parser ([`lol_html`]) is used rather than regex so malformed
+/// markup can't smuggle anything through. Two passes run on every element:
+/// 1. Disallowed elements (see [`DISALLOWED_ELEMENTS`]) are dropped together with
+///    their content.
+/// 2. Surviving elements have their XSS-bearing attributes neutralized
+///    (see [`neutralize_attributes`]).
+///
+/// Everything else — including inline `style`, tables and links — is preserved
+/// verbatim. If rewriting fails for any reason we drop the body entirely rather
+/// than risk rendering unsanitized content.
 fn sanitize_html(html: &str) -> String {
     use lol_html::{element, rewrite_str, RewriteStrSettings};
 
@@ -459,12 +494,85 @@ fn sanitize_html(html: &str) -> String {
             el.remove();
             Ok(())
         }))
-        .append_element_content_handler(element!("[contenteditable]", |el| {
-            el.remove_attribute("contenteditable");
+        .append_element_content_handler(element!("*", |el| {
+            neutralize_attributes(el);
             Ok(())
         }));
 
     rewrite_str(html, settings).unwrap_or_default()
+}
+
+/// Strips the XSS-bearing attributes from a *surviving* element while keeping the
+/// element itself:
+/// - every inline event handler (`on*`),
+/// - `contenteditable` (a reader is not an editor),
+/// - link/source attributes whose value uses a dangerous scheme
+///   (see [`is_dangerous_url`]),
+/// - `style` declarations carrying legacy CSS script vectors
+///   (see [`style_has_script_vector`]).
+fn neutralize_attributes(el: &mut Element) {
+    // `attributes()` borrows the element, so collect the doomed names first and
+    // only mutate (`remove_attribute`) once the borrow is released.
+    let doomed: Vec<String> = el
+        .attributes()
+        .iter()
+        .filter_map(|attr| {
+            let name = attr.name(); // lower-cased by the parser
+            let drop = name.starts_with("on")
+                || name == "contenteditable"
+                || (URL_ATTRIBUTES.contains(&name.as_str()) && is_dangerous_url(&attr.value()))
+                || (name == "style" && style_has_script_vector(&attr.value()));
+            drop.then_some(name)
+        })
+        .collect();
+
+    for name in doomed {
+        el.remove_attribute(&name);
+    }
+}
+
+/// Whether a URL value uses a scheme that can execute or load active content.
+///
+/// `javascript:`/`vbscript:` always execute; `data:` is blocked unless it is a
+/// raster image (inline `<img>` payloads are common and inert), with SVG excluded
+/// since an SVG document can script. Embedded whitespace/control characters in the
+/// scheme (e.g. `java\tscript:`) are stripped first, mirroring how engines parse it.
+fn is_dangerous_url(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    let Some(colon) = trimmed.find(':') else {
+        // No scheme: relative path, fragment or query — always safe.
+        return false;
+    };
+
+    let scheme: String = trimmed[..colon]
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    match scheme.as_str() {
+        "javascript" | "vbscript" => true,
+        "data" => {
+            let media = trimmed[colon + 1..]
+                .split([';', ','])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            !(media.starts_with("image/") && media != "image/svg+xml")
+        }
+        _ => false,
+    }
+}
+
+/// Whether an inline `style` value carries a legacy CSS script vector. These are
+/// inert on modern WebKit/Chromium, but stripping them is cheap defense-in-depth
+/// for older engines and an explicit signal of intent.
+fn style_has_script_vector(style: &str) -> bool {
+    let lower = style.to_ascii_lowercase();
+    ["javascript:", "expression(", "-moz-binding", "behavior:"]
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 /// Escapes the characters that are significant in HTML text content.
@@ -941,6 +1049,9 @@ mod tests {
              <embed src=\"x.pdf\">\
              <form><input name=\"a\"><textarea>t</textarea>\
              <select><option>o</option></select><button>b</button></form>\
+             <base href=\"https://evil.test/\"><link rel=\"stylesheet\" href=\"x.css\">\
+             <meta http-equiv=\"refresh\" content=\"0;url=https://evil.test\">\
+             <canvas></canvas><dialog>d</dialog>\
              <p>tail</p>";
         let clean = sanitize_html(dirty);
 
@@ -960,6 +1071,11 @@ mod tests {
             "<textarea",
             "<select",
             "<button",
+            "<base",
+            "<link",
+            "<meta",
+            "<canvas",
+            "<dialog",
         ] {
             assert!(
                 !clean.contains(needle),
@@ -969,11 +1085,80 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_strips_contenteditable_but_keeps_the_element() {
-        let clean = sanitize_html("<div contenteditable=\"true\">text</div>");
+    fn sanitize_keeps_svg_but_removes_its_scriptable_parts() {
+        let dirty = "<svg viewBox=\"0 0 10 10\">\
+             <rect width=\"10\" height=\"10\"></rect>\
+             <script>alert(1)</script>\
+             <foreignObject><body>x</body></foreignObject>\
+             <animate attributeName=\"x\"></animate>\
+             <set attributeName=\"onload\" to=\"alert(1)\"></set>\
+             </svg>";
+        let clean = sanitize_html(dirty);
+        let lower = clean.to_ascii_lowercase();
+        assert!(clean.contains("<svg"));
+        assert!(clean.contains("<rect"));
+        for needle in ["<script", "alert(1)", "foreignobject", "<animate", "<set"] {
+            assert!(
+                !lower.contains(needle),
+                "expected `{needle}` to be stripped from svg, got: {clean}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_strips_event_handlers_and_contenteditable() {
+        let clean = sanitize_html(
+            "<div contenteditable=\"true\" onclick=\"steal()\" ONERROR=\"x\">text</div>",
+        );
+        let lower = clean.to_ascii_lowercase();
         assert!(clean.contains("<div"));
         assert!(clean.contains("text"));
+        assert!(!lower.contains("onclick"));
+        assert!(!lower.contains("onerror"));
         assert!(!clean.contains("contenteditable"));
+    }
+
+    #[test]
+    fn sanitize_neutralizes_dangerous_url_schemes() {
+        let clean = sanitize_html(
+            "<a href=\"javascript:alert(1)\">a</a>\
+             <a href=\"vbscript:msgbox(1)\">b</a>\
+             <img src=\"data:image/svg+xml,<svg/>\">",
+        );
+        let lower = clean.to_ascii_lowercase();
+        assert!(!lower.contains("javascript:"));
+        assert!(!lower.contains("vbscript:"));
+        assert!(!lower.contains("data:image/svg+xml"));
+        // The anchors and image survive — only the unsafe attribute is dropped.
+        assert!(clean.contains("<a"));
+        assert!(clean.contains("<img"));
+    }
+
+    #[test]
+    fn is_dangerous_url_classifies_schemes() {
+        assert!(is_dangerous_url("javascript:alert(1)"));
+        assert!(is_dangerous_url("  JaVaScRiPt:alert(1)"));
+        assert!(is_dangerous_url("java\tscript:alert(1)"));
+        assert!(is_dangerous_url("vbscript:x"));
+        assert!(is_dangerous_url("data:text/html,<b>"));
+        assert!(is_dangerous_url("data:image/svg+xml,<svg/>"));
+        // Safe: relative/fragment/known-good schemes and inline raster images.
+        assert!(!is_dangerous_url("https://example.test/path"));
+        assert!(!is_dangerous_url("mailto:a@b.test"));
+        assert!(!is_dangerous_url("#section"));
+        assert!(!is_dangerous_url("/relative/path"));
+        assert!(!is_dangerous_url("data:image/png;base64,AAAA"));
+    }
+
+    #[test]
+    fn sanitize_drops_style_with_legacy_script_vectors() {
+        let clean = sanitize_html(
+            "<p style=\"width:expression(alert(1))\">a</p>\
+             <p style=\"background:url(javascript:alert(1))\">b</p>",
+        );
+        let lower = clean.to_ascii_lowercase();
+        assert!(!lower.contains("expression("));
+        assert!(!lower.contains("javascript:"));
     }
 
     #[test]

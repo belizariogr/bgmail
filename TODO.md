@@ -144,15 +144,29 @@
       `data:`/`about:` document load isn't intercepted.
 - ✅ Sanitize the e-mail HTML before it reaches the web engine (`sanitize_html`
       in `web_view.rs`, applied to `MessageBody::Html`). Uses `lol_html` (a real
-      HTML rewriter, not regex, so malformed markup can't smuggle tags through) to
-      strip elements a reader must never render — and that our context-menu story
-      couldn't cover: scripts/plugins (`script`/`object`/`embed`/`applet`), frames
-      (`iframe`/`frame`/`frameset` — our menu script is main-frame-only, so a
-      sub-frame would resurface the native "Reload" menu), media
-      (`video`/`audio`/`source`/`track`), and editable/interactive controls
-      (`input`/`textarea`/`select`/`button`/`form`, plus the `contenteditable`
-      attribute). Everything else — including inline styles — is preserved
+      HTML rewriter, not regex, so malformed markup can't smuggle tags through).
+      Two passes per element: drop disallowed elements (+content), then neutralize
+      XSS-bearing attributes on survivors (`neutralize_attributes`).
+      - **Removed elements** (`DISALLOWED_ELEMENTS`): scripts/plugins
+        (`script`/`object`/`embed`/`applet`); frames (`iframe`/`frame`/`frameset`
+        — our menu script is main-frame-only, so a sub-frame would resurface the
+        native "Reload" menu); media (`video`/`audio`/`source`/`track`);
+        editable/interactive controls (`input`/`textarea`/`select`/`button`/`form`);
+        document/redirect/external-resource heads (`base`/`meta`/`link`); and misc
+        scripting surfaces (`canvas`/`dialog`/`portal`). `head`/`title` are kept so
+        full-document e-mails don't lose their `<style>`.
+      - **`svg` is kept** (inline vector art), but its scriptable parts are removed:
+        `script`, `foreignObject` and the SMIL family (`animate`/`animatetransform`/
+        `animatemotion`/`set`).
+      - **Attribute neutralization**: every inline event handler (`on*`),
+        `contenteditable`, dangerous URL schemes on link/source attrs
+        (`javascript:`/`vbscript:`, and non-image `data:` incl. `image/svg+xml` —
+        `is_dangerous_url`), and `style` declarations carrying legacy CSS script
+        vectors (`expression(`/`-moz-binding`/`behavior:`/`url(javascript:`).
+      Everything else — including inline styles, tables and links — is preserved
       verbatim; a rewrite failure drops the body rather than render unsanitized.
+      Not yet done (privacy, separate item): blocking remote images / external CSS
+      loads (tracking pixels), which needs a "load images" UI affordance.
 - ✅ Scrollbar fade animation for list/sidebar (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)
