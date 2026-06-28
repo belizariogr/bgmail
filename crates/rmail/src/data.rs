@@ -325,23 +325,24 @@ pub fn sample_messages() -> Vec<Message> {
         ),
     ];
 
+    // Varied bodies loaded from separate files (see `sample_email_bodies`), so
+    // the reader exercises many different layouts. The first message keeps the
+    // embedded-image demo; the rest cycle through the file-based catalog.
+    let contents = sample_email_bodies();
+
     raw.into_iter()
         .enumerate()
         .map(
             |(idx, (sender, email, subject, preview, unread, starred, attach, time))| {
-                // Mix HTML and plain-text bodies so the reader exercises both
-                // rendering paths (every fourth message is plain text).
-                let body = if idx % 4 == 3 {
-                    MessageBody::Text(text_body(preview, sender))
+                let body = if idx == 0 {
+                    MessageBody::Html(html_body(
+                        subject,
+                        preview,
+                        sender,
+                        &embedded_image_data_uri(),
+                    ))
                 } else {
-                    // The first message embeds a real image (as a self-contained
-                    // `data:` URI); the others reference a remote URL.
-                    let image_src = if idx == 0 {
-                        embedded_image_data_uri()
-                    } else {
-                        "https://example.com/banner.png".to_string()
-                    };
-                    MessageBody::Html(html_body(subject, preview, sender, &image_src))
+                    contents[(idx - 1) % contents.len()].clone()
                 };
                 Message {
                     sender: sender.into(),
@@ -400,21 +401,29 @@ fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> Sha
     .into()
 }
 
-/// Builds a plain-text body (the other common e-mail format).
-fn text_body(preview: &str, sender: &str) -> SharedString {
-    format!(
-        "{preview}\n\n\
-         This is a plain-text message body. Some senders still deliver mail as plain text, \
-         so the reader must handle it as well as HTML.\n\n\
-         Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor \
-         incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud \
-         exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.\n\n\
-         Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat \
-         nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui \
-         officia deserunt mollit anim id est laborum.\n\n\
-         Best regards,\n{sender}"
-    )
-    .into()
+/// Reusable sample e-mail bodies, each loaded from its own file under
+/// `assets/emails/`. Kept as a catalog so the mock — and, later, tests and
+/// fixtures — can draw from a variety of realistic contents (newsletter,
+/// receipt, promo, code review, calendar invite, security alert, invoice,
+/// itinerary, plain text, …). To extend it, drop a file in `assets/emails/`
+/// and add a line here.
+pub fn sample_email_bodies() -> Vec<MessageBody> {
+    vec![
+        MessageBody::Html(include_str!("../assets/emails/welcome.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/newsletter.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/receipt.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/promo.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/code-review.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/calendar-invite.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/security-alert.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/social-comment.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/travel-itinerary.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/invoice.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/shipping-update.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/article-digest.html").into()),
+        MessageBody::Html(include_str!("../assets/emails/meeting-notes.html").into()),
+        MessageBody::Text(include_str!("../assets/emails/plain-note.txt").into()),
+    ]
 }
 
 /// Standard base64 alphabet (RFC 4648).
@@ -474,6 +483,33 @@ mod tests {
         assert!(!messages.is_empty());
         assert!(messages.iter().any(|m| m.unread));
         assert!(messages.iter().any(|m| m.has_attachment));
+    }
+
+    #[test]
+    fn sample_email_bodies_has_at_least_ten_varied_contents() {
+        let bodies = sample_email_bodies();
+        assert!(
+            bodies.len() >= 10,
+            "expected at least 10 sample contents, got {}",
+            bodies.len()
+        );
+    }
+
+    #[test]
+    fn sample_email_bodies_are_all_non_empty() {
+        for body in sample_email_bodies() {
+            let text = match body {
+                MessageBody::Html(s) | MessageBody::Text(s) => s,
+            };
+            assert!(!text.trim().is_empty(), "a sample body file is empty");
+        }
+    }
+
+    #[test]
+    fn sample_email_bodies_mix_html_and_text() {
+        let bodies = sample_email_bodies();
+        assert!(bodies.iter().any(|b| matches!(b, MessageBody::Html(_))));
+        assert!(bodies.iter().any(|b| matches!(b, MessageBody::Text(_))));
     }
 
     #[test]

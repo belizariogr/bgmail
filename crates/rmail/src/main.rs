@@ -26,7 +26,7 @@ fn main() {
         // Register the icon fonts (FontAwesome) used by the components.
         ui::init(cx);
 
-        let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(1100.0), px(720.0)));
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

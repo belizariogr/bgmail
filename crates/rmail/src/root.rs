@@ -102,7 +102,7 @@ impl RootView {
             accounts: data::sample_accounts(),
             messages: data::sample_messages(),
             selected_mailbox: (0, 0),
-            selected_message: 0,
+            selected_message: 3,
             show_sidebar: true,
             view: AppView::Mail,
             settings_section: SettingsSection::Appearance,
@@ -616,8 +616,8 @@ impl RootView {
             .flex_shrink_0()
             .w_full()
             .px_6()
-            .py_4()
-            .gap_3()
+            .py_2p5()
+            .gap_2()
             .border_b_1()
             .border_color(border)
             .child(
@@ -627,11 +627,11 @@ impl RootView {
             )
             .child(
                 h_flex()
-                    .gap_3()
+                    .gap_2p5()
                     .items_center()
                     .child(
                         div()
-                            .size(px(40.0))
+                            .size(px(32.0))
                             .flex_shrink_0()
                             .rounded_full()
                             .bg(accent)

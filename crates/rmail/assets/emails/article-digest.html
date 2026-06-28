@@ -1,0 +1,22 @@
+<h1>The case for native rendering</h1>
+<p style="opacity:0.75;">A 4-minute read · by the rMail engineering team</p>
+<p>For years, desktop apps reached for bundled browser engines to render rich
+content. The trade-off was obvious: hundreds of megabytes and a sluggish start,
+all to draw some text and images.</p>
+<h3>A leaner path</h3>
+<p>Every modern OS already ships a capable, well-maintained web engine — WebKit
+on macOS, WebView2 on Windows. By rendering e-mail through the <em>system</em>
+engine, we get correct HTML, native text selection and hardware-accelerated
+scrolling for essentially zero binary cost.</p>
+<blockquote>"The fastest code is the code that ships with the operating system."</blockquote>
+<h3>What this means for you</h3>
+<ul>
+  <li>Faster cold starts and a smaller download.</li>
+  <li>Pixel-accurate rendering that matches the rest of your system.</li>
+  <li>Security patches that arrive with OS updates, not app updates.</li>
+</ul>
+<p>There are trade-offs, of course — we give up some control over layout edge
+cases. But for reading mail, meeting people where their OS already is feels
+like the right call.</p>
+<hr>
+<p style="opacity:0.7;font-size:13px;">Enjoyed this? Forward it to a friend.</p>

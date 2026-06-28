@@ -1,0 +1,14 @@
+Hey,
+
+Quick note — no fancy formatting needed. Some mail still arrives as plain text,
+and the reader has to handle it just as gracefully as HTML.
+
+A few things I wanted to mention:
+
+  - The build is green on main again.
+  - I pushed the webview branch; take a look when you get a chance.
+  - Let's sync tomorrow morning before standup.
+
+No rush on any of this. Talk soon.
+
+— Alex
