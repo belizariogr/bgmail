@@ -700,8 +700,6 @@ impl RootView {
         let border = colors.border;
         let search_bg = colors.element_background;
         let language = cx.language();
-        let settings_open = self.settings_window.is_some();
-
         // Keep the toolbar segments aligned with the resizable columns below. When
         // the sidebar is docked its segment matches the sidebar width; otherwise it
         // only reserves room for the traffic lights + toggle controls.
@@ -792,11 +790,11 @@ impl RootView {
                             })),
                     )
                     .child(
-                        IconButton::new("settings", IconName::Settings)
-                            .selected(settings_open)
-                            .on_click(cx.listener(|this, _, window, cx| {
+                        IconButton::new("settings", IconName::Settings).on_click(cx.listener(
+                            |this, _, window, cx| {
                                 this.open_settings(window, cx);
-                            })),
+                            },
+                        )),
                     ),
             )
             // Segment 2: over the message list — title + count on the left,
