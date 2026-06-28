@@ -124,7 +124,18 @@ fn document_css(background: Hsla, text: Hsla, accent: Hsla) -> String {
          pre.plain {{ background: transparent; padding: 0; }}\
          code {{ background: {soft}; padding: 1px 4px; border-radius: 4px; }}\
          blockquote {{ margin: 0; padding-left: 12px; border-left: 3px solid {accent}; opacity: 0.85; }}\
-         hr {{ border: none; border-top: 1px solid {fg}; opacity: 0.15; margin: 16px 0; }}",
+         hr {{ border: none; border-top: 1px solid {fg}; opacity: 0.15; margin: 16px 0; }}\
+         /* Styling the WebKit scrollbar opts out of macOS overlay scrollbars, \
+            which auto-hide and visibly flash on every trackpad gesture (incl. \
+            the one that opens the context menu). A themed, always-present bar \
+            matches the steady look users get with a plugged-in mouse. */\
+         ::-webkit-scrollbar {{ width: 12px; height: 12px; }}\
+         ::-webkit-scrollbar-track {{ background: transparent; }}\
+         ::-webkit-scrollbar-corner {{ background: transparent; }}\
+         ::-webkit-scrollbar-thumb {{ background: {thumb}; border-radius: 8px; \
+           border: 3px solid transparent; background-clip: padding-box; }}\
+         ::-webkit-scrollbar-thumb:hover {{ background: {thumb_hover}; \
+           border: 3px solid transparent; background-clip: padding-box; }}",
         bg = css_color(background),
         fg = css_color(text),
         accent = css_color(accent),
@@ -132,6 +143,9 @@ fn document_css(background: Hsla, text: Hsla, accent: Hsla) -> String {
         soft = css_color_alpha(text, 0.08),
         // A slightly stronger line for the blocked-image placeholder border.
         line = css_color_alpha(text, 0.3),
+        // Scrollbar thumb, derived from the text color so it reads on either theme.
+        thumb = css_color_alpha(text, 0.25),
+        thumb_hover = css_color_alpha(text, 0.4),
     )
 }
 
@@ -1268,6 +1282,10 @@ mod tests {
         assert!(doc.contains("<p>Hello <strong>world</strong></p>"));
         // A dark background selects the dark color scheme.
         assert!(doc.contains("color-scheme: dark"));
+        // Custom scrollbar styling opts the body out of macOS overlay scrollbars
+        // (which flash on trackpad gestures); it must always be emitted.
+        assert!(doc.contains("::-webkit-scrollbar"));
+        assert!(doc.contains("::-webkit-scrollbar-thumb"));
     }
 
     #[test]

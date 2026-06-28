@@ -142,6 +142,13 @@
         so a live language switch updates it.
       The navigation handler is deliberately left untouched so the initial
       `data:`/`about:` document load isn't intercepted.
+- ✅ Suppress the macOS overlay-scrollbar flash in the reader. On a trackpad the
+      WKWebView's overlay scrollbars auto-hide and visibly flicker on every
+      gesture (incl. the one that pops the context menu); with a plugged-in mouse
+      they stay put and don't flicker. The document CSS now styles
+      `::-webkit-scrollbar`, which opts WebKit out of overlay scrollbars in favor
+      of a themed, always-present bar — matching the steady mouse behavior.
+      (The right-click→menu latency itself comes from GPUI and is out of scope.)
 - ✅ Sanitize the e-mail HTML before it reaches the web engine (`sanitize_html`
       in `web_view.rs`, applied to `MessageBody::Html`). Uses `lol_html` (a real
       HTML rewriter, not regex, so malformed markup can't smuggle tags through).
