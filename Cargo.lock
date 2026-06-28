@@ -4969,6 +4969,8 @@ name = "rmail"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "objc",
+ "raw-window-handle",
  "theme",
  "ui",
  "wry",

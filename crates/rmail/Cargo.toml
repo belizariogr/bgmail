@@ -21,3 +21,18 @@ ui.workspace = true
 # support (macOS/Windows). Other targets fall back to a plain-text reader.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 wry.workspace = true
+
+# macOS-only: GPUI 0.2 doesn't implement `start_window_move` on macOS, so we
+# drag the window via AppKit's `performWindowDragWithEvent:` using the native
+# window handle. Kept isolated in `window_drag.rs` behind a portable API.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+raw-window-handle = "0.6"
+
+# `objc` 0.2's `msg_send!` macro expands to a `feature = "cargo-clippy"` cfg that
+# the compiler can't otherwise know about; declare it so the lint stays useful
+# without flagging this harmless, dependency-generated case.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("cargo-clippy"))',
+] }

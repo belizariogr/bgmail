@@ -9,6 +9,7 @@ mod data;
 mod locale;
 mod root;
 mod web_view;
+mod window_drag;
 
 use gpui::{
     actions, point, px, size, App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem,

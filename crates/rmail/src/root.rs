@@ -7,8 +7,8 @@
 use std::time::Duration;
 
 use gpui::{
-    canvas, AppContext as _, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, ScrollHandle,
-    Window,
+    canvas, AppContext as _, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton,
+    MouseDownEvent, ScrollHandle, Window, WindowControlArea,
 };
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
@@ -137,6 +137,10 @@ pub struct RootView {
     /// Live window width, tracked at render time. Used to decide toolbar layout
     /// (e.g. collapsing the search field into an icon when space is tight).
     window_width: Pixels,
+    /// Set on mouse-down in the draggable toolbar; the actual window move only
+    /// starts on the first subsequent mouse-move, so plain clicks on toolbar
+    /// buttons still register.
+    should_move: bool,
     view: AppView,
     settings_section: SettingsSection,
     /// Scroll handle + scrollbar state for the message list.
@@ -163,6 +167,7 @@ impl RootView {
             list_width: px(360.0),
             narrow: false,
             window_width: px(1100.0),
+            should_move: false,
             view: AppView::Mail,
             settings_section: SettingsSection::Appearance,
             list_scroll: ScrollHandle::new(),
@@ -422,6 +427,32 @@ impl RootView {
             .bg(bg)
             .border_b_1()
             .border_color(border)
+            // The whole toolbar acts as a draggable title bar. We arm the drag on
+            // mouse-down and only begin moving on the first mouse-move, so clicks
+            // on the toolbar's own buttons keep working. A double-click performs
+            // the platform's default title-bar action (zoom/minimize on macOS).
+            .window_control_area(WindowControlArea::Drag)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, _| {
+                    if event.click_count == 2 {
+                        window.titlebar_double_click();
+                    } else {
+                        this.should_move = true;
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.should_move = false),
+            )
+            .on_mouse_down_out(cx.listener(|this, _, _, _| this.should_move = false))
+            .on_mouse_move(cx.listener(|this, _, window, _| {
+                if this.should_move {
+                    this.should_move = false;
+                    crate::window_drag::start_window_drag(window);
+                }
+            }))
             // Segment 1: over the sidebar — traffic-light spacing + sidebar toggle
             // and app settings (theme switching lives in Settings ▸ Appearance).
             .child(

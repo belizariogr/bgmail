@@ -27,6 +27,11 @@
       Below a 900px window width the sidebar auto-collapses and, once reopened,
       floats over the content with a dismissable scrim (`sync_layout`/`resize` +
       tests)
+- ✅ Draggable title bar: the whole top toolbar moves the window (arm on
+      mouse-down, start on first move so toolbar buttons still click; double-click
+      runs the platform title-bar action). Portable `window_drag` helper —
+      `Window::start_window_move` on Linux/Windows, AppKit
+      `performWindowDragWithEvent:` on macOS (GPUI 0.2 has no macOS impl)
 - ✅ Status bar
 - ✅ Real-time light/dark theme switching
 - ✅ Zed-style settings screen (General/Accounts/Appearance/Notifications)
