@@ -72,6 +72,7 @@ pub enum Key {
 
     CtxOpenImage,
     CtxDownloadImage,
+    CtxShowImage,
     CtxOpenLink,
     CtxCopyLink,
     CtxCopy,
@@ -153,6 +154,8 @@ impl Key {
             (CtxOpenImage, P) => "Abrir imagem",
             (CtxDownloadImage, E) => "Download image",
             (CtxDownloadImage, P) => "Baixar imagem",
+            (CtxShowImage, E) => "Show remote image",
+            (CtxShowImage, P) => "Mostrar imagem remota",
             (CtxOpenLink, E) => "Open in browser",
             (CtxOpenLink, P) => "Abrir no navegador",
             (CtxCopyLink, E) => "Copy link",
@@ -220,7 +223,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 33] = [
+    const ALL_KEYS: [Key; 34] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -250,6 +253,7 @@ mod tests {
         Key::SearchPlaceholder,
         Key::CtxOpenImage,
         Key::CtxDownloadImage,
+        Key::CtxShowImage,
         Key::CtxOpenLink,
         Key::CtxCopyLink,
         Key::CtxCopy,

@@ -29,6 +29,8 @@ pub struct ContextMenuLabels<'a> {
     pub image_open: &'a str,
     /// Image menu: "Download image".
     pub image_download: &'a str,
+    /// Blocked-image menu: "Show remote image" (loads the one remote image).
+    pub image_show: &'a str,
     /// Link menu: "Open in browser".
     pub link_open: &'a str,
     /// Link menu: "Copy link".
@@ -62,12 +64,14 @@ pub fn email_document(
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <style>{css}</style></head>\
          <body data-rm-img-open=\"{img_open}\" data-rm-img-download=\"{img_download}\" \
+         data-rm-img-show=\"{img_show}\" \
          data-rm-link-open=\"{link_open}\" data-rm-link-copy=\"{link_copy}\" \
          data-rm-sel-copy=\"{sel_copy}\" data-rm-copy-key=\"{copy_key}\">\
          {inner}</body></html>",
         css = document_css(background, text, accent),
         img_open = escape_html(labels.image_open),
         img_download = escape_html(labels.image_download),
+        img_show = escape_html(labels.image_show),
         link_open = escape_html(labels.link_open),
         link_copy = escape_html(labels.link_copy),
         sel_copy = escape_html(labels.selection_copy),
@@ -87,6 +91,8 @@ fn document_css(background: Hsla, text: Hsla, accent: Hsla) -> String {
            -webkit-font-smoothing: antialiased; overflow-wrap: anywhere; }}\
          a {{ color: {accent}; }}\
          img {{ display: block; }}\
+         img[data-rm-blocked-src] {{ background: {soft}; border: 1px dashed {line}; \
+           box-sizing: border-box; min-width: 24px; min-height: 24px; cursor: context-menu; }}\
          h1, h2, h3 {{ line-height: 1.25; }}\
          code, pre {{ font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }}\
          pre {{ white-space: pre-wrap; background: {soft}; padding: 12px; border-radius: 6px; }}\
@@ -99,6 +105,8 @@ fn document_css(background: Hsla, text: Hsla, accent: Hsla) -> String {
         accent = css_color(accent),
         // A subtle fill for code blocks/inline code, derived from the text color.
         soft = css_color_alpha(text, 0.08),
+        // A slightly stronger line for the blocked-image placeholder border.
+        line = css_color_alpha(text, 0.3),
     )
 }
 
@@ -287,8 +295,12 @@ pub enum HostEvent {
 
 /// Injected into every rendered message. Two responsibilities:
 ///
-/// 1. Report the link under the cursor to the host (status-bar mirroring).
-/// 2. Replace the native context menu *for images and links* with our own.
+/// 1. Report the URL under the cursor to the host (status-bar mirroring): link
+///    `href`s, plus the original URL of images blocked for privacy (stashed in
+///    `data-rm-blocked-src`).
+/// 2. Replace the native context menu *for images and links* with our own. A
+///    privacy-blocked image gets a "Show remote image" item that loads just that
+///    one image in place (sets its `src` from `data-rm-blocked-src`).
 ///    WebKit's image menu is inert ("Download Image" never reaches the download
 ///    delegate and exposes no URL), and for links we want a consistent, themed
 ///    menu. Both route their actions over IPC. The native menu is suppressed
@@ -309,14 +321,17 @@ const CONTENT_SCRIPT: &str = r#"(function () {
     return null;
   }
 
-  // 1. Hovered-link reporting.
+  // 1. Hovered-URL reporting: links, and remote images blocked for privacy
+  //    (whose original URL we stashed in data-rm-blocked-src).
   var currentHref = null;
   function reportHover(href) {
     if (href !== currentHref) { currentHref = href; send('H', href); }
   }
   document.addEventListener('mouseover', function (e) {
     var a = closestTag(e.target, 'A');
-    reportHover(a && a.href ? a.href : '');
+    if (a && a.href) { reportHover(a.href); return; }
+    var img = closestTag(e.target, 'IMG');
+    reportHover(img && img.dataset.rmBlockedSrc ? img.dataset.rmBlockedSrc : '');
   }, true);
   document.addEventListener('mouseleave', function () { reportHover(''); }, true);
 
@@ -378,6 +393,18 @@ const CONTENT_SCRIPT: &str = r#"(function () {
       openMenu(e.clientX, e.clientY, [
         { label: data.rmImgOpen || 'Open image in browser', run: function () { send('O', img.src); } },
         { label: data.rmImgDownload || 'Download image', run: function () { send('D', img.src); } }
+      ]);
+      return;
+    }
+    if (img && img.dataset.rmBlockedSrc) {
+      // A remote image blocked for privacy: offer to load this one in place.
+      e.preventDefault();
+      openMenu(e.clientX, e.clientY, [
+        { label: data.rmImgShow || 'Show remote image', run: function () {
+            img.src = img.dataset.rmBlockedSrc;
+            img.removeAttribute('data-rm-blocked-src');
+            reportHover('');
+        } }
       ]);
       return;
     }
@@ -566,10 +593,15 @@ fn find_url_open(s: &str) -> Option<usize> {
 ///   (see [`style_has_script_vector`]).
 ///
 /// When `load_remote` is false, also removed: link/source attributes (and
-/// `srcset`) pointing at remote resources, so the message can't phone home.
+/// `srcset`) pointing at remote resources, so the message can't phone home. A
+/// blocked `<img src>` is special-cased: its remote URL is preserved in
+/// `data-rm-blocked-src` (the `src` is still dropped, so nothing loads) so the
+/// content script can show the URL on hover and offer "Show remote image".
 fn neutralize_attributes(el: &mut Element, load_remote: bool) {
-    // `attributes()` borrows the element, so collect the doomed names first and
-    // only mutate (`remove_attribute`) once the borrow is released.
+    let is_img = el.tag_name() == "img";
+    // `attributes()` borrows the element, so collect everything we need first and
+    // only mutate (`remove_attribute`/`set_attribute`) once the borrow is released.
+    let mut blocked_img_src = None;
     let doomed: Vec<String> = el
         .attributes()
         .iter()
@@ -577,19 +609,26 @@ fn neutralize_attributes(el: &mut Element, load_remote: bool) {
             let name = attr.name(); // lower-cased by the parser
             let value = attr.value();
             let is_url_attr = URL_ATTRIBUTES.contains(&name.as_str());
+            let remote_blocked = !load_remote
+                && ((is_url_attr && is_remote_url(&value))
+                    || (name == "srcset" && !value.trim().is_empty()));
+            if remote_blocked && is_img && name == "src" {
+                blocked_img_src = Some(value.clone());
+            }
             let drop = name.starts_with("on")
                 || name == "contenteditable"
                 || (is_url_attr && is_dangerous_url(&value))
                 || (name == "style" && style_has_script_vector(&value))
-                || (!load_remote
-                    && ((is_url_attr && is_remote_url(&value))
-                        || (name == "srcset" && !value.trim().is_empty())));
+                || remote_blocked;
             drop.then_some(name)
         })
         .collect();
 
     for name in doomed {
         el.remove_attribute(&name);
+    }
+    if let Some(src) = blocked_img_src {
+        let _ = el.set_attribute("data-rm-blocked-src", &src);
     }
 }
 
@@ -942,6 +981,7 @@ mod tests {
         ContextMenuLabels {
             image_open: "Open image in browser",
             image_download: "Download image",
+            image_show: "Show remote image",
             link_open: "Open in browser",
             link_copy: "Copy link",
             selection_copy: "Copy",
@@ -1278,12 +1318,24 @@ mod tests {
              srcset=\"https://tracker.test/2x.gif 2x\">\
              <img src=\"data:image/png;base64,AAAA\">";
         let clean = sanitize_html(html, false);
-        assert!(!clean.contains("tracker.test"));
+        // The remote URL is preserved out-of-band (so the user can reveal it),
+        // and *only* there: it appears exactly once, inside data-rm-blocked-src,
+        // never as a live src/srcset. The srcset variant is dropped entirely.
+        assert!(clean.contains("data-rm-blocked-src=\"https://tracker.test/pixel.gif\""));
         assert!(!clean.contains("srcset"));
-        // Both <img> elements survive; only the remote sources are dropped, and
-        // the inline data: image is untouched.
+        assert!(!clean.contains("2x.gif"));
+        assert_eq!(clean.matches("tracker.test").count(), 1);
+        // Both <img> elements survive; the inline data: image is untouched.
         assert!(clean.contains("data:image/png;base64,AAAA"));
         assert_eq!(clean.matches("<img").count(), 2);
+    }
+
+    #[test]
+    fn sanitize_does_not_stash_blocked_src_when_remote_enabled() {
+        let html = "<img src=\"https://cdn.test/pixel.gif\">";
+        let clean = sanitize_html(html, true);
+        assert!(clean.contains("src=\"https://cdn.test/pixel.gif\""));
+        assert!(!clean.contains("data-rm-blocked-src"));
     }
 
     #[test]
@@ -1355,6 +1407,7 @@ mod tests {
             ContextMenuLabels {
                 image_open: "Open \"image\"",
                 image_download: "Download",
+                image_show: "Show",
                 link_open: "Open",
                 link_copy: "Copy link",
                 selection_copy: "Copy",
@@ -1365,6 +1418,7 @@ mod tests {
         // Labels ride on the body as data-* attributes, HTML-escaped.
         assert!(doc.contains("data-rm-img-open=\"Open &quot;image&quot;\""));
         assert!(doc.contains("data-rm-img-download=\"Download\""));
+        assert!(doc.contains("data-rm-img-show=\"Show\""));
         assert!(doc.contains("data-rm-link-open=\"Open\""));
         assert!(doc.contains("data-rm-link-copy=\"Copy link\""));
         assert!(doc.contains("data-rm-sel-copy=\"Copy\""));

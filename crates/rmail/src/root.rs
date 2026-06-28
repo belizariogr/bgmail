@@ -421,6 +421,7 @@ impl RootView {
             ContextMenuLabels {
                 image_open: Key::CtxOpenImage.tr(language),
                 image_download: Key::CtxDownloadImage.tr(language),
+                image_show: Key::CtxShowImage.tr(language),
                 link_open: Key::CtxOpenLink.tr(language),
                 link_copy: Key::CtxCopyLink.tr(language),
                 selection_copy: Key::CtxCopy.tr(language),

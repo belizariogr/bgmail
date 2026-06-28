@@ -180,6 +180,13 @@
       and `<style>` blocks is also neutralized when blocking, via a blunt textual
       pass (`strip_css_urls`, `url(...)` → `url()`) — deliberately not a CSS
       parser. `<link>`/media/iframes are removed outright regardless.
+      - A blocked remote `<img>` keeps its URL out-of-band in
+        `data-rm-blocked-src` (the `src` is still dropped, so nothing loads) and
+        gets a themed dashed placeholder. The content script then (a) mirrors that
+        URL into the status bar on hover (reusing the `H` hover IPC) and (b) adds
+        a "Show remote image" context-menu item that loads just that one image in
+        place (sets `src` from the stashed URL — pure JS, no host round-trip).
+        Localized label `CtxShowImage` (EN/PT) via the `data-rm-img-show` attr.
 - ✅ Scrollbar fade animation for list/sidebar (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)
