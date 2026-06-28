@@ -3,10 +3,13 @@ name = "rmail"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-default-run = "rmail"
+default-run = "rMail"
 
+# The binary is intentionally named "rMail" (mixed case): on macOS, when running
+# unbundled (e.g. `cargo run`), the application menu title comes from the running
+# process name, so this makes the global menu show "rMail" instead of "rmail".
 [[bin]]
-name = "rmail"
+name = "rMail"
 path = "src/main.rs"
 
 [dependencies]
