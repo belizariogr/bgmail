@@ -16,6 +16,10 @@ repository = "https://github.com/belizario/rMail"
 # UI framework (Zed's GPU-accelerated UI). Pinned to the published, standalone-buildable release.
 gpui = "0.2.2"
 
+# HTML parsing for the e-mail body viewer (same parser stack Zed uses in `html_to_markdown`).
+html5ever = "0.27.0"
+markup5ever_rcdom = "0.3.0"
+
 # Internal crates
 theme = { path = "crates/theme" }
 ui = { path = "crates/ui" }

@@ -13,17 +13,21 @@ pub mod prelude;
 
 mod button;
 mod color;
+mod html;
 mod icon;
 mod label;
 mod list_item;
 mod scrollbar;
+mod selectable_text;
 
 pub use button::*;
 pub use color::*;
+pub use html::*;
 pub use icon::*;
 pub use label::*;
 pub use list_item::*;
 pub use scrollbar::*;
+pub use selectable_text::*;
 
 pub use prelude::{h_flex, v_flex};
 

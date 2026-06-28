@@ -10,3 +10,5 @@ path = "src/ui.rs"
 [dependencies]
 gpui.workspace = true
 theme.workspace = true
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true

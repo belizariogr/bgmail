@@ -46,8 +46,35 @@
       and hidden ~250ms after scrolling stops or when the mouse leaves the strip.
       Tested via pure thumb-geometry + scroll-recency functions. Mock expanded
       (18 messages, 5 accounts, long bodies) so all three panels overflow.
+- ✅ HTML e-mail viewer: `ui::HtmlView` renders a curated subset of HTML
+      (headings, paragraphs, lists, links, bold/italic/underline/strikethrough,
+      inline code, block quotes, `<pre>` blocks, rules and image placeholders)
+      into themed GPUI elements via `StyledText`+`TextRun` runs, using the same
+      parser stack as Zed (`html5ever` + `markup5ever_rcdom`). `Message::body` is
+      now a `MessageBody::{Html, Text}`; the reader renders each kind and the
+      mock mixes both. Tested (whitespace collapse, block counts, run coverage,
+      malformed fallback). `<img>` with a local path (or `file://`) renders the
+      real picture inline (aspect-preserved via `gpui::img`); remote URLs stay as
+      placeholders. The first mock message embeds a sample image
+      (`crates/rmail/assets/tweezers.png`, a real 700×200 PNG); the `<img>`
+      honors an explicit `width` so it overflows the pane. Tests guard that the
+      asset exists, is a decodable PNG/JPEG (not a mislabeled WebP), is wider
+      than the pane and is referenced by the first message.
+- ✅ Horizontal scrollbar: `ui::Scrollbar` generalized to either axis
+      (`vertical`/`horizontal`); the reader pane now overflow-scrolls both axes
+      with vertical + horizontal bars sharing one `ScrollHandle`. Body blocks are
+      direct children of the scroll container (`items_start`) so wide blocks
+      (images, `<pre>`) overflow horizontally and drive the bar, while text blocks
+      stay `w_full` and wrap. The message header is fixed above the scroll area.
+- ✅ Selectable text: `ui::SelectableText` wraps `StyledText` with click-drag
+      selection (pointer→index via the text layout), highlights the range by
+      splitting `TextRun`s, and publishes the selection as an `ActiveTextSelection`
+      global; the reader body is focusable and copies it on `Cmd/Ctrl+C`. Each
+      HTML text/`<pre>` block is independently selectable (cross-block selection
+      is out of scope for the mock). Tested via the run-splitting highlight logic.
 - 🔄 **Measure the startup time** with instrumentation (still informal)
-- ⬜ Scrollbar fade animation (currently instant show/hide); horizontal axis if needed
+- ⬜ Clickable links in the HTML viewer (open via `cx.open_url`); cache parsed DOM
+- ⬜ Cross-block text selection; scrollbar fade animation (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)
 - ⬜ E-mail composition screen/panel (mock)

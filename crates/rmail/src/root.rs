@@ -6,15 +6,18 @@
 
 use std::time::Duration;
 
-use gpui::{AppContext as _, Context, Entity, FontWeight, Hsla, ScrollHandle, Window};
+use gpui::{
+    AppContext as _, ClipboardItem, Context, Entity, FocusHandle, FontWeight, Hsla, KeyDownEvent,
+    MouseButton, ScrollHandle, Window,
+};
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
 use ui::{
-    Button, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize, ListItem,
-    Scrollbar, ScrollbarState,
+    ActiveTextSelection, Button, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label,
+    LabelSize, ListItem, Scrollbar, ScrollbarState,
 };
 
-use crate::data::{self, Account, MailboxKind, Message};
+use crate::data::{self, Account, MailboxKind, Message, MessageBody};
 use crate::locale::{self, ActiveLanguage, Key, Language};
 
 /// Currently displayed screen.
@@ -89,9 +92,13 @@ pub struct RootView {
     /// Scroll handle + scrollbar state for the sidebar.
     sidebar_scroll: ScrollHandle,
     sidebar_scrollbar: Option<Entity<ScrollbarState>>,
-    /// Scroll handle + scrollbar state for the reader pane.
+    /// Scroll handle + scrollbar state for the reader pane (vertical and
+    /// horizontal bars share the same handle).
     reader_scroll: ScrollHandle,
     reader_scrollbar: Option<Entity<ScrollbarState>>,
+    reader_h_scrollbar: Option<Entity<ScrollbarState>>,
+    /// Focus for the reader body, so `Cmd/Ctrl+C` can copy the text selection.
+    reader_focus: Option<FocusHandle>,
 }
 
 impl RootView {
@@ -110,6 +117,8 @@ impl RootView {
             sidebar_scrollbar: None,
             reader_scroll: ScrollHandle::new(),
             reader_scrollbar: None,
+            reader_h_scrollbar: None,
+            reader_focus: None,
         }
     }
 
@@ -120,15 +129,20 @@ impl RootView {
             &mut self.list_scrollbar,
             &mut self.sidebar_scrollbar,
             &mut self.reader_scrollbar,
+            &mut self.reader_h_scrollbar,
         ] {
             slot.get_or_insert_with(|| cx.new(|_| ScrollbarState::new()));
         }
+        self.reader_focus.get_or_insert_with(|| cx.focus_handle());
     }
 
     /// Marks the given scrollbar as just-scrolled and schedules a re-render once
     /// the auto-hide window elapses, so the bar fades out after scrolling stops.
-    fn note_scroll(state: Option<Entity<ScrollbarState>>, cx: &mut Context<Self>) {
-        if let Some(state) = &state {
+    fn note_scroll(
+        states: impl IntoIterator<Item = Option<Entity<ScrollbarState>>>,
+        cx: &mut Context<Self>,
+    ) {
+        for state in states.into_iter().flatten() {
             state.update(cx, |state, _| state.note_scroll());
         }
         cx.notify();
@@ -319,7 +333,7 @@ impl RootView {
             .overflow_y_scroll()
             .track_scroll(&self.sidebar_scroll)
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                Self::note_scroll(this.sidebar_scrollbar.clone(), cx);
+                Self::note_scroll([this.sidebar_scrollbar.clone()], cx);
             }))
             .pt_2();
 
@@ -446,7 +460,7 @@ impl RootView {
             .overflow_y_scroll()
             .track_scroll(&self.list_scroll)
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                Self::note_scroll(this.list_scrollbar.clone(), cx);
+                Self::note_scroll([this.list_scrollbar.clone()], cx);
             }));
 
         for (idx, message) in self.messages.iter().enumerate() {
@@ -570,7 +584,7 @@ impl RootView {
 
     // ----- Reading pane ---------------------------------------------------
 
-    fn render_reader(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_reader(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let bg = colors.background;
         let border = colors.border;
@@ -586,91 +600,143 @@ impl RootView {
             .to_uppercase()
             .to_string();
 
-        let content = v_flex()
+        // Fixed header (does not scroll with the body, so it stays put while the
+        // content scrolls vertically or horizontally).
+        let header = v_flex()
+            .flex_shrink_0()
+            .w_full()
+            .px_6()
+            .py_4()
+            .gap_3()
+            .border_b_1()
+            .border_color(border)
+            .child(
+                Label::new(message.subject.clone())
+                    .size(LabelSize::Large)
+                    .bold(),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .size(px(40.0))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(accent)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(on_accent)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(initial),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                Label::new(message.sender.clone())
+                                    .weight(FontWeight::SEMIBOLD)
+                                    .single_line(),
+                            )
+                            .child(
+                                Label::new(message.sender_email.clone())
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .single_line(),
+                            ),
+                    )
+                    .child(
+                        Label::new(message.time.clone())
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            );
+
+        // Body blocks become *direct* children of the scroll container so that a
+        // wide block (an image or a fixed-width/`<pre>` element) enlarges the
+        // scrollable content width and reveals the horizontal scrollbar. Text
+        // blocks are `w_full` and wrap to the pane; wide blocks hug their content
+        // (the container uses `items_start`, so they aren't stretched).
+        let body_blocks: Vec<gpui::AnyElement> = match &message.body {
+            MessageBody::Html(html) => ui::html_blocks(html, window, cx),
+            MessageBody::Text(text) => vec![div().w_full().child(text.clone()).into_any_element()],
+        };
+
+        let mut scroll_body = v_flex()
             .id("reader")
             .size_full()
+            .items_start()
+            .px_6()
+            .py_4()
+            .gap_2()
+            .text_size(px(14.0))
+            .text_color(colors.text)
+            .overflow_x_scroll()
             .overflow_y_scroll()
             .track_scroll(&self.reader_scroll)
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                Self::note_scroll(this.reader_scrollbar.clone(), cx);
-            }))
-            // Message header.
-            .child(
-                v_flex()
-                    .flex_shrink_0()
-                    .px_6()
-                    .py_4()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(border)
-                    .child(
-                        Label::new(message.subject.clone())
-                            .size(LabelSize::Large)
-                            .bold(),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .items_center()
-                            .child(
-                                div()
-                                    .size(px(40.0))
-                                    .flex_shrink_0()
-                                    .rounded_full()
-                                    .bg(accent)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(on_accent)
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(initial),
-                            )
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(
-                                        Label::new(message.sender.clone())
-                                            .weight(FontWeight::SEMIBOLD)
-                                            .single_line(),
-                                    )
-                                    .child(
-                                        Label::new(message.sender_email.clone())
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted)
-                                            .single_line(),
-                                    ),
-                            )
-                            .child(
-                                Label::new(message.time.clone())
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            ),
-                    ),
-            )
-            // Message body.
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .px_6()
-                    .py_4()
-                    .text_size(px(14.0))
-                    .text_color(colors.text)
-                    .child(message.body.clone()),
-            );
+                Self::note_scroll(
+                    [
+                        this.reader_scrollbar.clone(),
+                        this.reader_h_scrollbar.clone(),
+                    ],
+                    cx,
+                );
+            }));
 
-        let scrollbar = self
+        // Focusable so the body can receive `Cmd/Ctrl+C` and copy the current
+        // text selection (published by the selectable text blocks).
+        if let Some(focus) = self.reader_focus.clone() {
+            scroll_body = scroll_body
+                .track_focus(&focus)
+                .on_mouse_down(MouseButton::Left, {
+                    let focus = focus.clone();
+                    move |_, window, _| window.focus(&focus)
+                })
+                .on_key_down(|event: &KeyDownEvent, _window, cx| {
+                    if event.keystroke.key == "c" && event.keystroke.modifiers.secondary() {
+                        if let Some(text) = cx
+                            .try_global::<ActiveTextSelection>()
+                            .and_then(|s| s.text.clone())
+                        {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        }
+                    }
+                });
+        }
+
+        let scroll_body = scroll_body.children(body_blocks);
+
+        let v_scrollbar = self
             .reader_scrollbar
             .clone()
             .map(|state| Scrollbar::vertical(state, self.reader_scroll.clone()));
+        let h_scrollbar = self
+            .reader_h_scrollbar
+            .clone()
+            .map(|state| Scrollbar::horizontal(state, self.reader_scroll.clone()));
 
-        div()
+        // The scrollbars overlay the scroll region only (not the fixed header),
+        // via a non-scrolling `relative` wrapper.
+        let body_area = div()
             .relative()
             .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(scroll_body)
+            .children(v_scrollbar)
+            .children(h_scrollbar);
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
             .h_full()
             .bg(bg)
-            .child(content)
-            .children(scrollbar)
+            .child(header)
+            .child(body_area)
     }
 
     // ----- Status bar -----------------------------------------------------
@@ -899,7 +965,7 @@ fn settings_row(
 }
 
 impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Make sure the scrollbar state entities exist before the panels render.
         self.ensure_scrollbar_states(cx);
 
@@ -913,7 +979,7 @@ impl Render for RootView {
                     row = row.child(self.render_sidebar(cx));
                 }
                 row.child(self.render_message_list(cx))
-                    .child(self.render_reader(cx))
+                    .child(self.render_reader(window, cx))
                     .into_any_element()
             }
             AppView::Settings => self.render_settings(cx).into_any_element(),

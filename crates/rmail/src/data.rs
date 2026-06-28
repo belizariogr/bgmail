@@ -9,6 +9,15 @@ use gpui::SharedString;
 
 use crate::locale::{Key, Language};
 
+/// Absolute path to the image embedded in the first sample message. It is wider
+/// than the reading pane on purpose, so the reader's horizontal scrollbar can be
+/// exercised. Must be a real raster image GPUI can decode (PNG/JPEG).
+pub const EMBEDDED_IMAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/tweezers.png");
+
+/// Display width (px) requested for the embedded image — larger than the pane so
+/// content overflows horizontally.
+const EMBEDDED_IMAGE_WIDTH: u32 = 700;
+
 /// Semantic kind of a mailbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MailboxKind {
@@ -61,6 +70,14 @@ pub struct Account {
     pub mailboxes: Vec<Mailbox>,
 }
 
+/// The content of a message. Real e-mails arrive either as HTML or plain text,
+/// so the reader must handle both; the viewer renders each appropriately.
+#[derive(Debug, Clone)]
+pub enum MessageBody {
+    Html(SharedString),
+    Text(SharedString),
+}
+
 /// An e-mail message.
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -68,7 +85,7 @@ pub struct Message {
     pub sender_email: SharedString,
     pub subject: SharedString,
     pub preview: SharedString,
-    pub body: SharedString,
+    pub body: MessageBody,
     pub time: SharedString,
     pub unread: bool,
     pub starred: bool,
@@ -305,51 +322,94 @@ pub fn sample_messages() -> Vec<Message> {
     ];
 
     raw.into_iter()
+        .enumerate()
         .map(
-            |(sender, email, subject, preview, unread, starred, attach, time)| Message {
-                sender: sender.into(),
-                sender_email: email.into(),
-                subject: subject.into(),
-                preview: preview.into(),
-                body: format!(
-                    "{preview}\n\n\
-                     This is a sample message body used in the rMail visual mock. The real \
-                     content will be rendered from HTML/text once the domain layer is implemented.\n\n\
-                     For now we keep the text intentionally long so the reading pane overflows \
-                     vertically and we can exercise its scrollbar. Lorem ipsum dolor sit amet, \
-                     consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et \
-                     dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation \
-                     ullamco laboris nisi ut aliquip ex ea commodo consequat.\n\n\
-                     Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore \
-                     eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, \
-                     sunt in culpa qui officia deserunt mollit anim id est laborum.\n\n\
-                     Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium \
-                     doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore \
-                     veritatis et quasi architecto beatae vitae dicta sunt explicabo.\n\n\
-                     Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, \
-                     sed quia consequuntur magni dolores eos qui ratione voluptatem sequi \
-                     nesciunt. Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet.\n\n\
-                     Ut enim ad minima veniam, quis nostrum exercitationem ullam corporis suscipit \
-                     laboriosam, nisi ut aliquid ex ea commodi consequatur. Quis autem vel eum iure \
-                     reprehenderit qui in ea voluptate velit esse quam nihil molestiae consequatur.\n\n\
-                     At vero eos et accusamus et iusto odio dignissimos ducimus qui blanditiis \
-                     praesentium voluptatum deleniti atque corrupti quos dolores et quas molestias \
-                     excepturi sint occaecati cupiditate non provident, similique sunt in culpa.\n\n\
-                     Et harum quidem rerum facilis est et expedita distinctio. Nam libero tempore, \
-                     cum soluta nobis est eligendi optio cumque nihil impedit quo minus id quod \
-                     maxime placeat facere possimus, omnis voluptas assumenda est, omnis dolor.\n\n\
-                     Temporibus autem quibusdam et aut officiis debitis aut rerum necessitatibus \
-                     saepe eveniet ut et voluptates repudiandae sint et molestiae non recusandae.\n\n\
-                     Best regards,\n{sender}"
-                )
-                .into(),
-                time: time.into(),
-                unread,
-                starred,
-                has_attachment: attach,
+            |(idx, (sender, email, subject, preview, unread, starred, attach, time))| {
+                // Mix HTML and plain-text bodies so the reader exercises both
+                // rendering paths (every fourth message is plain text).
+                let body = if idx % 4 == 3 {
+                    MessageBody::Text(text_body(preview, sender))
+                } else {
+                    // The first message embeds a real (local) image; the others
+                    // use a remote URL, which the viewer shows as a placeholder.
+                    let image_src = if idx == 0 {
+                        EMBEDDED_IMAGE_PATH
+                    } else {
+                        "https://example.com/banner.png"
+                    };
+                    MessageBody::Html(html_body(subject, preview, sender, image_src))
+                };
+                Message {
+                    sender: sender.into(),
+                    sender_email: email.into(),
+                    subject: subject.into(),
+                    preview: preview.into(),
+                    body,
+                    time: time.into(),
+                    unread,
+                    starred,
+                    has_attachment: attach,
+                }
             },
         )
         .collect()
+}
+
+/// Builds a rich HTML body that exercises the reader's HTML viewer.
+fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> SharedString {
+    let width = EMBEDDED_IMAGE_WIDTH;
+    format!(
+        "<h2>{subject}</h2>\
+         <p>{preview}</p>\
+         <p>Hi there,</p>\
+         <p>This message is rendered by rMail's built-in <strong>HTML viewer</strong>. \
+         It supports <em>emphasis</em>, <u>underline</u>, <s>strikethrough</s>, \
+         <a href=\"https://example.com\">links</a> and <code>inline code</code>.</p>\
+         <h3>Highlights</h3>\
+         <ul>\
+           <li>Rich text with <strong>bold</strong> and <em>italic</em></li>\
+           <li>Ordered and unordered lists</li>\
+           <li>Block quotes, code blocks and rules</li>\
+         </ul>\
+         <h3>Steps</h3>\
+         <ol>\
+           <li>Open the message</li>\
+           <li>Read the formatted content</li>\
+           <li>Reply when ready</li>\
+         </ol>\
+         <blockquote>\"Simplicity is the ultimate sophistication.\"</blockquote>\
+         <pre>fn main() {{\n    println!(\"Hello, rMail!\");\n}}</pre>\
+         <hr>\
+         <p>Messages can embed images; local ones render inline, remote ones \
+         show as a placeholder:</p>\
+         <p><img src=\"{image_src}\" alt=\"Embedded image\" width=\"{width}\"></p>\
+         <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor \
+         incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud \
+         exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure \
+         dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.</p>\
+         <p>Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt \
+         mollit anim id est laborum. Sed ut perspiciatis unde omnis iste natus error sit \
+         voluptatem accusantium doloremque laudantium, totam rem aperiam.</p>\
+         <p>Best regards,<br><strong>{sender}</strong></p>"
+    )
+    .into()
+}
+
+/// Builds a plain-text body (the other common e-mail format).
+fn text_body(preview: &str, sender: &str) -> SharedString {
+    format!(
+        "{preview}\n\n\
+         This is a plain-text message body. Some senders still deliver mail as plain text, \
+         so the reader must handle it as well as HTML.\n\n\
+         Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor \
+         incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud \
+         exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.\n\n\
+         Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat \
+         nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui \
+         officia deserunt mollit anim id est laborum.\n\n\
+         Best regards,\n{sender}"
+    )
+    .into()
 }
 
 #[cfg(test)]
@@ -372,6 +432,54 @@ mod tests {
         assert!(!messages.is_empty());
         assert!(messages.iter().any(|m| m.unread));
         assert!(messages.iter().any(|m| m.has_attachment));
+    }
+
+    #[test]
+    fn sample_messages_include_html_and_text_bodies() {
+        let messages = sample_messages();
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m.body, MessageBody::Html(_))));
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m.body, MessageBody::Text(_))));
+    }
+
+    #[test]
+    fn first_message_embeds_the_local_image() {
+        let messages = sample_messages();
+        let MessageBody::Html(html) = &messages[0].body else {
+            panic!("first message should be HTML");
+        };
+        assert!(
+            html.contains(EMBEDDED_IMAGE_PATH),
+            "HTML body must reference the embedded image path"
+        );
+        // The image is given an explicit width so it overflows the pane and the
+        // horizontal scrollbar has something to scroll.
+        assert!(html.contains(&format!("width=\"{EMBEDDED_IMAGE_WIDTH}\"")));
+    }
+
+    #[test]
+    fn embedded_image_file_exists_and_is_a_decodable_raster() {
+        let bytes =
+            std::fs::read(EMBEDDED_IMAGE_PATH).expect("embedded image asset must exist on disk");
+        // GPUI decodes via the `image` crate; a WebP-in-.png (or any non-raster)
+        // would silently fail to render. Guard the magic bytes for PNG/JPEG.
+        let is_png = bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        let is_jpeg = bytes.starts_with(&[0xFF, 0xD8, 0xFF]);
+        assert!(
+            is_png || is_jpeg,
+            "embedded image must be a real PNG/JPEG GPUI can decode (got {:?})",
+            &bytes[..bytes.len().min(8)]
+        );
+    }
+
+    #[test]
+    fn embedded_image_is_wider_than_a_typical_reading_pane() {
+        // A reading pane is roughly 520–620px; the image must be wider so the
+        // horizontal scrollbar is actually exercised.
+        assert!(EMBEDDED_IMAGE_WIDTH >= 640);
     }
 
     #[test]

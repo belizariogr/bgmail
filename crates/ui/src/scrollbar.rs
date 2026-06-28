@@ -1,23 +1,23 @@
-//! A compact, draggable vertical scrollbar.
+//! A compact, draggable scrollbar (vertical or horizontal).
 //!
 //! This mirrors the core idea of Zed's `Scrollbar` (a custom [`Element`] that
-//! reads a [`ScrollHandle`] and paints a thumb), but trimmed to what the mock
-//! needs: a single vertical axis, always visible while the content overflows,
-//! with thumb dragging and track clicking. There is no auto-hide animation or
-//! settings integration — adding those would be bloat for now.
+//! reads a [`ScrollHandle`] and paints a thumb), trimmed to what the mock needs:
+//! a single axis, revealed while hovering/scrolling, with thumb dragging and
+//! track clicking.
 //!
 //! Usage: place it as a child of a `relative` container that also holds the
 //! scrollable content tracking the same [`ScrollHandle`]. The element overlays
-//! the container and draws the thumb on the right edge.
+//! the container and draws the thumb on the right edge (vertical) or the bottom
+//! edge (horizontal). A horizontal and a vertical bar can share one handle.
 
 use std::panic::Location;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    point, px, quad, relative, size, App, BorderStyle, Bounds, Corners, CursorStyle, DispatchPhase,
-    Edges, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Position, ScrollHandle, Style, Window,
+    point, px, quad, relative, size, App, Axis, BorderStyle, Bounds, Corners, CursorStyle,
+    DispatchPhase, Edges, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Position, ScrollHandle, Style, Window,
 };
 use theme::ActiveTheme;
 
@@ -61,16 +61,67 @@ impl ScrollbarState {
     }
 }
 
-/// A vertical scrollbar overlay bound to a [`ScrollHandle`].
+/// A scrollbar overlay (vertical or horizontal) bound to a [`ScrollHandle`].
 pub struct Scrollbar {
     state: Entity<ScrollbarState>,
     handle: ScrollHandle,
+    axis: Axis,
 }
 
 impl Scrollbar {
     /// Creates a vertical scrollbar for the given scroll handle and state.
     pub fn vertical(state: Entity<ScrollbarState>, handle: ScrollHandle) -> Self {
-        Self { state, handle }
+        Self {
+            state,
+            handle,
+            axis: Axis::Vertical,
+        }
+    }
+
+    /// Creates a horizontal scrollbar for the given scroll handle and state.
+    pub fn horizontal(state: Entity<ScrollbarState>, handle: ScrollHandle) -> Self {
+        Self {
+            state,
+            handle,
+            axis: Axis::Horizontal,
+        }
+    }
+}
+
+/// Reads the position component along the scrollbar's axis.
+fn main_axis(horizontal: bool, p: Point<Pixels>) -> f32 {
+    if horizontal {
+        f32::from(p.x)
+    } else {
+        f32::from(p.y)
+    }
+}
+
+/// Reads the origin component of `bounds` along the scrollbar's axis.
+fn origin_main(horizontal: bool, bounds: &Bounds<Pixels>) -> f32 {
+    if horizontal {
+        f32::from(bounds.origin.x)
+    } else {
+        f32::from(bounds.origin.y)
+    }
+}
+
+/// Reads the size component of `bounds` along the scrollbar's axis.
+fn size_main(horizontal: bool, bounds: &Bounds<Pixels>) -> f32 {
+    if horizontal {
+        f32::from(bounds.size.width)
+    } else {
+        f32::from(bounds.size.height)
+    }
+}
+
+/// Applies a scroll offset along the scrollbar's axis, preserving the other.
+fn apply_offset(handle: &ScrollHandle, horizontal: bool, offset: f32) {
+    let current = handle.offset();
+    if horizontal {
+        handle.set_offset(point(px(offset), current.y));
+    } else {
+        handle.set_offset(point(current.x, px(offset)));
     }
 }
 
@@ -158,29 +209,69 @@ impl Element for Scrollbar {
         window: &mut Window,
         _cx: &mut App,
     ) -> Self::PrepaintState {
-        let viewport = f32::from(self.handle.bounds().size.height);
-        let max_offset = f32::from(self.handle.max_offset().height);
-        let scroll = -f32::from(self.handle.offset().y);
-        let track_height = f32::from(bounds.size.height);
+        let horizontal = self.axis == Axis::Horizontal;
+        let handle_bounds = self.handle.bounds();
+        let handle_max = self.handle.max_offset();
+        let offset = self.handle.offset();
 
-        let (thumb_top, thumb_height) = thumb_geometry(track_height, viewport, max_offset, scroll)?;
+        let (viewport, max_offset, scroll, track_len) = if horizontal {
+            (
+                f32::from(handle_bounds.size.width),
+                f32::from(handle_max.width),
+                -f32::from(offset.x),
+                f32::from(bounds.size.width),
+            )
+        } else {
+            (
+                f32::from(handle_bounds.size.height),
+                f32::from(handle_max.height),
+                -f32::from(offset.y),
+                f32::from(bounds.size.height),
+            )
+        };
 
-        let track_x = bounds.origin.x + bounds.size.width - WIDTH - PADDING;
-        let track = Bounds::new(
-            point(track_x, bounds.origin.y),
-            size(WIDTH, bounds.size.height),
-        );
-        let thumb = Bounds::new(
-            point(track_x, bounds.origin.y + px(thumb_top)),
-            size(WIDTH, px(thumb_height)),
-        );
-        let hover_region = Bounds::new(
-            point(
-                bounds.origin.x + bounds.size.width - HOVER_WIDTH,
-                bounds.origin.y,
-            ),
-            size(HOVER_WIDTH, bounds.size.height),
-        );
+        let (thumb_pos, thumb_len) = thumb_geometry(track_len, viewport, max_offset, scroll)?;
+
+        let (track, thumb, hover_region) = if horizontal {
+            let track_y = bounds.origin.y + bounds.size.height - WIDTH - PADDING;
+            (
+                Bounds::new(
+                    point(bounds.origin.x, track_y),
+                    size(bounds.size.width, WIDTH),
+                ),
+                Bounds::new(
+                    point(bounds.origin.x + px(thumb_pos), track_y),
+                    size(px(thumb_len), WIDTH),
+                ),
+                Bounds::new(
+                    point(
+                        bounds.origin.x,
+                        bounds.origin.y + bounds.size.height - HOVER_WIDTH,
+                    ),
+                    size(bounds.size.width, HOVER_WIDTH),
+                ),
+            )
+        } else {
+            let track_x = bounds.origin.x + bounds.size.width - WIDTH - PADDING;
+            (
+                Bounds::new(
+                    point(track_x, bounds.origin.y),
+                    size(WIDTH, bounds.size.height),
+                ),
+                Bounds::new(
+                    point(track_x, bounds.origin.y + px(thumb_pos)),
+                    size(WIDTH, px(thumb_len)),
+                ),
+                Bounds::new(
+                    point(
+                        bounds.origin.x + bounds.size.width - HOVER_WIDTH,
+                        bounds.origin.y,
+                    ),
+                    size(HOVER_WIDTH, bounds.size.height),
+                ),
+            )
+        };
+
         let hover_hitbox = window.insert_hitbox(hover_region, HitboxBehavior::Normal);
 
         Some(ScrollbarLayout {
@@ -243,6 +334,7 @@ impl Element for Scrollbar {
         let thumb = layout.thumb;
         let max_offset = layout.max_offset;
         let hover_bounds = layout.hover_hitbox.bounds;
+        let horizontal = self.axis == Axis::Horizontal;
 
         // Start dragging from the thumb, or jump-then-drag from the track.
         window.on_mouse_event({
@@ -253,20 +345,24 @@ impl Element for Scrollbar {
                     return;
                 }
                 if thumb.contains(&event.position) {
-                    let grab = f32::from(event.position.y - thumb.origin.y);
+                    let grab =
+                        main_axis(horizontal, event.position) - origin_main(horizontal, &thumb);
                     state.update(cx, |state, _| state.drag_grab = Some(grab));
                     window.refresh();
                     cx.stop_propagation();
                 } else if track.contains(&event.position) {
-                    let grab = f32::from(thumb.size.height) / 2.0;
-                    let thumb_top = f32::from(event.position.y - track.origin.y) - grab;
+                    let thumb_len = size_main(horizontal, &thumb);
+                    let grab = thumb_len / 2.0;
+                    let thumb_top = main_axis(horizontal, event.position)
+                        - origin_main(horizontal, &track)
+                        - grab;
                     let offset = offset_for_thumb_top(
                         thumb_top,
-                        f32::from(track.size.height),
-                        f32::from(thumb.size.height),
+                        size_main(horizontal, &track),
+                        thumb_len,
                         max_offset,
                     );
-                    handle.set_offset(point(handle.offset().x, px(offset)));
+                    apply_offset(&handle, horizontal, offset);
                     state.update(cx, |state, _| state.drag_grab = Some(grab));
                     window.refresh();
                     cx.stop_propagation();
@@ -294,14 +390,16 @@ impl Element for Scrollbar {
 
                 if let Some(grab) = drag_grab {
                     if event.dragging() {
-                        let thumb_top = f32::from(event.position.y - track.origin.y) - grab;
+                        let thumb_top = main_axis(horizontal, event.position)
+                            - origin_main(horizontal, &track)
+                            - grab;
                         let offset = offset_for_thumb_top(
                             thumb_top,
-                            f32::from(track.size.height),
-                            f32::from(thumb.size.height),
+                            size_main(horizontal, &track),
+                            size_main(horizontal, &thumb),
                             max_offset,
                         );
-                        handle.set_offset(point(handle.offset().x, px(offset)));
+                        apply_offset(&handle, horizontal, offset);
                         window.refresh();
                         cx.stop_propagation();
                         return;
