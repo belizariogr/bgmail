@@ -54,6 +54,7 @@ pub enum Key {
     ThemeLabel,
     ThemeLight,
     ThemeDark,
+    ReaderWhiteBackground,
 
     AppNameLabel,
     VersionLabel,
@@ -122,6 +123,8 @@ impl Key {
             (ThemeLight, P) => "Claro",
             (ThemeDark, E) => "Dark",
             (ThemeDark, P) => "Escuro",
+            (ReaderWhiteBackground, E) => "Keep the email reader on a white background",
+            (ReaderWhiteBackground, P) => "Manter o leitor de e-mail com fundo branco",
 
             (AppNameLabel, E) => "App name",
             (AppNameLabel, P) => "Nome do app",
@@ -235,7 +238,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 37] = [
+    const ALL_KEYS: [Key; 38] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -252,6 +255,7 @@ mod tests {
         Key::ThemeLabel,
         Key::ThemeLight,
         Key::ThemeDark,
+        Key::ReaderWhiteBackground,
         Key::AppNameLabel,
         Key::VersionLabel,
         Key::LanguageLabel,

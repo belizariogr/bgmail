@@ -45,6 +45,10 @@ pub struct Config {
     /// (tracking pixels reveal when/where a message was opened), so the user opts
     /// in. Inline `data:` images are unaffected and always render.
     pub load_remote_images: bool,
+    /// Whether the e-mail reader always uses a white background (with dark text),
+    /// regardless of the app theme. Most e-mails are authored for a light page,
+    /// so this keeps them legible in dark mode. Off by default.
+    pub reader_white_background: bool,
 }
 
 impl Default for Config {
@@ -63,6 +67,7 @@ impl Default for Config {
             sidebar_width: 200.0,
             list_width: 360.0,
             load_remote_images: false,
+            reader_white_background: false,
         }
     }
 }
@@ -139,6 +144,7 @@ mod tests {
             sidebar_width: 200.0,
             list_width: 420.0,
             load_remote_images: true,
+            reader_white_background: true,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
@@ -152,6 +158,13 @@ mod tests {
         assert!(!Config::default().load_remote_images);
         let parsed: Config = serde_json::from_str(r#"{ "sidebar_width": 175.0 }"#).unwrap();
         assert!(!parsed.load_remote_images);
+    }
+
+    #[test]
+    fn reader_white_background_defaults_off() {
+        assert!(!Config::default().reader_white_background);
+        let parsed: Config = serde_json::from_str(r#"{ "sidebar_width": 175.0 }"#).unwrap();
+        assert!(!parsed.reader_white_background);
     }
 
     #[test]
@@ -186,6 +199,7 @@ mod tests {
             sidebar_width: 160.0,
             list_width: 400.0,
             load_remote_images: false,
+            reader_white_background: true,
         };
         save_to(&path, &config).unwrap();
         assert_eq!(load_from(path.clone()), config);

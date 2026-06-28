@@ -20,7 +20,7 @@ use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
 use ui::{
     Button, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize, ListItem,
-    Scrollbar, ScrollbarState, Tooltip,
+    Scrollbar, ScrollbarState, Switch, Tooltip,
 };
 
 use crate::config::{self, Config};
@@ -69,6 +69,14 @@ const ITEM_PADDING: f32 = 4.0;
 const DRAG_THRESHOLD: f32 = 2.0;
 /// Width of the expanded search field in the toolbar, in pixels.
 const SEARCH_FIELD_WIDTH: f32 = 220.0;
+/// Body text color used when the reader is forced onto a white background. A near
+/// black (not pure) for comfortable contrast on white, independent of the theme.
+const READER_LIGHT_TEXT: Hsla = Hsla {
+    h: 0.0,
+    s: 0.0,
+    l: 0.13,
+    a: 1.0,
+};
 /// Width of the collapsed search button (icon only), in pixels.
 const SEARCH_ICON_WIDTH: f32 = 28.0;
 /// When the container that holds the reader's toolbar buttons (compose, action
@@ -272,10 +280,13 @@ pub struct RootView {
     /// the theme colors it was themed with). Used to skip rebuilding the HTML on
     /// every render — e.g. on every frame of an animation — when nothing that
     /// affects the document has changed.
-    last_webview_sig: Option<(usize, Hsla, Hsla, Hsla, Language, bool)>,
+    last_webview_sig: Option<(usize, Hsla, Hsla, Hsla, Language, bool, bool)>,
     /// Whether to load remote content (e.g. images) in e-mail bodies. Persisted;
     /// off by default to block tracking pixels until the user opts in.
     load_remote_images: bool,
+    /// Whether the reader always paints the message body on a white background
+    /// (dark text), ignoring the app theme. Persisted; off by default.
+    reader_white_background: bool,
     /// Whether the currently displayed message contains remote images. Drives
     /// whether the privacy shield appears. Recomputed when the document rebuilds.
     content_has_remote: bool,
@@ -341,6 +352,7 @@ impl RootView {
             email_webview: None,
             last_webview_sig: None,
             load_remote_images: settings.load_remote_images,
+            reader_white_background: settings.reader_white_background,
             content_has_remote: false,
             content_blocked_count: 0,
             unblocked_messages: HashSet::new(),
@@ -380,6 +392,7 @@ impl RootView {
             sidebar_width: f32::from(self.sidebar_width),
             list_width: f32::from(self.list_width),
             load_remote_images: self.load_remote_images,
+            reader_white_background: self.reader_white_background,
         }
     }
 
@@ -428,13 +441,21 @@ impl RootView {
         // unblocked this specific message.
         let load_remote =
             self.load_remote_images || self.unblocked_messages.contains(&self.selected_message);
+        // Force a white page (dark text) when the user keeps the reader light,
+        // regardless of the app theme; otherwise follow the theme.
+        let (body_bg, body_text) = if self.reader_white_background {
+            (gpui::white(), READER_LIGHT_TEXT)
+        } else {
+            (colors.background, colors.text)
+        };
         let signature = (
             self.selected_message,
-            colors.background,
-            colors.text,
+            body_bg,
+            body_text,
             colors.accent,
             language,
             load_remote,
+            self.reader_white_background,
         );
         if self.email_webview.is_some() && self.last_webview_sig == Some(signature) {
             return;
@@ -443,8 +464,8 @@ impl RootView {
 
         let empty_shown: HashSet<String> = HashSet::new();
         let rendered = email_document(
-            colors.background,
-            colors.text,
+            body_bg,
+            body_text,
             colors.accent,
             &self.messages[self.selected_message].body,
             ContextMenuLabels {
@@ -549,6 +570,16 @@ impl RootView {
     fn set_load_remote_images(&mut self, value: bool, cx: &mut Context<Self>) {
         if self.load_remote_images != value {
             self.load_remote_images = value;
+            self.request_save(cx);
+            cx.notify();
+        }
+    }
+
+    /// Toggles whether the reader forces a white background, persisting the
+    /// preference and re-rendering so the open message is re-themed.
+    fn set_reader_white_background(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.reader_white_background != value {
+            self.reader_white_background = value;
             self.request_save(cx);
             cx.notify();
         }
@@ -1756,6 +1787,9 @@ impl RootView {
                 .flex_1()
                 .min_h_0()
                 .min_w_0()
+                // Match the forced-white body so no themed background shows behind
+                // the webview while it loads or at sub-pixel edges.
+                .when(self.reader_white_background, |el| el.bg(gpui::white()))
                 .child(
                     canvas(
                         |_, _, _| {},
@@ -1967,38 +2001,55 @@ impl SettingsView {
                 )
                 .into_any_element()
             }
-            SettingsSection::Appearance => v_flex()
-                .gap_3()
-                .child(Label::new(Key::ThemeLabel.tr(language)).weight(FontWeight::SEMIBOLD))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("theme-light", Key::ThemeLight.tr(language))
-                                .style(if appearance == Appearance::Light {
-                                    ButtonStyle::Filled
-                                } else {
-                                    ButtonStyle::Subtle
-                                })
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    theme::set_theme(theme::Theme::light(), cx);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("theme-dark", Key::ThemeDark.tr(language))
-                                .style(if appearance == Appearance::Dark {
-                                    ButtonStyle::Filled
-                                } else {
-                                    ButtonStyle::Subtle
-                                })
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    theme::set_theme(theme::Theme::dark(), cx);
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .into_any_element(),
+            SettingsSection::Appearance => {
+                let reader_white = self
+                    .root
+                    .upgrade()
+                    .map(|root| root.read(cx).reader_white_background)
+                    .unwrap_or(false);
+                v_flex()
+                    .gap_3()
+                    .child(Label::new(Key::ThemeLabel.tr(language)).weight(FontWeight::SEMIBOLD))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("theme-light", Key::ThemeLight.tr(language))
+                                    .style(if appearance == Appearance::Light {
+                                        ButtonStyle::Filled
+                                    } else {
+                                        ButtonStyle::Subtle
+                                    })
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        theme::set_theme(theme::Theme::light(), cx);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("theme-dark", Key::ThemeDark.tr(language))
+                                    .style(if appearance == Appearance::Dark {
+                                        ButtonStyle::Filled
+                                    } else {
+                                        ButtonStyle::Subtle
+                                    })
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        theme::set_theme(theme::Theme::dark(), cx);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        Switch::new("reader-white-bg", reader_white)
+                            .label(Key::ReaderWhiteBackground.tr(language))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let _ = this.root.update(cx, |root, cx| {
+                                    root.set_reader_white_background(!reader_white, cx);
+                                });
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
+            }
             SettingsSection::Notifications => v_flex()
                 .gap_2()
                 .child(settings_row(
