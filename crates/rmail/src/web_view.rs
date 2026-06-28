@@ -32,6 +32,10 @@ pub struct ContextMenuLabels<'a> {
     pub link_open: &'a str,
     /// Link menu: "Copy link".
     pub link_copy: &'a str,
+    /// Selection menu: "Copy".
+    pub selection_copy: &'a str,
+    /// Keyboard hint shown next to "Copy" (`⌘C` on macOS, `Ctrl+C` elsewhere).
+    pub copy_shortcut: &'a str,
 }
 
 /// Builds a self-contained HTML document for `body`, themed to match the current
@@ -46,7 +50,7 @@ pub fn email_document(
     labels: ContextMenuLabels,
 ) -> String {
     let inner = match body {
-        MessageBody::Html(html) => html.to_string(),
+        MessageBody::Html(html) => sanitize_html(html),
         MessageBody::Text(plain) => format!("<pre class=\"plain\">{}</pre>", escape_html(plain)),
     };
 
@@ -55,13 +59,16 @@ pub fn email_document(
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <style>{css}</style></head>\
          <body data-rm-img-open=\"{img_open}\" data-rm-img-download=\"{img_download}\" \
-         data-rm-link-open=\"{link_open}\" data-rm-link-copy=\"{link_copy}\">\
+         data-rm-link-open=\"{link_open}\" data-rm-link-copy=\"{link_copy}\" \
+         data-rm-sel-copy=\"{sel_copy}\" data-rm-copy-key=\"{copy_key}\">\
          {inner}</body></html>",
         css = document_css(background, text, accent),
         img_open = escape_html(labels.image_open),
         img_download = escape_html(labels.image_download),
         link_open = escape_html(labels.link_open),
         link_copy = escape_html(labels.link_copy),
+        sel_copy = escape_html(labels.selection_copy),
+        copy_key = escape_html(labels.copy_shortcut),
     )
 }
 
@@ -281,10 +288,12 @@ pub enum HostEvent {
 /// 2. Replace the native context menu *for images and links* with our own.
 ///    WebKit's image menu is inert ("Download Image" never reaches the download
 ///    delegate and exposes no URL), and for links we want a consistent, themed
-///    menu. Both route their actions over IPC; on plain text the native menu is
-///    left untouched (so text selection/copy still works). Labels are read from
-///    `<body data-rm-*>` and colors from the document's CSS variables, so both
-///    follow the active language and theme without rebuilding the view.
+///    menu. Both route their actions over IPC. The native menu is suppressed
+///    everywhere — it only offers "Reload", which makes no sense in an e-mail
+///    body — and replaced by our own: a "Copy" menu when text is selected, and
+///    nothing on empty background. Labels are read from `<body data-rm-*>` and
+///    colors from the document's CSS variables, so all menus follow the active
+///    language and theme without rebuilding the view.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const CONTENT_SCRIPT: &str = r#"(function () {
   function send(tag, value) { window.ipc.postMessage(tag + '\n' + (value || '')); }
@@ -321,9 +330,11 @@ const CONTENT_SCRIPT: &str = r#"(function () {
       'box-shadow:0 8px 24px rgba(0,0,0,.28);overflow:hidden;' +
       'font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--rm-fg);' +
       'user-select:none;-webkit-user-select:none;}' +
-      '.rm-ctx button{display:block;width:100%;text-align:left;border:0;background:transparent;' +
-      'color:inherit;padding:7px 12px;border-radius:5px;cursor:default;font:inherit;white-space:nowrap;}' +
-      '.rm-ctx button:hover{background:var(--rm-accent);color:#fff;}';
+      '.rm-ctx button{display:flex;align-items:center;justify-content:space-between;gap:24px;' +
+      'width:100%;text-align:left;border:0;background:transparent;color:inherit;padding:7px 12px;' +
+      'border-radius:5px;cursor:default;font:inherit;white-space:nowrap;}' +
+      '.rm-ctx button:hover{background:var(--rm-accent);color:#fff;}' +
+      '.rm-ctx .rm-hint{margin-left:auto;opacity:.5;font-size:12px;}';
     document.head.appendChild(s);
   }
 
@@ -336,7 +347,15 @@ const CONTENT_SCRIPT: &str = r#"(function () {
     menu.className = 'rm-ctx';
     items.forEach(function (it) {
       var b = document.createElement('button');
-      b.textContent = it.label;
+      var label = document.createElement('span');
+      label.textContent = it.label;
+      b.appendChild(label);
+      if (it.hint) {
+        var hint = document.createElement('span');
+        hint.className = 'rm-hint';
+        hint.textContent = it.hint;
+        b.appendChild(hint);
+      }
       b.addEventListener('click', function () { it.run(); closeMenu(); });
       menu.appendChild(b);
     });
@@ -368,7 +387,18 @@ const CONTENT_SCRIPT: &str = r#"(function () {
       ]);
       return;
     }
-    closeMenu();
+    // Background: never the native menu (it only offers "Reload"). If text is
+    // selected, show our own menu with Copy; otherwise show nothing.
+    e.preventDefault();
+    var selection = window.getSelection();
+    var selectedText = selection ? selection.toString() : '';
+    if (selectedText.length > 0) {
+      openMenu(e.clientX, e.clientY, [
+        { label: data.rmSelCopy || 'Copy', hint: data.rmCopyKey || '', run: function () { send('C', selectedText); } }
+      ]);
+    } else {
+      closeMenu();
+    }
   }, true);
   document.addEventListener('mousedown', function (e) {
     if (menu && !menu.contains(e.target)) closeMenu();
@@ -392,6 +422,49 @@ fn applescript_string(input: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// CSS selector matching every element we refuse to render in an e-mail body.
+///
+/// These are stripped (element *and* their content) before the HTML ever reaches
+/// the OS web engine, so the elements never exist in the DOM:
+/// - **Active/embedding content** (`script`, `object`, `embed`, `applet`):
+///   e-mail must never execute code or load plugins.
+/// - **Frames** (`iframe`, `frame`, `frameset`): our context-menu script is only
+///   injected in the main frame, so a sub-frame would resurface the native menu
+///   (with "Reload") and bypass our handling. Removing them closes that gap.
+/// - **Media** (`video`, `audio`, `source`, `track`): the native media menu
+///   exposes inert "Download/Open" items (same problem as images) and players can
+///   autoplay; a reader has no use for embedded players.
+/// - **Editable/interactive controls** (`input`, `textarea`, `select`, `button`,
+///   `form`): a reader is not a form host, and our selection "Copy" can't read a
+///   field's selection anyway. Stripping them avoids dead/confusing affordances.
+const DISALLOWED_ELEMENTS: &str = "script, object, embed, applet, \
+     iframe, frame, frameset, \
+     video, audio, source, track, \
+     input, textarea, select, button, form";
+
+/// Removes the elements we never render (see [`DISALLOWED_ELEMENTS`]) and strips
+/// `contenteditable` from any surviving element, using a real HTML parser so that
+/// malformed markup can't smuggle them through (as a regex pass could). Everything
+/// else — including inline styles — is preserved verbatim.
+///
+/// If rewriting fails for any reason we drop the body entirely rather than risk
+/// rendering unsanitized content.
+fn sanitize_html(html: &str) -> String {
+    use lol_html::{element, rewrite_str, RewriteStrSettings};
+
+    let settings = RewriteStrSettings::new()
+        .append_element_content_handler(element!(DISALLOWED_ELEMENTS, |el| {
+            el.remove();
+            Ok(())
+        }))
+        .append_element_content_handler(element!("[contenteditable]", |el| {
+            el.remove_attribute("contenteditable");
+            Ok(())
+        }));
+
+    rewrite_str(html, settings).unwrap_or_default()
 }
 
 /// Escapes the characters that are significant in HTML text content.
@@ -681,6 +754,8 @@ mod tests {
             image_download: "Download image",
             link_open: "Open in browser",
             link_copy: "Copy link",
+            selection_copy: "Copy",
+            copy_shortcut: "\u{2318}C",
         }
     }
 
@@ -856,6 +931,80 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_strips_disallowed_elements_and_their_content() {
+        let dirty = "<p>keep</p>\
+             <script>alert(1)</script>\
+             <iframe src=\"https://evil.test\"></iframe>\
+             <video controls><source src=\"x.mp4\"></video>\
+             <audio src=\"x.mp3\"></audio>\
+             <object data=\"x.swf\"></object>\
+             <embed src=\"x.pdf\">\
+             <form><input name=\"a\"><textarea>t</textarea>\
+             <select><option>o</option></select><button>b</button></form>\
+             <p>tail</p>";
+        let clean = sanitize_html(dirty);
+
+        assert!(clean.contains("<p>keep</p>"));
+        assert!(clean.contains("<p>tail</p>"));
+        for needle in [
+            "<script",
+            "alert(1)",
+            "<iframe",
+            "<video",
+            "<source",
+            "<audio",
+            "<object",
+            "<embed",
+            "<form",
+            "<input",
+            "<textarea",
+            "<select",
+            "<button",
+        ] {
+            assert!(
+                !clean.contains(needle),
+                "expected `{needle}` to be stripped, got: {clean}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_strips_contenteditable_but_keeps_the_element() {
+        let clean = sanitize_html("<div contenteditable=\"true\">text</div>");
+        assert!(clean.contains("<div"));
+        assert!(clean.contains("text"));
+        assert!(!clean.contains("contenteditable"));
+    }
+
+    #[test]
+    fn sanitize_preserves_safe_markup_and_inline_styles() {
+        let html = "<p style=\"color:red\">Hi <a href=\"https://ex.test\">link</a> \
+             <img src=\"data:image/png;base64,AAAA\"></p>";
+        let clean = sanitize_html(html);
+        assert!(clean.contains("style=\"color:red\""));
+        assert!(clean.contains("<a href=\"https://ex.test\">link</a>"));
+        assert!(clean.contains("<img src=\"data:image/png;base64,AAAA\">"));
+    }
+
+    #[test]
+    fn document_strips_disallowed_elements_from_html_body() {
+        let body = MessageBody::Html(
+            "<p>safe</p><iframe src=\"x\"></iframe><input><video></video>".into(),
+        );
+        let doc = email_document(
+            hsla(0.0, 0.0, 0.1, 1.0),
+            hsla(0.0, 0.0, 0.9, 1.0),
+            hsla(0.6, 0.7, 0.5, 1.0),
+            &body,
+            labels(),
+        );
+        assert!(doc.contains("<p>safe</p>"));
+        assert!(!doc.contains("<iframe"));
+        assert!(!doc.contains("<input"));
+        assert!(!doc.contains("<video"));
+    }
+
+    #[test]
     fn document_embeds_escaped_menu_labels() {
         let doc = email_document(
             hsla(0.0, 0.0, 0.1, 1.0),
@@ -866,13 +1015,17 @@ mod tests {
                 image_open: "Open \"image\"",
                 image_download: "Download",
                 link_open: "Open",
-                link_copy: "Copy",
+                link_copy: "Copy link",
+                selection_copy: "Copy",
+                copy_shortcut: "\u{2318}C",
             },
         );
         // Labels ride on the body as data-* attributes, HTML-escaped.
         assert!(doc.contains("data-rm-img-open=\"Open &quot;image&quot;\""));
         assert!(doc.contains("data-rm-img-download=\"Download\""));
         assert!(doc.contains("data-rm-link-open=\"Open\""));
-        assert!(doc.contains("data-rm-link-copy=\"Copy\""));
+        assert!(doc.contains("data-rm-link-copy=\"Copy link\""));
+        assert!(doc.contains("data-rm-sel-copy=\"Copy\""));
+        assert!(doc.contains("data-rm-copy-key=\"\u{2318}C\""));
     }
 }

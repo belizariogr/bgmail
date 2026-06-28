@@ -62,9 +62,10 @@ const ITEM_INDENT: f32 = 16.0;
 /// while the hover/selection highlight keeps filling the full row.
 const ITEM_PADDING: f32 = 4.0;
 /// Distance (pixels) the cursor must travel after a toolbar mouse-down before it
-/// counts as a window drag. Below this it's treated as a click, so clicking the
-/// title bar never accidentally starts a move (which would un-maximize).
-const DRAG_THRESHOLD: f32 = 6.0;
+/// counts as a window drag. Kept small so dragging feels immediate (a maximized
+/// window restores almost at once), while still large enough that a plain click —
+/// which barely moves — never starts a move / un-maximizes.
+const DRAG_THRESHOLD: f32 = 2.0;
 /// Width of the expanded search field in the toolbar, in pixels.
 const SEARCH_FIELD_WIDTH: f32 = 220.0;
 /// Width of the collapsed search button (icon only), in pixels.
@@ -240,6 +241,11 @@ pub struct RootView {
     /// Cursor position captured on the toolbar mouse-down, used as the origin for
     /// the drag threshold.
     drag_start: Point<Pixels>,
+    /// Window top-left captured on the toolbar mouse-down. If the window's origin
+    /// later differs, the window has actually moved (e.g. a slow native title-bar
+    /// drag where the cursor barely moves relative to the window), which also
+    /// triggers the drag/un-maximize even if the cursor threshold wasn't reached.
+    drag_anchor: Point<Pixels>,
     /// Destination URL of the link currently under the cursor in the reader's
     /// webview (empty when none). Shown centered in the status bar.
     hovered_link: String,
@@ -299,6 +305,7 @@ impl RootView {
             persist_ready: false,
             should_move: false,
             drag_start: point(px(0.0), px(0.0)),
+            drag_anchor: point(px(0.0), px(0.0)),
             hovered_link: String::new(),
             settings_window: None,
             list_scroll: ScrollHandle::new(),
@@ -405,6 +412,13 @@ impl RootView {
                 image_download: Key::CtxDownloadImage.tr(language),
                 link_open: Key::CtxOpenLink.tr(language),
                 link_copy: Key::CtxCopyLink.tr(language),
+                selection_copy: Key::CtxCopy.tr(language),
+                // ⌘ (U+2318) is the macOS Command symbol; Ctrl elsewhere.
+                copy_shortcut: if cfg!(target_os = "macos") {
+                    "\u{2318}C"
+                } else {
+                    "Ctrl+C"
+                },
             },
         );
         let notify_body = Key::ImageDownloaded.tr(language).to_string();
@@ -774,6 +788,7 @@ impl RootView {
                     } else {
                         this.should_move = true;
                         this.drag_start = event.position;
+                        this.drag_anchor = window.bounds().origin;
                     }
                 }),
             )
@@ -786,11 +801,15 @@ impl RootView {
                 if !this.should_move {
                     return;
                 }
-                // Only begin the drag once the cursor has clearly moved, so a plain
-                // click (with minor jitter) doesn't start a move / un-maximize.
+                // Begin the drag (and un-maximize) once either the cursor has
+                // clearly moved or the window itself has moved from where it was at
+                // mouse-down. The latter catches slow native title-bar drags, where
+                // the window keeps up with the cursor so the cursor delta stays
+                // near zero. A plain click moves neither, so it never triggers.
                 let dx = f32::from(event.position.x - this.drag_start.x).abs();
                 let dy = f32::from(event.position.y - this.drag_start.y).abs();
-                if dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD {
+                let window_moved = window.bounds().origin != this.drag_anchor;
+                if window_moved || dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD {
                     this.should_move = false;
                     crate::window_drag::start_window_drag(window, this.maximized, this.window_size);
                 }

@@ -25,6 +25,11 @@ async-channel = "2"
 serde.workspace = true
 serde_json.workspace = true
 
+# Sanitizes e-mail HTML before it reaches the OS web engine: a real streaming
+# parser (not regex) so malformed markup can't smuggle through the elements a
+# reader must never render (scripts, frames, media, editable controls).
+lol_html = "3.0.0"
+
 # The embedded webview is only available where wry has a native backend we
 # support (macOS/Windows). Other targets fall back to a plain-text reader.
 # `open` launches links from message bodies in the user's default browser

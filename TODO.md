@@ -142,6 +142,17 @@
         so a live language switch updates it.
       The navigation handler is deliberately left untouched so the initial
       `data:`/`about:` document load isn't intercepted.
+- ✅ Sanitize the e-mail HTML before it reaches the web engine (`sanitize_html`
+      in `web_view.rs`, applied to `MessageBody::Html`). Uses `lol_html` (a real
+      HTML rewriter, not regex, so malformed markup can't smuggle tags through) to
+      strip elements a reader must never render — and that our context-menu story
+      couldn't cover: scripts/plugins (`script`/`object`/`embed`/`applet`), frames
+      (`iframe`/`frame`/`frameset` — our menu script is main-frame-only, so a
+      sub-frame would resurface the native "Reload" menu), media
+      (`video`/`audio`/`source`/`track`), and editable/interactive controls
+      (`input`/`textarea`/`select`/`button`/`form`, plus the `contenteditable`
+      attribute). Everything else — including inline styles — is preserved
+      verbatim; a rewrite failure drops the body rather than render unsanitized.
 - ✅ Scrollbar fade animation for list/sidebar (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)
