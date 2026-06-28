@@ -20,6 +20,11 @@ ui.workspace = true
 # GPUI view, which drains them asynchronously to update the status bar.
 async-channel = "2"
 
+# Persisted settings (window/column sizes) serialized as JSON under
+# ~/.config/rMail/config.json on every platform.
+serde.workspace = true
+serde_json.workspace = true
+
 # The embedded webview is only available where wry has a native backend we
 # support (macOS/Windows). Other targets fall back to a plain-text reader.
 # `open` launches links from message bodies in the user's default browser

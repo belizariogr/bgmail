@@ -5,6 +5,7 @@
 //! The domain layer will be added in later stages (see `docs/PLANEJAMENTO.md` and
 //! `TODO.md`).
 
+mod config;
 mod data;
 mod locale;
 mod root;
@@ -46,7 +47,15 @@ fn main() {
             cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
             cx.set_menus(app_menus());
 
-            let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(1100.0), px(720.0)));
+            // Restore the persisted layout (window/column sizes), clamped to the
+            // window's minimum so a stale or tiny config can't open an unusable window.
+            let settings = config::load();
+            let win_width = settings.window_width.max(800.0);
+            let win_height = settings.window_height.max(480.0);
+            let bounds = Bounds::new(
+                point(px(settings.window_x), px(settings.window_y)),
+                size(px(win_width), px(win_height)),
+            );
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -58,7 +67,30 @@ fn main() {
                     }),
                     ..Default::default()
                 },
-                |_window, cx| cx.new(|_cx| RootView::new()),
+                |window, cx| {
+                    let view = cx.new(|cx| {
+                        // Flush the latest layout synchronously when the app quits
+                        // (e.g. Cmd+Q), so a move/resize made right before quitting
+                        // — within the `request_save` debounce window — isn't lost.
+                        cx.on_app_quit(|view: &mut RootView, _cx| {
+                            view.persist_now();
+                            async {}
+                        })
+                        .detach();
+                        RootView::new(settings)
+                    });
+                    // Closing the window (e.g. the macOS traffic-light button)
+                    // doesn't necessarily quit the app, so flush the layout here
+                    // too — not just on app quit.
+                    let weak = view.downgrade();
+                    window.on_window_should_close(cx, move |_window, cx| {
+                        if let Some(view) = weak.upgrade() {
+                            view.update(cx, |view, _| view.persist_now());
+                        }
+                        true
+                    });
+                    view
+                },
             )
             .expect("failed to open the main window");
 

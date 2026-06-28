@@ -92,6 +92,16 @@
       HTML escaping, color formatting, document assembly (scheme + body),
       dependency-free base64 (RFC 4648 vectors), the data URI shape and the image
       magic bytes (guards against a mislabeled WebP).
+- ✅ Rudimentary persisted settings (`crates/rmail/src/config.rs`): main window
+      position + size (from `window_bounds`, windowed-only so maximize/fullscreen
+      doesn't clobber it) and the two resizable column widths (sidebar default
+      200px, min 150px; list), stored as JSON at
+      `~/.config/rMail/config.json` on every platform (fixed path; home resolved
+      via `HOME`/`USERPROFILE`, no extra dep). Loaded at startup (clamped to the
+      window/column minimums); saved best-effort on a background thread, debounced
+      (~500ms, token-guarded) so a live window/column drag only writes once it
+      settles. Tested: JSON round-trip, partial/invalid configs falling back to
+      defaults, on-disk save/load round-trip and the fixed path shape.
 - 🔄 **Measure the startup time** with instrumentation (still informal)
 - ✅ Clickable links / external navigation policy for the webview (open in the
       system browser instead of inside the embedded view)

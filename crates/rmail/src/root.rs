@@ -10,10 +10,10 @@ use std::time::Duration;
 use std::f32::consts::FRAC_PI_2;
 
 use gpui::{
-    canvas, ease_in_out, radians, size, svg, Animation, AnimationExt as _, AppContext as _, Bounds,
-    Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
-    ScrollHandle, Svg, TitlebarOptions, Transformation, Window, WindowBounds, WindowControlArea,
-    WindowHandle, WindowOptions,
+    canvas, ease_in_out, point, radians, size, svg, Animation, AnimationExt as _, AppContext as _,
+    Bounds, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    Point, ScrollHandle, Size, Svg, TitlebarOptions, Transformation, Window, WindowBounds,
+    WindowControlArea, WindowHandle, WindowOptions,
 };
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
@@ -22,6 +22,7 @@ use ui::{
     Scrollbar, ScrollbarState,
 };
 
+use crate::config::{self, Config};
 use crate::data::{self, Account, GlobalMailbox, MailboxKind, Message, MessageBody};
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::web_view::{email_document, EmailWebView, WEBVIEW_SUPPORTED};
@@ -205,6 +206,14 @@ pub struct RootView {
     /// Live window width, tracked at render time. Used to decide toolbar layout
     /// (e.g. collapsing the search field into an icon when space is tight).
     window_width: Pixels,
+    /// Last observed windowed (non-maximized) position and size of the main
+    /// window, tracked at render time and persisted so it reopens where/how the
+    /// user left it.
+    window_origin: Point<Pixels>,
+    window_size: Size<Pixels>,
+    /// Monotonic counter handing out tokens for the debounced settings save, so a
+    /// burst of changes (e.g. a live drag) only writes the file once it settles.
+    save_seq: u64,
     /// Set on mouse-down in the draggable toolbar; the actual window move only
     /// starts on the first subsequent mouse-move, so plain clicks on toolbar
     /// buttons still register.
@@ -234,7 +243,16 @@ pub struct RootView {
 }
 
 impl RootView {
-    pub fn new() -> Self {
+    pub fn new(settings: Config) -> Self {
+        // Restore persisted column widths, clamped to their minimums so a stale
+        // config can't produce an unusable layout.
+        let sidebar_width = px(settings.sidebar_width.max(SIDEBAR_MIN_WIDTH));
+        let list_width = px(settings.list_width.max(LIST_MIN_WIDTH));
+        let window_origin = point(px(settings.window_x), px(settings.window_y));
+        let window_size = size(
+            px(settings.window_width.max(800.0)),
+            px(settings.window_height.max(480.0)),
+        );
         Self {
             accounts: data::sample_accounts(),
             messages: data::sample_messages(),
@@ -244,10 +262,13 @@ impl RootView {
             fold_seq: 0,
             selected_message: 3,
             show_sidebar: true,
-            sidebar_width: px(SIDEBAR_MIN_WIDTH),
-            list_width: px(360.0),
+            sidebar_width,
+            list_width,
             narrow: false,
-            window_width: px(1100.0),
+            window_width: px(settings.window_width),
+            window_origin,
+            window_size,
+            save_seq: 0,
             should_move: false,
             hovered_link: String::new(),
             settings_window: None,
@@ -258,6 +279,44 @@ impl RootView {
             email_webview: None,
             last_webview_sig: None,
         }
+    }
+
+    /// Writes the current settings to disk immediately (synchronous, best-effort).
+    /// Used to flush on close, bypassing the debounced [`Self::request_save`].
+    pub(crate) fn persist_now(&self) {
+        config::save(&self.current_config());
+    }
+
+    /// Snapshot of the persisted settings, taken from the live layout state.
+    fn current_config(&self) -> Config {
+        Config {
+            window_x: f32::from(self.window_origin.x),
+            window_y: f32::from(self.window_origin.y),
+            window_width: f32::from(self.window_size.width),
+            window_height: f32::from(self.window_size.height),
+            sidebar_width: f32::from(self.sidebar_width),
+            list_width: f32::from(self.list_width),
+        }
+    }
+
+    /// Schedules a debounced settings write. Each call invalidates any pending
+    /// save, so a stream of changes (a live window/column resize) only hits disk
+    /// once it has been quiet for a short moment. The write runs on a background
+    /// thread and is best-effort.
+    fn request_save(&mut self, cx: &mut Context<Self>) {
+        self.save_seq += 1;
+        let token = self.save_seq;
+        let timer = cx.background_executor().timer(Duration::from_millis(500));
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, _| {
+                // Skip if a newer change has since scheduled its own save.
+                if this.save_seq == token {
+                    config::save(&this.current_config());
+                }
+            });
+        })
+        .detach();
     }
 
     /// Lazily creates the scrollbar state entities (needs an app context, which
@@ -1673,6 +1732,17 @@ impl Render for RootView {
         // Reconcile responsive state with the live window width before laying out.
         self.sync_layout(window.viewport_size().width);
 
+        // Persist (debounced) whenever the window has been moved or resized. Only
+        // windowed bounds are tracked, so maximizing/fullscreen doesn't clobber
+        // the position/size we restore to.
+        if let WindowBounds::Windowed(bounds) = window.window_bounds() {
+            if bounds.origin != self.window_origin || bounds.size != self.window_size {
+                self.window_origin = bounds.origin;
+                self.window_size = bounds.size;
+                self.request_save(cx);
+            }
+        }
+
         let docked_sidebar = self.show_sidebar && !self.narrow;
         let floating_sidebar = self.show_sidebar && self.narrow;
 
@@ -1686,6 +1756,7 @@ impl Render for RootView {
                     let total = event.bounds.size.width;
                     let x = event.event.position.x - event.bounds.left();
                     this.resize(handle, x, total);
+                    this.request_save(cx);
                     cx.notify();
                 }),
             );
@@ -1749,12 +1820,12 @@ mod tests {
 
     #[test]
     fn sidebar_starts_visible() {
-        assert!(RootView::new().show_sidebar);
+        assert!(RootView::new(Config::default()).show_sidebar);
     }
 
     #[test]
     fn toggle_sidebar_flips_visibility() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         view.toggle_sidebar();
         assert!(!view.show_sidebar);
         view.toggle_sidebar();
@@ -1763,7 +1834,7 @@ mod tests {
 
     #[test]
     fn default_selection_is_global_inbox() {
-        let view = RootView::new();
+        let view = RootView::new(Config::default());
         assert_eq!(
             view.selected_mailbox,
             Selection::Global(GlobalMailbox::Inbox)
@@ -1772,7 +1843,7 @@ mod tests {
 
     #[test]
     fn global_inbox_sums_every_account_inbox() {
-        let view = RootView::new();
+        let view = RootView::new(Config::default());
         let expected: usize = view
             .accounts
             .iter()
@@ -1786,21 +1857,21 @@ mod tests {
 
     #[test]
     fn global_flagged_counts_starred_messages() {
-        let view = RootView::new();
+        let view = RootView::new(Config::default());
         let starred = view.messages.iter().filter(|m| m.starred).count();
         assert_eq!(view.global_unread(GlobalMailbox::Flagged), starred);
     }
 
     #[test]
     fn global_drafts_and_sent_have_no_unread() {
-        let view = RootView::new();
+        let view = RootView::new(Config::default());
         assert_eq!(view.global_unread(GlobalMailbox::Drafts), 0);
         assert_eq!(view.global_unread(GlobalMailbox::Sent), 0);
     }
 
     #[test]
     fn accounts_start_expanded() {
-        let view = RootView::new();
+        let view = RootView::new(Config::default());
         for idx in 0..view.accounts.len() {
             assert!(!view.is_account_collapsed(idx));
         }
@@ -1808,7 +1879,7 @@ mod tests {
 
     #[test]
     fn toggle_account_collapses_and_expands() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         let collapsing = view.toggle_account(1);
         assert!(collapsing.collapsing);
         assert!(view.is_account_collapsed(1));
@@ -1821,7 +1892,7 @@ mod tests {
 
     #[test]
     fn toggle_account_hands_out_unique_tokens() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         let first = view.toggle_account(0).token;
         let second = view.toggle_account(0).token;
         assert_ne!(first, second);
@@ -1829,7 +1900,7 @@ mod tests {
 
     #[test]
     fn collapsing_account_stays_visible_until_finalized() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         let anim = view.toggle_account(2);
         // Mid-collapse the list is still rendered so it can animate out.
         assert!(view.is_account_collapsed(2));
@@ -1841,7 +1912,7 @@ mod tests {
 
     #[test]
     fn clear_fold_ignores_stale_token() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         let stale = view.toggle_account(0).token;
         // A second toggle supersedes the first, bumping the token.
         let _current = view.toggle_account(0);
@@ -1852,13 +1923,13 @@ mod tests {
 
     #[test]
     fn expanded_account_is_visible_without_animation() {
-        let view = RootView::new();
+        let view = RootView::new(Config::default());
         assert!(view.account_list_visible(0));
     }
 
     #[test]
     fn narrow_window_auto_collapses_sidebar() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         view.sync_layout(px(800.0));
         assert!(view.narrow);
         assert!(!view.show_sidebar);
@@ -1866,7 +1937,7 @@ mod tests {
 
     #[test]
     fn resizing_while_narrow_recollapses_floating_sidebar() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         view.sync_layout(px(850.0));
         // User reopens the sidebar as a floating overlay.
         view.show_sidebar = true;
@@ -1878,7 +1949,7 @@ mod tests {
 
     #[test]
     fn floating_sidebar_stays_open_without_resize() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         view.sync_layout(px(850.0));
         view.show_sidebar = true;
         // Re-render at the same width (e.g. from an unrelated notify) keeps it.
@@ -1888,7 +1959,7 @@ mod tests {
 
     #[test]
     fn widening_window_restores_sidebar() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         view.sync_layout(px(800.0));
         assert!(!view.show_sidebar);
         view.sync_layout(px(1200.0));
@@ -1898,7 +1969,7 @@ mod tests {
 
     #[test]
     fn resize_respects_sidebar_minimum() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         view.sync_layout(px(1400.0));
         view.resize(ResizeHandle::Sidebar, px(50.0), px(1400.0));
         assert_eq!(view.sidebar_width, px(SIDEBAR_MIN_WIDTH));
@@ -1906,7 +1977,7 @@ mod tests {
 
     #[test]
     fn resize_respects_list_minimum() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         view.sync_layout(px(1400.0));
         // Drag the list/reader divider far to the left (x near the sidebar edge).
         view.resize(
@@ -1920,7 +1991,7 @@ mod tests {
     #[test]
     fn resize_keeps_reader_minimum() {
         let total = px(1400.0);
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         view.sync_layout(total);
         // Try to make the list fill the whole row; the reader floor must hold.
         view.resize(ResizeHandle::List, total, total);
@@ -1930,7 +2001,7 @@ mod tests {
 
     #[test]
     fn search_collapses_when_reader_segment_is_narrow() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         // Docked layout: reader segment = 1100 - 250 - 360 = 490, below the
         // collapse threshold, so the search field turns into an icon.
         view.sync_layout(px(1100.0));
@@ -1939,7 +2010,7 @@ mod tests {
 
     #[test]
     fn search_expands_on_wide_reader_segment() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         // Wide docked layout leaves the reader segment well above the threshold.
         view.sync_layout(px(1600.0));
         assert!(!view.search_is_compact());
@@ -1947,14 +2018,14 @@ mod tests {
 
     #[test]
     fn all_action_groups_show_on_wide_window() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         view.sync_layout(px(1600.0));
         assert_eq!(view.visible_action_groups(), 3);
     }
 
     #[test]
     fn action_groups_drop_as_reader_segment_shrinks() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         view.narrow = false;
         view.show_sidebar = true;
         view.sidebar_width = px(SIDEBAR_MIN_WIDTH);
@@ -1971,7 +2042,7 @@ mod tests {
 
     #[test]
     fn action_groups_vanish_but_search_survives_when_tiny() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         view.narrow = true;
         view.show_sidebar = false;
         // Artificially tiny reader segment: every action group is dropped.
@@ -1983,7 +2054,7 @@ mod tests {
 
     #[test]
     fn sync_layout_shrinks_columns_to_fit() {
-        let mut view = RootView::new();
+        let mut view = RootView::new(Config::default());
         // Wide (docked) window so the sidebar keeps its column; an oversized list
         // must shrink to preserve the reader's minimum width.
         view.list_width = px(900.0);

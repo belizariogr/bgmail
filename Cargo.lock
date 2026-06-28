@@ -4973,6 +4973,8 @@ dependencies = [
  "objc",
  "open",
  "raw-window-handle",
+ "serde",
+ "serde_json",
  "theme",
  "ui",
  "wry",
