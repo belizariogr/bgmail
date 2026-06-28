@@ -116,6 +116,28 @@
       devtools by default in debug builds, which added "Inspect Element" to the
       context menu and, once opened, attached an inspector that resized the child
       WKWebView so it overflowed the reader pane. The body now stays sandboxed.
+- ✅ Custom image context menu in the webview, because WebKit's native image
+      menu items can't be wired without subclassing `WKWebView` (`willOpenMenu`,
+      Obj-C — disallowed here): "Download Image" never reaches the download
+      delegate and exposes no URL (confirmed; Apple/wry limitation). An injected
+      content script replaces the context menu *for images only* (the native menu
+      stays for text/links), reading localized labels from `<body data-rm-*>` and
+      colors from the document's CSS variables, so it follows the language/theme
+      without rebuilding the view. Actions route over a small namespaced IPC
+      protocol (`H`/`O`/`D` → hover / open / download; `parse_ipc_message`):
+      - "Open image in browser": http/https/mailto open in the system browser;
+        inline `data:` images are base64-decoded to a temp file and handed to the
+        OS default viewer (`decode_data_uri`/`extension_for_mime`/`base64_decode`,
+        all dependency-free and unit-tested).
+      - "Download image": saves straight to `~/Downloads` (no dialog) with a
+        non-clobbering ` (n)` name (`downloads_dir`/`unique_download_path`), then
+        fires a desktop notification. macOS uses `osascript` (works for the
+        unbundled `cargo run` binary, unlike `UNUserNotificationCenter`);
+        `applescript_string` safely quotes the text. Windows notification backend
+        is still TODO. Localized notification text is shared via `set_notify_text`
+        so a live language switch updates it.
+      The navigation handler is deliberately left untouched so the initial
+      `data:`/`about:` document load isn't intercepted.
 - ✅ Scrollbar fade animation for list/sidebar (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)

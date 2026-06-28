@@ -25,7 +25,7 @@ use ui::{
 use crate::config::{self, Config};
 use crate::data::{self, Account, GlobalMailbox, MailboxKind, Message, MessageBody};
 use crate::locale::{self, ActiveLanguage, Key, Language};
-use crate::web_view::{email_document, EmailWebView, WEBVIEW_SUPPORTED};
+use crate::web_view::{email_document, EmailWebView, ImageMenuLabels, WEBVIEW_SUPPORTED};
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
 const SIDEBAR_MIN_WIDTH: f32 = 150.0;
@@ -259,7 +259,7 @@ pub struct RootView {
     /// the theme colors it was themed with). Used to skip rebuilding the HTML on
     /// every render — e.g. on every frame of an animation — when nothing that
     /// affects the document has changed.
-    last_webview_sig: Option<(usize, Hsla, Hsla, Hsla)>,
+    last_webview_sig: Option<(usize, Hsla, Hsla, Hsla, Language)>,
 }
 
 impl RootView {
@@ -376,14 +376,17 @@ impl RootView {
     /// on screen so it doesn't float over other views.
     fn sync_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let colors = cx.theme().colors();
-        // The document depends only on the selected message and the theme colors.
-        // Re-rendering happens on every animation frame, so skip the (potentially
-        // large) HTML rebuild + diff entirely when none of those inputs changed.
+        let language = cx.language();
+        // The document depends only on the selected message, the theme colors and
+        // the language (which localizes the image context menu). Re-rendering
+        // happens on every animation frame, so skip the (potentially large) HTML
+        // rebuild + diff entirely when none of those inputs changed.
         let signature = (
             self.selected_message,
             colors.background,
             colors.text,
             colors.accent,
+            language,
         );
         if self.email_webview.is_some() && self.last_webview_sig == Some(signature) {
             return;
@@ -395,16 +398,24 @@ impl RootView {
             colors.text,
             colors.accent,
             &self.messages[self.selected_message].body,
+            ImageMenuLabels {
+                open: Key::CtxOpenImage.tr(language),
+                download: Key::CtxDownloadImage.tr(language),
+            },
         );
+        let notify_body = Key::ImageDownloaded.tr(language).to_string();
 
         match &mut self.email_webview {
-            Some(webview) => webview.set_html(&document),
+            Some(webview) => {
+                webview.set_html(&document);
+                webview.set_notify_text(notify_body);
+            }
             None => {
                 // The webview's IPC callback can fire from any thread, so we hand
                 // hovered-link URLs off through a channel and drain them on the
                 // GPUI foreground to update the status bar.
                 let (tx, rx) = async_channel::unbounded::<String>();
-                self.email_webview = EmailWebView::new(window, &document, tx);
+                self.email_webview = EmailWebView::new(window, &document, tx, notify_body);
                 cx.spawn(async move |this, cx| {
                     while let Ok(url) = rx.recv().await {
                         if this

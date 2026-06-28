@@ -9,6 +9,8 @@
 //! see `AGENTS.md`). There [`EmailWebView::new`] returns `None` and the reader
 //! falls back to a plain-text view, so the app still builds and runs everywhere.
 
+use std::path::Path;
+
 use gpui::{Hsla, Rgba};
 
 use crate::data::MessageBody;
@@ -16,10 +18,28 @@ use crate::data::MessageBody;
 /// Whether the native embedded webview backend is available on this target.
 pub const WEBVIEW_SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
+/// Localized labels for the custom image context menu. They are embedded in the
+/// rendered document (as `data-*` attributes) and read by the injected menu
+/// script, so switching the UI language updates the menu on the next reload.
+#[derive(Debug, Clone, Copy)]
+pub struct ImageMenuLabels<'a> {
+    /// "Open image in browser".
+    pub open: &'a str,
+    /// "Download image".
+    pub download: &'a str,
+}
+
 /// Builds a self-contained HTML document for `body`, themed to match the current
 /// app colors. Plain-text bodies are HTML-escaped and wrapped so they keep their
-/// line breaks and wrap to the pane width.
-pub fn email_document(background: Hsla, text: Hsla, accent: Hsla, body: &MessageBody) -> String {
+/// line breaks and wrap to the pane width. `labels` localize the custom image
+/// context menu.
+pub fn email_document(
+    background: Hsla,
+    text: Hsla,
+    accent: Hsla,
+    body: &MessageBody,
+    labels: ImageMenuLabels,
+) -> String {
     let inner = match body {
         MessageBody::Html(html) => html.to_string(),
         MessageBody::Text(plain) => format!("<pre class=\"plain\">{}</pre>", escape_html(plain)),
@@ -28,8 +48,12 @@ pub fn email_document(background: Hsla, text: Hsla, accent: Hsla, body: &Message
     format!(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <style>{css}</style></head><body>{inner}</body></html>",
+         <style>{css}</style></head>\
+         <body data-rm-open=\"{open}\" data-rm-download=\"{download}\">\
+         {inner}</body></html>",
         css = document_css(background, text, accent),
+        open = escape_html(labels.open),
+        download = escape_html(labels.download),
     )
 }
 
@@ -39,7 +63,7 @@ pub fn email_document(background: Hsla, text: Hsla, accent: Hsla, body: &Message
 fn document_css(background: Hsla, text: Hsla, accent: Hsla) -> String {
     let scheme = if background.l < 0.5 { "dark" } else { "light" };
     format!(
-        ":root {{ color-scheme: {scheme}; }}\
+        ":root {{ color-scheme: {scheme}; --rm-bg: {bg}; --rm-fg: {fg}; --rm-accent: {accent}; }}\
          html, body {{ margin: 0; padding: 16px 24px; background: {bg}; color: {fg}; \
            font: 14px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; \
            -webkit-font-smoothing: antialiased; overflow-wrap: anywhere; }}\
@@ -96,12 +120,154 @@ fn is_external_link(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:")
 }
 
-/// Injected into every rendered message: reports the destination of the link
-/// under the cursor (or an empty string when none) to the host via the IPC
-/// channel, so the UI can mirror it in the status bar like a browser does.
+/// Parses a base64 `data:` URI (the form inline e-mail images use), returning a
+/// file extension derived from the MIME type and the decoded bytes. Used by the
+/// "Open Image in New Window" context-menu action: a `data:` image has no remote
+/// URL to hand to the browser, so we materialize it and let the OS open it.
+///
+/// Returns `None` for anything that isn't a non-empty, base64-encoded `data:`
+/// URI (e.g. plain URLs or the percent-encoded text form).
+fn decode_data_uri(url: &str) -> Option<(&'static str, Vec<u8>)> {
+    let trimmed = url.trim();
+    let rest = trimmed
+        .get(..5)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("data:"))
+        .map(|_| &trimmed[5..])?;
+    let (meta, payload) = rest.split_once(',')?;
+    let meta = meta.to_ascii_lowercase();
+    // We only decode the base64 form; the percent-encoded text variant is not
+    // something we ever produce for images.
+    if !meta.split(';').any(|seg| seg == "base64") {
+        return None;
+    }
+    let mime = meta.split(';').next().unwrap_or("");
+    let bytes = base64_decode(payload)?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some((extension_for_mime(mime), bytes))
+}
+
+/// Maps a MIME type to a sensible file extension so the materialized temp file
+/// opens in the right app. Unknown types fall back to `bin`.
+fn extension_for_mime(mime: &str) -> &'static str {
+    match mime.trim() {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "image/bmp" => "bmp",
+        "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+        "application/pdf" => "pdf",
+        _ => "bin",
+    }
+}
+
+/// Returns the user's Downloads directory (`$HOME/Downloads`, or
+/// `%USERPROFILE%\Downloads` on Windows). Used as the fixed save location for
+/// the image-download action, mirroring how `config.rs` resolves the home dir
+/// without pulling in an extra dependency.
+fn downloads_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(Path::new(&home).join("Downloads"))
+}
+
+/// Picks a non-clobbering path inside `dir` for `stem.ext`, appending ` (n)`
+/// before the extension when earlier files exist (like browsers do). `exists`
+/// reports whether a candidate is already taken, kept injectable so the naming
+/// logic is testable without touching the filesystem.
+fn unique_download_path(
+    dir: &Path,
+    stem: &str,
+    extension: &str,
+    exists: impl Fn(&Path) -> bool,
+) -> std::path::PathBuf {
+    let mut candidate = dir.join(format!("{stem}.{extension}"));
+    let mut counter = 1;
+    while exists(&candidate) {
+        candidate = dir.join(format!("{stem} ({counter}).{extension}"));
+        counter += 1;
+    }
+    candidate
+}
+
+/// Minimal RFC 4648 base64 decoder (standard alphabet). Whitespace and padding
+/// are skipped. Returns `None` on any out-of-alphabet byte. Kept dependency-free
+/// to mirror the encoder in `data.rs`.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    fn sextet(byte: u8) -> Option<u32> {
+        match byte {
+            b'A'..=b'Z' => Some((byte - b'A') as u32),
+            b'a'..=b'z' => Some((byte - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((byte - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    for &byte in input.as_bytes() {
+        if byte == b'=' || byte.is_ascii_whitespace() {
+            continue;
+        }
+        buffer = (buffer << 6) | sextet(byte)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// One IPC message kind sent from the document to the host. Messages are encoded
+/// as `"<tag>\n<payload>"` so a single channel can carry several intents (see
+/// [`CONTENT_SCRIPT`] and [`parse_ipc_message`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpcMessage<'a> {
+    /// The link under the cursor changed (payload is the URL, empty when none).
+    /// Mirrored into the status bar like a browser.
+    Hover(&'a str),
+    /// "Open image in browser" — open the image (payload URL) externally.
+    OpenImage(&'a str),
+    /// "Download image" — save the image (payload URL) to Downloads, no dialog.
+    DownloadImage(&'a str),
+}
+
+/// Parses an IPC message produced by [`CONTENT_SCRIPT`]. Returns `None` for an
+/// unknown tag or a message missing its `\n` separator.
+fn parse_ipc_message(message: &str) -> Option<IpcMessage<'_>> {
+    let (tag, payload) = message.split_once('\n')?;
+    match tag {
+        "H" => Some(IpcMessage::Hover(payload)),
+        "O" => Some(IpcMessage::OpenImage(payload)),
+        "D" => Some(IpcMessage::DownloadImage(payload)),
+        _ => None,
+    }
+}
+
+/// Injected into every rendered message. Two responsibilities:
+///
+/// 1. Report the link under the cursor to the host (status-bar mirroring).
+/// 2. Replace the native context menu *for images only* with our own, because
+///    WebKit's "Download Image" item is inert (it never reaches the download
+///    delegate and exposes no URL). The custom menu routes its actions over IPC;
+///    on non-image targets the native menu is left untouched. Labels are read
+///    from `<body data-rm-*>` and colors from the document's CSS variables, so
+///    both follow the active language and theme without rebuilding the view.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-const HOVER_SCRIPT: &str = r#"(function () {
-  var current = null;
+const CONTENT_SCRIPT: &str = r#"(function () {
+  function send(tag, value) { window.ipc.postMessage(tag + '\n' + (value || '')); }
+
+  // 1. Hovered-link reporting.
+  var currentHref = null;
   function anchorHref(el) {
     while (el && el.nodeType === 1) {
       if (el.tagName === 'A' && el.href) return el.href;
@@ -109,15 +275,88 @@ const HOVER_SCRIPT: &str = r#"(function () {
     }
     return '';
   }
-  function report(href) {
-    if (href !== current) {
-      current = href;
-      window.ipc.postMessage(href);
-    }
+  function reportHover(href) {
+    if (href !== currentHref) { currentHref = href; send('H', href); }
   }
-  document.addEventListener('mouseover', function (e) { report(anchorHref(e.target)); }, true);
-  document.addEventListener('mouseleave', function () { report(''); }, true);
+  document.addEventListener('mouseover', function (e) { reportHover(anchorHref(e.target)); }, true);
+  document.addEventListener('mouseleave', function () { reportHover(''); }, true);
+
+  // 2. Custom image context menu.
+  var STYLE_ID = 'rm-ctx-style';
+  function ensureStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    var s = document.createElement('style');
+    s.id = STYLE_ID;
+    s.textContent =
+      '.rm-ctx{position:fixed;z-index:2147483647;min-width:200px;padding:4px;border-radius:8px;' +
+      'border:1px solid color-mix(in srgb, var(--rm-fg) 16%, var(--rm-bg));' +
+      'background:color-mix(in srgb, var(--rm-fg) 6%, var(--rm-bg));' +
+      'box-shadow:0 8px 24px rgba(0,0,0,.28);overflow:hidden;' +
+      'font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--rm-fg);' +
+      'user-select:none;-webkit-user-select:none;}' +
+      '.rm-ctx button{display:block;width:100%;text-align:left;border:0;background:transparent;' +
+      'color:inherit;padding:7px 12px;border-radius:5px;cursor:default;font:inherit;white-space:nowrap;}' +
+      '.rm-ctx button:hover{background:var(--rm-accent);color:#fff;}';
+    document.head.appendChild(s);
+  }
+
+  var menu = null;
+  function closeMenu() { if (menu) { menu.remove(); menu = null; } }
+  function addItem(label, run) {
+    var b = document.createElement('button');
+    b.textContent = label;
+    b.addEventListener('click', function () { run(); closeMenu(); });
+    menu.appendChild(b);
+  }
+  function openMenu(x, y, src) {
+    ensureStyle();
+    closeMenu();
+    var data = document.body.dataset;
+    menu = document.createElement('div');
+    menu.className = 'rm-ctx';
+    addItem(data.rmOpen || 'Open image in browser', function () { send('O', src); });
+    addItem(data.rmDownload || 'Download image', function () { send('D', src); });
+    document.body.appendChild(menu);
+    var r = menu.getBoundingClientRect();
+    if (x + r.width > window.innerWidth) x = window.innerWidth - r.width - 4;
+    if (y + r.height > window.innerHeight) y = window.innerHeight - r.height - 4;
+    menu.style.left = Math.max(4, x) + 'px';
+    menu.style.top = Math.max(4, y) + 'px';
+  }
+
+  document.addEventListener('contextmenu', function (e) {
+    var el = e.target;
+    while (el && el.nodeType === 1 && el.tagName !== 'IMG') el = el.parentElement;
+    if (el && el.tagName === 'IMG' && el.src) {
+      e.preventDefault();
+      openMenu(e.clientX, e.clientY, el.src);
+    } else {
+      closeMenu();
+    }
+  }, true);
+  document.addEventListener('mousedown', function (e) {
+    if (menu && !menu.contains(e.target)) closeMenu();
+  }, true);
+  document.addEventListener('scroll', closeMenu, true);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeMenu(); });
+  window.addEventListener('blur', closeMenu);
 })();"#;
+
+/// Quotes a string as an AppleScript string literal (escaping `\` and `"`), so
+/// notification text passed to `osascript -e` can't break out of the string.
+#[cfg(target_os = "macos")]
+fn applescript_string(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 2);
+    out.push('"');
+    for ch in input.chars() {
+        if ch == '\\' || ch == '"' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
 
 /// Escapes the characters that are significant in HTML text content.
 fn escape_html(input: &str) -> String {
@@ -146,12 +385,109 @@ mod platform {
         NewWindowResponse, Rect, WebView, WebViewBuilder,
     };
 
-    use super::{is_external_link, HOVER_SCRIPT};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{
+        decode_data_uri, downloads_dir, is_external_link, parse_ipc_message, unique_download_path,
+        IpcMessage, CONTENT_SCRIPT,
+    };
 
     /// Opens `url` in the user's default browser, detached so it never blocks the
     /// UI thread. Errors are ignored: a failed launch shouldn't crash the reader.
     fn open_external(url: &str) {
         let _ = open::that_detached(url);
+    }
+
+    /// Routes a message sent from the document's content script. `on_hover`
+    /// carries hovered-link URLs back to the GPUI status bar; the image actions
+    /// run here on the main thread. `notify_body` is the localized text shown
+    /// after a successful download.
+    fn handle_ipc(message: &str, on_hover: &Sender<String>, notify_body: &str) {
+        match parse_ipc_message(message) {
+            Some(IpcMessage::Hover(url)) => {
+                let _ = on_hover.try_send(url.to_string());
+            }
+            Some(IpcMessage::OpenImage(url)) => open_in_new_window(url),
+            Some(IpcMessage::DownloadImage(url)) => download_image(url, notify_body),
+            None => {}
+        }
+    }
+
+    /// Handles a "open in new window" request (links or images): the embedded
+    /// reader never spawns its own window. Remote targets go to the system
+    /// browser; an inline `data:` image — which has no URL to navigate to — is
+    /// written to a temp file and handed to the OS default viewer instead.
+    fn open_in_new_window(url: &str) {
+        if is_external_link(url) {
+            open_external(url);
+        } else if let Some((extension, bytes)) = decode_data_uri(url) {
+            if let Some(path) = persist_temp_file(extension, &bytes) {
+                let _ = open::that_detached(path);
+            }
+        }
+    }
+
+    /// Saves an image straight to the user's Downloads folder (no dialog) and
+    /// fires a desktop notification. This backs the custom context menu's
+    /// "Download image", which exists because WebKit's own "Download Image" item
+    /// never reaches the download delegate.
+    ///
+    /// Inline `data:` images are decoded and written directly. Remote images
+    /// would need a network fetch we don't have yet, so we fall back to opening
+    /// them in the browser, where the user can save them.
+    fn download_image(url: &str, notify_body: &str) {
+        let Some((extension, bytes)) = decode_data_uri(url) else {
+            if is_external_link(url) {
+                open_external(url);
+            }
+            return;
+        };
+        let Some(dir) = downloads_dir() else {
+            return;
+        };
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let path = unique_download_path(&dir, "image", extension, |candidate| candidate.exists());
+        if std::fs::write(&path, bytes).is_ok() {
+            notify(notify_body);
+        }
+    }
+
+    /// Shows a desktop notification confirming the download. On macOS we shell
+    /// out to `osascript`, which works for an unbundled binary (`cargo run`) —
+    /// unlike `UNUserNotificationCenter`, which needs an app bundle. Other
+    /// platforms are a no-op until their notification backend lands.
+    #[allow(unused_variables)]
+    fn notify(body: &str) {
+        #[cfg(target_os = "macos")]
+        {
+            let script = format!(
+                "display notification {} with title {}",
+                super::applescript_string(body),
+                super::applescript_string("rMail"),
+            );
+            let _ = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(script)
+                .spawn();
+        }
+    }
+
+    /// Writes `bytes` to a uniquely named file in the OS temp directory and
+    /// returns its path. The nanosecond timestamp keeps successive opens from
+    /// clobbering each other. Returns `None` if the write fails.
+    fn persist_temp_file(extension: &str, bytes: &[u8]) -> Option<std::path::PathBuf> {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!("rmail-image-{nanos}.{extension}"));
+        std::fs::write(&path, bytes).ok()?;
+        Some(path)
     }
 
     /// A native webview hosted as a child of the GPUI window. It floats over the
@@ -161,12 +497,23 @@ mod platform {
         last_html: String,
         last_bounds: Option<(f32, f32, f32, f32)>,
         visible: bool,
+        /// Localized text shown after a successful image download. Shared with
+        /// the IPC closure so [`Self::set_notify_text`] can relocalize it live
+        /// (the view isn't rebuilt on a language switch).
+        notify_body: Rc<RefCell<String>>,
     }
 
     impl EmailWebView {
         /// Creates the child webview hosted by `window`, initially hidden so it
         /// doesn't flash at the default origin before it is first positioned.
-        pub fn new(window: &Window, html: &str, on_hover: Sender<String>) -> Option<Self> {
+        pub fn new(
+            window: &Window,
+            html: &str,
+            on_hover: Sender<String>,
+            notify_body: String,
+        ) -> Option<Self> {
+            let notify_body = Rc::new(RefCell::new(notify_body));
+            let notify_for_ipc = notify_body.clone();
             let webview = WebViewBuilder::new()
                 .with_html(html)
                 // Links must open in the system browser, not hijack the reader.
@@ -179,18 +526,19 @@ mod platform {
                         true
                     }
                 })
-                // `target="_blank"` / `window.open` links never spawn an embedded
-                // window; they go to the browser too.
+                // "Open Link/Image in New Window", `target="_blank"` and
+                // `window.open` never spawn an embedded window: links go to the
+                // system browser and inline images are opened by the OS.
                 .with_new_window_req_handler(|url, _features| {
-                    if is_external_link(&url) {
-                        open_external(&url);
-                    }
+                    open_in_new_window(&url);
                     NewWindowResponse::Deny
                 })
-                // Mirror the hovered link's URL into the status bar.
-                .with_initialization_script(HOVER_SCRIPT)
+                // Hovered-link reporting + the custom image context menu (the
+                // native "Download Image" is inert in WebKit, so we provide our
+                // own and route the action through IPC).
+                .with_initialization_script(CONTENT_SCRIPT)
                 .with_ipc_handler(move |req| {
-                    let _ = on_hover.try_send(req.into_body());
+                    handle_ipc(&req.into_body(), &on_hover, &notify_for_ipc.borrow());
                 })
                 // Never expose the OS Web Inspector ("Inspect Element"). wry turns
                 // devtools on by default in debug builds, which both pollutes the
@@ -206,6 +554,7 @@ mod platform {
                 last_html: html.to_string(),
                 last_bounds: None,
                 visible: false,
+                notify_body,
             })
         }
 
@@ -218,6 +567,12 @@ mod platform {
             if self.webview.load_html(html).is_ok() {
                 self.last_html = html.to_string();
             }
+        }
+
+        /// Updates the localized notification text used after a download, so a
+        /// language switch is reflected without rebuilding the webview.
+        pub fn set_notify_text(&self, body: String) {
+            *self.notify_body.borrow_mut() = body;
         }
 
         /// Positions the webview over `bounds` (window-relative, logical pixels)
@@ -260,10 +615,12 @@ mod platform {
             _window: &Window,
             _html: &str,
             _on_hover: async_channel::Sender<String>,
+            _notify_body: String,
         ) -> Option<Self> {
             None
         }
         pub fn set_html(&mut self, _html: &str) {}
+        pub fn set_notify_text(&self, _body: String) {}
         pub fn position(&mut self, _bounds: Bounds<Pixels>) {}
     }
 }
@@ -275,6 +632,13 @@ mod tests {
 
     fn body_html() -> MessageBody {
         MessageBody::Html("<p>Hello <strong>world</strong></p>".into())
+    }
+
+    fn labels() -> ImageMenuLabels<'static> {
+        ImageMenuLabels {
+            open: "Open image in browser",
+            download: "Download image",
+        }
     }
 
     #[test]
@@ -302,6 +666,105 @@ mod tests {
     }
 
     #[test]
+    fn base64_decode_reverses_known_vectors() {
+        // RFC 4648 vectors, mirroring the encoder's tests in `data.rs`.
+        assert_eq!(base64_decode("").unwrap(), b"");
+        assert_eq!(base64_decode("Zg==").unwrap(), b"f");
+        assert_eq!(base64_decode("Zm8=").unwrap(), b"fo");
+        assert_eq!(base64_decode("Zm9v").unwrap(), b"foo");
+        assert_eq!(base64_decode("Zm9vYg==").unwrap(), b"foob");
+        assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
+        // Embedded whitespace (line wrapping) is tolerated.
+        assert_eq!(base64_decode("Zm9v\n  YmFy").unwrap(), b"foobar");
+    }
+
+    #[test]
+    fn base64_decode_rejects_out_of_alphabet_bytes() {
+        assert!(base64_decode("not*valid").is_none());
+    }
+
+    #[test]
+    fn decode_data_uri_extracts_image_bytes() {
+        // "data:image/png;base64," + base64("foo")
+        let uri = "data:image/png;base64,Zm9v";
+        let (extension, bytes) = decode_data_uri(uri).expect("a base64 image data URI");
+        assert_eq!(extension, "png");
+        assert_eq!(bytes, b"foo");
+    }
+
+    #[test]
+    fn decode_data_uri_is_case_insensitive_on_the_scheme() {
+        let (extension, _) =
+            decode_data_uri("DATA:image/jpeg;base64,Zm9v").expect("scheme is case-insensitive");
+        assert_eq!(extension, "jpg");
+    }
+
+    #[test]
+    fn decode_data_uri_rejects_non_data_and_non_base64() {
+        assert!(decode_data_uri("https://example.com/cat.png").is_none());
+        // The percent-encoded text form is not something we materialize.
+        assert!(decode_data_uri("data:text/plain,hello").is_none());
+        // Empty payloads carry nothing to open.
+        assert!(decode_data_uri("data:image/png;base64,").is_none());
+    }
+
+    #[test]
+    fn extension_for_mime_maps_known_image_types() {
+        assert_eq!(extension_for_mime("image/png"), "png");
+        assert_eq!(extension_for_mime("image/jpeg"), "jpg");
+        assert_eq!(extension_for_mime("image/gif"), "gif");
+        assert_eq!(extension_for_mime("image/svg+xml"), "svg");
+        assert_eq!(extension_for_mime("application/octet-stream"), "bin");
+    }
+
+    #[test]
+    fn parse_ipc_message_routes_known_tags() {
+        assert_eq!(
+            parse_ipc_message("H\nhttps://example.com"),
+            Some(IpcMessage::Hover("https://example.com"))
+        );
+        // An empty hover payload (cursor left the link) is preserved.
+        assert_eq!(parse_ipc_message("H\n"), Some(IpcMessage::Hover("")));
+        assert_eq!(
+            parse_ipc_message("O\ndata:image/png;base64,Zm9v"),
+            Some(IpcMessage::OpenImage("data:image/png;base64,Zm9v"))
+        );
+        assert_eq!(
+            parse_ipc_message("D\ndata:image/png;base64,Zm9v"),
+            Some(IpcMessage::DownloadImage("data:image/png;base64,Zm9v"))
+        );
+    }
+
+    #[test]
+    fn parse_ipc_message_rejects_unknown_or_malformed() {
+        assert_eq!(parse_ipc_message("X\npayload"), None);
+        // Missing the `\n` separator.
+        assert_eq!(parse_ipc_message("Hhttps://example.com"), None);
+    }
+
+    #[test]
+    fn unique_download_path_appends_counter_when_taken() {
+        let dir = Path::new("/tmp/dl");
+        // Nothing exists yet → the plain name.
+        let first = unique_download_path(dir, "image", "png", |_| false);
+        assert_eq!(first, dir.join("image.png"));
+        // The plain name and the first two numbered variants are taken.
+        let taken = ["image.png", "image (1).png", "image (2).png"];
+        let path = unique_download_path(dir, "image", "png", |candidate| {
+            taken.iter().any(|name| candidate == dir.join(name))
+        });
+        assert_eq!(path, dir.join("image (3).png"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn applescript_string_quotes_and_escapes() {
+        assert_eq!(applescript_string("hi"), "\"hi\"");
+        // Embedded quotes and backslashes are escaped so the literal is safe.
+        assert_eq!(applescript_string("a\"b\\c"), "\"a\\\"b\\\\c\"");
+    }
+
+    #[test]
     fn channels_clamp_and_round() {
         assert_eq!(channel(0.0), 0);
         assert_eq!(channel(1.0), 255);
@@ -322,6 +785,7 @@ mod tests {
             hsla(0.0, 0.0, 0.9, 1.0),
             hsla(0.6, 0.7, 0.5, 1.0),
             &body_html(),
+            labels(),
         );
         assert!(doc.starts_with("<!DOCTYPE html>"));
         assert!(doc.contains("<p>Hello <strong>world</strong></p>"));
@@ -337,9 +801,27 @@ mod tests {
             hsla(0.0, 0.0, 0.1, 1.0),
             hsla(0.6, 0.7, 0.5, 1.0),
             &body,
+            labels(),
         );
         assert!(doc.contains("<pre class=\"plain\">1 &lt; 2 &amp; 3</pre>"));
         // A light background selects the light color scheme.
         assert!(doc.contains("color-scheme: light"));
+    }
+
+    #[test]
+    fn document_embeds_escaped_menu_labels() {
+        let doc = email_document(
+            hsla(0.0, 0.0, 0.1, 1.0),
+            hsla(0.0, 0.0, 0.9, 1.0),
+            hsla(0.6, 0.7, 0.5, 1.0),
+            &body_html(),
+            ImageMenuLabels {
+                open: "Open \"image\"",
+                download: "Download",
+            },
+        );
+        // Labels ride on the body as data-* attributes, HTML-escaped.
+        assert!(doc.contains("data-rm-open=\"Open &quot;image&quot;\""));
+        assert!(doc.contains("data-rm-download=\"Download\""));
     }
 }

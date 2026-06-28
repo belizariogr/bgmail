@@ -65,6 +65,10 @@ pub enum Key {
     Disabled,
 
     SearchPlaceholder,
+
+    CtxOpenImage,
+    CtxDownloadImage,
+    ImageDownloaded,
 }
 
 impl Key {
@@ -126,6 +130,13 @@ impl Key {
 
             (SearchPlaceholder, E) => "Search",
             (SearchPlaceholder, P) => "Buscar",
+
+            (CtxOpenImage, E) => "Open image",
+            (CtxOpenImage, P) => "Abrir imagem",
+            (CtxDownloadImage, E) => "Download image",
+            (CtxDownloadImage, P) => "Baixar imagem",
+            (ImageDownloaded, E) => "Image saved to your Downloads folder",
+            (ImageDownloaded, P) => "Imagem salva na pasta Downloads",
         }
     }
 }
@@ -185,7 +196,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 24] = [
+    const ALL_KEYS: [Key; 27] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -210,6 +221,9 @@ mod tests {
         Key::Enabled,
         Key::Disabled,
         Key::SearchPlaceholder,
+        Key::CtxOpenImage,
+        Key::CtxDownloadImage,
+        Key::ImageDownloaded,
     ];
 
     #[test]
