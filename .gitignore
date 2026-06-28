@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+*.pdb
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+
+# Local secrets / accounts (never commit real credentials)
+/.rmail
+*.local.toml
+secrets.toml

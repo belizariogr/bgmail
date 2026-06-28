@@ -1,0 +1,8 @@
+# macOS (Xcode 26+): o toolchain Metal foi desacoplado do Xcode. O build script do
+# `gpui` compila shaders via `xcrun -sdk macosx metal`, que resolve para um stub do
+# `XcodeDefault.xctoolchain` incapaz de localizar o componente instalado
+# (`xcodebuild -downloadComponent MetalToolchain`). Forçar o toolchain "Metal" faz
+# `metal`/`metallib` apontarem para o componente correto, enquanto `clang` e as demais
+# ferramentas continuam no XcodeDefault via fallback. A variável é ignorada fora do macOS.
+[env]
+TOOLCHAINS = "com.apple.dt.toolchain.Metal"

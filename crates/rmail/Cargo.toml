@@ -1,0 +1,15 @@
+[package]
+name = "rmail"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "rmail"
+
+[[bin]]
+name = "rmail"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+theme.workspace = true
+ui.workspace = true
