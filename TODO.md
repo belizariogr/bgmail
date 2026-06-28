@@ -40,41 +40,32 @@
       `ActiveLanguage` global; UI resolves strings at render time, with a
       language picker in the General settings. English is the default everywhere.
 - ✅ Custom `ui::Scrollbar` element (vertical, draggable thumb + track click)
-      overlaying the message list, sidebar and reader pane; translucent thumb
-      colors added to the theme. Default arrow cursor over the strip. Auto-hide:
-      shown while hovering the strip, dragging, or scrolling (incl. mouse wheel),
-      and hidden ~250ms after scrolling stops or when the mouse leaves the strip.
-      Tested via pure thumb-geometry + scroll-recency functions. Mock expanded
-      (18 messages, 5 accounts, long bodies) so all three panels overflow.
-- ✅ HTML e-mail viewer: `ui::HtmlView` renders a curated subset of HTML
-      (headings, paragraphs, lists, links, bold/italic/underline/strikethrough,
-      inline code, block quotes, `<pre>` blocks, rules and image placeholders)
-      into themed GPUI elements via `StyledText`+`TextRun` runs, using the same
-      parser stack as Zed (`html5ever` + `markup5ever_rcdom`). `Message::body` is
-      now a `MessageBody::{Html, Text}`; the reader renders each kind and the
-      mock mixes both. Tested (whitespace collapse, block counts, run coverage,
-      malformed fallback). `<img>` with a local path (or `file://`) renders the
-      real picture inline (aspect-preserved via `gpui::img`); remote URLs stay as
-      placeholders. The first mock message embeds a sample image
-      (`crates/rmail/assets/tweezers.png`, a real 700×200 PNG); the `<img>`
-      honors an explicit `width` so it overflows the pane. Tests guard that the
-      asset exists, is a decodable PNG/JPEG (not a mislabeled WebP), is wider
-      than the pane and is referenced by the first message.
-- ✅ Horizontal scrollbar: `ui::Scrollbar` generalized to either axis
-      (`vertical`/`horizontal`); the reader pane now overflow-scrolls both axes
-      with vertical + horizontal bars sharing one `ScrollHandle`. Body blocks are
-      direct children of the scroll container (`items_start`) so wide blocks
-      (images, `<pre>`) overflow horizontally and drive the bar, while text blocks
-      stay `w_full` and wrap. The message header is fixed above the scroll area.
-- ✅ Selectable text: `ui::SelectableText` wraps `StyledText` with click-drag
-      selection (pointer→index via the text layout), highlights the range by
-      splitting `TextRun`s, and publishes the selection as an `ActiveTextSelection`
-      global; the reader body is focusable and copies it on `Cmd/Ctrl+C`. Each
-      HTML text/`<pre>` block is independently selectable (cross-block selection
-      is out of scope for the mock). Tested via the run-splitting highlight logic.
+      overlaying the message list and sidebar; translucent thumb colors added to
+      the theme. Default arrow cursor over the strip. Auto-hide: shown while
+      hovering the strip, dragging, or scrolling (incl. mouse wheel), and hidden
+      ~250ms after scrolling stops or when the mouse leaves the strip. Tested via
+      pure thumb-geometry + scroll-recency functions. Mock expanded (18 messages,
+      5 accounts, long bodies) so the panels overflow.
+- ✅ HTML e-mail viewer via a **native embedded webview** (`wry`: WKWebView on
+      macOS, WebView2 on Windows), replacing the hand-rolled GPUI renderer. The
+      OS engine handles layout, scrolling, text selection and copy natively. The
+      webview is a child of the GPUI window, layered over the reader body; a
+      `canvas` element keeps its bounds in sync each paint, and it is hidden when
+      the reader isn't on screen. `crates/rmail/src/web_view.rs` owns the platform
+      abstraction (`EmailWebView`, no-op on unsupported targets) plus a themed
+      `email_document` builder (theme-aware CSS, dark/light `color-scheme`); the
+      reader falls back to a plain-text view where no webview backend exists
+      (Linux is deferred — see `AGENTS.md`). `Message::body` stays a
+      `MessageBody::{Html, Text}` and the mock mixes both. The first mock message
+      embeds a real 700×200 PNG (`crates/rmail/assets/tweezers.png`) as a
+      self-contained base64 `data:` URI with explicit `width`/`height`. Tested:
+      HTML escaping, color formatting, document assembly (scheme + body),
+      dependency-free base64 (RFC 4648 vectors), the data URI shape and the image
+      magic bytes (guards against a mislabeled WebP).
 - 🔄 **Measure the startup time** with instrumentation (still informal)
-- ⬜ Clickable links in the HTML viewer (open via `cx.open_url`); cache parsed DOM
-- ⬜ Cross-block text selection; scrollbar fade animation (currently instant show/hide)
+- ⬜ Clickable links / external navigation policy for the webview (open in the
+      system browser instead of inside the embedded view)
+- ⬜ Scrollbar fade animation for list/sidebar (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)
 - ⬜ E-mail composition screen/panel (mock)

@@ -13,3 +13,8 @@ path = "src/main.rs"
 gpui.workspace = true
 theme.workspace = true
 ui.workspace = true
+
+# The embedded webview is only available where wry has a native backend we
+# support (macOS/Windows). Other targets fall back to a plain-text reader.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+wry.workspace = true

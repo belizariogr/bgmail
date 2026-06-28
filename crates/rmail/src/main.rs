@@ -8,6 +8,7 @@
 mod data;
 mod locale;
 mod root;
+mod web_view;
 
 use gpui::{
     point, px, size, App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds,

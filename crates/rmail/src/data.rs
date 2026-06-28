@@ -9,14 +9,18 @@ use gpui::SharedString;
 
 use crate::locale::{Key, Language};
 
-/// Absolute path to the image embedded in the first sample message. It is wider
-/// than the reading pane on purpose, so the reader's horizontal scrollbar can be
-/// exercised. Must be a real raster image GPUI can decode (PNG/JPEG).
-pub const EMBEDDED_IMAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/tweezers.png");
+/// Raw bytes of the image embedded in the first sample message, baked into the
+/// binary so the message is self-contained: the webview renders it from a
+/// `data:` URI (see [`embedded_image_data_uri`]), which avoids file-access
+/// quirks on a page loaded from an HTML string. Must be a real raster image a
+/// browser engine can decode (PNG/JPEG).
+const EMBEDDED_IMAGE_BYTES: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/tweezers.png"));
 
-/// Display width (px) requested for the embedded image — larger than the pane so
-/// content overflows horizontally.
+/// Requested display size (px) for the embedded image. Matches the asset's
+/// intrinsic 700×200 so the explicit `width`/`height` keep its aspect ratio.
 const EMBEDDED_IMAGE_WIDTH: u32 = 700;
+const EMBEDDED_IMAGE_HEIGHT: u32 = 200;
 
 /// Semantic kind of a mailbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,14 +334,14 @@ pub fn sample_messages() -> Vec<Message> {
                 let body = if idx % 4 == 3 {
                     MessageBody::Text(text_body(preview, sender))
                 } else {
-                    // The first message embeds a real (local) image; the others
-                    // use a remote URL, which the viewer shows as a placeholder.
+                    // The first message embeds a real image (as a self-contained
+                    // `data:` URI); the others reference a remote URL.
                     let image_src = if idx == 0 {
-                        EMBEDDED_IMAGE_PATH
+                        embedded_image_data_uri()
                     } else {
-                        "https://example.com/banner.png"
+                        "https://example.com/banner.png".to_string()
                     };
-                    MessageBody::Html(html_body(subject, preview, sender, image_src))
+                    MessageBody::Html(html_body(subject, preview, sender, &image_src))
                 };
                 Message {
                     sender: sender.into(),
@@ -358,6 +362,7 @@ pub fn sample_messages() -> Vec<Message> {
 /// Builds a rich HTML body that exercises the reader's HTML viewer.
 fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> SharedString {
     let width = EMBEDDED_IMAGE_WIDTH;
+    let height = EMBEDDED_IMAGE_HEIGHT;
     format!(
         "<h2>{subject}</h2>\
          <p>{preview}</p>\
@@ -382,7 +387,7 @@ fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> Sha
          <hr>\
          <p>Messages can embed images; local ones render inline, remote ones \
          show as a placeholder:</p>\
-         <p><img src=\"{image_src}\" alt=\"Embedded image\" width=\"{width}\"></p>\
+         <p><img src=\"{image_src}\" alt=\"Embedded image\" width=\"{width}\" height=\"{height}\"></p>\
          <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor \
          incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud \
          exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure \
@@ -410,6 +415,43 @@ fn text_body(preview: &str, sender: &str) -> SharedString {
          Best regards,\n{sender}"
     )
     .into()
+}
+
+/// Standard base64 alphabet (RFC 4648).
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Minimal base64 encoder (with padding). Kept dependency-free since the only
+/// use is embedding the sample image as a `data:` URI.
+fn base64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(BASE64_ALPHABET[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(BASE64_ALPHABET[((triple >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64_ALPHABET[((triple >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_ALPHABET[(triple & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// The embedded image as a self-contained `data:` URI the webview can render.
+fn embedded_image_data_uri() -> String {
+    format!(
+        "data:image/png;base64,{}",
+        base64_encode(EMBEDDED_IMAGE_BYTES)
+    )
 }
 
 #[cfg(test)]
@@ -446,31 +488,50 @@ mod tests {
     }
 
     #[test]
-    fn first_message_embeds_the_local_image() {
+    fn first_message_embeds_the_image_as_a_data_uri() {
         let messages = sample_messages();
         let MessageBody::Html(html) = &messages[0].body else {
             panic!("first message should be HTML");
         };
+        // The image is baked into the body as a self-contained data URI so the
+        // webview renders it without any file access.
         assert!(
-            html.contains(EMBEDDED_IMAGE_PATH),
-            "HTML body must reference the embedded image path"
+            html.contains("data:image/png;base64,"),
+            "HTML body must embed the image as a data URI"
         );
-        // The image is given an explicit width so it overflows the pane and the
-        // horizontal scrollbar has something to scroll.
+        // Explicit dimensions let us verify the webview honors width/height.
         assert!(html.contains(&format!("width=\"{EMBEDDED_IMAGE_WIDTH}\"")));
+        assert!(html.contains(&format!("height=\"{EMBEDDED_IMAGE_HEIGHT}\"")));
     }
 
     #[test]
-    fn embedded_image_file_exists_and_is_a_decodable_raster() {
-        let bytes =
-            std::fs::read(EMBEDDED_IMAGE_PATH).expect("embedded image asset must exist on disk");
-        // GPUI decodes via the `image` crate; a WebP-in-.png (or any non-raster)
-        // would silently fail to render. Guard the magic bytes for PNG/JPEG.
+    fn base64_encodes_known_vectors() {
+        // Classic RFC 4648 examples, covering each padding case.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+    }
+
+    #[test]
+    fn embedded_image_data_uri_is_well_formed() {
+        let uri = embedded_image_data_uri();
+        assert!(uri.starts_with("data:image/png;base64,"));
+        assert!(uri.len() > "data:image/png;base64,".len());
+    }
+
+    #[test]
+    fn embedded_image_is_a_decodable_raster() {
+        // A WebP-in-.png (or any non-raster) would silently fail to render in the
+        // webview. Guard the magic bytes for PNG/JPEG.
+        let bytes = EMBEDDED_IMAGE_BYTES;
         let is_png = bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
         let is_jpeg = bytes.starts_with(&[0xFF, 0xD8, 0xFF]);
         assert!(
             is_png || is_jpeg,
-            "embedded image must be a real PNG/JPEG GPUI can decode (got {:?})",
+            "embedded image must be a real PNG/JPEG the engine can decode (got {:?})",
             &bytes[..bytes.len().min(8)]
         );
     }

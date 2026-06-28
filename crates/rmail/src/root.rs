@@ -6,19 +6,17 @@
 
 use std::time::Duration;
 
-use gpui::{
-    AppContext as _, ClipboardItem, Context, Entity, FocusHandle, FontWeight, Hsla, KeyDownEvent,
-    MouseButton, ScrollHandle, Window,
-};
+use gpui::{canvas, AppContext as _, Context, Entity, FontWeight, Hsla, ScrollHandle, Window};
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
 use ui::{
-    ActiveTextSelection, Button, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label,
-    LabelSize, ListItem, Scrollbar, ScrollbarState,
+    Button, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize, ListItem,
+    Scrollbar, ScrollbarState,
 };
 
 use crate::data::{self, Account, MailboxKind, Message, MessageBody};
 use crate::locale::{self, ActiveLanguage, Key, Language};
+use crate::web_view::{email_document, EmailWebView, WEBVIEW_SUPPORTED};
 
 /// Currently displayed screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,13 +90,10 @@ pub struct RootView {
     /// Scroll handle + scrollbar state for the sidebar.
     sidebar_scroll: ScrollHandle,
     sidebar_scrollbar: Option<Entity<ScrollbarState>>,
-    /// Scroll handle + scrollbar state for the reader pane (vertical and
-    /// horizontal bars share the same handle).
-    reader_scroll: ScrollHandle,
-    reader_scrollbar: Option<Entity<ScrollbarState>>,
-    reader_h_scrollbar: Option<Entity<ScrollbarState>>,
-    /// Focus for the reader body, so `Cmd/Ctrl+C` can copy the text selection.
-    reader_focus: Option<FocusHandle>,
+    /// Native webview that renders the selected message's HTML body. Scrolling,
+    /// text selection and copy are handled by the OS engine. `None` on targets
+    /// without a webview backend (Linux) or until it has been created.
+    email_webview: Option<EmailWebView>,
 }
 
 impl RootView {
@@ -115,25 +110,40 @@ impl RootView {
             list_scrollbar: None,
             sidebar_scroll: ScrollHandle::new(),
             sidebar_scrollbar: None,
-            reader_scroll: ScrollHandle::new(),
-            reader_scrollbar: None,
-            reader_h_scrollbar: None,
-            reader_focus: None,
+            email_webview: None,
         }
     }
 
     /// Lazily creates the scrollbar state entities (needs an app context, which
     /// is only available at render time).
     fn ensure_scrollbar_states(&mut self, cx: &mut Context<Self>) {
-        for slot in [
-            &mut self.list_scrollbar,
-            &mut self.sidebar_scrollbar,
-            &mut self.reader_scrollbar,
-            &mut self.reader_h_scrollbar,
-        ] {
+        for slot in [&mut self.list_scrollbar, &mut self.sidebar_scrollbar] {
             slot.get_or_insert_with(|| cx.new(|_| ScrollbarState::new()));
         }
-        self.reader_focus.get_or_insert_with(|| cx.focus_handle());
+    }
+
+    /// Creates (on first use) and updates the embedded webview to reflect the
+    /// selected message and the current theme. Hides it when the reader is not
+    /// on screen so it doesn't float over other views.
+    fn sync_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let colors = cx.theme().colors();
+        let document = email_document(
+            colors.background,
+            colors.text,
+            colors.accent,
+            &self.messages[self.selected_message].body,
+        );
+
+        match &mut self.email_webview {
+            Some(webview) => webview.set_html(&document),
+            None => self.email_webview = EmailWebView::new(window, &document),
+        }
+
+        if self.view != AppView::Mail {
+            if let Some(webview) = &mut self.email_webview {
+                webview.hide();
+            }
+        }
     }
 
     /// Marks the given scrollbar as just-scrolled and schedules a re-render once
@@ -584,7 +594,7 @@ impl RootView {
 
     // ----- Reading pane ---------------------------------------------------
 
-    fn render_reader(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_reader(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let bg = colors.background;
         let border = colors.border;
@@ -655,80 +665,33 @@ impl RootView {
                     ),
             );
 
-        // Body blocks become *direct* children of the scroll container so that a
-        // wide block (an image or a fixed-width/`<pre>` element) enlarges the
-        // scrollable content width and reveals the horizontal scrollbar. Text
-        // blocks are `w_full` and wrap to the pane; wide blocks hug their content
-        // (the container uses `items_start`, so they aren't stretched).
-        let body_blocks: Vec<gpui::AnyElement> = match &message.body {
-            MessageBody::Html(html) => ui::html_blocks(html, window, cx),
-            MessageBody::Text(text) => vec![div().w_full().child(text.clone()).into_any_element()],
+        // The body is rendered by the native webview, which we lay out over this
+        // region on every paint (the webview engine handles scrolling, text
+        // selection and copy). On targets without a webview backend we fall back
+        // to a simple text view so the app still works.
+        let body_area = if WEBVIEW_SUPPORTED {
+            let view = cx.weak_entity();
+            div()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, _, _window, cx| {
+                            let _ = view.update(cx, |this, _| {
+                                if let Some(webview) = &mut this.email_webview {
+                                    webview.position(bounds);
+                                }
+                            });
+                        },
+                    )
+                    .size_full(),
+                )
+                .into_any_element()
+        } else {
+            self.render_text_fallback(message, cx).into_any_element()
         };
-
-        let mut scroll_body = v_flex()
-            .id("reader")
-            .size_full()
-            .items_start()
-            .px_6()
-            .py_4()
-            .gap_2()
-            .text_size(px(14.0))
-            .text_color(colors.text)
-            .overflow_x_scroll()
-            .overflow_y_scroll()
-            .track_scroll(&self.reader_scroll)
-            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                Self::note_scroll(
-                    [
-                        this.reader_scrollbar.clone(),
-                        this.reader_h_scrollbar.clone(),
-                    ],
-                    cx,
-                );
-            }));
-
-        // Focusable so the body can receive `Cmd/Ctrl+C` and copy the current
-        // text selection (published by the selectable text blocks).
-        if let Some(focus) = self.reader_focus.clone() {
-            scroll_body = scroll_body
-                .track_focus(&focus)
-                .on_mouse_down(MouseButton::Left, {
-                    let focus = focus.clone();
-                    move |_, window, _| window.focus(&focus)
-                })
-                .on_key_down(|event: &KeyDownEvent, _window, cx| {
-                    if event.keystroke.key == "c" && event.keystroke.modifiers.secondary() {
-                        if let Some(text) = cx
-                            .try_global::<ActiveTextSelection>()
-                            .and_then(|s| s.text.clone())
-                        {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text));
-                        }
-                    }
-                });
-        }
-
-        let scroll_body = scroll_body.children(body_blocks);
-
-        let v_scrollbar = self
-            .reader_scrollbar
-            .clone()
-            .map(|state| Scrollbar::vertical(state, self.reader_scroll.clone()));
-        let h_scrollbar = self
-            .reader_h_scrollbar
-            .clone()
-            .map(|state| Scrollbar::horizontal(state, self.reader_scroll.clone()));
-
-        // The scrollbars overlay the scroll region only (not the fixed header),
-        // via a non-scrolling `relative` wrapper.
-        let body_area = div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .min_w_0()
-            .child(scroll_body)
-            .children(v_scrollbar)
-            .children(h_scrollbar);
 
         v_flex()
             .flex_1()
@@ -737,6 +700,28 @@ impl RootView {
             .bg(bg)
             .child(header)
             .child(body_area)
+    }
+
+    /// Plain-text reader used where the embedded webview isn't available.
+    fn render_text_fallback(&self, message: &Message, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let text = match &message.body {
+            MessageBody::Text(plain) => plain.clone(),
+            MessageBody::Html(_) => {
+                SharedString::from("HTML preview is only available on macOS and Windows for now.")
+            }
+        };
+
+        div()
+            .id("reader-fallback")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_6()
+            .py_4()
+            .text_size(px(14.0))
+            .text_color(colors.text)
+            .child(text)
     }
 
     // ----- Status bar -----------------------------------------------------
@@ -968,6 +953,8 @@ impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Make sure the scrollbar state entities exist before the panels render.
         self.ensure_scrollbar_states(cx);
+        // Keep the embedded e-mail webview in sync with the selection and theme.
+        self.sync_webview(window, cx);
 
         let background = cx.theme().colors().background;
         let text = cx.theme().colors().text;
@@ -979,7 +966,7 @@ impl Render for RootView {
                     row = row.child(self.render_sidebar(cx));
                 }
                 row.child(self.render_message_list(cx))
-                    .child(self.render_reader(window, cx))
+                    .child(self.render_reader(cx))
                     .into_any_element()
             }
             AppView::Settings => self.render_settings(cx).into_any_element(),
