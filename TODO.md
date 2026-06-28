@@ -112,6 +112,10 @@
 - 🔄 **Measure the startup time** with instrumentation (still informal)
 - ✅ Clickable links / external navigation policy for the webview (open in the
       system browser instead of inside the embedded view)
+- ✅ Disable the webview's OS Web Inspector (`with_devtools(false)`): wry enables
+      devtools by default in debug builds, which added "Inspect Element" to the
+      context menu and, once opened, attached an inspector that resized the child
+      WKWebView so it overflowed the reader pane. The body now stays sandboxed.
 - ✅ Scrollbar fade animation for list/sidebar (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)

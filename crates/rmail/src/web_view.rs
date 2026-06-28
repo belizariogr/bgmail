@@ -192,6 +192,12 @@ mod platform {
                 .with_ipc_handler(move |req| {
                     let _ = on_hover.try_send(req.into_body());
                 })
+                // Never expose the OS Web Inspector ("Inspect Element"). wry turns
+                // devtools on by default in debug builds, which both pollutes the
+                // context menu and, once opened, attaches an inspector that resizes
+                // the child WKWebView so it overflows the reader pane. This is an
+                // e-mail reader, not a browser: the body stays sandboxed.
+                .with_devtools(false)
                 .with_visible(false)
                 .build_as_child(window)
                 .ok()?;
