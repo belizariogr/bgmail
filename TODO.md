@@ -116,15 +116,19 @@
       devtools by default in debug builds, which added "Inspect Element" to the
       context menu and, once opened, attached an inspector that resized the child
       WKWebView so it overflowed the reader pane. The body now stays sandboxed.
-- ✅ Custom image context menu in the webview, because WebKit's native image
-      menu items can't be wired without subclassing `WKWebView` (`willOpenMenu`,
-      Obj-C — disallowed here): "Download Image" never reaches the download
-      delegate and exposes no URL (confirmed; Apple/wry limitation). An injected
-      content script replaces the context menu *for images only* (the native menu
-      stays for text/links), reading localized labels from `<body data-rm-*>` and
-      colors from the document's CSS variables, so it follows the language/theme
-      without rebuilding the view. Actions route over a small namespaced IPC
-      protocol (`H`/`O`/`D` → hover / open / download; `parse_ipc_message`):
+- ✅ Custom in-webview context menus for **images and links**, because WebKit's
+      native image menu items can't be wired without subclassing `WKWebView`
+      (`willOpenMenu`, Obj-C — disallowed here): "Download Image" never reaches
+      the download delegate and exposes no URL (confirmed; Apple/wry limitation).
+      An injected content script replaces the context menu for images and links
+      (the native menu stays on plain text, so selection/copy still works),
+      reading localized labels from `<body data-rm-*>` and colors from the
+      document's CSS variables, so they follow the language/theme without
+      rebuilding the view. The link menu offers "Open in browser" + "Copy link".
+      Actions route over a small namespaced IPC protocol (`H`/`O`/`D`/`C` →
+      hover / open / download / copy; `parse_ipc_message`). Foreground-only
+      actions (status-bar hover, clipboard via `cx.write_to_clipboard`) are sent
+      to GPUI as a `HostEvent` over the channel; open/download run inline:
       - "Open image in browser": http/https/mailto open in the system browser;
         inline `data:` images are base64-decoded to a temp file and handed to the
         OS default viewer (`decode_data_uri`/`extension_for_mime`/`base64_decode`,

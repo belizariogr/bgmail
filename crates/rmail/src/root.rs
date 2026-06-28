@@ -11,9 +11,9 @@ use std::f32::consts::FRAC_PI_2;
 
 use gpui::{
     canvas, ease_in_out, point, radians, size, svg, Animation, AnimationExt as _, AppContext as _,
-    Bounds, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Point, ScrollHandle, Size, Svg, TitlebarOptions, Transformation, Window,
-    WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
+    Bounds, ClipboardItem, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Point, ScrollHandle, Size, Svg, TitlebarOptions,
+    Transformation, Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
 };
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
@@ -25,7 +25,9 @@ use ui::{
 use crate::config::{self, Config};
 use crate::data::{self, Account, GlobalMailbox, MailboxKind, Message, MessageBody};
 use crate::locale::{self, ActiveLanguage, Key, Language};
-use crate::web_view::{email_document, EmailWebView, ImageMenuLabels, WEBVIEW_SUPPORTED};
+use crate::web_view::{
+    email_document, ContextMenuLabels, EmailWebView, HostEvent, WEBVIEW_SUPPORTED,
+};
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
 const SIDEBAR_MIN_WIDTH: f32 = 150.0;
@@ -398,9 +400,11 @@ impl RootView {
             colors.text,
             colors.accent,
             &self.messages[self.selected_message].body,
-            ImageMenuLabels {
-                open: Key::CtxOpenImage.tr(language),
-                download: Key::CtxDownloadImage.tr(language),
+            ContextMenuLabels {
+                image_open: Key::CtxOpenImage.tr(language),
+                image_download: Key::CtxDownloadImage.tr(language),
+                link_open: Key::CtxOpenLink.tr(language),
+                link_copy: Key::CtxCopyLink.tr(language),
             },
         );
         let notify_body = Key::ImageDownloaded.tr(language).to_string();
@@ -412,14 +416,14 @@ impl RootView {
             }
             None => {
                 // The webview's IPC callback can fire from any thread, so we hand
-                // hovered-link URLs off through a channel and drain them on the
-                // GPUI foreground to update the status bar.
-                let (tx, rx) = async_channel::unbounded::<String>();
+                // events off through a channel and drain them on the GPUI
+                // foreground (status bar updates, clipboard writes).
+                let (tx, rx) = async_channel::unbounded::<HostEvent>();
                 self.email_webview = EmailWebView::new(window, &document, tx, notify_body);
                 cx.spawn(async move |this, cx| {
-                    while let Ok(url) = rx.recv().await {
+                    while let Ok(event) = rx.recv().await {
                         if this
-                            .update(cx, |root, cx| root.set_hovered_link(url, cx))
+                            .update(cx, |root, cx| root.handle_host_event(event, cx))
                             .is_err()
                         {
                             break;
@@ -427,6 +431,16 @@ impl RootView {
                     }
                 })
                 .detach();
+            }
+        }
+    }
+
+    /// Applies an action requested by the webview on the GPUI foreground.
+    fn handle_host_event(&mut self, event: HostEvent, cx: &mut Context<Self>) {
+        match event {
+            HostEvent::HoverLink(url) => self.set_hovered_link(url, cx),
+            HostEvent::CopyToClipboard(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
         }
     }

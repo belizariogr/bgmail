@@ -18,15 +18,20 @@ use crate::data::MessageBody;
 /// Whether the native embedded webview backend is available on this target.
 pub const WEBVIEW_SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
-/// Localized labels for the custom image context menu. They are embedded in the
-/// rendered document (as `data-*` attributes) and read by the injected menu
-/// script, so switching the UI language updates the menu on the next reload.
+/// Localized labels for the custom context menus (images and links). They are
+/// embedded in the rendered document (as `data-*` attributes) and read by the
+/// injected menu script, so switching the UI language updates the menus on the
+/// next reload.
 #[derive(Debug, Clone, Copy)]
-pub struct ImageMenuLabels<'a> {
-    /// "Open image in browser".
-    pub open: &'a str,
-    /// "Download image".
-    pub download: &'a str,
+pub struct ContextMenuLabels<'a> {
+    /// Image menu: "Open image in browser".
+    pub image_open: &'a str,
+    /// Image menu: "Download image".
+    pub image_download: &'a str,
+    /// Link menu: "Open in browser".
+    pub link_open: &'a str,
+    /// Link menu: "Copy link".
+    pub link_copy: &'a str,
 }
 
 /// Builds a self-contained HTML document for `body`, themed to match the current
@@ -38,7 +43,7 @@ pub fn email_document(
     text: Hsla,
     accent: Hsla,
     body: &MessageBody,
-    labels: ImageMenuLabels,
+    labels: ContextMenuLabels,
 ) -> String {
     let inner = match body {
         MessageBody::Html(html) => html.to_string(),
@@ -49,11 +54,14 @@ pub fn email_document(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <style>{css}</style></head>\
-         <body data-rm-open=\"{open}\" data-rm-download=\"{download}\">\
+         <body data-rm-img-open=\"{img_open}\" data-rm-img-download=\"{img_download}\" \
+         data-rm-link-open=\"{link_open}\" data-rm-link-copy=\"{link_copy}\">\
          {inner}</body></html>",
         css = document_css(background, text, accent),
-        open = escape_html(labels.open),
-        download = escape_html(labels.download),
+        img_open = escape_html(labels.image_open),
+        img_download = escape_html(labels.image_download),
+        link_open = escape_html(labels.link_open),
+        link_copy = escape_html(labels.link_copy),
     )
 }
 
@@ -235,10 +243,12 @@ enum IpcMessage<'a> {
     /// The link under the cursor changed (payload is the URL, empty when none).
     /// Mirrored into the status bar like a browser.
     Hover(&'a str),
-    /// "Open image in browser" — open the image (payload URL) externally.
-    OpenImage(&'a str),
+    /// "Open in browser" (image or link) — open the payload URL externally.
+    OpenExternal(&'a str),
     /// "Download image" — save the image (payload URL) to Downloads, no dialog.
     DownloadImage(&'a str),
+    /// "Copy link" — copy the payload URL to the system clipboard.
+    CopyToClipboard(&'a str),
 }
 
 /// Parses an IPC message produced by [`CONTENT_SCRIPT`]. Returns `None` for an
@@ -247,41 +257,58 @@ fn parse_ipc_message(message: &str) -> Option<IpcMessage<'_>> {
     let (tag, payload) = message.split_once('\n')?;
     match tag {
         "H" => Some(IpcMessage::Hover(payload)),
-        "O" => Some(IpcMessage::OpenImage(payload)),
+        "O" => Some(IpcMessage::OpenExternal(payload)),
         "D" => Some(IpcMessage::DownloadImage(payload)),
+        "C" => Some(IpcMessage::CopyToClipboard(payload)),
         _ => None,
     }
+}
+
+/// An action the webview asks the GPUI host to perform on the foreground. Sent
+/// over a channel because these touch app state (status bar) or need GPUI APIs
+/// (clipboard) that the IPC callback can't reach directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostEvent {
+    /// Update the hovered-link URL shown in the status bar (empty clears it).
+    HoverLink(String),
+    /// Copy text (a link URL) to the system clipboard.
+    CopyToClipboard(String),
 }
 
 /// Injected into every rendered message. Two responsibilities:
 ///
 /// 1. Report the link under the cursor to the host (status-bar mirroring).
-/// 2. Replace the native context menu *for images only* with our own, because
-///    WebKit's "Download Image" item is inert (it never reaches the download
-///    delegate and exposes no URL). The custom menu routes its actions over IPC;
-///    on non-image targets the native menu is left untouched. Labels are read
-///    from `<body data-rm-*>` and colors from the document's CSS variables, so
-///    both follow the active language and theme without rebuilding the view.
+/// 2. Replace the native context menu *for images and links* with our own.
+///    WebKit's image menu is inert ("Download Image" never reaches the download
+///    delegate and exposes no URL), and for links we want a consistent, themed
+///    menu. Both route their actions over IPC; on plain text the native menu is
+///    left untouched (so text selection/copy still works). Labels are read from
+///    `<body data-rm-*>` and colors from the document's CSS variables, so both
+///    follow the active language and theme without rebuilding the view.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const CONTENT_SCRIPT: &str = r#"(function () {
   function send(tag, value) { window.ipc.postMessage(tag + '\n' + (value || '')); }
 
-  // 1. Hovered-link reporting.
-  var currentHref = null;
-  function anchorHref(el) {
+  function closestTag(el, tag) {
     while (el && el.nodeType === 1) {
-      if (el.tagName === 'A' && el.href) return el.href;
+      if (el.tagName === tag) return el;
       el = el.parentElement;
     }
-    return '';
+    return null;
   }
+
+  // 1. Hovered-link reporting.
+  var currentHref = null;
   function reportHover(href) {
     if (href !== currentHref) { currentHref = href; send('H', href); }
   }
-  document.addEventListener('mouseover', function (e) { reportHover(anchorHref(e.target)); }, true);
+  document.addEventListener('mouseover', function (e) {
+    var a = closestTag(e.target, 'A');
+    reportHover(a && a.href ? a.href : '');
+  }, true);
   document.addEventListener('mouseleave', function () { reportHover(''); }, true);
 
-  // 2. Custom image context menu.
+  // 2. Custom context menus (image + link).
   var STYLE_ID = 'rm-ctx-style';
   function ensureStyle() {
     if (document.getElementById(STYLE_ID)) return;
@@ -302,20 +329,17 @@ const CONTENT_SCRIPT: &str = r#"(function () {
 
   var menu = null;
   function closeMenu() { if (menu) { menu.remove(); menu = null; } }
-  function addItem(label, run) {
-    var b = document.createElement('button');
-    b.textContent = label;
-    b.addEventListener('click', function () { run(); closeMenu(); });
-    menu.appendChild(b);
-  }
-  function openMenu(x, y, src) {
+  function openMenu(x, y, items) {
     ensureStyle();
     closeMenu();
-    var data = document.body.dataset;
     menu = document.createElement('div');
     menu.className = 'rm-ctx';
-    addItem(data.rmOpen || 'Open image in browser', function () { send('O', src); });
-    addItem(data.rmDownload || 'Download image', function () { send('D', src); });
+    items.forEach(function (it) {
+      var b = document.createElement('button');
+      b.textContent = it.label;
+      b.addEventListener('click', function () { it.run(); closeMenu(); });
+      menu.appendChild(b);
+    });
     document.body.appendChild(menu);
     var r = menu.getBoundingClientRect();
     if (x + r.width > window.innerWidth) x = window.innerWidth - r.width - 4;
@@ -325,14 +349,26 @@ const CONTENT_SCRIPT: &str = r#"(function () {
   }
 
   document.addEventListener('contextmenu', function (e) {
-    var el = e.target;
-    while (el && el.nodeType === 1 && el.tagName !== 'IMG') el = el.parentElement;
-    if (el && el.tagName === 'IMG' && el.src) {
+    var data = document.body.dataset;
+    var img = closestTag(e.target, 'IMG');
+    if (img && img.src) {
       e.preventDefault();
-      openMenu(e.clientX, e.clientY, el.src);
-    } else {
-      closeMenu();
+      openMenu(e.clientX, e.clientY, [
+        { label: data.rmImgOpen || 'Open image in browser', run: function () { send('O', img.src); } },
+        { label: data.rmImgDownload || 'Download image', run: function () { send('D', img.src); } }
+      ]);
+      return;
     }
+    var a = closestTag(e.target, 'A');
+    if (a && a.href) {
+      e.preventDefault();
+      openMenu(e.clientX, e.clientY, [
+        { label: data.rmLinkOpen || 'Open in browser', run: function () { send('O', a.href); } },
+        { label: data.rmLinkCopy || 'Copy link', run: function () { send('C', a.href); } }
+      ]);
+      return;
+    }
+    closeMenu();
   }, true);
   document.addEventListener('mousedown', function (e) {
     if (menu && !menu.contains(e.target)) closeMenu();
@@ -391,7 +427,7 @@ mod platform {
 
     use super::{
         decode_data_uri, downloads_dir, is_external_link, parse_ipc_message, unique_download_path,
-        IpcMessage, CONTENT_SCRIPT,
+        HostEvent, IpcMessage, CONTENT_SCRIPT,
     };
 
     /// Opens `url` in the user's default browser, detached so it never blocks the
@@ -400,17 +436,20 @@ mod platform {
         let _ = open::that_detached(url);
     }
 
-    /// Routes a message sent from the document's content script. `on_hover`
-    /// carries hovered-link URLs back to the GPUI status bar; the image actions
-    /// run here on the main thread. `notify_body` is the localized text shown
-    /// after a successful download.
-    fn handle_ipc(message: &str, on_hover: &Sender<String>, notify_body: &str) {
+    /// Routes a message sent from the document's content script. Actions that
+    /// touch app state (hover) or need GPUI (clipboard) are forwarded to the
+    /// foreground over `to_host`; open/download run here on the main thread.
+    /// `notify_body` is the localized text shown after a successful download.
+    fn handle_ipc(message: &str, to_host: &Sender<HostEvent>, notify_body: &str) {
         match parse_ipc_message(message) {
             Some(IpcMessage::Hover(url)) => {
-                let _ = on_hover.try_send(url.to_string());
+                let _ = to_host.try_send(HostEvent::HoverLink(url.to_string()));
             }
-            Some(IpcMessage::OpenImage(url)) => open_in_new_window(url),
+            Some(IpcMessage::OpenExternal(url)) => open_in_new_window(url),
             Some(IpcMessage::DownloadImage(url)) => download_image(url, notify_body),
+            Some(IpcMessage::CopyToClipboard(text)) => {
+                let _ = to_host.try_send(HostEvent::CopyToClipboard(text.to_string()));
+            }
             None => {}
         }
     }
@@ -509,7 +548,7 @@ mod platform {
         pub fn new(
             window: &Window,
             html: &str,
-            on_hover: Sender<String>,
+            to_host: Sender<HostEvent>,
             notify_body: String,
         ) -> Option<Self> {
             let notify_body = Rc::new(RefCell::new(notify_body));
@@ -538,7 +577,7 @@ mod platform {
                 // own and route the action through IPC).
                 .with_initialization_script(CONTENT_SCRIPT)
                 .with_ipc_handler(move |req| {
-                    handle_ipc(&req.into_body(), &on_hover, &notify_for_ipc.borrow());
+                    handle_ipc(&req.into_body(), &to_host, &notify_for_ipc.borrow());
                 })
                 // Never expose the OS Web Inspector ("Inspect Element"). wry turns
                 // devtools on by default in debug builds, which both pollutes the
@@ -607,6 +646,8 @@ mod platform {
 mod platform {
     use gpui::{Bounds, Pixels, Window};
 
+    use super::HostEvent;
+
     /// No-op stand-in on targets without a supported webview backend (Linux).
     pub struct EmailWebView;
 
@@ -614,7 +655,7 @@ mod platform {
         pub fn new(
             _window: &Window,
             _html: &str,
-            _on_hover: async_channel::Sender<String>,
+            _to_host: async_channel::Sender<HostEvent>,
             _notify_body: String,
         ) -> Option<Self> {
             None
@@ -634,10 +675,12 @@ mod tests {
         MessageBody::Html("<p>Hello <strong>world</strong></p>".into())
     }
 
-    fn labels() -> ImageMenuLabels<'static> {
-        ImageMenuLabels {
-            open: "Open image in browser",
-            download: "Download image",
+    fn labels() -> ContextMenuLabels<'static> {
+        ContextMenuLabels {
+            image_open: "Open image in browser",
+            image_download: "Download image",
+            link_open: "Open in browser",
+            link_copy: "Copy link",
         }
     }
 
@@ -727,11 +770,15 @@ mod tests {
         assert_eq!(parse_ipc_message("H\n"), Some(IpcMessage::Hover("")));
         assert_eq!(
             parse_ipc_message("O\ndata:image/png;base64,Zm9v"),
-            Some(IpcMessage::OpenImage("data:image/png;base64,Zm9v"))
+            Some(IpcMessage::OpenExternal("data:image/png;base64,Zm9v"))
         );
         assert_eq!(
             parse_ipc_message("D\ndata:image/png;base64,Zm9v"),
             Some(IpcMessage::DownloadImage("data:image/png;base64,Zm9v"))
+        );
+        assert_eq!(
+            parse_ipc_message("C\nhttps://example.com/page"),
+            Some(IpcMessage::CopyToClipboard("https://example.com/page"))
         );
     }
 
@@ -815,13 +862,17 @@ mod tests {
             hsla(0.0, 0.0, 0.9, 1.0),
             hsla(0.6, 0.7, 0.5, 1.0),
             &body_html(),
-            ImageMenuLabels {
-                open: "Open \"image\"",
-                download: "Download",
+            ContextMenuLabels {
+                image_open: "Open \"image\"",
+                image_download: "Download",
+                link_open: "Open",
+                link_copy: "Copy",
             },
         );
         // Labels ride on the body as data-* attributes, HTML-escaped.
-        assert!(doc.contains("data-rm-open=\"Open &quot;image&quot;\""));
-        assert!(doc.contains("data-rm-download=\"Download\""));
+        assert!(doc.contains("data-rm-img-open=\"Open &quot;image&quot;\""));
+        assert!(doc.contains("data-rm-img-download=\"Download\""));
+        assert!(doc.contains("data-rm-link-open=\"Open\""));
+        assert!(doc.contains("data-rm-link-copy=\"Copy\""));
     }
 }

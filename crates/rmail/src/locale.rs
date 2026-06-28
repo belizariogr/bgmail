@@ -68,6 +68,8 @@ pub enum Key {
 
     CtxOpenImage,
     CtxDownloadImage,
+    CtxOpenLink,
+    CtxCopyLink,
     ImageDownloaded,
 }
 
@@ -135,6 +137,10 @@ impl Key {
             (CtxOpenImage, P) => "Abrir imagem",
             (CtxDownloadImage, E) => "Download image",
             (CtxDownloadImage, P) => "Baixar imagem",
+            (CtxOpenLink, E) => "Open in browser",
+            (CtxOpenLink, P) => "Abrir no navegador",
+            (CtxCopyLink, E) => "Copy link",
+            (CtxCopyLink, P) => "Copiar link",
             (ImageDownloaded, E) => "Image saved to your Downloads folder",
             (ImageDownloaded, P) => "Imagem salva na pasta Downloads",
         }
@@ -196,7 +202,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 27] = [
+    const ALL_KEYS: [Key; 29] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -223,6 +229,8 @@ mod tests {
         Key::SearchPlaceholder,
         Key::CtxOpenImage,
         Key::CtxDownloadImage,
+        Key::CtxOpenLink,
+        Key::CtxCopyLink,
         Key::ImageDownloaded,
     ];
 
