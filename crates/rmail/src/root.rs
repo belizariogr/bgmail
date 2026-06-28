@@ -7,8 +7,9 @@
 use std::time::Duration;
 
 use gpui::{
-    canvas, AppContext as _, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton,
-    MouseDownEvent, ScrollHandle, Window, WindowControlArea,
+    canvas, size, AppContext as _, Bounds, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla,
+    MouseButton, MouseDownEvent, ScrollHandle, TitlebarOptions, Window, WindowBounds,
+    WindowControlArea, WindowHandle, WindowOptions,
 };
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
@@ -62,13 +63,6 @@ enum ResizeHandle {
 /// Drag payload used to resize a column by dragging its right-edge handle.
 #[derive(Debug, Clone, Copy)]
 struct ResizeDrag(ResizeHandle);
-
-/// Currently displayed screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AppView {
-    Mail,
-    Settings,
-}
 
 /// Active section of the settings screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,8 +138,10 @@ pub struct RootView {
     /// Destination URL of the link currently under the cursor in the reader's
     /// webview (empty when none). Shown centered in the status bar.
     hovered_link: String,
-    view: AppView,
-    settings_section: SettingsSection,
+    /// Handle to the separate settings window while it is open (like Zed, the
+    /// preferences live in their own window). `None` when it has never been
+    /// opened or was closed.
+    settings_window: Option<WindowHandle<SettingsView>>,
     /// Scroll handle + scrollbar state for the message list.
     list_scroll: ScrollHandle,
     list_scrollbar: Option<Entity<ScrollbarState>>,
@@ -172,8 +168,7 @@ impl RootView {
             window_width: px(1100.0),
             should_move: false,
             hovered_link: String::new(),
-            view: AppView::Mail,
-            settings_section: SettingsSection::Appearance,
+            settings_window: None,
             list_scroll: ScrollHandle::new(),
             list_scrollbar: None,
             sidebar_scroll: ScrollHandle::new(),
@@ -223,13 +218,6 @@ impl RootView {
                 .detach();
             }
         }
-
-        if self.view != AppView::Mail {
-            if let Some(webview) = &mut self.email_webview {
-                webview.hide();
-            }
-            self.set_hovered_link(String::new(), cx);
-        }
     }
 
     /// Updates the hovered-link URL shown in the status bar, re-rendering only
@@ -237,6 +225,42 @@ impl RootView {
     fn set_hovered_link(&mut self, url: String, cx: &mut Context<Self>) {
         if self.hovered_link != url {
             self.hovered_link = url;
+            cx.notify();
+        }
+    }
+
+    /// Opens the preferences in their own window (like Zed). If it is already
+    /// open, just brings it to the front rather than spawning a duplicate.
+    fn open_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(handle) = self.settings_window {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            // The window was closed since we last opened it; reopen a fresh one.
+            self.settings_window = None;
+        }
+
+        let accounts = self.accounts.clone();
+        let bounds = Bounds::centered(None, size(px(760.0), px(560.0)), cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(520.0), px(420.0))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("rMail Settings".into()),
+                appears_transparent: false,
+                traffic_light_position: None,
+            }),
+            ..Default::default()
+        };
+
+        if let Ok(handle) = cx.open_window(options, |_window, cx| {
+            cx.new(|_| SettingsView::new(accounts))
+        }) {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            self.settings_window = Some(handle);
             cx.notify();
         }
     }
@@ -284,7 +308,7 @@ impl RootView {
         } else {
             px(240.0)
         };
-        let list_segment = if self.sidebar_docked() && self.view == AppView::Mail {
+        let list_segment = if self.sidebar_docked() {
             self.list_width
         } else {
             px(0.0)
@@ -303,9 +327,6 @@ impl RootView {
     /// the reader segment without pushing into the always-visible search button.
     /// Groups are dropped from the right as space shrinks.
     fn visible_action_groups(&self) -> usize {
-        if self.view != AppView::Mail {
-            return 0;
-        }
         let search_width = if self.search_is_compact() {
             SEARCH_ICON_WIDTH
         } else {
@@ -426,7 +447,7 @@ impl RootView {
         let border = colors.border;
         let search_bg = colors.element_background;
         let language = cx.language();
-        let in_settings = self.view == AppView::Settings;
+        let settings_open = self.settings_window.is_some();
 
         // Keep the toolbar segments aligned with the resizable columns below. When
         // the sidebar is docked its segment matches the sidebar width; otherwise it
@@ -440,7 +461,7 @@ impl RootView {
 
         // The list controls live in the toolbar only while the sidebar is docked;
         // otherwise they move into the list's own header (see `render_message_list`).
-        let list_segment = (sidebar_docked && !in_settings).then(|| {
+        let list_segment = sidebar_docked.then(|| {
             h_flex()
                 .w(self.list_width)
                 .flex_shrink_0()
@@ -507,14 +528,9 @@ impl RootView {
                     )
                     .child(
                         IconButton::new("settings", IconName::Settings)
-                            .selected(in_settings)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.view = if this.view == AppView::Settings {
-                                    AppView::Mail
-                                } else {
-                                    AppView::Settings
-                                };
-                                cx.notify();
+                            .selected(settings_open)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_settings(window, cx);
                             })),
                     ),
             )
@@ -534,7 +550,7 @@ impl RootView {
                     // Centered action groups, divided like macOS Mail. Whole groups
                     // are dropped (right to left) as space shrinks so they never
                     // overlap the search button on the right.
-                    .when(!in_settings, |el| {
+                    .map(|el| {
                         let groups = self.visible_action_groups();
                         el.child(
                             h_flex()
@@ -799,7 +815,7 @@ impl RootView {
 
         // When the sidebar isn't docked, the list controls that normally live in
         // the top toolbar move here, pinned to the top of the list.
-        let header = (!self.sidebar_docked() && self.view == AppView::Mail).then(|| {
+        let header = (!self.sidebar_docked()).then(|| {
             h_flex()
                 .w_full()
                 .flex_shrink_0()
@@ -1125,10 +1141,25 @@ impl RootView {
                 )
             })
     }
+}
 
-    // ----- Settings screen (Zed-style) ------------------------------------
+/// Standalone preferences window content (Zed-style: settings open in their own
+/// window). Theme and language are app-wide globals, so changes made here are
+/// reflected in the main window immediately.
+struct SettingsView {
+    accounts: Vec<Account>,
+    section: SettingsSection,
+}
 
-    fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+impl SettingsView {
+    fn new(accounts: Vec<Account>) -> Self {
+        Self {
+            accounts,
+            section: SettingsSection::General,
+        }
+    }
+
+    fn render_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let language = cx.language();
 
@@ -1150,7 +1181,7 @@ impl RootView {
             );
 
         for (ix, section) in SettingsSection::ALL.into_iter().enumerate() {
-            let selected = self.settings_section == section;
+            let selected = self.section == section;
             nav = nav.child(
                 ListItem::new(("settings-nav", ix))
                     .selected(selected)
@@ -1163,29 +1194,17 @@ impl RootView {
                     ))
                     .child(Label::new(section.title_key().tr(language)).size(LabelSize::Small))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings_section = section;
+                        this.section = section;
                         cx.notify();
                     })),
             );
         }
 
-        h_flex()
-            .flex_1()
-            .h_full()
-            .bg(colors.background)
-            .child(nav)
-            .child(
-                div()
-                    .id("settings-content")
-                    .flex_1()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .child(self.render_settings_content(cx)),
-            )
+        nav
     }
 
-    fn render_settings_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let section = self.settings_section;
+    fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let section = self.section;
         let appearance = cx.theme().appearance();
         let language = cx.language();
 
@@ -1273,8 +1292,8 @@ impl RootView {
             .child(content)
     }
 
-    /// Language selector used in the General settings section. Switching the
-    /// language re-renders the whole UI through the locale global.
+    /// Language selector used in the General section. Switching the language
+    /// re-renders the whole app through the locale global.
     fn render_language_picker(
         &self,
         language: Language,
@@ -1297,6 +1316,27 @@ impl RootView {
             );
         }
         row
+    }
+}
+
+impl Render for SettingsView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+
+        h_flex()
+            .size_full()
+            .bg(colors.background)
+            .text_color(colors.text)
+            .font_family("Helvetica")
+            .child(self.render_nav(cx))
+            .child(
+                div()
+                    .id("settings-content")
+                    .flex_1()
+                    .h_full()
+                    .overflow_y_scroll()
+                    .child(self.render_content(cx)),
+            )
     }
 }
 
@@ -1327,68 +1367,63 @@ impl Render for RootView {
         // Reconcile responsive state with the live window width before laying out.
         self.sync_layout(window.viewport_size().width);
 
-        let body = match self.view {
-            AppView::Mail => {
-                let docked_sidebar = self.show_sidebar && !self.narrow;
-                let floating_sidebar = self.show_sidebar && self.narrow;
+        let docked_sidebar = self.show_sidebar && !self.narrow;
+        let floating_sidebar = self.show_sidebar && self.narrow;
 
-                let mut row = h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .on_drag_move(
-                        cx.listener(|this, event: &DragMoveEvent<ResizeDrag>, _, cx| {
-                            let ResizeDrag(handle) = *event.drag(cx);
-                            let total = event.bounds.size.width;
-                            let x = event.event.position.x - event.bounds.left();
-                            this.resize(handle, x, total);
+        let mut row = h_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<ResizeDrag>, _, cx| {
+                    let ResizeDrag(handle) = *event.drag(cx);
+                    let total = event.bounds.size.width;
+                    let x = event.event.position.x - event.bounds.left();
+                    this.resize(handle, x, total);
+                    cx.notify();
+                }),
+            );
+        if docked_sidebar {
+            row = row.child(self.render_sidebar(false, cx));
+        }
+        row = row
+            .child(self.render_message_list(cx))
+            .child(self.render_reader(cx));
+
+        let body = if floating_sidebar {
+            // Wrap the columns so the sidebar can float on top. The scrim and the
+            // floating sidebar both occlude the mouse so hovering them never
+            // reaches the columns beneath.
+            v_flex()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(row)
+                .child(
+                    div()
+                        .id("sidebar-scrim")
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .bg(scrim.opacity(0.4))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_sidebar = false;
                             cx.notify();
-                        }),
-                    );
-                if docked_sidebar {
-                    row = row.child(self.render_sidebar(false, cx));
-                }
-                row = row
-                    .child(self.render_message_list(cx))
-                    .child(self.render_reader(cx));
-
-                if floating_sidebar {
-                    // Wrap the columns so the sidebar can float on top. The scrim
-                    // and the floating sidebar both occlude the mouse so hovering
-                    // them never reaches the columns beneath.
-                    v_flex()
-                        .relative()
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .child(row)
-                        .child(
-                            div()
-                                .id("sidebar-scrim")
-                                .absolute()
-                                .inset_0()
-                                .occlude()
-                                .bg(scrim.opacity(0.4))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_sidebar = false;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .h_full()
-                                .occlude()
-                                .child(self.render_sidebar(true, cx)),
-                        )
-                        .into_any_element()
-                } else {
-                    row.into_any_element()
-                }
-            }
-            AppView::Settings => self.render_settings(cx).into_any_element(),
+                        })),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .h_full()
+                        .occlude()
+                        .child(self.render_sidebar(true, cx)),
+                )
+                .into_any_element()
+        } else {
+            row.into_any_element()
         };
 
         v_flex()

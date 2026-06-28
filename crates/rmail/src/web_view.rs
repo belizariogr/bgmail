@@ -234,12 +234,6 @@ mod platform {
             self.set_visible(true);
         }
 
-        /// Hides the webview (used when leaving the reader, e.g. on the settings
-        /// screen) so it doesn't float over unrelated content.
-        pub fn hide(&mut self) {
-            self.set_visible(false);
-        }
-
         fn set_visible(&mut self, visible: bool) {
             if self.visible != visible && self.webview.set_visible(visible).is_ok() {
                 self.visible = visible;
@@ -265,7 +259,6 @@ mod platform {
         }
         pub fn set_html(&mut self, _html: &str) {}
         pub fn position(&mut self, _bounds: Bounds<Pixels>) {}
-        pub fn hide(&mut self) {}
     }
 }
 

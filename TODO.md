@@ -34,7 +34,10 @@
       `performWindowDragWithEvent:` on macOS (GPUI 0.2 has no macOS impl)
 - ✅ Status bar
 - ✅ Real-time light/dark theme switching
-- ✅ Zed-style settings screen (General/Accounts/Appearance/Notifications)
+- ✅ Zed-style settings in a separate window (General/Accounts/Appearance/
+      Notifications): the toolbar gear opens a dedicated `SettingsView` window
+      (reused/refocused if already open) instead of replacing the main content;
+      theme/language are app globals so changes apply live to both windows
 - ✅ First workspace build (`cargo build --workspace`), `cargo clippy` with no
       warnings and `cargo test --workspace` passing; app starts without crashing
 - ✅ macOS/Xcode 26: unbundled Metal Toolchain — `xcodebuild -downloadComponent
