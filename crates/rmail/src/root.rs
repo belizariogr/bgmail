@@ -29,9 +29,26 @@ const LIST_MIN_WIDTH: f32 = 350.0;
 const READER_MIN_WIDTH: f32 = 400.0;
 /// Below this window width the sidebar collapses automatically and, once
 /// reopened, floats over the content instead of pushing the columns.
-const NARROW_BREAKPOINT: f32 = 900.0;
+const NARROW_BREAKPOINT: f32 = 1100.0;
 /// Hit area (width) of the draggable divider between two columns, in pixels.
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
+/// Width of the expanded search field in the toolbar, in pixels.
+const SEARCH_FIELD_WIDTH: f32 = 220.0;
+/// Width of the collapsed search button (icon only), in pixels.
+const SEARCH_ICON_WIDTH: f32 = 28.0;
+/// When the container that holds the reader's toolbar buttons (compose, action
+/// groups and search) is narrower than this, the search field collapses into a
+/// single magnifying-glass button. Tweak this to fine-tune the breakpoint.
+const SEARCH_COLLAPSE_WIDTH: f32 = 700.0;
+/// Fixed reader-segment overhead that always precedes the action groups:
+/// horizontal padding, inter-child gaps and the compose button.
+const TOOLBAR_FIXED_OVERHEAD: f32 = 100.0;
+/// Cumulative widths (incl. separators/gaps) of the centered action groups, used
+/// to decide how many fit alongside the always-visible search button. Groups are
+/// dropped from the right (flag/move first) so search is never overlapped.
+const ACTIONS_1_WIDTH: f32 = 92.0; // reply / reply-all / forward
+const ACTIONS_2_WIDTH: f32 = 193.0; // + trash / archive / junk
+const ACTIONS_3_WIDTH: f32 = 290.0; // + flag / move
 
 /// Which inter-column divider is currently being dragged.
 #[derive(Debug, Clone, Copy)]
@@ -117,6 +134,9 @@ pub struct RootView {
     /// Whether the window is currently below `NARROW_BREAKPOINT`. When narrow the
     /// sidebar is collapsed and, if reopened, floats over the content.
     narrow: bool,
+    /// Live window width, tracked at render time. Used to decide toolbar layout
+    /// (e.g. collapsing the search field into an icon when space is tight).
+    window_width: Pixels,
     view: AppView,
     settings_section: SettingsSection,
     /// Scroll handle + scrollbar state for the message list.
@@ -142,6 +162,7 @@ impl RootView {
             sidebar_width: px(SIDEBAR_MIN_WIDTH),
             list_width: px(360.0),
             narrow: false,
+            window_width: px(1100.0),
             view: AppView::Mail,
             settings_section: SettingsSection::Appearance,
             list_scroll: ScrollHandle::new(),
@@ -219,6 +240,53 @@ impl RootView {
         self.show_sidebar && !self.narrow
     }
 
+    /// Horizontal space the reader's toolbar segment (compose + actions + search)
+    /// gets, i.e. the window width minus the sidebar and list segments.
+    fn reader_segment_width(&self) -> Pixels {
+        let sidebar_segment = if self.sidebar_docked() {
+            self.sidebar_width
+        } else {
+            px(240.0)
+        };
+        let list_segment = if self.sidebar_docked() && self.view == AppView::Mail {
+            self.list_width
+        } else {
+            px(0.0)
+        };
+        self.window_width - sidebar_segment - list_segment
+    }
+
+    /// Whether the toolbar search field should collapse into an icon button,
+    /// i.e. when the container holding the reader's toolbar buttons is narrower
+    /// than `SEARCH_COLLAPSE_WIDTH`.
+    fn search_is_compact(&self) -> bool {
+        self.reader_segment_width() < px(SEARCH_COLLAPSE_WIDTH)
+    }
+
+    /// How many of the centered action groups (reply, trash, flag/move) fit in
+    /// the reader segment without pushing into the always-visible search button.
+    /// Groups are dropped from the right as space shrinks.
+    fn visible_action_groups(&self) -> usize {
+        if self.view != AppView::Mail {
+            return 0;
+        }
+        let search_width = if self.search_is_compact() {
+            SEARCH_ICON_WIDTH
+        } else {
+            SEARCH_FIELD_WIDTH
+        };
+        let budget = f32::from(self.reader_segment_width()) - TOOLBAR_FIXED_OVERHEAD - search_width;
+        if budget >= ACTIONS_3_WIDTH {
+            3
+        } else if budget >= ACTIONS_2_WIDTH {
+            2
+        } else if budget >= ACTIONS_1_WIDTH {
+            1
+        } else {
+            0
+        }
+    }
+
     /// The message-list controls (mailbox title + count on the left, filter/more
     /// on the right). Rendered in the top toolbar while the sidebar is docked,
     /// and inside the list's own header otherwise.
@@ -255,12 +323,22 @@ impl RootView {
     /// restoring it when leaving) and clamps the column widths so every column
     /// keeps its minimum and the reader never shrinks past `READER_MIN_WIDTH`.
     fn sync_layout(&mut self, total: Pixels) {
+        let width_changed = total != self.window_width;
+        self.window_width = total;
         let now_narrow = total < px(NARROW_BREAKPOINT);
-        if now_narrow != self.narrow {
-            // Collapse on entering narrow; restore on leaving it.
-            self.show_sidebar = !now_narrow;
-            self.narrow = now_narrow;
+
+        if now_narrow {
+            // Below the breakpoint the sidebar is collapsed. It can still be
+            // reopened as a floating overlay via the toolbar toggle, but entering
+            // the narrow range — or any resize while inside it — re-collapses it.
+            if !self.narrow || width_changed {
+                self.show_sidebar = false;
+            }
+        } else if self.narrow {
+            // Restore the docked sidebar once the window grows back.
+            self.show_sidebar = true;
         }
+        self.narrow = now_narrow;
 
         let sidebar = if self.show_sidebar && !self.narrow {
             self.sidebar_width
@@ -333,6 +411,10 @@ impl RootView {
                 .child(self.render_list_controls(cx))
         });
 
+        // When the reader's toolbar segment gets too tight the full search field
+        // would be clipped, so we collapse it into a single icon button.
+        let compact_search = self.search_is_compact();
+
         h_flex()
             .h(px(52.0))
             .w_full()
@@ -385,35 +467,54 @@ impl RootView {
                     // Left-aligned: compose.
                     .child(IconButton::new("compose", IconName::Compose).size(IconSize::Medium))
                     .child(div().flex_1())
-                    // Centered action groups, divided like macOS Mail.
+                    // Centered action groups, divided like macOS Mail. Whole groups
+                    // are dropped (right to left) as space shrinks so they never
+                    // overlap the search button on the right.
                     .when(!in_settings, |el| {
+                        let groups = self.visible_action_groups();
                         el.child(
                             h_flex()
-                                .gap_1()
-                                .child(IconButton::new("reply", IconName::Reply))
-                                .child(IconButton::new("reply-all", IconName::ReplyAll))
-                                .child(IconButton::new("forward", IconName::Forward)),
-                        )
-                        .child(Self::render_toolbar_separator(border))
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(IconButton::new("trash", IconName::Trash))
-                                .child(IconButton::new("archive", IconName::Archive))
-                                .child(IconButton::new("junk", IconName::Junk)),
-                        )
-                        .child(Self::render_toolbar_separator(border))
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(Self::render_dropdown_button("flag", IconName::Flag))
-                                .child(Self::render_dropdown_button("move", IconName::Folder)),
+                                .gap_2()
+                                .when(groups >= 1, |cluster| {
+                                    cluster.child(
+                                        h_flex()
+                                            .gap_1()
+                                            .child(IconButton::new("reply", IconName::Reply))
+                                            .child(IconButton::new("reply-all", IconName::ReplyAll))
+                                            .child(IconButton::new("forward", IconName::Forward)),
+                                    )
+                                })
+                                .when(groups >= 2, |cluster| {
+                                    cluster.child(Self::render_toolbar_separator(border)).child(
+                                        h_flex()
+                                            .gap_1()
+                                            .child(IconButton::new("trash", IconName::Trash))
+                                            .child(IconButton::new("archive", IconName::Archive))
+                                            .child(IconButton::new("junk", IconName::Junk)),
+                                    )
+                                })
+                                .when(groups >= 3, |cluster| {
+                                    cluster.child(Self::render_toolbar_separator(border)).child(
+                                        h_flex()
+                                            .gap_1()
+                                            .child(Self::render_dropdown_button(
+                                                "flag",
+                                                IconName::Flag,
+                                            ))
+                                            .child(Self::render_dropdown_button(
+                                                "move",
+                                                IconName::Folder,
+                                            )),
+                                    )
+                                }),
                         )
                     })
                     .child(div().flex_1())
-                    .child(
+                    .child(if compact_search {
+                        IconButton::new("search", IconName::Search).into_any_element()
+                    } else {
                         h_flex()
-                            .w(px(220.0))
+                            .w(px(SEARCH_FIELD_WIDTH))
                             .h(px(28.0))
                             .px_2()
                             .gap_1p5()
@@ -429,8 +530,9 @@ impl RootView {
                                 Label::new(Key::SearchPlaceholder.tr(language))
                                     .size(LabelSize::Small)
                                     .color(Color::Muted),
-                            ),
-                    ),
+                            )
+                            .into_any_element()
+                    }),
             )
     }
 
@@ -1238,6 +1340,28 @@ mod tests {
     }
 
     #[test]
+    fn resizing_while_narrow_recollapses_floating_sidebar() {
+        let mut view = RootView::new();
+        view.sync_layout(px(850.0));
+        // User reopens the sidebar as a floating overlay.
+        view.show_sidebar = true;
+        // Any resize while still narrow collapses it again.
+        view.sync_layout(px(840.0));
+        assert!(view.narrow);
+        assert!(!view.show_sidebar);
+    }
+
+    #[test]
+    fn floating_sidebar_stays_open_without_resize() {
+        let mut view = RootView::new();
+        view.sync_layout(px(850.0));
+        view.show_sidebar = true;
+        // Re-render at the same width (e.g. from an unrelated notify) keeps it.
+        view.sync_layout(px(850.0));
+        assert!(view.show_sidebar);
+    }
+
+    #[test]
     fn widening_window_restores_sidebar() {
         let mut view = RootView::new();
         view.sync_layout(px(800.0));
@@ -1280,11 +1404,66 @@ mod tests {
     }
 
     #[test]
+    fn search_collapses_when_reader_segment_is_narrow() {
+        let mut view = RootView::new();
+        // Docked layout: reader segment = 1100 - 250 - 360 = 490, below the
+        // collapse threshold, so the search field turns into an icon.
+        view.sync_layout(px(1100.0));
+        assert!(view.search_is_compact());
+    }
+
+    #[test]
+    fn search_expands_on_wide_reader_segment() {
+        let mut view = RootView::new();
+        // Wide docked layout leaves the reader segment well above the threshold.
+        view.sync_layout(px(1600.0));
+        assert!(!view.search_is_compact());
+    }
+
+    #[test]
+    fn all_action_groups_show_on_wide_window() {
+        let mut view = RootView::new();
+        view.sync_layout(px(1600.0));
+        assert_eq!(view.visible_action_groups(), 3);
+    }
+
+    #[test]
+    fn action_groups_drop_as_reader_segment_shrinks() {
+        let mut view = RootView::new();
+        view.narrow = false;
+        view.show_sidebar = true;
+        view.sidebar_width = px(SIDEBAR_MIN_WIDTH);
+        view.list_width = px(LIST_MIN_WIDTH);
+
+        // Reader segment = window - 250 - 350. Shrinking it drops groups, but the
+        // search button must always remain (groups never reach a negative count).
+        view.window_width = px(1100.0);
+        let wide = view.visible_action_groups();
+        view.window_width = px(820.0);
+        let narrow = view.visible_action_groups();
+        assert!(narrow < wide);
+    }
+
+    #[test]
+    fn action_groups_vanish_but_search_survives_when_tiny() {
+        let mut view = RootView::new();
+        view.narrow = true;
+        view.show_sidebar = false;
+        // Artificially tiny reader segment: every action group is dropped.
+        view.window_width = px(400.0);
+        assert_eq!(view.visible_action_groups(), 0);
+        // The search button is independent of the groups and stays visible.
+        assert!(view.search_is_compact());
+    }
+
+    #[test]
     fn sync_layout_shrinks_columns_to_fit() {
         let mut view = RootView::new();
+        // Wide (docked) window so the sidebar keeps its column; an oversized list
+        // must shrink to preserve the reader's minimum width.
         view.list_width = px(900.0);
-        view.sync_layout(px(1000.0));
-        let reader = px(1000.0) - view.sidebar_width - view.list_width;
+        view.sync_layout(px(1400.0));
+        let reader = px(1400.0) - view.sidebar_width - view.list_width;
         assert!(reader >= px(READER_MIN_WIDTH));
         assert!(view.list_width >= px(LIST_MIN_WIDTH));
     }
