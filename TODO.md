@@ -22,6 +22,11 @@
       reply/reply-all/forward, archive/trash/junk, move ▾, flag ▾, search box
       over the reader. List title moved out of the list into the toolbar.
 - ✅ Sidebar visibility toggle from the toolbar (`show_sidebar` + tests)
+- ✅ Resizable columns (draggable dividers): sidebar (min 250px) and message
+      list (min 350px) resize via drag handles; the reader keeps a 400px floor.
+      Below a 900px window width the sidebar auto-collapses and, once reopened,
+      floats over the content with a dismissable scrim (`sync_layout`/`resize` +
+      tests)
 - ✅ Status bar
 - ✅ Real-time light/dark theme switching
 - ✅ Zed-style settings screen (General/Accounts/Appearance/Notifications)
@@ -69,8 +74,6 @@
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)
 - ⬜ E-mail composition screen/panel (mock)
-- ⬜ Column resizing (draggable dividers)
-
 ## Stage 2 — Domain layer
 - ⬜ `mail_core` crate: `Account`, `Mailbox`, `Message`, `Thread`, `Attachment`
 - ⬜ `storage` crate: local persistence (SQLite) + tests

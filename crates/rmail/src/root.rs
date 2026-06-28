@@ -6,7 +6,10 @@
 
 use std::time::Duration;
 
-use gpui::{canvas, AppContext as _, Context, Entity, FontWeight, Hsla, ScrollHandle, Window};
+use gpui::{
+    canvas, AppContext as _, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, ScrollHandle,
+    Window,
+};
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
 use ui::{
@@ -17,6 +20,31 @@ use ui::{
 use crate::data::{self, Account, MailboxKind, Message, MessageBody};
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::web_view::{email_document, EmailWebView, WEBVIEW_SUPPORTED};
+
+/// Minimum width of the accounts/folders sidebar, in pixels.
+const SIDEBAR_MIN_WIDTH: f32 = 250.0;
+/// Minimum width of the message list, in pixels.
+const LIST_MIN_WIDTH: f32 = 350.0;
+/// Minimum width reserved for the reading pane (e-mail content), in pixels.
+const READER_MIN_WIDTH: f32 = 400.0;
+/// Below this window width the sidebar collapses automatically and, once
+/// reopened, floats over the content instead of pushing the columns.
+const NARROW_BREAKPOINT: f32 = 900.0;
+/// Hit area (width) of the draggable divider between two columns, in pixels.
+const RESIZE_HANDLE_WIDTH: f32 = 6.0;
+
+/// Which inter-column divider is currently being dragged.
+#[derive(Debug, Clone, Copy)]
+enum ResizeHandle {
+    /// Divider between the sidebar and the message list.
+    Sidebar,
+    /// Divider between the message list and the reading pane.
+    List,
+}
+
+/// Drag payload used to resize a column by dragging its right-edge handle.
+#[derive(Debug, Clone, Copy)]
+struct ResizeDrag(ResizeHandle);
 
 /// Currently displayed screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +110,13 @@ pub struct RootView {
     selected_message: usize,
     /// Whether the accounts sidebar is visible (toggled from the toolbar).
     show_sidebar: bool,
+    /// User-adjustable width of the accounts/folders sidebar.
+    sidebar_width: Pixels,
+    /// User-adjustable width of the message list.
+    list_width: Pixels,
+    /// Whether the window is currently below `NARROW_BREAKPOINT`. When narrow the
+    /// sidebar is collapsed and, if reopened, floats over the content.
+    narrow: bool,
     view: AppView,
     settings_section: SettingsSection,
     /// Scroll handle + scrollbar state for the message list.
@@ -104,6 +139,9 @@ impl RootView {
             selected_mailbox: (0, 0),
             selected_message: 3,
             show_sidebar: true,
+            sidebar_width: px(SIDEBAR_MIN_WIDTH),
+            list_width: px(360.0),
+            narrow: false,
             view: AppView::Mail,
             settings_section: SettingsSection::Appearance,
             list_scroll: ScrollHandle::new(),
@@ -174,6 +212,96 @@ impl RootView {
         self.show_sidebar = !self.show_sidebar;
     }
 
+    /// Whether the sidebar occupies a column in the layout (vs. hidden or
+    /// floating). When it isn't docked, the message-list controls move from the
+    /// top toolbar into a header at the top of the list.
+    fn sidebar_docked(&self) -> bool {
+        self.show_sidebar && !self.narrow
+    }
+
+    /// The message-list controls (mailbox title + count on the left, filter/more
+    /// on the right). Rendered in the top toolbar while the sidebar is docked,
+    /// and inside the list's own header otherwise.
+    fn render_list_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = cx.language();
+        let (account_idx, mailbox_idx) = self.selected_mailbox;
+        let mailbox = &self.accounts[account_idx].mailboxes[mailbox_idx];
+        let list_title = mailbox.kind.display_name(language).to_string();
+        let list_count = locale::message_count(language, self.messages.len());
+
+        h_flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .child(
+                v_flex()
+                    .child(Label::new(list_title).weight(FontWeight::SEMIBOLD))
+                    .child(
+                        Label::new(list_count)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(IconButton::new("filter", IconName::Filter))
+                    .child(IconButton::new("more", IconName::More)),
+            )
+    }
+
+    /// Reconciles layout state with the current window width: tracks the narrow
+    /// breakpoint (auto-collapsing the sidebar when crossing into it and
+    /// restoring it when leaving) and clamps the column widths so every column
+    /// keeps its minimum and the reader never shrinks past `READER_MIN_WIDTH`.
+    fn sync_layout(&mut self, total: Pixels) {
+        let now_narrow = total < px(NARROW_BREAKPOINT);
+        if now_narrow != self.narrow {
+            // Collapse on entering narrow; restore on leaving it.
+            self.show_sidebar = !now_narrow;
+            self.narrow = now_narrow;
+        }
+
+        let sidebar = if self.show_sidebar && !self.narrow {
+            self.sidebar_width
+        } else {
+            px(0.0)
+        };
+
+        // Keep the list within [min, available-for-reader].
+        let list_max = (total - sidebar - px(READER_MIN_WIDTH)).max(px(LIST_MIN_WIDTH));
+        self.list_width = self.list_width.clamp(px(LIST_MIN_WIDTH), list_max);
+
+        // Keep the sidebar within [min, available-for-list-and-reader].
+        if self.show_sidebar && !self.narrow {
+            let sidebar_max =
+                (total - self.list_width - px(READER_MIN_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
+            self.sidebar_width = self.sidebar_width.clamp(px(SIDEBAR_MIN_WIDTH), sidebar_max);
+        }
+    }
+
+    /// Applies a divider drag: `x` is the cursor position relative to the row's
+    /// left edge and `total` is the row width. Widths are clamped so the reader
+    /// keeps at least `READER_MIN_WIDTH`.
+    fn resize(&mut self, handle: ResizeHandle, x: Pixels, total: Pixels) {
+        match handle {
+            ResizeHandle::Sidebar => {
+                let max =
+                    (total - self.list_width - px(READER_MIN_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
+                self.sidebar_width = x.clamp(px(SIDEBAR_MIN_WIDTH), max);
+            }
+            ResizeHandle::List => {
+                let left = if self.show_sidebar && !self.narrow {
+                    self.sidebar_width
+                } else {
+                    px(0.0)
+                };
+                let max = (total - left - px(READER_MIN_WIDTH)).max(px(LIST_MIN_WIDTH));
+                self.list_width = (x - left).clamp(px(LIST_MIN_WIDTH), max);
+            }
+        }
+    }
+
     // ----- Top toolbar (unified title bar) --------------------------------
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -184,10 +312,26 @@ impl RootView {
         let language = cx.language();
         let in_settings = self.view == AppView::Settings;
 
-        let (account_idx, mailbox_idx) = self.selected_mailbox;
-        let mailbox = &self.accounts[account_idx].mailboxes[mailbox_idx];
-        let list_title = mailbox.kind.display_name(language).to_string();
-        let list_count = locale::message_count(language, self.messages.len());
+        // Keep the toolbar segments aligned with the resizable columns below. When
+        // the sidebar is docked its segment matches the sidebar width; otherwise it
+        // only reserves room for the traffic lights + toggle controls.
+        let sidebar_docked = self.sidebar_docked();
+        let sidebar_segment_width = if sidebar_docked {
+            self.sidebar_width
+        } else {
+            px(240.0)
+        };
+
+        // The list controls live in the toolbar only while the sidebar is docked;
+        // otherwise they move into the list's own header (see `render_message_list`).
+        let list_segment = (sidebar_docked && !in_settings).then(|| {
+            h_flex()
+                .w(self.list_width)
+                .flex_shrink_0()
+                .items_center()
+                .px_3()
+                .child(self.render_list_controls(cx))
+        });
 
         h_flex()
             .h(px(52.0))
@@ -200,11 +344,13 @@ impl RootView {
             // and app settings (theme switching lives in Settings ▸ Appearance).
             .child(
                 h_flex()
-                    .w(px(240.0))
+                    .w(sidebar_segment_width)
                     .flex_shrink_0()
                     .items_center()
                     .gap_1()
-                    .pl(px(72.0))
+                    // 72px clears the traffic lights, +18px keeps the first button
+                    // from crowding the window close button.
+                    .pl(px(90.0))
                     .child(
                         IconButton::new("toggle-sidebar", IconName::Sidebar)
                             .selected(self.show_sidebar)
@@ -226,32 +372,9 @@ impl RootView {
                             })),
                     ),
             )
-            // Segment 2: over the message list — title + count on the left, filter/more on the right.
-            .child(
-                h_flex()
-                    .w(px(360.0))
-                    .flex_shrink_0()
-                    .items_center()
-                    .justify_between()
-                    .px_3()
-                    .when(!in_settings, |el| {
-                        el.child(
-                            v_flex()
-                                .child(Label::new(list_title).weight(FontWeight::SEMIBOLD))
-                                .child(
-                                    Label::new(list_count)
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(IconButton::new("filter", IconName::Filter))
-                                .child(IconButton::new("more", IconName::More)),
-                        )
-                    }),
-            )
+            // Segment 2: over the message list — title + count on the left,
+            // filter/more on the right. Only present while the sidebar is docked.
+            .children(list_segment)
             // Segment 3: over the reader — compose, action groups, search, app controls.
             .child(
                 h_flex()
@@ -332,7 +455,7 @@ impl RootView {
 
     // ----- Sidebar (accounts and mailboxes) -------------------------------
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, floating: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let bg = colors.panel_background;
         let border = colors.border;
@@ -358,14 +481,40 @@ impl RootView {
 
         div()
             .relative()
-            .w(px(240.0))
+            .w(self.sidebar_width)
             .flex_shrink_0()
             .h_full()
             .bg(bg)
             .border_r_1()
             .border_color(border)
+            .when(floating, |el| el.shadow_lg())
             .child(content)
             .children(scrollbar)
+            .child(self.render_resize_handle(ResizeHandle::Sidebar, cx))
+    }
+
+    /// A thin draggable strip overlaid on a column's right edge that resizes the
+    /// column. The actual width update happens in the row-level `on_drag_move`
+    /// handler (see `render`), which has the full row bounds to work with.
+    fn render_resize_handle(
+        &self,
+        kind: ResizeHandle,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let id = match kind {
+            ResizeHandle::Sidebar => "resize-handle-sidebar",
+            ResizeHandle::List => "resize-handle-list",
+        };
+        div()
+            .id(id)
+            .absolute()
+            .top_0()
+            .right(px(-RESIZE_HANDLE_WIDTH / 2.0))
+            .w(px(RESIZE_HANDLE_WIDTH))
+            .h_full()
+            .cursor_col_resize()
+            .occlude()
+            .on_drag(ResizeDrag(kind), |_, _, _, cx| cx.new(|_| Empty))
     }
 
     fn render_account(
@@ -482,16 +631,40 @@ impl RootView {
             .clone()
             .map(|state| Scrollbar::vertical(state, self.list_scroll.clone()));
 
-        div()
+        // When the sidebar isn't docked, the list controls that normally live in
+        // the top toolbar move here, pinned to the top of the list.
+        let header = (!self.sidebar_docked() && self.view == AppView::Mail).then(|| {
+            h_flex()
+                .w_full()
+                .flex_shrink_0()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(border)
+                .child(self.render_list_controls(cx))
+        });
+
+        v_flex()
             .relative()
-            .w(px(360.0))
+            .w(self.list_width)
             .flex_shrink_0()
             .h_full()
             .bg(bg)
             .border_r_1()
             .border_color(border)
-            .child(content)
-            .children(scrollbar)
+            .children(header)
+            .child(
+                // Inner relative wrapper so the scrollbar overlay aligns with the
+                // scrollable area (below the header) instead of the whole column.
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(content)
+                    .children(scrollbar),
+            )
+            .child(self.render_resize_handle(ResizeHandle::List, cx))
     }
 
     fn render_message_row(
@@ -958,16 +1131,71 @@ impl Render for RootView {
 
         let background = cx.theme().colors().background;
         let text = cx.theme().colors().text;
+        let scrim = cx.theme().colors().elevated_surface_background;
+
+        // Reconcile responsive state with the live window width before laying out.
+        self.sync_layout(window.viewport_size().width);
 
         let body = match self.view {
             AppView::Mail => {
-                let mut row = h_flex().flex_1().min_h_0().w_full();
-                if self.show_sidebar {
-                    row = row.child(self.render_sidebar(cx));
+                let docked_sidebar = self.show_sidebar && !self.narrow;
+                let floating_sidebar = self.show_sidebar && self.narrow;
+
+                let mut row = h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .on_drag_move(
+                        cx.listener(|this, event: &DragMoveEvent<ResizeDrag>, _, cx| {
+                            let ResizeDrag(handle) = *event.drag(cx);
+                            let total = event.bounds.size.width;
+                            let x = event.event.position.x - event.bounds.left();
+                            this.resize(handle, x, total);
+                            cx.notify();
+                        }),
+                    );
+                if docked_sidebar {
+                    row = row.child(self.render_sidebar(false, cx));
                 }
-                row.child(self.render_message_list(cx))
-                    .child(self.render_reader(cx))
-                    .into_any_element()
+                row = row
+                    .child(self.render_message_list(cx))
+                    .child(self.render_reader(cx));
+
+                if floating_sidebar {
+                    // Wrap the columns so the sidebar can float on top. The scrim
+                    // and the floating sidebar both occlude the mouse so hovering
+                    // them never reaches the columns beneath.
+                    v_flex()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(row)
+                        .child(
+                            div()
+                                .id("sidebar-scrim")
+                                .absolute()
+                                .inset_0()
+                                .occlude()
+                                .bg(scrim.opacity(0.4))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_sidebar = false;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .h_full()
+                                .occlude()
+                                .child(self.render_sidebar(true, cx)),
+                        )
+                        .into_any_element()
+                } else {
+                    row.into_any_element()
+                }
             }
             AppView::Settings => self.render_settings(cx).into_any_element(),
         };
@@ -999,5 +1227,65 @@ mod tests {
         assert!(!view.show_sidebar);
         view.toggle_sidebar();
         assert!(view.show_sidebar);
+    }
+
+    #[test]
+    fn narrow_window_auto_collapses_sidebar() {
+        let mut view = RootView::new();
+        view.sync_layout(px(800.0));
+        assert!(view.narrow);
+        assert!(!view.show_sidebar);
+    }
+
+    #[test]
+    fn widening_window_restores_sidebar() {
+        let mut view = RootView::new();
+        view.sync_layout(px(800.0));
+        assert!(!view.show_sidebar);
+        view.sync_layout(px(1200.0));
+        assert!(!view.narrow);
+        assert!(view.show_sidebar);
+    }
+
+    #[test]
+    fn resize_respects_sidebar_minimum() {
+        let mut view = RootView::new();
+        view.sync_layout(px(1400.0));
+        view.resize(ResizeHandle::Sidebar, px(50.0), px(1400.0));
+        assert_eq!(view.sidebar_width, px(SIDEBAR_MIN_WIDTH));
+    }
+
+    #[test]
+    fn resize_respects_list_minimum() {
+        let mut view = RootView::new();
+        view.sync_layout(px(1400.0));
+        // Drag the list/reader divider far to the left (x near the sidebar edge).
+        view.resize(
+            ResizeHandle::List,
+            view.sidebar_width + px(10.0),
+            px(1400.0),
+        );
+        assert_eq!(view.list_width, px(LIST_MIN_WIDTH));
+    }
+
+    #[test]
+    fn resize_keeps_reader_minimum() {
+        let total = px(1400.0);
+        let mut view = RootView::new();
+        view.sync_layout(total);
+        // Try to make the list fill the whole row; the reader floor must hold.
+        view.resize(ResizeHandle::List, total, total);
+        let reader = total - view.sidebar_width - view.list_width;
+        assert!(reader >= px(READER_MIN_WIDTH));
+    }
+
+    #[test]
+    fn sync_layout_shrinks_columns_to_fit() {
+        let mut view = RootView::new();
+        view.list_width = px(900.0);
+        view.sync_layout(px(1000.0));
+        let reader = px(1000.0) - view.sidebar_width - view.list_width;
+        assert!(reader >= px(READER_MIN_WIDTH));
+        assert!(view.list_width >= px(LIST_MIN_WIDTH));
     }
 }
