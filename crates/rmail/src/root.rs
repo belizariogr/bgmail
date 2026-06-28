@@ -276,13 +276,20 @@ pub struct RootView {
     /// Whether to load remote content (e.g. images) in e-mail bodies. Persisted;
     /// off by default to block tracking pixels until the user opts in.
     load_remote_images: bool,
-    /// Whether the currently displayed message references remote content.
-    /// Drives the privacy affordance in the reader header. Recomputed whenever
-    /// the webview document is rebuilt.
+    /// Whether the currently displayed message contains remote images. Drives
+    /// whether the privacy shield appears. Recomputed when the document rebuilds.
     content_has_remote: bool,
-    /// Indices of messages the user explicitly unblocked. Unblocking is per
-    /// message (not the global setting), so other messages keep blocking.
+    /// How many remote images are still blocked in the current message. Red
+    /// shield while non-zero, green once it reaches zero. Recomputed on rebuild
+    /// and decremented as the user reveals individual images.
+    content_blocked_count: usize,
+    /// Indices of messages the user fully unblocked via the shield menu.
+    /// Unblocking is per message (not the global setting).
     unblocked_messages: HashSet<usize>,
+    /// Per message, the remote image URLs the user revealed one at a time (via
+    /// the in-body "Show remote image" menu). Kept so those images stay shown
+    /// across re-renders (theme/language switches, reselecting the message).
+    shown_images: HashMap<usize, HashSet<String>>,
     /// Whether the privacy menu (offering to unblock remote content) is open,
     /// and the window-space anchor where it was summoned.
     privacy_menu_open: bool,
@@ -335,7 +342,9 @@ impl RootView {
             last_webview_sig: None,
             load_remote_images: settings.load_remote_images,
             content_has_remote: false,
+            content_blocked_count: 0,
             unblocked_messages: HashSet::new(),
+            shown_images: HashMap::new(),
             privacy_menu_open: false,
             privacy_menu_pos: point(px(0.0), px(0.0)),
         }
@@ -432,6 +441,7 @@ impl RootView {
         }
         self.last_webview_sig = Some(signature);
 
+        let empty_shown: HashSet<String> = HashSet::new();
         let rendered = email_document(
             colors.background,
             colors.text,
@@ -452,8 +462,12 @@ impl RootView {
                 },
             },
             load_remote,
+            self.shown_images
+                .get(&self.selected_message)
+                .unwrap_or(&empty_shown),
         );
         self.content_has_remote = rendered.has_remote;
+        self.content_blocked_count = rendered.blocked_images;
         // The unblock menu only makes sense while the shield is in its blocked
         // (red) state; close it once nothing is blocked for this message.
         if !self.shield_is_blocked() {
@@ -495,7 +509,22 @@ impl RootView {
             HostEvent::CopyToClipboard(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
+            HostEvent::ImageShown(url) => self.image_shown(url, cx),
         }
+    }
+
+    /// Records that the user revealed one blocked remote image in the body. The
+    /// image is kept in this message's allowlist (so it stays shown across
+    /// re-renders) and the blocked count drops; when it hits zero the shield
+    /// flips to its loaded (green) state. The webview already swapped the image
+    /// in place, so no document rebuild is needed here.
+    fn image_shown(&mut self, url: String, cx: &mut Context<Self>) {
+        self.shown_images
+            .entry(self.selected_message)
+            .or_default()
+            .insert(url);
+        self.content_blocked_count = self.content_blocked_count.saturating_sub(1);
+        cx.notify();
     }
 
     /// Updates the hovered-link URL shown in the status bar, re-rendering only
@@ -1466,18 +1495,14 @@ impl RootView {
     /// current message: blocking is globally on, the message has remote content,
     /// and the user hasn't unblocked this specific message yet.
     fn shield_is_blocked(&self) -> bool {
-        !self.load_remote_images
-            && self.content_has_remote
-            && !self.unblocked_messages.contains(&self.selected_message)
+        !self.load_remote_images && self.content_has_remote && self.content_blocked_count > 0
     }
 
     /// Whether the reader should show the *loaded* (green) privacy shield: the
-    /// message has remote content that is now showing only because the user
-    /// unblocked this specific message (not the global setting).
+    /// message has remote images and none remain blocked, because the user
+    /// unblocked them — all at once via the menu, or one by one in the body.
     fn shield_is_loaded(&self) -> bool {
-        !self.load_remote_images
-            && self.content_has_remote
-            && self.unblocked_messages.contains(&self.selected_message)
+        !self.load_remote_images && self.content_has_remote && self.content_blocked_count == 0
     }
 
     /// Privacy affordance shown on the subject line. A same-sized empty slot is
@@ -1534,7 +1559,11 @@ impl RootView {
             .rounded_md()
             .cursor_pointer()
             .hover(|el| el.bg(colors.element_hover))
-            .tooltip(Tooltip::text(Key::BlockedElements.tr(language)))
+            .tooltip(Tooltip::text(
+                Key::BlockedElements
+                    .tr(language)
+                    .replace("{}", &self.content_blocked_count.to_string()),
+            ))
             .child(
                 Icon::new(IconName::Shield)
                     .size(IconSize::Small)

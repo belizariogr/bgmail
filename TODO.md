@@ -189,20 +189,30 @@
         Localized label `CtxShowImage` (EN/PT) via the `data-rm-img-show` attr.
         Blocked placeholders now use the default cursor (no `context-menu` hint).
       - Reader-header privacy affordance: `email_document` returns a
-        `RenderedEmail { html, has_remote }` (the sanitizer reports whether the
-        message references any remote resource, regardless of blocking);
-        `RootView.content_has_remote` caches it. On the subject line a compact,
-        fixed-size shield slot (so the header height is identical with or without
-        it) shows one of two states when the message has remote content and the
-        global setting is off: a **red** `Shield` (`Color::Error`, hover tooltip
-        `BlockedElements`) that on click opens a deferred/anchored dropdown
-        "Unblock all remote content" (`UnblockRemote`), or — once unblocked — a
-        **green** `Shield`+`Check` overlay (`Color::Success`, tooltip
-        `RemoteContentLoaded`). Unblocking is **per message** (`RootView
-        .unblocked_messages: HashSet<usize>`, folded into the effective
-        `load_remote` and the webview memoization signature), never the global
-        setting. A full-window catcher closes the menu on outside click. New
-        `ui::Tooltip` (text) component, `IconName::Check`, and EN/PT keys.
+        `RenderedEmail { html, has_remote, blocked_images }` (the sanitizer
+        reports whether the message has remote `<img>` and how many are still
+        blocked); `RootView` caches `content_has_remote` + `content_blocked_count`.
+        On the subject line a compact, fixed-size shield slot (so the header
+        height is identical with or without it) shows, when the message has
+        remote images and the global setting is off: a **red** `Shield`
+        (`Color::Error`, tooltip `BlockedElements` with the live count) that on
+        click opens a deferred/anchored dropdown "Unblock all remote content"
+        (`UnblockRemote`), or a **green** `ShieldSolid`+`Check` overlay
+        (`Color::Success`, check in the background color, tooltip
+        `RemoteContentLoaded`) once `blocked_images == 0`.
+      - Two unblock paths, both **per message** (never the global setting):
+        the dropdown fully unblocks (`unblocked_messages: HashSet<usize>` →
+        effective `load_remote`), or the in-body "Show remote image" reveals one
+        image at a time. The latter now also posts an `S` IPC →
+        `HostEvent::ImageShown(url)`; the host records the URL in
+        `shown_images: HashMap<usize, HashSet<String>>` (so it stays shown across
+        re-renders — `sanitize`/`neutralize_attributes` take the allowlist) and
+        decrements the blocked count. When the user reveals **all** images the
+        count reaches zero and the shield turns green on its own. A full-window
+        catcher closes the menu on outside click. New `ui::Tooltip` (text)
+        component, `IconName::Check`/`ShieldSolid`, `IconSize::XXSmall`, and
+        EN/PT keys. Mock body now embeds two remote images so the count is
+        observable.
 - ✅ Scrollbar fade animation for list/sidebar (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)

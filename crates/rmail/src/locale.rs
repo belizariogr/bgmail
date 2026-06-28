@@ -149,8 +149,8 @@ impl Key {
             (RemoteImagesHint, P) => {
                 "Desativado por padrão. Imagens remotas podem rastrear quando e onde você abre uma mensagem."
             }
-            (BlockedElements, E) => "Blocked content present",
-            (BlockedElements, P) => "Há conteúdo bloqueado",
+            (BlockedElements, E) => "Blocked images: {}",
+            (BlockedElements, P) => "Imagens bloqueadas: {}",
             (UnblockRemote, E) => "Unblock all remote content",
             (UnblockRemote, P) => "Desbloquear todo conteúdo remoto",
             (RemoteContentLoaded, E) => "Remote content loaded",

@@ -485,6 +485,9 @@ fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> Sha
          <p><img src=\"https://picsum.photos/seed/rmail/{width}/{height}\" \
          alt=\"Remote image (blocked unless you allow remote content)\" \
          width=\"{width}\" height=\"{height}\"></p>\
+         <p><img src=\"https://picsum.photos/seed/rmail2/{width}/{height}\" \
+         alt=\"Another remote image (blocked unless you allow remote content)\" \
+         width=\"{width}\" height=\"{height}\"></p>\
          <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor \
          incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud \
          exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure \
