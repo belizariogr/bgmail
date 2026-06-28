@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// `#[serde(default)]` lets older/partial config files load: any missing field
 /// falls back to its default instead of failing the whole parse.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// X position (left edge) of the main window, in screen coordinates.
@@ -49,6 +49,9 @@ pub struct Config {
     /// regardless of the app theme. Most e-mails are authored for a light page,
     /// so this keeps them legible in dark mode. Off by default.
     pub reader_white_background: bool,
+    /// Indices of the sidebar account groups the user collapsed, so their
+    /// open/closed state survives a restart. Stored sorted for a stable file.
+    pub collapsed_accounts: Vec<usize>,
 }
 
 impl Default for Config {
@@ -68,6 +71,7 @@ impl Default for Config {
             list_width: 360.0,
             load_remote_images: false,
             reader_white_background: false,
+            collapsed_accounts: Vec::new(),
         }
     }
 }
@@ -145,6 +149,7 @@ mod tests {
             list_width: 420.0,
             load_remote_images: true,
             reader_white_background: true,
+            collapsed_accounts: vec![0, 2, 4],
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
@@ -158,6 +163,13 @@ mod tests {
         assert!(!Config::default().load_remote_images);
         let parsed: Config = serde_json::from_str(r#"{ "sidebar_width": 175.0 }"#).unwrap();
         assert!(!parsed.load_remote_images);
+    }
+
+    #[test]
+    fn collapsed_accounts_default_empty_and_round_trip() {
+        assert!(Config::default().collapsed_accounts.is_empty());
+        let parsed: Config = serde_json::from_str(r#"{ "collapsed_accounts": [2, 5] }"#).unwrap();
+        assert_eq!(parsed.collapsed_accounts, vec![2, 5]);
     }
 
     #[test]
@@ -200,6 +212,7 @@ mod tests {
             list_width: 400.0,
             load_remote_images: false,
             reader_white_background: true,
+            collapsed_accounts: vec![1, 3],
         };
         save_to(&path, &config).unwrap();
         assert_eq!(load_from(path.clone()), config);

@@ -324,7 +324,7 @@ impl RootView {
             accounts: data::sample_accounts(),
             messages: data::sample_messages(),
             selected_mailbox: Selection::Global(GlobalMailbox::Inbox),
-            collapsed_accounts: HashSet::new(),
+            collapsed_accounts: settings.collapsed_accounts.iter().copied().collect(),
             fold_anim: HashMap::new(),
             fold_seq: 0,
             selected_message: 3,
@@ -393,6 +393,11 @@ impl RootView {
             list_width: f32::from(self.list_width),
             load_remote_images: self.load_remote_images,
             reader_white_background: self.reader_white_background,
+            collapsed_accounts: {
+                let mut groups: Vec<usize> = self.collapsed_accounts.iter().copied().collect();
+                groups.sort_unstable();
+                groups
+            },
         }
     }
 
@@ -1225,6 +1230,8 @@ impl RootView {
                 .hover(|el| el.bg(cx.theme().colors().element_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let token = this.toggle_account(account_idx).token;
+                    // Persist the new open/closed state (debounced).
+                    this.request_save(cx);
                     // Clear the animation once it has played out so the list and
                     // chevron settle into their final (static) state.
                     let timer = cx
@@ -1401,8 +1408,11 @@ impl RootView {
 
     fn render_message_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let bg = colors.surface_background;
+        // Match the reader pane (the email panel) rather than the sidebar, so the
+        // list and the open message share one surface.
+        let bg = colors.background;
         let border = colors.border;
+        let header_bg = colors.panel_background;
 
         let mut content = v_flex()
             .id("message-list")
@@ -1430,6 +1440,9 @@ impl RootView {
                 .flex_shrink_0()
                 .px_3()
                 .py_2()
+                // Match the sidebar surface: in this collapsed layout the list's
+                // own toolbar stands in for the (hidden) sidebar's top region.
+                .bg(header_bg)
                 .border_b_1()
                 .border_color(border)
                 .child(self.render_list_controls(false, cx))
@@ -2364,8 +2377,14 @@ mod tests {
         view.narrow = true;
         view.show_sidebar = true;
         view.apply_mailbox_selection(Selection::Global(GlobalMailbox::Sent));
-        assert_eq!(view.selected_mailbox, Selection::Global(GlobalMailbox::Sent));
-        assert!(!view.show_sidebar, "narrow selection should close the sidebar");
+        assert_eq!(
+            view.selected_mailbox,
+            Selection::Global(GlobalMailbox::Sent)
+        );
+        assert!(
+            !view.show_sidebar,
+            "narrow selection should close the sidebar"
+        );
     }
 
     #[test]
