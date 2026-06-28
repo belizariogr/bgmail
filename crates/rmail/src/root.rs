@@ -10,17 +10,17 @@ use std::time::Duration;
 use std::f32::consts::FRAC_PI_2;
 
 use gpui::{
-    canvas, ease_in_out, point, radians, size, svg, Animation, AnimationExt as _, AppContext as _,
-    Bounds, ClipboardItem, Context, DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Point, ScrollHandle, Size, Svg, TitlebarOptions,
-    Transformation, WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle,
-    WindowOptions,
+    anchored, canvas, deferred, ease_in_out, point, radians, size, svg, Animation,
+    AnimationExt as _, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Corner,
+    DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Point, ScrollHandle, Size, Svg, TitlebarOptions, Transformation, WeakEntity, Window,
+    WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
 };
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
 use ui::{
     Button, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize, ListItem,
-    Scrollbar, ScrollbarState,
+    Scrollbar, ScrollbarState, Tooltip,
 };
 
 use crate::config::{self, Config};
@@ -276,6 +276,14 @@ pub struct RootView {
     /// Whether to load remote content (e.g. images) in e-mail bodies. Persisted;
     /// off by default to block tracking pixels until the user opts in.
     load_remote_images: bool,
+    /// Whether the currently displayed message had remote content withheld.
+    /// Drives the privacy affordance in the reader header. Recomputed whenever
+    /// the webview document is rebuilt.
+    content_blocked: bool,
+    /// Whether the privacy menu (offering to unblock remote content) is open,
+    /// and the window-space anchor where it was summoned.
+    privacy_menu_open: bool,
+    privacy_menu_pos: Point<Pixels>,
 }
 
 impl RootView {
@@ -323,6 +331,9 @@ impl RootView {
             email_webview: None,
             last_webview_sig: None,
             load_remote_images: settings.load_remote_images,
+            content_blocked: false,
+            privacy_menu_open: false,
+            privacy_menu_pos: point(px(0.0), px(0.0)),
         }
     }
 
@@ -413,7 +424,7 @@ impl RootView {
         }
         self.last_webview_sig = Some(signature);
 
-        let document = email_document(
+        let rendered = email_document(
             colors.background,
             colors.text,
             colors.accent,
@@ -434,6 +445,13 @@ impl RootView {
             },
             self.load_remote_images,
         );
+        // Surface the "blocked remote content" affordance only when something was
+        // actually withheld; close the menu if a re-render no longer blocks.
+        self.content_blocked = rendered.blocked_remote;
+        if !self.content_blocked {
+            self.privacy_menu_open = false;
+        }
+        let document = rendered.html;
         let notify_body = Key::ImageDownloaded.tr(language).to_string();
 
         match &mut self.email_webview {
@@ -1436,6 +1454,101 @@ impl RootView {
 
     // ----- Reading pane ---------------------------------------------------
 
+    /// Privacy affordance shown on the subject line when the current message has
+    /// remote content withheld: a compact red shield that, on click, opens a
+    /// menu to unblock everything. A same-sized empty slot is reserved when
+    /// nothing is blocked, so the header keeps an identical height either way.
+    fn render_privacy_shield(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let slot = div().flex_shrink_0().size(px(20.0));
+        if !self.content_blocked {
+            return slot.into_any_element();
+        }
+        let language = cx.language();
+        let colors = cx.theme().colors();
+        slot.id("privacy-shield")
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|el| el.bg(colors.element_hover))
+            .tooltip(Tooltip::text(Key::BlockedElements.tr(language)))
+            .child(
+                Icon::new(IconName::Shield)
+                    .size(IconSize::Small)
+                    .color(Color::Error),
+            )
+            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                this.privacy_menu_pos = event.position();
+                this.privacy_menu_open = !this.privacy_menu_open;
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    /// The dropdown summoned by the privacy shield. Anchored to the click and
+    /// deferred so it paints above everything; the embedded webview is hidden
+    /// while it is open (a native child view would otherwise occlude it).
+    fn render_privacy_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let language = cx.language();
+        let menu = v_flex()
+            .occlude()
+            .min_w(px(240.0))
+            .p_1()
+            .bg(colors.elevated_surface_background)
+            .border_1()
+            .border_color(colors.border)
+            .rounded_md()
+            .shadow_lg()
+            .child(
+                h_flex()
+                    .id("unblock-remote")
+                    .w_full()
+                    .gap_2()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|el| el.bg(colors.element_hover))
+                    .child(
+                        Icon::new(IconName::Shield)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(Label::new(Key::UnblockRemote.tr(language)).size(LabelSize::Small))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.privacy_menu_open = false;
+                        this.set_load_remote_images(true, cx);
+                        cx.notify();
+                    })),
+            );
+
+        // Full-window catcher closes the menu on any outside click; the menu
+        // itself occludes so its own clicks don't fall through to it.
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.privacy_menu_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                deferred(
+                    anchored()
+                        .position(self.privacy_menu_pos)
+                        .anchor(Corner::TopRight)
+                        .snap_to_window_with_margin(px(8.0))
+                        .child(menu),
+                )
+                .with_priority(1),
+            )
+    }
+
     fn render_reader(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let bg = colors.background;
@@ -1463,9 +1576,19 @@ impl RootView {
             .border_b_1()
             .border_color(border)
             .child(
-                Label::new(message.subject.clone())
-                    .size(LabelSize::Large)
-                    .bold(),
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Label::new(message.subject.clone())
+                                .size(LabelSize::Large)
+                                .bold()
+                                .single_line(),
+                        ),
+                    )
+                    .child(self.render_privacy_shield(cx)),
             )
             .child(
                 h_flex()
@@ -2019,6 +2142,9 @@ impl Render for RootView {
             .child(self.render_toolbar(cx))
             .child(body)
             .child(self.render_status_bar(cx))
+            .when(self.privacy_menu_open, |el| {
+                el.child(self.render_privacy_menu(cx))
+            })
     }
 }
 

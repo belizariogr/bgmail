@@ -67,6 +67,8 @@ pub enum Key {
 
     RemoteImagesLabel,
     RemoteImagesHint,
+    BlockedElements,
+    UnblockRemote,
 
     SearchPlaceholder,
 
@@ -146,6 +148,10 @@ impl Key {
             (RemoteImagesHint, P) => {
                 "Desativado por padrão. Imagens remotas podem rastrear quando e onde você abre uma mensagem."
             }
+            (BlockedElements, E) => "Blocked content present",
+            (BlockedElements, P) => "Há conteúdo bloqueado",
+            (UnblockRemote, E) => "Unblock all remote content",
+            (UnblockRemote, P) => "Desbloquear todo conteúdo remoto",
 
             (SearchPlaceholder, E) => "Search",
             (SearchPlaceholder, P) => "Buscar",
@@ -223,7 +229,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 34] = [
+    const ALL_KEYS: [Key; 36] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -250,6 +256,8 @@ mod tests {
         Key::Disabled,
         Key::RemoteImagesLabel,
         Key::RemoteImagesHint,
+        Key::BlockedElements,
+        Key::UnblockRemote,
         Key::SearchPlaceholder,
         Key::CtxOpenImage,
         Key::CtxDownloadImage,

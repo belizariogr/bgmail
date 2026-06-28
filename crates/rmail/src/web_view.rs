@@ -46,6 +46,16 @@ pub struct ContextMenuLabels<'a> {
 /// line breaks and wrap to the pane width. `labels` localize the custom image
 /// context menu. When `load_remote` is false, remote resources (e.g. tracking
 /// pixels) are stripped from HTML bodies; inline `data:` images always render.
+/// A rendered e-mail document plus the privacy metadata the reader needs to
+/// decide whether to show the "remote content blocked" affordance.
+pub struct RenderedEmail {
+    /// The full HTML document fed to the webview.
+    pub html: String,
+    /// Whether any remote resource was blocked while rendering (so the reader
+    /// can offer to unblock it). Always false when remote loading is enabled.
+    pub blocked_remote: bool,
+}
+
 pub fn email_document(
     background: Hsla,
     text: Hsla,
@@ -53,13 +63,16 @@ pub fn email_document(
     body: &MessageBody,
     labels: ContextMenuLabels,
     load_remote: bool,
-) -> String {
-    let inner = match body {
-        MessageBody::Html(html) => sanitize_html(html, load_remote),
-        MessageBody::Text(plain) => format!("<pre class=\"plain\">{}</pre>", escape_html(plain)),
+) -> RenderedEmail {
+    let (inner, blocked_remote) = match body {
+        MessageBody::Html(html) => sanitize_html_inner(html, load_remote),
+        MessageBody::Text(plain) => (
+            format!("<pre class=\"plain\">{}</pre>", escape_html(plain)),
+            false,
+        ),
     };
 
-    format!(
+    let html = format!(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <style>{css}</style></head>\
@@ -76,7 +89,11 @@ pub fn email_document(
         link_copy = escape_html(labels.link_copy),
         sel_copy = escape_html(labels.selection_copy),
         copy_key = escape_html(labels.copy_shortcut),
-    )
+    );
+    RenderedEmail {
+        html,
+        blocked_remote,
+    }
 }
 
 /// Theme-aware stylesheet shared by every rendered message. Colors come straight
@@ -92,7 +109,7 @@ fn document_css(background: Hsla, text: Hsla, accent: Hsla) -> String {
          a {{ color: {accent}; }}\
          img {{ display: block; }}\
          img[data-rm-blocked-src] {{ background: {soft}; border: 1px dashed {line}; \
-           box-sizing: border-box; min-width: 24px; min-height: 24px; cursor: context-menu; }}\
+           box-sizing: border-box; min-width: 24px; min-height: 24px; }}\
          h1, h2, h3 {{ line-height: 1.25; }}\
          code, pre {{ font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }}\
          pre {{ white-space: pre-wrap; background: {soft}; padding: 12px; border-radius: 6px; }}\
@@ -520,28 +537,43 @@ const URL_ATTRIBUTES: &[&str] = &[
 /// Everything else — including inline `style`, tables and links — is preserved
 /// verbatim. If rewriting fails for any reason we drop the body entirely rather
 /// than risk rendering unsanitized content.
+#[cfg(test)]
 fn sanitize_html(html: &str, load_remote: bool) -> String {
-    use lol_html::{element, rewrite_str, RewriteStrSettings};
+    sanitize_html_inner(html, load_remote).0
+}
 
+/// Like [`sanitize_html`], but also reports whether any *remote* resource was
+/// blocked (a remote `<img>`/`srcset`/url-bearing attribute was stripped because
+/// `load_remote` is false). The reader uses this to surface the "blocked
+/// content" affordance only when toggling the setting would actually reveal
+/// something.
+fn sanitize_html_inner(html: &str, load_remote: bool) -> (String, bool) {
+    use lol_html::{element, rewrite_str, RewriteStrSettings};
+    use std::cell::Cell;
+
+    let blocked_remote = Cell::new(false);
     let settings = RewriteStrSettings::new()
         .append_element_content_handler(element!(DISALLOWED_ELEMENTS, |el| {
             el.remove();
             Ok(())
         }))
         .append_element_content_handler(element!("*", |el| {
-            neutralize_attributes(el, load_remote);
+            if neutralize_attributes(el, load_remote) {
+                blocked_remote.set(true);
+            }
             Ok(())
         }));
 
     let sanitized = rewrite_str(html, settings).unwrap_or_default();
-    if load_remote {
+    let html = if load_remote {
         sanitized
     } else {
         // CSS `url(...)` (background images, web fonts, `@import`) also fetches
         // remote resources, in both inline `style` and `<style>` blocks. Blank
         // them too. By preference this is a blunt textual pass, not a CSS parser.
         strip_css_urls(&sanitized)
-    }
+    };
+    (html, blocked_remote.get())
 }
 
 /// Empties the contents of every CSS `url(...)` in `css` — `url(http://x.png)`
@@ -597,11 +629,12 @@ fn find_url_open(s: &str) -> Option<usize> {
 /// blocked `<img src>` is special-cased: its remote URL is preserved in
 /// `data-rm-blocked-src` (the `src` is still dropped, so nothing loads) so the
 /// content script can show the URL on hover and offer "Show remote image".
-fn neutralize_attributes(el: &mut Element, load_remote: bool) {
+fn neutralize_attributes(el: &mut Element, load_remote: bool) -> bool {
     let is_img = el.tag_name() == "img";
     // `attributes()` borrows the element, so collect everything we need first and
     // only mutate (`remove_attribute`/`set_attribute`) once the borrow is released.
     let mut blocked_img_src = None;
+    let mut blocked_remote = false;
     let doomed: Vec<String> = el
         .attributes()
         .iter()
@@ -612,8 +645,11 @@ fn neutralize_attributes(el: &mut Element, load_remote: bool) {
             let remote_blocked = !load_remote
                 && ((is_url_attr && is_remote_url(&value))
                     || (name == "srcset" && !value.trim().is_empty()));
-            if remote_blocked && is_img && name == "src" {
-                blocked_img_src = Some(value.clone());
+            if remote_blocked {
+                blocked_remote = true;
+                if is_img && name == "src" {
+                    blocked_img_src = Some(value.clone());
+                }
             }
             let drop = name.starts_with("on")
                 || name == "contenteditable"
@@ -630,6 +666,7 @@ fn neutralize_attributes(el: &mut Element, load_remote: bool) {
     if let Some(src) = blocked_img_src {
         let _ = el.set_attribute("data-rm-blocked-src", &src);
     }
+    blocked_remote
 }
 
 /// Whether a URL value uses a scheme that can execute or load active content.
@@ -1139,7 +1176,8 @@ mod tests {
             &body_html(),
             labels(),
             true,
-        );
+        )
+        .html;
         assert!(doc.starts_with("<!DOCTYPE html>"));
         assert!(doc.contains("<p>Hello <strong>world</strong></p>"));
         // A dark background selects the dark color scheme.
@@ -1156,7 +1194,8 @@ mod tests {
             &body,
             labels(),
             true,
-        );
+        )
+        .html;
         assert!(doc.contains("<pre class=\"plain\">1 &lt; 2 &amp; 3</pre>"));
         // A light background selects the light color scheme.
         assert!(doc.contains("color-scheme: light"));
@@ -1390,11 +1429,31 @@ mod tests {
             &body,
             labels(),
             true,
-        );
+        )
+        .html;
         assert!(doc.contains("<p>safe</p>"));
         assert!(!doc.contains("<iframe"));
         assert!(!doc.contains("<input"));
         assert!(!doc.contains("<video"));
+    }
+
+    #[test]
+    fn document_reports_blocked_remote_only_when_blocking() {
+        let body = MessageBody::Html("<img src=\"https://tracker.test/p.gif\">".into());
+        let colors = (
+            hsla(0.0, 0.0, 0.1, 1.0),
+            hsla(0.0, 0.0, 0.9, 1.0),
+            hsla(0.6, 0.7, 0.5, 1.0),
+        );
+        // Blocking on → the remote image is withheld and the flag is set.
+        let blocked = email_document(colors.0, colors.1, colors.2, &body, labels(), false);
+        assert!(blocked.blocked_remote);
+        // Loading enabled → nothing is blocked, so the flag stays clear.
+        let allowed = email_document(colors.0, colors.1, colors.2, &body, labels(), true);
+        assert!(!allowed.blocked_remote);
+        // A message with no remote resources never flags as blocked.
+        let local = email_document(colors.0, colors.1, colors.2, &body_html(), labels(), false);
+        assert!(!local.blocked_remote);
     }
 
     #[test]
@@ -1414,7 +1473,8 @@ mod tests {
                 copy_shortcut: "\u{2318}C",
             },
             true,
-        );
+        )
+        .html;
         // Labels ride on the body as data-* attributes, HTML-escaped.
         assert!(doc.contains("data-rm-img-open=\"Open &quot;image&quot;\""));
         assert!(doc.contains("data-rm-img-download=\"Download\""));

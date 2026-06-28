@@ -18,6 +18,7 @@ mod icon;
 mod label;
 mod list_item;
 mod scrollbar;
+mod tooltip;
 
 pub use assets::*;
 pub use button::*;
@@ -26,6 +27,7 @@ pub use icon::*;
 pub use label::*;
 pub use list_item::*;
 pub use scrollbar::*;
+pub use tooltip::*;
 
 pub use prelude::{h_flex, v_flex};
 

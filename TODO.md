@@ -187,6 +187,17 @@
         a "Show remote image" context-menu item that loads just that one image in
         place (sets `src` from the stashed URL — pure JS, no host round-trip).
         Localized label `CtxShowImage` (EN/PT) via the `data-rm-img-show` attr.
+        Blocked placeholders now use the default cursor (no `context-menu` hint).
+      - Reader-header privacy affordance: `email_document` returns a
+        `RenderedEmail { html, blocked_remote }` (the sanitizer reports when it
+        withheld a remote resource); `RootView.content_blocked` caches it. When
+        set, a red shield (`IconName::Shield`, `Color::Error`) renders above the
+        date with a hover tooltip (`BlockedElements`) and, on click, a deferred/
+        anchored dropdown offering "Unblock all remote content" (`UnblockRemote`
+        → `set_load_remote_images(true)`). The native webview is `hide()`-d while
+        the menu is open so its child view can't occlude the GPUI overlay; a
+        full-window catcher closes it on outside click. New `ui::Tooltip` (text)
+        component + EN/PT keys.
 - ✅ Scrollbar fade animation for list/sidebar (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)
