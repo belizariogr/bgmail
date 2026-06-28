@@ -1137,7 +1137,11 @@ impl RootView {
                             Color::Muted
                         }),
                 )
-                .child(Label::new(global.display_name(language)).size(LabelSize::Small))
+                .child(
+                    Label::new(global.display_name(language))
+                        .size(LabelSize::Small)
+                        .single_line(),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.selected_mailbox = Selection::Global(global);
                     cx.notify();
@@ -1223,7 +1227,11 @@ impl RootView {
                             Color::Muted
                         }),
                 )
-                .child(Label::new(mailbox.display_name(language)).size(LabelSize::Small))
+                .child(
+                    Label::new(mailbox.display_name(language))
+                        .size(LabelSize::Small)
+                        .single_line(),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.selected_mailbox = Selection::Mailbox(account_idx, mailbox_idx);
                     cx.notify();
