@@ -326,7 +326,7 @@ impl RootView {
     /// The message-list controls (mailbox title + count on the left, filter/more
     /// on the right). Rendered in the top toolbar while the sidebar is docked,
     /// and inside the list's own header otherwise.
-    fn render_list_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_list_controls(&self, show_count: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let language = cx.language();
         let (account_idx, mailbox_idx) = self.selected_mailbox;
         let mailbox = &self.accounts[account_idx].mailboxes[mailbox_idx];
@@ -340,11 +340,13 @@ impl RootView {
             .child(
                 v_flex()
                     .child(Label::new(list_title).weight(FontWeight::SEMIBOLD))
-                    .child(
-                        Label::new(list_count)
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    ),
+                    .when(show_count, |this| {
+                        this.child(
+                            Label::new(list_count)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                    }),
             )
             .child(
                 h_flex()
@@ -444,7 +446,7 @@ impl RootView {
                 .flex_shrink_0()
                 .items_center()
                 .px_3()
-                .child(self.render_list_controls(cx))
+                .child(self.render_list_controls(true, cx))
         });
 
         // When the reader's toolbar segment gets too tight the full search field
@@ -805,7 +807,7 @@ impl RootView {
                 .py_2()
                 .border_b_1()
                 .border_color(border)
-                .child(self.render_list_controls(cx))
+                .child(self.render_list_controls(false, cx))
         });
 
         v_flex()
