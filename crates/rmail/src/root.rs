@@ -1333,6 +1333,7 @@ impl RootView {
         h_flex()
             .h(px(19.0))
             .min_w(px(21.0))
+            .px_1p5()
             .justify_center()
             .rounded_full()
             .bg(bg)

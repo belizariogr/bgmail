@@ -183,7 +183,7 @@ pub fn sample_accounts() -> Vec<Account> {
         Account {
             name: "Personal".into(),
             email: "you@gmail.com".into(),
-            mailboxes: default_mailboxes(7),
+            mailboxes: default_mailboxes(5000),
         },
         Account {
             name: "Work".into(),
@@ -191,7 +191,7 @@ pub fn sample_accounts() -> Vec<Account> {
             // The standard mailboxes plus a handful of user-created folders, to
             // exercise a longer, custom list in the sidebar.
             mailboxes: {
-                let mut mailboxes = default_mailboxes(2);
+                let mut mailboxes = default_mailboxes(200);
                 mailboxes.extend([
                     Mailbox::custom("Clients", 4),
                     Mailbox::custom("Invoices", 0),
@@ -205,7 +205,7 @@ pub fn sample_accounts() -> Vec<Account> {
         Account {
             name: "University".into(),
             email: "you@university.edu".into(),
-            mailboxes: default_mailboxes(5),
+            mailboxes: default_mailboxes(20000),
         },
         Account {
             name: "Newsletters".into(),
@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn unread_count_matches_first_account() {
         let accounts = sample_accounts();
-        assert_eq!(accounts[0].mailboxes[0].unread, 7);
+        assert_eq!(accounts[0].mailboxes[0].unread, 5000);
     }
 
     #[test]
