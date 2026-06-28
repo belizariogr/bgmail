@@ -76,9 +76,9 @@
       dependency-free base64 (RFC 4648 vectors), the data URI shape and the image
       magic bytes (guards against a mislabeled WebP).
 - 🔄 **Measure the startup time** with instrumentation (still informal)
-- ⬜ Clickable links / external navigation policy for the webview (open in the
+- ✅ Clickable links / external navigation policy for the webview (open in the
       system browser instead of inside the embedded view)
-- ⬜ Scrollbar fade animation for list/sidebar (currently instant show/hide)
+- ✅ Scrollbar fade animation for list/sidebar (currently instant show/hide)
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)
 - ⬜ E-mail composition screen/panel (mock)

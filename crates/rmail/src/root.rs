@@ -4,6 +4,7 @@
 //! and a status bar), using the components from the `ui` crate. All interaction
 //! here is "mock" — only item selection, theme toggling and language switching.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui::{
@@ -117,6 +118,8 @@ pub struct RootView {
     messages: Vec<Message>,
     /// Selected (account index, mailbox index) in the sidebar.
     selected_mailbox: (usize, usize),
+    /// Indices of the accounts whose mailbox list is collapsed in the sidebar.
+    collapsed_accounts: HashSet<usize>,
     /// Index of the message selected in the list.
     selected_message: usize,
     /// Whether the accounts sidebar is visible (toggled from the toolbar).
@@ -160,6 +163,7 @@ impl RootView {
             accounts: data::sample_accounts(),
             messages: data::sample_messages(),
             selected_mailbox: (0, 0),
+            collapsed_accounts: HashSet::new(),
             selected_message: 3,
             show_sidebar: true,
             sidebar_width: px(SIDEBAR_MIN_WIDTH),
@@ -291,6 +295,18 @@ impl RootView {
     /// Show or hide the accounts sidebar (toolbar toggle, like Mail).
     fn toggle_sidebar(&mut self) {
         self.show_sidebar = !self.show_sidebar;
+    }
+
+    /// Whether the given account's mailbox list is currently collapsed.
+    fn is_account_collapsed(&self, account_idx: usize) -> bool {
+        self.collapsed_accounts.contains(&account_idx)
+    }
+
+    /// Collapse or expand the given account's mailbox list in the sidebar.
+    fn toggle_account(&mut self, account_idx: usize) {
+        if !self.collapsed_accounts.remove(&account_idx) {
+            self.collapsed_accounts.insert(account_idx);
+        }
     }
 
     /// Whether the sidebar occupies a column in the layout (vs. hidden or
@@ -706,13 +722,27 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let language = cx.language();
+        let collapsed = self.is_account_collapsed(account_idx);
+        let chevron = if collapsed {
+            IconName::ChevronRight
+        } else {
+            IconName::ChevronDown
+        };
         let mut section = v_flex().px_2().pb_3().child(
             h_flex()
+                .id(("account-header", account_idx))
                 .px_2()
                 .py_1()
                 .gap_2()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|el| el.bg(cx.theme().colors().element_hover))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_account(account_idx);
+                    cx.notify();
+                }))
                 .child(
-                    Icon::new(IconName::ChevronDown)
+                    Icon::new(chevron)
                         .size(IconSize::XSmall)
                         .color(Color::Muted),
                 )
@@ -723,6 +753,10 @@ impl RootView {
                         .weight(FontWeight::SEMIBOLD),
                 ),
         );
+
+        if collapsed {
+            return section;
+        }
 
         for (mailbox_idx, mailbox) in account.mailboxes.iter().enumerate() {
             let selected = self.selected_mailbox == (account_idx, mailbox_idx);
@@ -1453,6 +1487,25 @@ mod tests {
         assert!(!view.show_sidebar);
         view.toggle_sidebar();
         assert!(view.show_sidebar);
+    }
+
+    #[test]
+    fn accounts_start_expanded() {
+        let view = RootView::new();
+        for idx in 0..view.accounts.len() {
+            assert!(!view.is_account_collapsed(idx));
+        }
+    }
+
+    #[test]
+    fn toggle_account_collapses_and_expands() {
+        let mut view = RootView::new();
+        view.toggle_account(1);
+        assert!(view.is_account_collapsed(1));
+        // Other accounts are unaffected.
+        assert!(!view.is_account_collapsed(0));
+        view.toggle_account(1);
+        assert!(!view.is_account_collapsed(1));
     }
 
     #[test]
