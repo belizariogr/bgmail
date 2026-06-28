@@ -1327,13 +1327,16 @@ impl RootView {
             colors.text_muted
         };
 
+        // A fixed height paired with a line height tight to the glyph keeps the
+        // digit optically centered: with the default (looser) line height the
+        // text box is taller than the number, leaving it ~1px off center.
         h_flex()
-            .px_1p5()
-            .min_w(px(20.0))
+            .h(px(19.0))
+            .min_w(px(21.0))
             .justify_center()
             .rounded_full()
             .bg(bg)
-            .text_size(px(11.0))
+            .text_size(px(10.0))
             .text_color(text)
             .child(count.to_string())
     }
