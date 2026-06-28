@@ -364,6 +364,13 @@ pub fn sample_messages() -> Vec<Message> {
 fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> SharedString {
     let width = EMBEDDED_IMAGE_WIDTH;
     let height = EMBEDDED_IMAGE_HEIGHT;
+    // A ~2000-character href to stress-test how the status bar handles extreme
+    // overflow on hover. Built from a repeated path segment (no `&`, so it needs
+    // no HTML escaping and the rendered `a.href` length matches this string).
+    let huge_href = format!(
+        "https://www.example.com/{}?ref=overflow-2k",
+        "abcdefghij0123456789/".repeat(94)
+    );
     format!(
         "<h2>{subject}</h2>\
          <p>{preview}</p>\
@@ -371,6 +378,11 @@ fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> Sha
          <p>This message is rendered by rMail's built-in <strong>HTML viewer</strong>. \
          It supports <em>emphasis</em>, <u>underline</u>, <s>strikethrough</s>, \
          <a href=\"https://example.com\">links</a> and <code>inline code</code>.</p>\
+         <p>Here is a deliberately long link so you can see how the status bar \
+         handles overflow on hover: \
+         <a href=\"https://www.example.com/very/long/path/to/a/resource/that/keeps/going/and/going/even/further?utm_source=rmail&amp;utm_medium=email&amp;utm_campaign=newsletter-2026-summer-edition&amp;utm_term=status-bar-overflow-test&amp;utm_content=hero-call-to-action-button&amp;ref=footer&amp;session=abcdef0123456789abcdef0123456789&amp;token=ZmFrZS10b2tlbi1mb3ItdGVzdGluZy1wdXJwb3Nlcy1vbmx5&amp;page=1&amp;sort=desc\">a very long tracking URL</a>.</p>\
+         <p>And an extreme one (~2000 characters): \
+         <a href=\"{huge_href}\">a 2000-character URL</a>.</p>\
          <h3>Highlights</h3>\
          <ul>\
            <li>Rich text with <strong>bold</strong> and <em>italic</em></li>\

@@ -141,6 +141,9 @@ pub struct RootView {
     /// starts on the first subsequent mouse-move, so plain clicks on toolbar
     /// buttons still register.
     should_move: bool,
+    /// Destination URL of the link currently under the cursor in the reader's
+    /// webview (empty when none). Shown centered in the status bar.
+    hovered_link: String,
     view: AppView,
     settings_section: SettingsSection,
     /// Scroll handle + scrollbar state for the message list.
@@ -168,6 +171,7 @@ impl RootView {
             narrow: false,
             window_width: px(1100.0),
             should_move: false,
+            hovered_link: String::new(),
             view: AppView::Mail,
             settings_section: SettingsSection::Appearance,
             list_scroll: ScrollHandle::new(),
@@ -200,13 +204,40 @@ impl RootView {
 
         match &mut self.email_webview {
             Some(webview) => webview.set_html(&document),
-            None => self.email_webview = EmailWebView::new(window, &document),
+            None => {
+                // The webview's IPC callback can fire from any thread, so we hand
+                // hovered-link URLs off through a channel and drain them on the
+                // GPUI foreground to update the status bar.
+                let (tx, rx) = async_channel::unbounded::<String>();
+                self.email_webview = EmailWebView::new(window, &document, tx);
+                cx.spawn(async move |this, cx| {
+                    while let Ok(url) = rx.recv().await {
+                        if this
+                            .update(cx, |root, cx| root.set_hovered_link(url, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            }
         }
 
         if self.view != AppView::Mail {
             if let Some(webview) = &mut self.email_webview {
                 webview.hide();
             }
+            self.set_hovered_link(String::new(), cx);
+        }
+    }
+
+    /// Updates the hovered-link URL shown in the status bar, re-rendering only
+    /// when it actually changes.
+    fn set_hovered_link(&mut self, url: String, cx: &mut Context<Self>) {
+        if self.hovered_link != url {
+            self.hovered_link = url;
+            cx.notify();
         }
     }
 
@@ -1043,6 +1074,7 @@ impl RootView {
             .sum();
 
         h_flex()
+            .relative()
             .h(px(24.0))
             .w_full()
             .flex_shrink_0()
@@ -1066,6 +1098,30 @@ impl RootView {
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
             )
+            // Hovered link URL, centered over the bar (a chip-colored backing
+            // keeps it legible above the side counters when it gets long).
+            .when(!self.hovered_link.is_empty(), |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .max_w(px(560.0))
+                                .px_2()
+                                .bg(colors.status_bar_background)
+                                .child(
+                                    Label::new(self.hovered_link.clone())
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .single_line(),
+                                ),
+                        ),
+                )
+            })
     }
 
     // ----- Settings screen (Zed-style) ------------------------------------

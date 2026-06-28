@@ -87,6 +87,38 @@ fn channel(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// Whether a navigation target should be handed off to the system browser
+/// instead of being followed inside the reader's webview. We treat real web and
+/// mail destinations as external; in-document navigations (the `about:`/`data:`
+/// document we load the body into, anchor fragments, etc.) stay in-place.
+fn is_external_link(url: &str) -> bool {
+    let url = url.trim().to_ascii_lowercase();
+    url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:")
+}
+
+/// Injected into every rendered message: reports the destination of the link
+/// under the cursor (or an empty string when none) to the host via the IPC
+/// channel, so the UI can mirror it in the status bar like a browser does.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const HOVER_SCRIPT: &str = r#"(function () {
+  var current = null;
+  function anchorHref(el) {
+    while (el && el.nodeType === 1) {
+      if (el.tagName === 'A' && el.href) return el.href;
+      el = el.parentElement;
+    }
+    return '';
+  }
+  function report(href) {
+    if (href !== current) {
+      current = href;
+      window.ipc.postMessage(href);
+    }
+  }
+  document.addEventListener('mouseover', function (e) { report(anchorHref(e.target)); }, true);
+  document.addEventListener('mouseleave', function () { report(''); }, true);
+})();"#;
+
 /// Escapes the characters that are significant in HTML text content.
 fn escape_html(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
@@ -107,11 +139,20 @@ pub use platform::EmailWebView;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod platform {
+    use async_channel::Sender;
     use gpui::{Bounds, Pixels, Window};
     use wry::{
         dpi::{LogicalPosition, LogicalSize},
-        Rect, WebView, WebViewBuilder,
+        NewWindowResponse, Rect, WebView, WebViewBuilder,
     };
+
+    use super::{is_external_link, HOVER_SCRIPT};
+
+    /// Opens `url` in the user's default browser, detached so it never blocks the
+    /// UI thread. Errors are ignored: a failed launch shouldn't crash the reader.
+    fn open_external(url: &str) {
+        let _ = open::that_detached(url);
+    }
 
     /// A native webview hosted as a child of the GPUI window. It floats over the
     /// reader pane; we only have to keep its bounds, HTML and visibility in sync.
@@ -125,9 +166,32 @@ mod platform {
     impl EmailWebView {
         /// Creates the child webview hosted by `window`, initially hidden so it
         /// doesn't flash at the default origin before it is first positioned.
-        pub fn new(window: &Window, html: &str) -> Option<Self> {
+        pub fn new(window: &Window, html: &str, on_hover: Sender<String>) -> Option<Self> {
             let webview = WebViewBuilder::new()
                 .with_html(html)
+                // Links must open in the system browser, not hijack the reader.
+                // We cancel external navigations and hand the URL to the OS.
+                .with_navigation_handler(|url| {
+                    if is_external_link(&url) {
+                        open_external(&url);
+                        false
+                    } else {
+                        true
+                    }
+                })
+                // `target="_blank"` / `window.open` links never spawn an embedded
+                // window; they go to the browser too.
+                .with_new_window_req_handler(|url, _features| {
+                    if is_external_link(&url) {
+                        open_external(&url);
+                    }
+                    NewWindowResponse::Deny
+                })
+                // Mirror the hovered link's URL into the status bar.
+                .with_initialization_script(HOVER_SCRIPT)
+                .with_ipc_handler(move |req| {
+                    let _ = on_hover.try_send(req.into_body());
+                })
                 .with_visible(false)
                 .build_as_child(window)
                 .ok()?;
@@ -192,7 +256,11 @@ mod platform {
     pub struct EmailWebView;
 
     impl EmailWebView {
-        pub fn new(_window: &Window, _html: &str) -> Option<Self> {
+        pub fn new(
+            _window: &Window,
+            _html: &str,
+            _on_hover: async_channel::Sender<String>,
+        ) -> Option<Self> {
             None
         }
         pub fn set_html(&mut self, _html: &str) {}
@@ -216,6 +284,22 @@ mod tests {
             escape_html("a < b & c > d \"e\" 'f'"),
             "a &lt; b &amp; c &gt; d &quot;e&quot; &#39;f&#39;"
         );
+    }
+
+    #[test]
+    fn external_links_route_to_the_browser() {
+        assert!(is_external_link("https://example.com/path?q=1"));
+        assert!(is_external_link("http://example.com"));
+        assert!(is_external_link("  HTTPS://Example.com  "));
+        assert!(is_external_link("mailto:someone@example.com"));
+    }
+
+    #[test]
+    fn in_document_navigations_stay_in_place() {
+        assert!(!is_external_link("about:blank"));
+        assert!(!is_external_link("data:text/html,<p>hi</p>"));
+        assert!(!is_external_link("#section"));
+        assert!(!is_external_link(""));
     }
 
     #[test]

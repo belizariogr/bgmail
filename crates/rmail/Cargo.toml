@@ -16,11 +16,17 @@ path = "src/main.rs"
 gpui.workspace = true
 theme.workspace = true
 ui.workspace = true
+# Carries link-hover URLs from the webview's IPC callback (any thread) to the
+# GPUI view, which drains them asynchronously to update the status bar.
+async-channel = "2"
 
 # The embedded webview is only available where wry has a native backend we
 # support (macOS/Windows). Other targets fall back to a plain-text reader.
+# `open` launches links from message bodies in the user's default browser
+# (per-platform, shell-injection-safe — important for untrusted e-mail URLs).
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 wry.workspace = true
+open = "5"
 
 # macOS-only: GPUI 0.2 doesn't implement `start_window_move` on macOS, so we
 # drag the window via AppKit's `performWindowDragWithEvent:` using the native
