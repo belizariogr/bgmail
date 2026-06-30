@@ -44,6 +44,7 @@ pub enum IconName {
     Archive,
     Star,
     StarFilled,
+    Palette,
     Flag,
     Reply,
     ReplyAll,
@@ -78,6 +79,7 @@ impl IconName {
             IconName::Archive => crate::ARCHIVE,
             IconName::Star => crate::STAR,
             IconName::StarFilled => crate::STAR_FILLED,
+            IconName::Palette => crate::PALETTE,
             IconName::Flag => crate::FLAG,
             IconName::Reply => crate::REPLY,
             IconName::ReplyAll => crate::REPLY_ALL,
@@ -153,7 +155,7 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 28] = [
+    const ALL: [IconName; 29] = [
         IconName::Inbox,
         IconName::Sent,
         IconName::Drafts,
@@ -162,6 +164,7 @@ mod tests {
         IconName::Archive,
         IconName::Star,
         IconName::StarFilled,
+        IconName::Palette,
         IconName::Flag,
         IconName::Reply,
         IconName::ReplyAll,

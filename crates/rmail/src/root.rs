@@ -166,7 +166,7 @@ impl SettingsSection {
         match self {
             SettingsSection::General => IconName::Settings,
             SettingsSection::Accounts => IconName::Account,
-            SettingsSection::Appearance => IconName::Star,
+            SettingsSection::Appearance => IconName::Palette,
             SettingsSection::Notifications => IconName::Flag,
             SettingsSection::Privacy => IconName::Shield,
         }

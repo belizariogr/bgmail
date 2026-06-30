@@ -41,6 +41,7 @@ icon_assets! {
     (ARCHIVE, "icons/archive.svg"),
     (STAR, "icons/star.svg"),
     (STAR_FILLED, "icons/star-filled.svg"),
+    (PALETTE, "icons/palette.svg"),
     (FLAG, "icons/flag.svg"),
     (REPLY, "icons/reply.svg"),
     (REPLY_ALL, "icons/reply-all.svg"),
