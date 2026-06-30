@@ -102,6 +102,11 @@ fn main() {
                     window_bounds: Some(window_bounds),
                     window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
                     titlebar: Some(window_frame::main_titlebar_options()),
+                    // Windows opens hidden so we can cloak it and run the
+                    // (asynchronous) maximize + first layout off-screen, then reveal
+                    // the finished window — see the spawn below. Elsewhere GPUI shows
+                    // the window immediately.
+                    show: !cfg!(target_os = "windows"),
                     ..Default::default()
                 },
                 |window, cx| {
@@ -136,20 +141,25 @@ fn main() {
                         }
                         true
                     });
-                    // Windows applies the maximize asynchronously and can drop the
-                    // `WM_SIZE` that grows GPUI's cached viewport during the busy open
-                    // sequence, leaving the UI laid out at the small base size while
-                    // the window is actually maximized. Poll briefly until the viewport
-                    // matches the real window size — re-posting `WM_SIZE` whenever it
-                    // looks stale — then reveal the UI (held behind a plain background
-                    // until now via `RootView::content_ready`).
+                    // Windows: keep the window cloaked (invisible to the compositor)
+                    // while it maximizes and lays out, then reveal it once finished —
+                    // no restore→maximize or paint-in flicker. The maximize is applied
+                    // asynchronously and the `WM_SIZE` that grows GPUI's cached viewport
+                    // can be dropped during the busy open sequence, leaving the UI at
+                    // the small base size; so we also poll, re-posting `WM_SIZE`
+                    // whenever the viewport looks stale, until the window settles.
                     #[cfg(target_os = "windows")]
                     {
+                        window_drag::set_window_cloaked(window, true);
+                        // Created hidden (show:false); show + maximize it now while it
+                        // stays cloaked (off-screen).
+                        window.activate_window();
+
                         let ready = view.downgrade();
                         window
                             .spawn(cx, async move |cx| {
-                                // ~1.5s cap (90 × 16ms) so a missed resize can't leave
-                                // the UI hidden forever; then reveal it regardless.
+                                // ~1.5s cap (90 × 16ms) so a missed resize can't keep
+                                // the window cloaked forever; then reveal it regardless.
                                 for _ in 0..90 {
                                     cx.background_executor()
                                         .timer(Duration::from_millis(16))
@@ -173,6 +183,14 @@ fn main() {
                                     }
                                 }
                                 let _ = ready.update(cx, |view, cx| view.mark_content_ready(cx));
+                                // Give the now-ready content time to fully paint before
+                                // revealing the window, for a clean (flicker-free) appearance.
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(250))
+                                    .await;
+                                let _ = cx.update(|window, _| {
+                                    window_drag::set_window_cloaked(window, false);
+                                });
                             })
                             .detach();
                     }

@@ -72,6 +72,46 @@ pub fn nudge_window_resize(window: &Window) {
 #[cfg(not(target_os = "windows"))]
 pub fn nudge_window_resize(_window: &Window) {}
 
+/// Hides or reveals the window via DWM cloaking. A cloaked window is invisible to
+/// the desktop compositor while still being a normal, laid-out window — unlike
+/// `SW_HIDE`, it keeps its (maximized) size and state. We cloak on open so the
+/// asynchronous maximize and first paint happen off-screen, then uncloak once the
+/// UI is rendered, avoiding the restore→maximize + paint-in flicker. No-op on
+/// other platforms.
+#[cfg(target_os = "windows")]
+pub fn set_window_cloaked(window: &Window, cloaked: bool) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+
+    // Fully qualified to disambiguate from GPUI's inherent `Window::window_handle`.
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut core::ffi::c_void);
+    // `DWMWA_CLOAK` takes a `BOOL` (a 4-byte `i32`); 1 cloaks, 0 reveals.
+    let value: i32 = cloaked as i32;
+
+    // SAFETY: `hwnd` is the live handle for `window`, used only synchronously
+    // here. `DwmSetWindowAttribute` reads `cbattribute` bytes from `pvattribute`
+    // (a local `i32` we keep alive across the call) to toggle the cloak flag; it
+    // transfers no ownership and nothing escapes this call.
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK,
+            &value as *const i32 as *const core::ffi::c_void,
+            core::mem::size_of::<i32>() as u32,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn set_window_cloaked(_window: &Window, _cloaked: bool) {}
+
 /// Picks the `WindowBounds` to open the main window with.
 ///
 /// On Windows/Linux, opening with `Maximized` while the window is still hidden
