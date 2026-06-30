@@ -2,12 +2,7 @@ use crate::prelude::*;
 use gpui::FontWeight;
 use std::borrow::Cow;
 
-/// Single typographic family of FontAwesome 6 Free. The solid (weight
-/// `Black`/900) and regular (weight `Normal`/400) variants share this name; the
-/// style is selected by the font weight (see [`FaStyle`]).
-const FA_FAMILY: &str = "Font Awesome 6 Free";
-
-/// Glyph style within the FontAwesome 6 Free family.
+/// Glyph style within FontAwesome 6 Free.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FaStyle {
     /// Filled variant (weight 900).
@@ -17,6 +12,23 @@ enum FaStyle {
 }
 
 impl FaStyle {
+    /// Unique font-family name (OpenType name ID 1) of the physical face.
+    ///
+    /// The solid and regular TTFs only share the *typographic* family
+    /// "Font Awesome 6 Free" (name ID 16); each declares its own distinct
+    /// family name. Selecting glyphs through the shared typographic name plus a
+    /// weight is unreliable on Windows/DirectWrite: it may fail to match our
+    /// in-memory fonts and fall back to a different system-installed FontAwesome,
+    /// so some glyphs render from the wrong version. Referencing the face by its
+    /// own family name pins rendering to the bundled fonts (see [`init_fonts`])
+    /// on every platform.
+    fn family(self) -> &'static str {
+        match self {
+            FaStyle::Solid => "Font Awesome 6 Free Solid",
+            FaStyle::Regular => "Font Awesome 6 Free Regular",
+        }
+    }
+
     fn weight(self) -> FontWeight {
         match self {
             FaStyle::Solid => FontWeight::BLACK,
@@ -178,7 +190,7 @@ impl RenderOnce for Icon {
             .flex()
             .items_center()
             .justify_center()
-            .font_family(FA_FAMILY)
+            .font_family(style.family())
             .font_weight(style.weight())
             .text_size(self.size.glyph())
             .text_color(color)
@@ -249,5 +261,15 @@ mod tests {
         assert_eq!(FaStyle::Solid.weight(), FontWeight::BLACK);
         assert_eq!(FaStyle::Regular.weight(), FontWeight::NORMAL);
         assert_ne!(FaStyle::Solid.weight(), FaStyle::Regular.weight());
+    }
+
+    /// Each style must resolve to the bundled face's own family name (name ID 1)
+    /// rather than the shared typographic family, so glyph lookup can't drift to
+    /// a system-installed FontAwesome on Windows.
+    #[test]
+    fn styles_map_to_distinct_bundled_family_names() {
+        assert_eq!(FaStyle::Solid.family(), "Font Awesome 6 Free Solid");
+        assert_eq!(FaStyle::Regular.family(), "Font Awesome 6 Free Regular");
+        assert_ne!(FaStyle::Solid.family(), FaStyle::Regular.family());
     }
 }

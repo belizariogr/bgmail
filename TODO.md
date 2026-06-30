@@ -63,8 +63,11 @@
       `xcrun -sdk macosx metal`, which does not find the stub)
 - ✅ Icons via the FontAwesome 6 Free font (replacing the Unicode glyphs):
       fonts embedded and registered in `ui::init`, `IconName` maps to style
-      (solid/regular via weight) + codepoint; solid/regular resolve to distinct
-      fonts (verified at runtime)
+      (solid/regular) + codepoint; each style is requested by its own unique
+      family name ("Font Awesome 6 Free Solid"/"…Regular", name ID 1) instead of
+      the shared typographic family + weight, so glyph lookup stays pinned to the
+      bundled fonts and can't drift to a system-installed FontAwesome on
+      Windows/DirectWrite (fixed inconsistent icons; verified at runtime)
 - ✅ Localization (i18n): `crates/rmail/src/locale.rs` with `Language`
       (English default + Brazilian Portuguese), a string catalog and an
       `ActiveLanguage` global; UI resolves strings at render time, with a
