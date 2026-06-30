@@ -20,7 +20,7 @@ use gpui::{
     WindowOptions,
 };
 
-use root::RootView;
+use root::{RootView, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH};
 
 actions!(rmail, [Quit]);
 
@@ -73,8 +73,8 @@ fn main() {
             // Restore the persisted layout (window/column sizes), clamped to the
             // window's minimum so a stale or tiny config can't open an unusable window.
             let settings = config::load();
-            let win_width = settings.window_width.max(800.0);
-            let win_height = settings.window_height.max(480.0);
+            let win_width = settings.window_width.max(WINDOW_MIN_WIDTH);
+            let win_height = settings.window_height.max(WINDOW_MIN_HEIGHT);
             let bounds = Bounds::new(
                 point(px(settings.window_x), px(settings.window_y)),
                 size(px(win_width), px(win_height)),
@@ -98,7 +98,7 @@ fn main() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(window_bounds),
-                    window_min_size: Some(size(px(800.0), px(480.0))),
+                    window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
                     titlebar: Some(window_frame::main_titlebar_options()),
                     ..Default::default()
                 },

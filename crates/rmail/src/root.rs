@@ -35,10 +35,17 @@ const SIDEBAR_MIN_WIDTH: f32 = 150.0;
 /// Minimum width of the message list, in pixels.
 const LIST_MIN_WIDTH: f32 = 350.0;
 /// Minimum width reserved for the reading pane (e-mail content), in pixels.
-const READER_MIN_WIDTH: f32 = 400.0;
+const READER_MIN_WIDTH: f32 = 550.0;
+/// Minimum window width, in pixels. Kept above `LIST_MIN_WIDTH +
+/// READER_MIN_WIDTH + RESIZE_HANDLE_WIDTH` so that, even with the sidebar
+/// collapsed, the docked list + reader can't shrink the titlebar enough to clip
+/// the window controls (e.g. the close button).
+pub(crate) const WINDOW_MIN_WIDTH: f32 = 950.0;
+/// Minimum window height, in pixels.
+pub(crate) const WINDOW_MIN_HEIGHT: f32 = 480.0;
 /// Below this window width the sidebar collapses automatically and, once
 /// reopened, floats over the content instead of pushing the columns.
-const NARROW_BREAKPOINT: f32 = 1100.0;
+const NARROW_BREAKPOINT: f32 = 1200.0;
 /// Hit area (width) of the draggable divider between two columns, in pixels.
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 /// Duration of the sidebar fold (collapse/expand) animation, in milliseconds.
@@ -327,8 +334,8 @@ impl RootView {
         let list_width = px(settings.list_width.max(LIST_MIN_WIDTH));
         let window_origin = point(px(settings.window_x), px(settings.window_y));
         let window_size = size(
-            px(settings.window_width.max(800.0)),
-            px(settings.window_height.max(480.0)),
+            px(settings.window_width.max(WINDOW_MIN_WIDTH)),
+            px(settings.window_height.max(WINDOW_MIN_HEIGHT)),
         );
         let max_origin = point(px(settings.max_x), px(settings.max_y));
         let max_size = size(px(settings.max_width), px(settings.max_height));
@@ -1007,6 +1014,11 @@ impl RootView {
             .child(
                 h_flex()
                     .flex_1()
+                    // Let this segment yield width to the window controls beside it
+                    // (which are `flex_shrink_0`). Without it the segment refuses to
+                    // shrink below its content and pushes the caption buttons — the
+                    // close button included — off the right edge of the window.
+                    .min_w_0()
                     .items_center()
                     .gap_3()
                     .px_3()
@@ -2587,12 +2599,38 @@ mod tests {
         assert!(reader >= px(READER_MIN_WIDTH));
     }
 
+    /// Dragging either divider hard to the right must never grow a column past
+    /// the point where the reader would drop below `READER_MIN_WIDTH`. Once that
+    /// floor is reached the divider is locked, so the reader (and the window
+    /// controls riding above it) can't be pushed off-screen.
+    #[test]
+    fn resize_locks_panels_once_reader_minimum_is_reached() {
+        let total = px(1400.0);
+        let mut view = RootView::new(Config::default());
+        view.sync_layout(total);
+
+        // Grow the list as far right as the cursor can go.
+        view.resize(ResizeHandle::List, total * 2.0, total);
+        // Then try to grow the sidebar past the list, and hammer both again.
+        view.resize(ResizeHandle::Sidebar, total * 2.0, total);
+        view.resize(ResizeHandle::List, total * 2.0, total);
+        view.resize(ResizeHandle::Sidebar, total * 2.0, total);
+
+        let used = view.sidebar_width + view.list_width;
+        assert!(
+            used <= total - px(READER_MIN_WIDTH),
+            "sidebar+list ({used:?}) left the reader below its {READER_MIN_WIDTH}px floor",
+        );
+    }
+
     #[test]
     fn search_collapses_when_reader_segment_is_narrow() {
         let mut view = RootView::new(Config::default());
-        // Docked layout: reader segment = 1100 - 250 - 360 = 490, below the
-        // collapse threshold, so the search field turns into an icon.
-        view.sync_layout(px(1100.0));
+        // Just-docked layout (at the narrow breakpoint): the sidebar and list eat
+        // most of the row, leaving the reader's toolbar segment below the collapse
+        // threshold, so the search field turns into an icon. Holds on every
+        // platform (the Windows caption-button reserve only makes it narrower).
+        view.sync_layout(px(NARROW_BREAKPOINT));
         assert!(view.search_is_compact());
     }
 

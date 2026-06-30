@@ -23,7 +23,14 @@
       over the reader. List title moved out of the list into the toolbar.
 - ✅ Sidebar visibility toggle from the toolbar (`show_sidebar` + tests)
 - ✅ Resizable columns (draggable dividers): sidebar (min 250px) and message
-      list (min 350px) resize via drag handles; the reader keeps a 400px floor.
+      list (min 350px) resize via drag handles; the reader keeps a 550px floor,
+      and the window enforces a 950px-wide minimum (`WINDOW_MIN_WIDTH`) so the
+      docked list + reader can't clip the titlebar window controls. Dragging a
+      divider is locked once the reader hits its floor (the `sidebar + list <=
+      total - READER_MIN_WIDTH` invariant holds across drags; covered by
+      `resize_locks_panels_once_reader_minimum_is_reached`), and the reader's
+      toolbar segment is `min_w_0` so it yields width to the (flex-shrink-0)
+      window controls instead of pushing the close button off-screen.
       Below a 900px window width the sidebar auto-collapses and, once reopened,
       floats over the content with a dismissable scrim (`sync_layout`/`resize` +
       tests)
