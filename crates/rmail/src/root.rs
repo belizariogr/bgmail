@@ -760,7 +760,10 @@ impl RootView {
         } else {
             px(0.0)
         };
-        self.window_width - sidebar_segment - list_segment
+        self.window_width
+            - sidebar_segment
+            - list_segment
+            - crate::window_frame::right_controls_reserved_width()
     }
 
     /// Whether the toolbar search field should collapse into an icon button,
@@ -891,7 +894,7 @@ impl RootView {
 
     // ----- Top toolbar (unified title bar) --------------------------------
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let bg = colors.title_bar_background;
         let border = colors.border;
@@ -972,7 +975,7 @@ impl RootView {
                     crate::window_drag::start_window_drag(window, this.maximized, this.window_size);
                 }
             }))
-            // Segment 1: over the sidebar — traffic-light spacing + sidebar toggle
+            // Segment 1: over the sidebar — titlebar spacing + sidebar toggle
             // and app settings (theme switching lives in Settings ▸ Appearance).
             .child(
                 h_flex()
@@ -980,9 +983,7 @@ impl RootView {
                     .flex_shrink_0()
                     .items_center()
                     .gap_1()
-                    // 72px clears the traffic lights, +18px keeps the first button
-                    // from crowding the window close button.
-                    .pl(px(90.0))
+                    .pl(crate::window_frame::toolbar_left_padding())
                     .child(
                         IconButton::new("toggle-sidebar", IconName::Sidebar)
                             .selected(self.show_sidebar)
@@ -1079,6 +1080,7 @@ impl RootView {
                             .into_any_element()
                     }),
             )
+            .children(crate::window_frame::render_right_window_controls(window))
     }
 
     /// A thin vertical divider used to separate toolbar button groups.
@@ -2365,7 +2367,7 @@ impl Render for RootView {
                     webview.dismiss_context_menu();
                 }
             }))
-            .child(self.render_toolbar(cx))
+            .child(self.render_toolbar(window, cx))
             .child(body)
             .child(self.render_status_bar(cx))
             .when(self.privacy_menu_open, |el| {

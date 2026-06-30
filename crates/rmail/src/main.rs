@@ -11,12 +11,13 @@ mod locale;
 mod root;
 mod web_view;
 mod window_drag;
+mod window_frame;
 
 use std::time::Duration;
 
 use gpui::{
     actions, point, px, size, App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem,
-    TitlebarOptions, WindowOptions,
+    WindowOptions,
 };
 
 use root::RootView;
@@ -78,11 +79,7 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(window_bounds),
                     window_min_size: Some(size(px(800.0), px(480.0))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("rMail".into()),
-                        appears_transparent: true,
-                        traffic_light_position: Some(point(px(12.0), px(16.0))),
-                    }),
+                    titlebar: Some(window_frame::main_titlebar_options()),
                     ..Default::default()
                 },
                 |window, cx| {

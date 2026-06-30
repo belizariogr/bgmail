@@ -221,6 +221,10 @@
         EN/PT keys. Mock body now embeds two remote images so the count is
         observable.
 - ✅ Scrollbar fade animation for list/sidebar (currently instant show/hide)
+- ✅ Windows titlebar controls for the custom transparent main window, with
+      explicit minimize/maximize/close actions. The buttons occlude the draggable
+      toolbar hitbox, so window dragging still works without changing the macOS
+      traffic-light layout
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)
 - ⬜ E-mail composition screen/panel (mock)
