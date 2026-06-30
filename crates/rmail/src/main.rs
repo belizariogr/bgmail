@@ -24,6 +24,24 @@ use root::RootView;
 
 actions!(rmail, [Quit]);
 
+/// GPUI's Windows renderer uses DirectComposition by default (`WS_EX_NOREDIRECTIONBITMAP`).
+/// That path does not compose reliably with the child HWND used by WebView2: the
+/// page can be interactive while its pixels, especially text/selection, never
+/// become visible. This env var is read by GPUI during platform initialization.
+#[cfg(target_os = "windows")]
+const GPUI_DISABLE_DIRECT_COMPOSITION: (&str, &str) = ("GPUI_DISABLE_DIRECT_COMPOSITION", "1");
+
+#[cfg(target_os = "windows")]
+fn configure_windows_webview_hosting() {
+    std::env::set_var(
+        GPUI_DISABLE_DIRECT_COMPOSITION.0,
+        GPUI_DISABLE_DIRECT_COMPOSITION.1,
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_windows_webview_hosting() {}
+
 /// Builds the macOS application menu. The first menu's name becomes the bold
 /// "app menu" in the global menu bar, so it carries the application name.
 fn app_menus() -> Vec<Menu> {
@@ -34,6 +52,8 @@ fn app_menus() -> Vec<Menu> {
 }
 
 fn main() {
+    configure_windows_webview_hosting();
+
     Application::new()
         .with_assets(ui::Assets)
         .run(|cx: &mut App| {
@@ -121,4 +141,16 @@ fn main() {
 
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_webview_hosting_disables_gpui_direct_composition() {
+        assert_eq!(
+            super::GPUI_DISABLE_DIRECT_COMPOSITION,
+            ("GPUI_DISABLE_DIRECT_COMPOSITION", "1")
+        );
+    }
 }

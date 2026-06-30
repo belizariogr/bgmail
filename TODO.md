@@ -225,6 +225,20 @@
       explicit minimize/maximize/close actions. The buttons occlude the draggable
       toolbar hitbox, so window dragging still works without changing the macOS
       traffic-light layout
+- ✅ Fix Windows WebView2 text compositing in the reader by giving the native
+      child webview an explicit opaque background that matches the e-mail document
+- ✅ Work around Windows WebView2 GPU/DirectComposition transparency failures:
+      preserve wry's default browser args and add Microsoft's recommended GPU
+      flags for cases where content is interactive but text/page pixels are not
+      visible
+- ✅ Avoid creating the Windows WebView2 reader hidden: initialize it as a tiny
+      visible child surface, then move it to the measured GPUI canvas bounds on
+      first paint, avoiding known WebView2 hidden-initialization blank renders
+- ✅ Disable GPUI DirectComposition on Windows before platform initialization
+      (`GPUI_DISABLE_DIRECT_COMPOSITION=1`) because its `WS_EX_NOREDIRECTIONBITMAP`
+      window path does not compose reliably with WebView2's child HWND
+- ⬜ Verify the WebView2 GPU workaround visually on the affected Windows host
+      after fully restarting the app process
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)
 - ⬜ E-mail composition screen/panel (mock)
