@@ -259,11 +259,12 @@
       poll on open re-posting `WM_SIZE` (`window_drag::nudge_window_resize`)
       whenever GPUI's viewport is stale, so it re-reads the real size without
       un-maximizing
-- ✅ Remove the open flicker on Windows: create the window hidden (`show: false`)
-      and DWM-cloak it (`window_drag::set_window_cloaked`) so the asynchronous
-      maximize and first paint happen off-screen, then uncloak (after a short
-      settle delay) — the window appears already maximized and fully rendered, with
-      no restore→maximize or paint-in flash
+- ✅ Remove the open flicker: cloak the window on open so the first paint (and, on
+      Windows, the asynchronous maximize) happens off-screen, then reveal it after a
+      short settle delay — the window appears already laid out and fully rendered,
+      with no restore→maximize or paint-in flash. Windows creates it hidden
+      (`show: false`) and uses DWM cloaking; macOS uses the window's `alphaValue`
+      (`window_drag::set_window_cloaked`)
 - ⬜ Verify the WebView2 GPU workaround visually on the affected Windows host
       after fully restarting the app process
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)

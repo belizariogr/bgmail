@@ -72,12 +72,12 @@ pub fn nudge_window_resize(window: &Window) {
 #[cfg(not(target_os = "windows"))]
 pub fn nudge_window_resize(_window: &Window) {}
 
-/// Hides or reveals the window via DWM cloaking. A cloaked window is invisible to
-/// the desktop compositor while still being a normal, laid-out window — unlike
-/// `SW_HIDE`, it keeps its (maximized) size and state. We cloak on open so the
-/// asynchronous maximize and first paint happen off-screen, then uncloak once the
-/// UI is rendered, avoiding the restore→maximize + paint-in flicker. No-op on
-/// other platforms.
+/// Hides or reveals the window without changing its layout, so the first paint
+/// (and, on Windows, the asynchronous maximize) can happen off-screen and the
+/// window only appears once fully rendered — avoiding the open flicker. Windows
+/// uses DWM cloaking (invisible to the compositor while keeping its maximized
+/// size/state, unlike `SW_HIDE`); macOS uses the window's `alphaValue` (still
+/// composited and rendering, just transparent). No-op on other platforms.
 #[cfg(target_os = "windows")]
 pub fn set_window_cloaked(window: &Window, cloaked: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -109,7 +109,39 @@ pub fn set_window_cloaked(window: &Window, cloaked: bool) {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// macOS implementation: toggle the window's `alphaValue` (0 hides, 1 reveals).
+/// The window stays ordered front and keeps rendering while transparent, so when
+/// we restore the alpha the finished content appears at once.
+#[cfg(target_os = "macos")]
+pub fn set_window_cloaked(window: &Window, cloaked: bool) {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    // Fully qualified to disambiguate from GPUI's inherent `Window::window_handle`.
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let alpha: f64 = if cloaked { 0.0 } else { 1.0 };
+
+    // SAFETY: `ns_view` points to the window's live `NSView` (valid while the
+    // window is open; touched only synchronously here). `-[NSView window]` and
+    // `-[NSWindow setAlphaValue:]` transfer no ownership, so no retain/release
+    // bookkeeping is required.
+    unsafe {
+        let ns_view = handle.ns_view.as_ptr() as *mut Object;
+        let ns_window: *mut Object = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let _: () = msg_send![ns_window, setAlphaValue: alpha];
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn set_window_cloaked(_window: &Window, _cloaked: bool) {}
 
 /// Picks the `WindowBounds` to open the main window with.

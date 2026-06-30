@@ -194,6 +194,24 @@ fn main() {
                             })
                             .detach();
                     }
+                    // macOS opens windowed directly at the maximized frame (no async
+                    // maximize), so there's no layout race — only a small paint-in
+                    // flash. Cloak via the window's alpha, then reveal after a short
+                    // settle so the first full frame is painted before it appears.
+                    #[cfg(target_os = "macos")]
+                    {
+                        window_drag::set_window_cloaked(window, true);
+                        window
+                            .spawn(cx, async move |cx| {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(250))
+                                    .await;
+                                let _ = cx.update(|window, _| {
+                                    window_drag::set_window_cloaked(window, false);
+                                });
+                            })
+                            .detach();
+                    }
                     view
                 },
             )
