@@ -61,8 +61,6 @@ fn main() {
             theme::init(theme::Appearance::Dark, cx);
             // Initialize localization (English by default).
             locale::init(locale::Language::default(), cx);
-            // Register the icon fonts (FontAwesome) used by the components.
-            ui::init(cx);
 
             // Wire up the global menu bar and the standard Quit (Cmd+Q) shortcut, so
             // the app shows its name in the menu bar and can be quit like a native app.

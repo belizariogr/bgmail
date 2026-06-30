@@ -160,9 +160,11 @@ active theme.
 
 - **GPUI via crates.io (`0.2.2`)** instead of path/git to the local checkout —
   for reproducibility. (Reassess if we need APIs only present on `main`.)
-- **Icons via the FontAwesome 6 Free font**, abstracted by `IconName` (solid and
-  regular variants selected by font weight). The fonts are embedded and registered
-  in GPUI's text system by `ui::init`.
+- **Icons as embedded SVGs**, abstracted by `IconName`. Each icon resolves to an
+  SVG under `assets/icons/` (embedded in `crates/ui/src/assets.rs`) and is rendered
+  with `gpui::svg()`, which tints it with the icon's color. SVGs are used instead
+  of a glyph font so rendering can't depend on a platform font being matched
+  correctly (the FontAwesome font broke across platforms).
 - **UI language**: English by default, with a localization layer
   (`crates/rmail/src/locale.rs`) that also ships Brazilian Portuguese and can be
   switched at runtime from the settings.

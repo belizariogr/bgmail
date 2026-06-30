@@ -1,56 +1,5 @@
 use crate::prelude::*;
-use gpui::FontWeight;
-use std::borrow::Cow;
-
-/// Glyph style within FontAwesome 6 Free.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum FaStyle {
-    /// Filled variant (weight 900).
-    Solid,
-    /// Outline variant (weight 400).
-    Regular,
-}
-
-impl FaStyle {
-    /// Unique font-family name (OpenType name ID 1) of the physical face.
-    ///
-    /// The solid and regular TTFs only share the *typographic* family
-    /// "Font Awesome 6 Free" (name ID 16); each declares its own distinct
-    /// family name. Selecting glyphs through the shared typographic name plus a
-    /// weight is unreliable on Windows/DirectWrite: it may fail to match our
-    /// in-memory fonts and fall back to a different system-installed FontAwesome,
-    /// so some glyphs render from the wrong version. Referencing the face by its
-    /// own family name pins rendering to the bundled fonts (see [`init_fonts`])
-    /// on every platform.
-    fn family(self) -> &'static str {
-        match self {
-            FaStyle::Solid => "Font Awesome 6 Free Solid",
-            FaStyle::Regular => "Font Awesome 6 Free Regular",
-        }
-    }
-
-    fn weight(self) -> FontWeight {
-        match self {
-            FaStyle::Solid => FontWeight::BLACK,
-            FaStyle::Regular => FontWeight::NORMAL,
-        }
-    }
-}
-
-/// FontAwesome font bytes embedded in the binary (from `assets/fonts`).
-const FA_SOLID_TTF: &[u8] = include_bytes!("../../../assets/fonts/fa-solid-900.ttf");
-const FA_REGULAR_TTF: &[u8] = include_bytes!("../../../assets/fonts/fa-regular-400.ttf");
-
-/// Registers the icon fonts in GPUI's text system.
-///
-/// Must be called once during startup, before opening windows. Without it the
-/// glyphs render as "tofu" (empty rectangles).
-pub(crate) fn init_fonts(cx: &mut App) {
-    let fonts = vec![Cow::Borrowed(FA_SOLID_TTF), Cow::Borrowed(FA_REGULAR_TTF)];
-    if let Err(err) = cx.text_system().add_fonts(fonts) {
-        eprintln!("rMail: failed to register FontAwesome fonts: {err:?}");
-    }
-}
+use gpui::svg;
 
 /// Sizes available for [`Icon`].
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -67,8 +16,8 @@ pub enum IconSize {
 }
 
 impl IconSize {
-    /// Size of the glyph itself.
-    fn glyph(self) -> Pixels {
+    /// Square footprint of the rendered icon.
+    fn px(self) -> Pixels {
         match self {
             IconSize::XXSmall => px(10.0),
             IconSize::XSmall => px(12.0),
@@ -80,9 +29,11 @@ impl IconSize {
 
 /// Set of icons used by rMail.
 ///
-/// Icons are rendered as glyphs from the FontAwesome 6 Free font (loaded by
-/// [`init_fonts`]). The enum abstracts the concrete family and codepoint, so the
-/// call sites stay stable if the font is swapped in the future.
+/// Each icon is an SVG embedded in the binary (see [`crate::Assets`]) and
+/// rendered with [`gpui::svg`], which tints it with the icon's color. SVGs are
+/// used instead of a glyph font so rendering never depends on a platform font
+/// being matched correctly. The enum abstracts the concrete asset path, so the
+/// call sites stay stable if an icon's artwork is swapped in the future.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IconName {
     Inbox,
@@ -116,37 +67,37 @@ pub enum IconName {
 }
 
 impl IconName {
-    /// Style (solid/regular) and codepoint (private use area) of the FontAwesome glyph.
-    fn glyph(self) -> (FaStyle, char) {
+    /// Asset path of the icon's SVG, resolvable by [`crate::Assets`].
+    pub fn path(self) -> &'static str {
         match self {
-            IconName::Inbox => (FaStyle::Solid, '\u{f01c}'), // inbox
-            IconName::Sent => (FaStyle::Solid, '\u{f1d8}'),  // paper-plane
-            IconName::Drafts => (FaStyle::Solid, '\u{f31c}'), // file-pen
-            IconName::Trash => (FaStyle::Solid, '\u{f1f8}'), // trash
-            IconName::Junk => (FaStyle::Solid, '\u{f071}'),  // triangle-exclamation
-            IconName::Archive => (FaStyle::Solid, '\u{f187}'), // box-archive
-            IconName::Star => (FaStyle::Regular, '\u{f005}'), // star (outline)
-            IconName::StarFilled => (FaStyle::Solid, '\u{f005}'), // star (filled)
-            IconName::Flag => (FaStyle::Solid, '\u{f024}'),  // flag
-            IconName::Reply => (FaStyle::Solid, '\u{f112}'), // reply
-            IconName::ReplyAll => (FaStyle::Solid, '\u{f122}'), // reply-all
-            IconName::Forward => (FaStyle::Solid, '\u{f064}'), // share
-            IconName::Compose => (FaStyle::Solid, '\u{f044}'), // pen-to-square
-            IconName::Search => (FaStyle::Solid, '\u{f002}'), // magnifying-glass
-            IconName::Settings => (FaStyle::Solid, '\u{f013}'), // gear
-            IconName::Refresh => (FaStyle::Solid, '\u{f021}'), // arrows-rotate
-            IconName::ChevronRight => (FaStyle::Solid, '\u{f054}'), // chevron-right
-            IconName::ChevronDown => (FaStyle::Solid, '\u{f078}'), // chevron-down
-            IconName::Account => (FaStyle::Solid, '\u{f2bd}'), // circle-user
-            IconName::Attachment => (FaStyle::Solid, '\u{f0c6}'), // paperclip
-            IconName::Mail => (FaStyle::Solid, '\u{f0e0}'),  // envelope
-            IconName::Sidebar => (FaStyle::Solid, '\u{f0db}'), // table-columns
-            IconName::Filter => (FaStyle::Solid, '\u{f0b0}'), // filter
-            IconName::More => (FaStyle::Solid, '\u{f141}'),  // ellipsis
-            IconName::Folder => (FaStyle::Solid, '\u{f07b}'), // folder
-            IconName::Shield => (FaStyle::Solid, '\u{f3ed}'), // shield-halved
-            IconName::ShieldSolid => (FaStyle::Solid, '\u{f132}'), // shield (full)
-            IconName::Check => (FaStyle::Solid, '\u{f00c}'), // check
+            IconName::Inbox => crate::INBOX,
+            IconName::Sent => crate::SEND,
+            IconName::Drafts => crate::FILE_PEN,
+            IconName::Trash => crate::TRASH,
+            IconName::Junk => crate::TRIANGLE_EXCLAMATION,
+            IconName::Archive => crate::ARCHIVE,
+            IconName::Star => crate::STAR,
+            IconName::StarFilled => crate::STAR_FILLED,
+            IconName::Flag => crate::FLAG,
+            IconName::Reply => crate::REPLY,
+            IconName::ReplyAll => crate::REPLY_ALL,
+            IconName::Forward => crate::FORWARD,
+            IconName::Compose => crate::PEN_TO_SQUARE,
+            IconName::Search => crate::SEARCH,
+            IconName::Settings => crate::SETTINGS,
+            IconName::Refresh => crate::REFRESH,
+            IconName::ChevronRight => crate::CHEVRON_RIGHT,
+            IconName::ChevronDown => crate::CHEVRON_DOWN,
+            IconName::Account => crate::CIRCLE_USER,
+            IconName::Attachment => crate::PAPERCLIP,
+            IconName::Mail => crate::ENVELOPE,
+            IconName::Sidebar => crate::SIDEBAR,
+            IconName::Filter => crate::FILTER,
+            IconName::More => crate::ELLIPSIS,
+            IconName::Folder => crate::FOLDER,
+            IconName::Shield => crate::SHIELD_HALVED,
+            IconName::ShieldSolid => crate::SHIELD,
+            IconName::Check => crate::CHECK,
         }
     }
 }
@@ -185,25 +136,23 @@ impl Icon {
 impl RenderOnce for Icon {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let color = self.color.hsla(cx);
-        let (style, glyph) = self.name.glyph();
-        div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .font_family(style.family())
-            .font_weight(style.weight())
-            .text_size(self.size.glyph())
+        let size = self.size.px();
+        svg()
+            .flex_none()
+            .w(size)
+            .h(size)
+            .path(self.name.path())
             .text_color(color)
-            .child(glyph.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Assets;
+    use gpui::AssetSource;
 
-    /// Every icon must map to a codepoint in the Private Use Area (where
-    /// FontAwesome places its glyphs).
+    /// Every icon variant, so coverage tests can iterate over the full set.
     const ALL: [IconName; 28] = [
         IconName::Inbox,
         IconName::Sent,
@@ -236,40 +185,47 @@ mod tests {
     ];
 
     #[test]
-    fn every_icon_maps_to_pua_codepoint() {
+    fn every_icon_points_to_an_svg_asset() {
         for name in ALL {
-            let (_style, glyph) = name.glyph();
-            let cp = glyph as u32;
+            let path = name.path();
             assert!(
-                (0xE000..=0xF8FF).contains(&cp),
-                "{name:?} has a codepoint outside the PUA: U+{cp:04X}"
+                path.ends_with(".svg"),
+                "{name:?} path is not an SVG: {path}"
+            );
+        }
+    }
+
+    /// The asset source must be able to resolve every icon's SVG. This is what
+    /// keeps the font-free icons from regressing into the "tofu"/blank state the
+    /// glyph font used to cause when it failed to match on a platform.
+    #[test]
+    fn every_icon_resolves_to_embedded_bytes() {
+        for name in ALL {
+            let bytes = Assets
+                .load(name.path())
+                .expect("load must not error")
+                .unwrap_or_else(|| panic!("{name:?} has no embedded SVG at {}", name.path()));
+            assert!(
+                bytes.starts_with(b"<svg"),
+                "{name:?} asset is not an SVG document"
             );
         }
     }
 
     #[test]
-    fn star_variants_share_codepoint_but_differ_in_style() {
-        let (regular_style, regular_glyph) = IconName::Star.glyph();
-        let (solid_style, solid_glyph) = IconName::StarFilled.glyph();
-        assert_eq!(regular_glyph, solid_glyph);
-        assert_eq!(regular_style, FaStyle::Regular);
-        assert_eq!(solid_style, FaStyle::Solid);
+    fn star_variants_use_distinct_assets() {
+        assert_ne!(IconName::Star.path(), IconName::StarFilled.path());
     }
 
     #[test]
-    fn styles_map_to_distinct_weights() {
-        assert_eq!(FaStyle::Solid.weight(), FontWeight::BLACK);
-        assert_eq!(FaStyle::Regular.weight(), FontWeight::NORMAL);
-        assert_ne!(FaStyle::Solid.weight(), FaStyle::Regular.weight());
+    fn shield_variants_use_distinct_assets() {
+        assert_ne!(IconName::Shield.path(), IconName::ShieldSolid.path());
     }
 
-    /// Each style must resolve to the bundled face's own family name (name ID 1)
-    /// rather than the shared typographic family, so glyph lookup can't drift to
-    /// a system-installed FontAwesome on Windows.
     #[test]
-    fn styles_map_to_distinct_bundled_family_names() {
-        assert_eq!(FaStyle::Solid.family(), "Font Awesome 6 Free Solid");
-        assert_eq!(FaStyle::Regular.family(), "Font Awesome 6 Free Regular");
-        assert_ne!(FaStyle::Solid.family(), FaStyle::Regular.family());
+    fn sizes_are_distinct_and_ascending() {
+        assert!(IconSize::XXSmall.px() < IconSize::XSmall.px());
+        assert!(IconSize::XSmall.px() < IconSize::Small.px());
+        assert!(IconSize::Small.px() < IconSize::Medium.px());
     }
 }

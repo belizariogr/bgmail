@@ -35,9 +35,3 @@ pub use prelude::{h_flex, v_flex};
 
 // Re-export the most used theme types for consumer convenience.
 pub use theme::{ActiveTheme, Appearance, Theme, ThemeColors};
-
-/// Initializes the UI crate by registering the icon fonts (FontAwesome) in
-/// GPUI's text system. Must be called once, before opening windows.
-pub fn init(cx: &mut gpui::App) {
-    icon::init_fonts(cx);
-}

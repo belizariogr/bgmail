@@ -68,13 +68,12 @@
       MetalToolchain` + `.cargo/config.toml` forcing
       `TOOLCHAINS = "com.apple.dt.toolchain.Metal"` (gpui's build script uses
       `xcrun -sdk macosx metal`, which does not find the stub)
-- ✅ Icons via the FontAwesome 6 Free font (replacing the Unicode glyphs):
-      fonts embedded and registered in `ui::init`, `IconName` maps to style
-      (solid/regular) + codepoint; each style is requested by its own unique
-      family name ("Font Awesome 6 Free Solid"/"…Regular", name ID 1) instead of
-      the shared typographic family + weight, so glyph lookup stays pinned to the
-      bundled fonts and can't drift to a system-installed FontAwesome on
-      Windows/DirectWrite (fixed inconsistent icons; verified at runtime)
+- ✅ Icons as embedded SVGs (no icon font): every `IconName` maps to an SVG under
+      `assets/icons/`, embedded in `crates/ui/src/assets.rs` and rendered with
+      `gpui::svg()` (tinted by the icon's color). This replaces the FontAwesome
+      glyph font, whose face/codepoint lookup rendered inconsistently across
+      platforms (broke on macOS after a Windows fix). SVGs reuse Zed's icon set
+      where available, with the rest drawn in the same stroke style.
 - ✅ Localization (i18n): `crates/rmail/src/locale.rs` with `Language`
       (English default + Brazilian Portuguese), a string catalog and an
       `ActiveLanguage` global; UI resolves strings at render time, with a
