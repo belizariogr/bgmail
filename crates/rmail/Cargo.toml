@@ -45,6 +45,18 @@ open = "5"
 objc = "0.2"
 raw-window-handle = "0.6"
 
+# Windows-only: we disable DirectComposition (so WebView2 text composes), which
+# makes GPUI's maximize-on-open asynchronous; the resize message that grows its
+# viewport can be lost during the busy open sequence. We re-post `WM_SIZE` from
+# the native handle so GPUI re-reads the real size. Kept isolated in
+# `window_drag.rs`. `windows` matches the version GPUI already pulls in.
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 # `objc` 0.2's `msg_send!` macro expands to a `feature = "cargo-clippy"` cfg that
 # the compiler can't otherwise know about; declare it so the lint stays useful
 # without flagging this harmless, dependency-generated case.

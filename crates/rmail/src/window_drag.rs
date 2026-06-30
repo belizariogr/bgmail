@@ -8,6 +8,70 @@
 
 use gpui::{Bounds, Pixels, Size, Window, WindowBounds};
 
+/// Whether the window has reached its final size, so the deferred UI can lay out
+/// (see `RootView::content_ready`). `actual` is the platform's real window size
+/// and `viewport` is GPUI's cached drawable size; they match once GPUI has
+/// processed the latest resize. When a maximized open is expected we also wait
+/// for the OS to report the window as maximized, so the UI is never revealed at
+/// the pre-maximize size.
+pub fn window_layout_settled(
+    expect_maximized: bool,
+    is_maximized: bool,
+    viewport: Size<Pixels>,
+    actual: Size<Pixels>,
+) -> bool {
+    let synced = viewport == actual;
+    synced && (!expect_maximized || is_maximized)
+}
+
+/// Re-posts the `WM_SIZE` the OS sends on resize so GPUI re-reads the real window
+/// size into its cached viewport. Needed on Windows because the maximize-on-open
+/// is applied asynchronously and that single `WM_SIZE` can be dropped during the
+/// busy open sequence, leaving GPUI laid out at the small base size. Re-posting
+/// it (with the current client rect) re-syncs GPUI without changing the window
+/// state, so the window stays truly maximized. No-op on other platforms.
+#[cfg(target_os = "windows")]
+pub fn nudge_window_resize(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClientRect, IsZoomed, PostMessageW, SIZE_MAXIMIZED, SIZE_RESTORED, WM_SIZE,
+    };
+
+    // Fully qualified to disambiguate from GPUI's inherent `Window::window_handle`.
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut core::ffi::c_void);
+
+    // SAFETY: `hwnd` is the live handle for `window`, used only synchronously
+    // here. `GetClientRect`/`IsZoomed` are read-only queries and `PostMessageW`
+    // merely re-queues the same `WM_SIZE` the OS itself posts on resize, so GPUI
+    // re-reads the real client size into its viewport. No ownership is transferred
+    // and nothing escapes this call.
+    unsafe {
+        let mut rect = RECT::default();
+        if GetClientRect(hwnd, &mut rect).is_err() {
+            return;
+        }
+        let width = (rect.right - rect.left).max(1) as u32 & 0xFFFF;
+        let height = (rect.bottom - rect.top).max(1) as u32 & 0xFFFF;
+        let kind = if IsZoomed(hwnd).as_bool() {
+            SIZE_MAXIMIZED
+        } else {
+            SIZE_RESTORED
+        };
+        let lparam = LPARAM(((height << 16) | width) as isize);
+        let _ = PostMessageW(Some(hwnd), WM_SIZE, WPARAM(kind as usize), lparam);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn nudge_window_resize(_window: &Window) {}
+
 /// Picks the `WindowBounds` to open the main window with.
 ///
 /// On Windows/Linux, opening with `Maximized` while the window is still hidden
@@ -152,5 +216,30 @@ pub fn start_window_drag(window: &Window, maximized: bool, restore_size: Size<Pi
             return;
         }
         let _: () = msg_send![ns_window, performWindowDragWithEvent: event];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::window_layout_settled;
+    use gpui::{px, size};
+
+    #[test]
+    fn settled_requires_viewport_to_match_window() {
+        let stale = size(px(800.0), px(600.0));
+        let real = size(px(1920.0), px(1040.0));
+        // A viewport smaller than the real window means GPUI hasn't caught up yet.
+        assert!(!window_layout_settled(false, false, stale, real));
+        assert!(window_layout_settled(false, false, real, real));
+    }
+
+    #[test]
+    fn settled_waits_for_maximize_when_expected() {
+        let real = size(px(1920.0), px(1040.0));
+        // Synced but not maximized yet: keep waiting when a maximized open is expected.
+        assert!(!window_layout_settled(true, false, real, real));
+        assert!(window_layout_settled(true, true, real, real));
+        // No maximize expected: matching sizes is enough.
+        assert!(window_layout_settled(false, false, real, real));
     }
 }

@@ -93,6 +93,10 @@ fn main() {
             // restored `bounds` is the size/position to restore to on move.
             let window_bounds =
                 window_drag::initial_window_bounds(bounds, settings.maximized, max_bounds);
+            // Captured before `settings` is moved into the view: on Windows we wait
+            // for the (asynchronous) maximize to land before revealing the UI.
+            #[cfg(target_os = "windows")]
+            let open_maximized = settings.maximized;
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(window_bounds),
@@ -132,6 +136,46 @@ fn main() {
                         }
                         true
                     });
+                    // Windows applies the maximize asynchronously and can drop the
+                    // `WM_SIZE` that grows GPUI's cached viewport during the busy open
+                    // sequence, leaving the UI laid out at the small base size while
+                    // the window is actually maximized. Poll briefly until the viewport
+                    // matches the real window size — re-posting `WM_SIZE` whenever it
+                    // looks stale — then reveal the UI (held behind a plain background
+                    // until now via `RootView::content_ready`).
+                    #[cfg(target_os = "windows")]
+                    {
+                        let ready = view.downgrade();
+                        window
+                            .spawn(cx, async move |cx| {
+                                // ~1.5s cap (90 × 16ms) so a missed resize can't leave
+                                // the UI hidden forever; then reveal it regardless.
+                                for _ in 0..90 {
+                                    cx.background_executor()
+                                        .timer(Duration::from_millis(16))
+                                        .await;
+                                    let settled = cx
+                                        .update(|window, _| {
+                                            let actual = window.bounds().size;
+                                            if window.viewport_size() != actual {
+                                                window_drag::nudge_window_resize(window);
+                                            }
+                                            window_drag::window_layout_settled(
+                                                open_maximized,
+                                                window.is_maximized(),
+                                                window.viewport_size(),
+                                                actual,
+                                            )
+                                        })
+                                        .unwrap_or(true);
+                                    if settled {
+                                        break;
+                                    }
+                                }
+                                let _ = ready.update(cx, |view, cx| view.mark_content_ready(cx));
+                            })
+                            .detach();
+                    }
                     view
                 },
             )

@@ -265,6 +265,14 @@ pub struct RootView {
     /// after launch, once the initial window state (including a restored maximize)
     /// has settled, so the opening sequence never overwrites the saved sizes.
     persist_ready: bool,
+    /// Gate that holds the UI behind a plain background until the window has
+    /// reached its final size. On Windows the maximize-on-open is asynchronous and
+    /// the `WM_SIZE` that grows GPUI's cached viewport can be lost during the busy
+    /// open sequence, so laying out immediately would size the UI to the small
+    /// base viewport (leaving the maximized window mostly empty). We start `false`
+    /// there and flip it once the viewport matches the real window size; every
+    /// other platform starts ready.
+    content_ready: bool,
     /// Set on mouse-down in the draggable toolbar; the actual window move only
     /// starts once the cursor leaves a small threshold around [`Self::drag_start`],
     /// so plain clicks (and their sub-pixel jitter) never start a drag — which
@@ -359,6 +367,9 @@ impl RootView {
             max_size,
             save_seq: 0,
             persist_ready: false,
+            // Only Windows defers the first layout (see the field docs); elsewhere
+            // the window already has its final size when the UI first renders.
+            content_ready: !cfg!(target_os = "windows"),
             should_move: false,
             drag_start: point(px(0.0), px(0.0)),
             drag_anchor: point(px(0.0), px(0.0)),
@@ -394,6 +405,15 @@ impl RootView {
     /// Arms settings persistence once the initial window state has settled.
     pub(crate) fn enable_persistence(&mut self) {
         self.persist_ready = true;
+    }
+
+    /// Reveals the UI once the window has reached its final size (see
+    /// [`Self::content_ready`]). Idempotent; redraws on the transition.
+    pub(crate) fn mark_content_ready(&mut self, cx: &mut Context<Self>) {
+        if !self.content_ready {
+            self.content_ready = true;
+            cx.notify();
+        }
     }
 
     /// Snapshot of the persisted settings, taken from the live layout state.
@@ -2264,6 +2284,17 @@ fn settings_row(
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Until the window has settled at its final size (Windows maximize-on-open
+        // is asynchronous; see `content_ready`), show only a full-size background.
+        // Laying the real UI out against the not-yet-grown viewport would size it
+        // to the small base bounds and leave the maximized window mostly empty.
+        if !self.content_ready {
+            return div()
+                .size_full()
+                .bg(cx.theme().colors().background)
+                .into_any_element();
+        }
+
         // Make sure the scrollbar state entities exist before the panels render.
         self.ensure_scrollbar_states(cx);
         // Keep the embedded e-mail webview in sync with the selection and theme.
@@ -2385,6 +2416,7 @@ impl Render for RootView {
             .when(self.privacy_menu_open, |el| {
                 el.child(self.render_privacy_menu(cx))
             })
+            .into_any_element()
     }
 }
 

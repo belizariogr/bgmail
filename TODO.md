@@ -249,6 +249,16 @@
 - ✅ Disable GPUI DirectComposition on Windows before platform initialization
       (`GPUI_DISABLE_DIRECT_COMPOSITION=1`) because its `WS_EX_NOREDIRECTIONBITMAP`
       window path does not compose reliably with WebView2's child HWND
+- ✅ Fix the Windows maximized-open regression caused by disabling
+      DirectComposition: the maximize-on-open is applied asynchronously
+      (`ShowWindowAsync(SW_MAXIMIZE)`) and the `WM_SIZE` that grows GPUI's cached
+      viewport can be dropped during the busy open sequence, so the UI laid out
+      against the small base viewport while the window was already maximized
+      (content too small, empty space until a manual resize). Hold the UI behind a
+      plain background (`RootView::content_ready`) until the window settles, and
+      poll on open re-posting `WM_SIZE` (`window_drag::nudge_window_resize`)
+      whenever GPUI's viewport is stale, so it re-reads the real size without
+      un-maximizing
 - ⬜ Verify the WebView2 GPU workaround visually on the affected Windows host
       after fully restarting the app process
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
