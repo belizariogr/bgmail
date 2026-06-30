@@ -71,9 +71,12 @@
 - ✅ Icons as embedded SVGs (no icon font): every `IconName` maps to an SVG under
       `assets/icons/`, embedded in `crates/ui/src/assets.rs` and rendered with
       `gpui::svg()` (tinted by the icon's color). This replaces the FontAwesome
-      glyph font, whose face/codepoint lookup rendered inconsistently across
-      platforms (broke on macOS after a Windows fix). SVGs reuse Zed's icon set
-      where available, with the rest drawn in the same stroke style.
+      glyph *font*, whose face/codepoint lookup rendered inconsistently across
+      platforms (broke on macOS after a Windows fix). To keep the exact previous
+      look, the SVGs are the official FontAwesome 6 Free *Solid* artwork (Star uses
+      Regular for the outline variant; icons CC BY 4.0), normalized to a square
+      viewBox so every icon shares a consistent footprint. `chevron-right.svg`
+      stays a hand-drawn stroke chevron because the sidebar disclosure rotates it.
 - ✅ Localization (i18n): `crates/rmail/src/locale.rs` with `Language`
       (English default + Brazilian Portuguese), a string catalog and an
       `ActiveLanguage` global; UI resolves strings at render time, with a

@@ -164,7 +164,9 @@ active theme.
   SVG under `assets/icons/` (embedded in `crates/ui/src/assets.rs`) and is rendered
   with `gpui::svg()`, which tints it with the icon's color. SVGs are used instead
   of a glyph font so rendering can't depend on a platform font being matched
-  correctly (the FontAwesome font broke across platforms).
+  correctly (the FontAwesome font broke across platforms). The artwork is the
+  official FontAwesome 6 Free Solid set (Star uses Regular for its outline variant;
+  icons under CC BY 4.0), normalized to a square viewBox for a consistent footprint.
 - **UI language**: English by default, with a localization layer
   (`crates/rmail/src/locale.rs`) that also ships Brazilian Portuguese and can be
   switched at runtime from the settings.
