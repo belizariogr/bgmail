@@ -389,6 +389,8 @@ pub struct RootView {
     search_debounce_seq: u64,
     /// Sidebar selection restored when the search box is cleared.
     pre_search_mailbox: Option<Selection>,
+    /// Set when a webview click should drop search focus on the next frame.
+    search_blur_requested: bool,
 }
 
 /// Adapts stored accounts for compose/settings views that still use [`data::Account`].
@@ -506,6 +508,7 @@ impl RootView {
             last_search_query: String::new(),
             search_debounce_seq: 0,
             pre_search_mailbox: None,
+            search_blur_requested: false,
         }
     }
 
@@ -645,7 +648,12 @@ impl RootView {
     }
 
     /// Lazily creates the toolbar search field.
-    fn ensure_search_input(&mut self, language: Language, cx: &mut Context<Self>) {
+    fn ensure_search_input(
+        &mut self,
+        language: Language,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.search_input.is_none() {
             let placeholder = Key::SearchPlaceholder.tr(language);
             let input = cx.new(|cx| TextInput::new(placeholder, cx));
@@ -661,6 +669,9 @@ impl RootView {
                 });
             })
             .detach();
+            let focus_handle = input.read(cx).focus_handle(cx);
+            cx.on_blur(&focus_handle, window, |this, _, cx| this.on_search_blur(cx))
+                .detach();
             self.search_input = Some(input);
         } else if let Some(input) = &self.search_input {
             input.update(cx, |field, _| {
@@ -818,6 +829,32 @@ impl RootView {
         cx.notify();
     }
 
+    fn search_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.search_input
+            .as_ref()
+            .is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// Drops keyboard focus from the search field when it is active.
+    fn blur_search_if_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_input_focused(window, cx) {
+            window.blur();
+        }
+    }
+
+    /// Whether a compact, force-expanded search should collapse once it loses focus.
+    fn should_collapse_search_after_blur(&self, query: &str) -> bool {
+        self.search_is_compact() && self.search_force_expanded && query.trim().is_empty()
+    }
+
+    /// Collapses a compact search opened via the icon when it blurs while empty.
+    fn on_search_blur(&mut self, cx: &mut Context<Self>) {
+        if self.should_collapse_search_after_blur(&self.search_query(cx)) {
+            self.search_force_expanded = false;
+            cx.notify();
+        }
+    }
+
     /// Creates (on first use) and updates the embedded webview to reflect the
     /// selected message and the current theme. Hides it when the reader is not
     /// on screen so it doesn't float over other views.
@@ -932,8 +969,9 @@ impl RootView {
                 // outside-click catcher, so close the privacy dropdown here.
                 if self.privacy_menu_open {
                     self.privacy_menu_open = false;
-                    cx.notify();
                 }
+                self.search_blur_requested = true;
+                cx.notify();
             }
         }
     }
@@ -2935,7 +2973,11 @@ impl Render for RootView {
 
         // Make sure the scrollbar state entities exist before the panels render.
         self.ensure_scrollbar_states(cx);
-        self.ensure_search_input(cx.language(), cx);
+        self.ensure_search_input(cx.language(), window, cx);
+        if self.search_blur_requested {
+            self.search_blur_requested = false;
+            self.blur_search_if_focused(window, cx);
+        }
         if !self.search_is_compact() {
             self.search_force_expanded = false;
         }
@@ -3047,10 +3089,11 @@ impl Render for RootView {
             // webview: such clicks neither blur the webview nor reach its DOM, so
             // the menu would otherwise linger. Capture phase so it still fires
             // when children stop propagation (e.g. buttons).
-            .capture_any_mouse_down(cx.listener(|this, _, _, _| {
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 if let Some(webview) = &this.email_webview {
                     webview.dismiss_context_menu();
                 }
+                this.blur_search_if_focused(window, cx);
             }))
             .child(self.render_toolbar(window, cx))
             .child(body)
@@ -3423,5 +3466,18 @@ mod tests {
         view.sync_layout(px(NARROW_BREAKPOINT));
         view.search_force_expanded = true;
         assert!(view.show_search_clear_in_field_for_query(""));
+    }
+
+    #[test]
+    fn search_collapses_after_blur_only_when_compact_expanded_and_empty() {
+        let (_dir, mut view) = test_view();
+        view.sync_layout(px(NARROW_BREAKPOINT));
+        view.search_force_expanded = true;
+        assert!(view.should_collapse_search_after_blur(""));
+        assert!(!view.should_collapse_search_after_blur("hello"));
+
+        view.sync_layout(px(1600.0));
+        view.search_force_expanded = true;
+        assert!(!view.should_collapse_search_after_blur(""));
     }
 }
