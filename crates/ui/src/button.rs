@@ -21,6 +21,7 @@ type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub struct Button {
     id: ElementId,
     label: SharedString,
+    icon: Option<IconName>,
     style: ButtonStyle,
     full_width: bool,
     on_click: Option<ClickHandler>,
@@ -32,10 +33,17 @@ impl Button {
         Self {
             id: id.into(),
             label: label.into(),
+            icon: None,
             style: ButtonStyle::default(),
             full_width: false,
             on_click: None,
         }
+    }
+
+    /// Prepends an icon before the label (e.g. the compose Send button).
+    pub fn icon(mut self, icon: IconName) -> Self {
+        self.icon = Some(icon);
+        self
     }
 
     /// Sets the button style.
@@ -81,6 +89,14 @@ impl RenderOnce for Button {
             .text_color(text_color)
             .when(self.full_width, |el| el.w_full())
             .hover(move |el| el.bg(hover_bg))
+            .when_some(self.icon, |el, icon| {
+                let icon_color = if self.style == ButtonStyle::Filled {
+                    Color::OnAccent
+                } else {
+                    Color::Default
+                };
+                el.child(Icon::new(icon).size(IconSize::Small).color(icon_color))
+            })
             .child(self.label)
             .when_some(self.on_click, |el, handler| {
                 // Swallow the mouse-down so an enclosing draggable container (e.g.

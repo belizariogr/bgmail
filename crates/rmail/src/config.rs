@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::compose;
+
 /// Persisted layout settings. Sizes are in logical pixels.
 ///
 /// `#[serde(default)]` lets older/partial config files load: any missing field
@@ -49,9 +51,20 @@ pub struct Config {
     /// regardless of the app theme. Most e-mails are authored for a light page,
     /// so this keeps them legible in dark mode. Off by default.
     pub reader_white_background: bool,
+    /// Whether the compose message body uses a white background (with dark text),
+    /// regardless of the app theme. Off by default.
+    pub compose_white_background: bool,
     /// Indices of the sidebar account groups the user collapsed, so their
     /// open/closed state survives a restart. Stored sorted for a stable file.
     pub collapsed_accounts: Vec<usize>,
+    /// X position of the compose window. Negative values mean "center on open".
+    pub compose_x: f32,
+    /// Y position of the compose window. Negative values mean "center on open".
+    pub compose_y: f32,
+    /// Width of the compose window.
+    pub compose_width: f32,
+    /// Height of the compose window.
+    pub compose_height: f32,
 }
 
 impl Default for Config {
@@ -71,7 +84,12 @@ impl Default for Config {
             list_width: 360.0,
             load_remote_images: false,
             reader_white_background: false,
+            compose_white_background: false,
             collapsed_accounts: Vec::new(),
+            compose_x: compose::COMPOSE_POSITION_UNSET,
+            compose_y: compose::COMPOSE_POSITION_UNSET,
+            compose_width: compose::COMPOSE_DEFAULT_WIDTH,
+            compose_height: compose::COMPOSE_DEFAULT_HEIGHT,
         }
     }
 }
@@ -149,7 +167,12 @@ mod tests {
             list_width: 420.0,
             load_remote_images: true,
             reader_white_background: true,
+            compose_white_background: true,
             collapsed_accounts: vec![0, 2, 4],
+            compose_x: 100.0,
+            compose_y: 80.0,
+            compose_width: 790.0,
+            compose_height: 720.0,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
@@ -173,6 +196,13 @@ mod tests {
     }
 
     #[test]
+    fn compose_white_background_defaults_off() {
+        assert!(!Config::default().compose_white_background);
+        let parsed: Config = serde_json::from_str(r#"{ "sidebar_width": 175.0 }"#).unwrap();
+        assert!(!parsed.compose_white_background);
+    }
+
+    #[test]
     fn reader_white_background_defaults_off() {
         assert!(!Config::default().reader_white_background);
         let parsed: Config = serde_json::from_str(r#"{ "sidebar_width": 175.0 }"#).unwrap();
@@ -185,6 +215,22 @@ mod tests {
         let parsed: Config = serde_json::from_str(r#"{ "sidebar_width": 175.0 }"#).unwrap();
         assert_eq!(parsed.sidebar_width, 175.0);
         assert_eq!(parsed.window_width, Config::default().window_width);
+    }
+
+    #[test]
+    fn compose_bounds_default_to_centered_open_size() {
+        let config = Config::default();
+        assert!(config.compose_x < 0.0);
+        assert!(config.compose_y < 0.0);
+        assert_eq!(config.compose_width, compose::COMPOSE_DEFAULT_WIDTH);
+        assert_eq!(config.compose_height, compose::COMPOSE_DEFAULT_HEIGHT);
+    }
+
+    #[test]
+    fn missing_compose_fields_fall_back_to_defaults() {
+        let parsed: Config = serde_json::from_str(r#"{ "sidebar_width": 175.0 }"#).unwrap();
+        assert_eq!(parsed.compose_width, Config::default().compose_width);
+        assert_eq!(parsed.compose_x, Config::default().compose_x);
     }
 
     #[test]
@@ -212,7 +258,12 @@ mod tests {
             list_width: 400.0,
             load_remote_images: false,
             reader_white_background: true,
+            compose_white_background: true,
             collapsed_accounts: vec![1, 3],
+            compose_x: 200.0,
+            compose_y: 50.0,
+            compose_width: 800.0,
+            compose_height: 600.0,
         };
         save_to(&path, &config).unwrap();
         assert_eq!(load_from(path.clone()), config);

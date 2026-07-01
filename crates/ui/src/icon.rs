@@ -50,6 +50,9 @@ pub enum IconName {
     ReplyAll,
     Forward,
     Compose,
+    /// Send action (compose toolbar). Shares the paper-plane artwork with
+    /// [`IconName::Sent`] but names the action distinctly from the Sent mailbox.
+    Send,
     Search,
     Settings,
     Refresh,
@@ -85,6 +88,7 @@ impl IconName {
             IconName::ReplyAll => crate::REPLY_ALL,
             IconName::Forward => crate::FORWARD,
             IconName::Compose => crate::PEN_TO_SQUARE,
+            IconName::Send => crate::SEND,
             IconName::Search => crate::SEARCH,
             IconName::Settings => crate::SETTINGS,
             IconName::Refresh => crate::REFRESH,
@@ -155,7 +159,7 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 29] = [
+    const ALL: [IconName; 30] = [
         IconName::Inbox,
         IconName::Sent,
         IconName::Drafts,
@@ -170,6 +174,7 @@ mod tests {
         IconName::ReplyAll,
         IconName::Forward,
         IconName::Compose,
+        IconName::Send,
         IconName::Search,
         IconName::Settings,
         IconName::Refresh,

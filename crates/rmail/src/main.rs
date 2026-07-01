@@ -5,6 +5,7 @@
 //! The domain layer will be added in later stages (see `docs/PLANEJAMENTO.md` and
 //! `TODO.md`).
 
+mod compose;
 mod config;
 mod data;
 mod locale;

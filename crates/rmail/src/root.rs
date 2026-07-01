@@ -23,6 +23,7 @@ use ui::{
     Scrollbar, ScrollbarState, Switch, Tooltip,
 };
 
+use crate::compose::{self, ComposeView};
 use crate::config::{self, Config};
 use crate::data::{self, Account, GlobalMailbox, MailboxKind, Message, MessageBody};
 use crate::locale::{self, ActiveLanguage, Key, Language};
@@ -78,7 +79,8 @@ const DRAG_THRESHOLD: f32 = 2.0;
 const SEARCH_FIELD_WIDTH: f32 = 220.0;
 /// Body text color used when the reader is forced onto a white background. A near
 /// black (not pure) for comfortable contrast on white, independent of the theme.
-const READER_LIGHT_TEXT: Hsla = Hsla {
+/// Shared with the compose body when the same preference is enabled.
+pub(crate) const READER_LIGHT_TEXT: Hsla = Hsla {
     h: 0.0,
     s: 0.0,
     l: 0.13,
@@ -293,6 +295,13 @@ pub struct RootView {
     /// preferences live in their own window). `None` when it has never been
     /// opened or was closed.
     settings_window: Option<WindowHandle<SettingsView>>,
+    /// Handle to the separate compose window while it is open. `None` when it
+    /// has never been opened or was closed.
+    compose_window: Option<WindowHandle<ComposeView>>,
+    /// Last observed position and size of the compose window, persisted so it
+    /// reopens where/how the user left it.
+    compose_origin: Point<Pixels>,
+    compose_size: Size<Pixels>,
     /// Scroll handle + scrollbar state for the message list.
     list_scroll: ScrollHandle,
     list_scrollbar: Option<Entity<ScrollbarState>>,
@@ -314,6 +323,9 @@ pub struct RootView {
     /// Whether the reader always paints the message body on a white background
     /// (dark text), ignoring the app theme. Persisted; off by default.
     reader_white_background: bool,
+    /// Whether the compose message body uses a white background. Persisted; off
+    /// by default.
+    compose_white_background: bool,
     /// Whether the currently displayed message contains remote images. Drives
     /// whether the privacy shield appears. Recomputed when the document rebuilds.
     content_has_remote: bool,
@@ -347,6 +359,11 @@ impl RootView {
         );
         let max_origin = point(px(settings.max_x), px(settings.max_y));
         let max_size = size(px(settings.max_width), px(settings.max_height));
+        let compose_origin = point(px(settings.compose_x), px(settings.compose_y));
+        let compose_size = size(
+            px(settings.compose_width.max(compose::COMPOSE_MIN_WIDTH)),
+            px(settings.compose_height.max(compose::COMPOSE_MIN_HEIGHT)),
+        );
         Self {
             accounts: data::sample_accounts(),
             messages: data::sample_messages(),
@@ -375,6 +392,9 @@ impl RootView {
             drag_anchor: point(px(0.0), px(0.0)),
             hovered_link: String::new(),
             settings_window: None,
+            compose_window: None,
+            compose_origin,
+            compose_size,
             list_scroll: ScrollHandle::new(),
             list_scrollbar: None,
             sidebar_scroll: ScrollHandle::new(),
@@ -383,6 +403,7 @@ impl RootView {
             last_webview_sig: None,
             load_remote_images: settings.load_remote_images,
             reader_white_background: settings.reader_white_background,
+            compose_white_background: settings.compose_white_background,
             content_has_remote: false,
             content_blocked_count: 0,
             unblocked_messages: HashSet::new(),
@@ -432,11 +453,34 @@ impl RootView {
             list_width: f32::from(self.list_width),
             load_remote_images: self.load_remote_images,
             reader_white_background: self.reader_white_background,
+            compose_white_background: self.compose_white_background,
             collapsed_accounts: {
                 let mut groups: Vec<usize> = self.collapsed_accounts.iter().copied().collect();
                 groups.sort_unstable();
                 groups
             },
+            compose_x: f32::from(self.compose_origin.x),
+            compose_y: f32::from(self.compose_origin.y),
+            compose_width: f32::from(self.compose_size.width),
+            compose_height: f32::from(self.compose_size.height),
+        }
+    }
+
+    /// Records a move/resize of the compose window and debounces a settings
+    /// write, mirroring the main window's persistence path.
+    pub(crate) fn sync_compose_window_bounds(
+        &mut self,
+        origin: Point<Pixels>,
+        window_size: Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.persist_ready {
+            return;
+        }
+        if origin != self.compose_origin || window_size != self.compose_size {
+            self.compose_origin = origin;
+            self.compose_size = window_size;
+            self.request_save(cx);
         }
     }
 
@@ -630,7 +674,22 @@ impl RootView {
         if self.reader_white_background != value {
             self.reader_white_background = value;
             self.request_save(cx);
-            cx.notify();
+            cx.refresh_windows();
+        }
+    }
+
+    /// Toggles whether the compose body forces a white background, persisting
+    /// the preference and updating an open compose window.
+    fn set_compose_white_background(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.compose_white_background != value {
+            self.compose_white_background = value;
+            self.request_save(cx);
+            if let Some(handle) = self.compose_window {
+                let _ = handle.update(cx, |view, _, cx| {
+                    view.set_white_background(value, cx);
+                });
+            }
+            cx.refresh_windows();
         }
     }
 
@@ -667,6 +726,57 @@ impl RootView {
         }) {
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             self.settings_window = Some(handle);
+            cx.notify();
+        }
+    }
+
+    /// Opens the compose window, or focuses it if it is already open.
+    fn open_compose(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(handle) = self.compose_window {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.compose_window = None;
+        }
+
+        let accounts = self.accounts.clone();
+        let root = cx.entity().downgrade();
+        let compose_white = self.compose_white_background;
+        let title = compose::window_title(cx.language());
+        let bounds = compose::open_bounds(self.compose_origin, self.compose_size, cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(
+                px(compose::COMPOSE_MIN_WIDTH),
+                px(compose::COMPOSE_MIN_HEIGHT),
+            )),
+            titlebar: Some(TitlebarOptions {
+                title: Some(title.into()),
+                appears_transparent: false,
+                traffic_light_position: None,
+            }),
+            ..Default::default()
+        };
+
+        if let Ok(handle) = cx.open_window(options, |window, cx| {
+            let root_for_close = root.clone();
+            let view = cx.new(|_| ComposeView::new(accounts, root, compose_white));
+            window.on_window_should_close(cx, move |_, cx| {
+                if let Some(root) = root_for_close.upgrade() {
+                    root.update(cx, |root, _| {
+                        root.compose_window = None;
+                        root.persist_now();
+                    });
+                }
+                true
+            });
+            view
+        }) {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            self.compose_window = Some(handle);
             cx.notify();
         }
     }
@@ -852,8 +962,16 @@ impl RootView {
             .child(
                 h_flex()
                     .gap_1()
-                    .child(IconButton::new("filter", IconName::Filter))
-                    .child(IconButton::new("more", IconName::More)),
+                    .child(Self::icon_button_with_tooltip(
+                        "filter",
+                        Key::ToolbarFilter.tr(language),
+                        IconButton::new("filter", IconName::Filter),
+                    ))
+                    .child(Self::icon_button_with_tooltip(
+                        "more",
+                        Key::ToolbarMore.tr(language),
+                        IconButton::new("more", IconName::More),
+                    )),
             )
     }
 
@@ -1011,21 +1129,25 @@ impl RootView {
                     .items_center()
                     .gap_1()
                     .pl(crate::window_frame::toolbar_left_padding())
-                    .child(
+                    .child(Self::icon_button_with_tooltip(
+                        "toggle-sidebar",
+                        Key::ToolbarToggleSidebar.tr(language),
                         IconButton::new("toggle-sidebar", IconName::Sidebar)
                             .selected(self.show_sidebar)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.toggle_sidebar();
                                 cx.notify();
                             })),
-                    )
-                    .child(
+                    ))
+                    .child(Self::icon_button_with_tooltip(
+                        "settings",
+                        Key::SettingsTitle.tr(language),
                         IconButton::new("settings", IconName::Settings).on_click(cx.listener(
                             |this, _, window, cx| {
                                 this.open_settings(window, cx);
                             },
                         )),
-                    ),
+                    )),
             )
             // Segment 2: over the message list — title + count on the left,
             // filter/more on the right. Only present while the sidebar is docked.
@@ -1043,7 +1165,15 @@ impl RootView {
                     .gap_3()
                     .px_3()
                     // Left-aligned: compose.
-                    .child(IconButton::new("compose", IconName::Compose).size(IconSize::Medium))
+                    .child(Self::icon_button_with_tooltip(
+                        "compose",
+                        Key::ComposeWindowTitle.tr(language),
+                        IconButton::new("compose", IconName::Compose)
+                            .size(IconSize::Medium)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_compose(window, cx);
+                            })),
+                    ))
                     .child(div().flex_1())
                     // Centered action groups, divided like macOS Mail. Whole groups
                     // are dropped (right to left) as space shrinks so they never
@@ -1057,18 +1187,42 @@ impl RootView {
                                     cluster.child(
                                         h_flex()
                                             .gap_1()
-                                            .child(IconButton::new("reply", IconName::Reply))
-                                            .child(IconButton::new("reply-all", IconName::ReplyAll))
-                                            .child(IconButton::new("forward", IconName::Forward)),
+                                            .child(Self::icon_button_with_tooltip(
+                                                "reply",
+                                                Key::ToolbarReply.tr(language),
+                                                IconButton::new("reply", IconName::Reply),
+                                            ))
+                                            .child(Self::icon_button_with_tooltip(
+                                                "reply-all",
+                                                Key::ToolbarReplyAll.tr(language),
+                                                IconButton::new("reply-all", IconName::ReplyAll),
+                                            ))
+                                            .child(Self::icon_button_with_tooltip(
+                                                "forward",
+                                                Key::ToolbarForward.tr(language),
+                                                IconButton::new("forward", IconName::Forward),
+                                            )),
                                     )
                                 })
                                 .when(groups >= 2, |cluster| {
                                     cluster.child(Self::render_toolbar_separator(border)).child(
                                         h_flex()
                                             .gap_1()
-                                            .child(IconButton::new("trash", IconName::Trash))
-                                            .child(IconButton::new("archive", IconName::Archive))
-                                            .child(IconButton::new("junk", IconName::Junk)),
+                                            .child(Self::icon_button_with_tooltip(
+                                                "trash",
+                                                Key::MailboxTrash.tr(language),
+                                                IconButton::new("trash", IconName::Trash),
+                                            ))
+                                            .child(Self::icon_button_with_tooltip(
+                                                "archive",
+                                                Key::MailboxArchive.tr(language),
+                                                IconButton::new("archive", IconName::Archive),
+                                            ))
+                                            .child(Self::icon_button_with_tooltip(
+                                                "junk",
+                                                Key::MailboxJunk.tr(language),
+                                                IconButton::new("junk", IconName::Junk),
+                                            )),
                                     )
                                 })
                                 .when(groups >= 3, |cluster| {
@@ -1078,10 +1232,12 @@ impl RootView {
                                             .child(Self::render_dropdown_button(
                                                 "flag",
                                                 IconName::Flag,
+                                                Key::ToolbarFlag.tr(language),
                                             ))
                                             .child(Self::render_dropdown_button(
                                                 "move",
                                                 IconName::Folder,
+                                                Key::ToolbarMove.tr(language),
                                             )),
                                     )
                                 }),
@@ -1089,7 +1245,12 @@ impl RootView {
                     })
                     .child(div().flex_1())
                     .child(if compact_search {
-                        IconButton::new("search", IconName::Search).into_any_element()
+                        Self::icon_button_with_tooltip(
+                            "search",
+                            Key::SearchPlaceholder.tr(language),
+                            IconButton::new("search", IconName::Search),
+                        )
+                        .into_any_element()
                     } else {
                         h_flex()
                             .w(px(SEARCH_FIELD_WIDTH))
@@ -1115,6 +1276,16 @@ impl RootView {
             .children(crate::window_frame::render_right_window_controls(window))
     }
 
+    /// Wraps an [`IconButton`] with a localized tooltip (GPUI attaches tooltips to
+    /// elements via `div`, not to `IconButton` directly).
+    fn icon_button_with_tooltip(
+        id: &'static str,
+        tooltip: &'static str,
+        button: IconButton,
+    ) -> impl IntoElement {
+        div().id(id).tooltip(Tooltip::text(tooltip)).child(button)
+    }
+
     /// A thin vertical divider used to separate toolbar button groups.
     fn render_toolbar_separator(color: Hsla) -> impl IntoElement {
         div().w(px(1.0)).h(px(20.0)).bg(color)
@@ -1122,16 +1293,22 @@ impl RootView {
 
     /// A toolbar control that pairs an icon with a small chevron to hint a
     /// dropdown menu (mirrors the "move to folder" / "flag" buttons in Mail).
-    fn render_dropdown_button(id: &'static str, icon: IconName) -> impl IntoElement {
-        h_flex()
-            .items_center()
-            .gap_0p5()
-            .child(IconButton::new(id, icon))
-            .child(
-                Icon::new(IconName::ChevronDown)
-                    .size(IconSize::XSmall)
-                    .color(Color::Muted),
-            )
+    fn render_dropdown_button(
+        id: &'static str,
+        icon: IconName,
+        tooltip: &'static str,
+    ) -> impl IntoElement {
+        div().id(id).tooltip(Tooltip::text(tooltip)).child(
+            h_flex()
+                .items_center()
+                .gap_0p5()
+                .child(IconButton::new(id, icon))
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                ),
+        )
     }
 
     // ----- Sidebar (accounts and mailboxes) -------------------------------
@@ -2087,6 +2264,11 @@ impl SettingsView {
                     .upgrade()
                     .map(|root| root.read(cx).reader_white_background)
                     .unwrap_or(false);
+                let compose_white = self
+                    .root
+                    .upgrade()
+                    .map(|root| root.read(cx).compose_white_background)
+                    .unwrap_or(false);
                 v_flex()
                     .gap_3()
                     .child(Label::new(Key::ThemeLabel.tr(language)).weight(FontWeight::SEMIBOLD))
@@ -2128,6 +2310,17 @@ impl SettingsView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let _ = this.root.update(cx, |root, cx| {
                                     root.set_reader_white_background(!reader_white, cx);
+                                });
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Switch::new("compose-white-bg", compose_white)
+                            .label(Key::ComposeWhiteBackground.tr(language))
+                            .disabled(appearance == Appearance::Light)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let _ = this.root.update(cx, |root, cx| {
+                                    root.set_compose_white_background(!compose_white, cx);
                                 });
                                 cx.notify();
                             })),

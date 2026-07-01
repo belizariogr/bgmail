@@ -269,7 +269,12 @@
       after fully restarting the app process
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ⬜ Functional search field (filters the mock list)
-- ⬜ E-mail composition screen/panel (mock)
+- ✅ E-mail composition screen/panel (mock): toolbar compose button opens a
+      dedicated `ComposeView` window (reused/refocused if already open) with Send,
+      Attach and Discard actions (FontAwesome SVG icons), header fields
+      (From/To/Cc/Bcc/Subject) and a body placeholder; Cc/Bcc toggle and From
+      account cycling are interactive mocks; compose window position/size persist
+      in `config.json` (default 790×720, centered on first open)
 ## Stage 2 — Domain layer
 - ⬜ `mail_core` crate: `Account`, `Mailbox`, `Message`, `Thread`, `Attachment`
 - ⬜ `storage` crate: local persistence (SQLite) + tests
