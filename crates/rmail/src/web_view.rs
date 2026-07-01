@@ -335,6 +335,9 @@ enum IpcMessage<'a> {
     /// A mouse press landed inside the webview (no payload). Lets the host close
     /// any open GPUI overlay, since those clicks never reach GPUI's catcher.
     BodyMouseDown,
+    /// Ctrl/Cmd+P inside the native webview should open rMail's command palette,
+    /// not the browser engine's Print dialog.
+    CommandPalette,
 }
 
 /// Parses an IPC message produced by [`CONTENT_SCRIPT`]. Returns `None` for an
@@ -348,6 +351,7 @@ fn parse_ipc_message(message: &str) -> Option<IpcMessage<'_>> {
         "C" => Some(IpcMessage::CopyToClipboard(payload)),
         "S" => Some(IpcMessage::ShowImage(payload)),
         "B" => Some(IpcMessage::BodyMouseDown),
+        "P" => Some(IpcMessage::CommandPalette),
         _ => None,
     }
 }
@@ -366,6 +370,9 @@ pub enum HostEvent {
     /// A mouse press landed inside the webview; the host dismisses any open GPUI
     /// overlay (those clicks never reach GPUI's outside-click catcher).
     BodyMouseDown,
+    /// Toggle the command palette from a keyboard shortcut handled by the native
+    /// webview document.
+    CommandPalette,
 }
 
 /// Injected into every rendered message. Two responsibilities:
@@ -515,7 +522,15 @@ const CONTENT_SCRIPT: &str = r#"(function () {
     send('B', '');
   }, true);
   document.addEventListener('scroll', closeMenu, true);
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeMenu(); });
+  document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key && e.key.toLowerCase() === 'p') {
+      e.preventDefault();
+      e.stopPropagation();
+      send('P', '');
+      return;
+    }
+    if (e.key === 'Escape') closeMenu();
+  }, true);
   window.addEventListener('blur', closeMenu);
   // Exposed so the host can dismiss the menu when the user clicks the GPUI UI
   // outside the webview: clicks on sibling native views don't blur the webview
@@ -897,6 +912,9 @@ mod platform {
             Some(IpcMessage::BodyMouseDown) => {
                 let _ = to_host.try_send(HostEvent::BodyMouseDown);
             }
+            Some(IpcMessage::CommandPalette) => {
+                let _ = to_host.try_send(HostEvent::CommandPalette);
+            }
             None => {}
         }
     }
@@ -1262,6 +1280,7 @@ mod tests {
             parse_ipc_message("S\nhttps://tracker.test/p.gif"),
             Some(IpcMessage::ShowImage("https://tracker.test/p.gif"))
         );
+        assert_eq!(parse_ipc_message("P\n"), Some(IpcMessage::CommandPalette));
     }
 
     #[test]

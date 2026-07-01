@@ -2,6 +2,7 @@
 
 mod database;
 mod folder;
+mod message_ops;
 mod schema;
 mod search;
 mod seed;

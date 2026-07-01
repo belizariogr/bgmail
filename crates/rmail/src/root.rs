@@ -23,6 +23,13 @@ use ui::{
     LabelSize, ListItem, Scrollbar, ScrollbarState, Switch, TextInput, Tooltip,
 };
 
+use crate::actions::{
+    ComposeNew, MessageArchive, MessageDelete, MessageDeletePermanent, MessageMarkJunk,
+    MessageRestore, MessageToggleFlag, MoveMessageToFolder, OpenSettings, ToggleSidebar,
+};
+use crate::app_menus;
+use crate::command_palette::CommandPaletteState;
+use crate::commands::{CommandContext, CommandId};
 use crate::compose::{self, ComposeView};
 use crate::config::{self, Config};
 use crate::data::{self, GlobalMailbox, MailboxKind};
@@ -391,6 +398,11 @@ pub struct RootView {
     pre_search_mailbox: Option<Selection>,
     /// Set when a webview click should drop search focus on the next frame.
     search_blur_requested: bool,
+    /// Command palette overlay (Zed-style action picker).
+    command_palette: Option<CommandPaletteState>,
+    /// Set when opening the command palette so its input is focused after the
+    /// overlay has been included in the rendered tree.
+    command_palette_focus_requested: bool,
 }
 
 /// Adapts stored accounts for compose/settings views that still use [`data::Account`].
@@ -509,6 +521,8 @@ impl RootView {
             search_debounce_seq: 0,
             pre_search_mailbox: None,
             search_blur_requested: false,
+            command_palette: None,
+            command_palette_focus_requested: false,
         }
     }
 
@@ -541,6 +555,359 @@ impl RootView {
         self.selected_detail = self
             .selected_message_id
             .and_then(|id| self.db.get_message(id).ok().flatten());
+    }
+
+    fn on_message_selection_changed(&mut self, cx: &mut Context<Self>) {
+        self.reload_selected_detail();
+        self.sync_app_menus(cx);
+        cx.notify();
+    }
+
+    /// Builds the command context snapshot used by menus and the palette.
+    fn command_context(&self) -> CommandContext {
+        CommandContext {
+            selected_message_id: self.selected_message_id,
+            message_detail: self.selected_detail.clone(),
+            folders_by_account: self.folders_by_account.clone(),
+        }
+    }
+
+    /// Refreshes the global menu bar (disabled states follow the current selection).
+    pub(crate) fn sync_app_menus(&self, cx: &mut Context<Self>) {
+        let ctx = self.command_context();
+        let language = cx.language();
+        app_menus::sync_menus(cx, &ctx, language);
+    }
+
+    fn refresh_after_message_action(&mut self, cx: &mut Context<Self>) {
+        self.reload_message_list();
+        self.sync_app_menus(cx);
+        self.last_webview_sig = None;
+        cx.notify();
+    }
+
+    fn ensure_command_palette(&mut self, cx: &mut Context<Self>) {
+        if self.command_palette.is_none() {
+            let input = cx.new(|cx| TextInput::new("", cx));
+            let root = cx.weak_entity();
+            cx.observe(&input, move |_, _, cx| {
+                let root = root.clone();
+                cx.defer(move |cx| {
+                    if let Some(root) = root.upgrade() {
+                        root.update(cx, |this, cx| {
+                            this.sync_command_palette_query(cx);
+                        });
+                    }
+                });
+            })
+            .detach();
+            self.command_palette = Some(CommandPaletteState {
+                open: false,
+                query: String::new(),
+                selected_ix: 0,
+                input: Some(input),
+            });
+        }
+    }
+
+    fn focus_command_palette_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(palette) = &self.command_palette {
+            if let Some(input) = &palette.input {
+                let focus_handle = input.read(cx).focus_handle(cx);
+                window.defer(cx, move |window, _| {
+                    window.focus(&focus_handle);
+                });
+            }
+        }
+    }
+
+    fn focus_command_palette_if_requested(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.command_palette_focus_requested {
+            return;
+        }
+        if !self
+            .command_palette
+            .as_ref()
+            .is_some_and(|palette| palette.open)
+        {
+            self.command_palette_focus_requested = false;
+            return;
+        }
+        self.command_palette_focus_requested = false;
+        self.focus_command_palette_input(window, cx);
+    }
+
+    fn sync_command_palette_query(&mut self, cx: &mut Context<Self>) {
+        let Some(palette) = &mut self.command_palette else {
+            return;
+        };
+        let query = palette
+            .input
+            .as_ref()
+            .map(|input| input.read(cx).content().to_string())
+            .unwrap_or_default();
+        if query != palette.query {
+            palette.on_query_change(query);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_command_palette(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_command_palette(cx);
+        if let Some(palette) = &mut self.command_palette {
+            palette.open = !palette.open;
+            if palette.open {
+                palette.query.clear();
+                palette.selected_ix = 0;
+                if let Some(input) = &palette.input {
+                    input.update(cx, |field, cx| field.clear(cx));
+                }
+                self.command_palette_focus_requested = true;
+            }
+            cx.notify();
+        }
+    }
+
+    fn toggle_command_palette_from_webview(&mut self, cx: &mut Context<Self>) {
+        self.ensure_command_palette(cx);
+        if let Some(palette) = &mut self.command_palette {
+            palette.open = !palette.open;
+            if palette.open {
+                palette.query.clear();
+                palette.selected_ix = 0;
+                if let Some(input) = &palette.input {
+                    input.update(cx, |field, cx| field.clear(cx));
+                }
+                self.command_palette_focus_requested = true;
+            }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn execute_command(
+        &mut self,
+        id: &CommandId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match id {
+            CommandId::ComposeNew => self.open_compose(window, cx),
+            CommandId::OpenSettings => self.open_settings(window, cx),
+            CommandId::ToggleSidebar => {
+                self.toggle_sidebar();
+                self.sync_app_menus(cx);
+            }
+            CommandId::MessageDelete => self.delete_message_to_trash(cx),
+            CommandId::MessageDeletePermanent => self.delete_message_permanently(cx),
+            CommandId::MessageRestore => self.restore_message(cx),
+            CommandId::MessageArchive => self.archive_message(cx),
+            CommandId::MessageMarkJunk => self.mark_message_junk(cx),
+            CommandId::MessageToggleFlag => self.toggle_message_flag(cx),
+            CommandId::MoveToFolder(path) => self.move_message_to_folder(path.as_ref(), cx),
+        }
+        if let Some(palette) = &mut self.command_palette {
+            palette.open = false;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn delete_message_to_trash(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_message_id else {
+            return;
+        };
+        let _ = self.db.move_message_to_trash(id);
+        self.refresh_after_message_action(cx);
+    }
+
+    pub(crate) fn delete_message_permanently(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_message_id else {
+            return;
+        };
+        if self.db.delete_message_permanently(id).unwrap_or(false) {
+            self.clear_message_selection();
+            self.refresh_after_message_action(cx);
+        }
+    }
+
+    pub(crate) fn restore_message(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_message_id else {
+            return;
+        };
+        let _ = self.db.restore_message_from_trash(id);
+        self.refresh_after_message_action(cx);
+    }
+
+    pub(crate) fn archive_message(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_message_id else {
+            return;
+        };
+        let _ = self.db.archive_message(id);
+        self.refresh_after_message_action(cx);
+    }
+
+    pub(crate) fn mark_message_junk(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_message_id else {
+            return;
+        };
+        let _ = self.db.mark_message_junk(id);
+        self.refresh_after_message_action(cx);
+    }
+
+    pub(crate) fn toggle_message_flag(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_message_id else {
+            return;
+        };
+        let _ = self.db.toggle_message_starred(id);
+        self.refresh_after_message_action(cx);
+    }
+
+    pub(crate) fn move_message_to_folder(&mut self, folder_path: &str, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_message_id else {
+            return;
+        };
+        let _ = self.db.move_message_to_folder(id, folder_path);
+        self.refresh_after_message_action(cx);
+    }
+
+    fn handle_command_palette_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.command_palette.as_ref().is_some_and(|p| p.open) {
+            return false;
+        }
+        let language = cx.language();
+        let ctx = self.command_context();
+        let entries = self
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .filtered_entries(language, &ctx);
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                if let Some(palette) = &mut self.command_palette {
+                    palette.open = false;
+                }
+                cx.notify();
+                true
+            }
+            "up" => {
+                let changed = self
+                    .command_palette
+                    .as_mut()
+                    .expect("palette open")
+                    .move_selection(-1, entries.len());
+                if changed {
+                    cx.notify();
+                }
+                true
+            }
+            "down" => {
+                let changed = self
+                    .command_palette
+                    .as_mut()
+                    .expect("palette open")
+                    .move_selection(1, entries.len());
+                if changed {
+                    cx.notify();
+                }
+                true
+            }
+            "enter" => {
+                if let Some(id) = self
+                    .command_palette
+                    .as_ref()
+                    .and_then(|palette| palette.selected_command(&entries))
+                    .cloned()
+                {
+                    self.execute_command(&id, window, cx);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn render_command_palette(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let language = cx.language();
+        let ctx = self.command_context();
+        let palette = self.command_palette.as_mut()?;
+        if !palette.open {
+            return None;
+        }
+        let entries = palette.filtered_entries(language, &ctx);
+        palette.clamp_selection(entries.len());
+
+        let colors = cx.theme().colors();
+        let panel_bg = colors.elevated_surface_background;
+        let border = colors.border;
+        let text = colors.text;
+        let selected_ix = palette.selected_ix;
+        let input = palette.input.clone().expect("palette input");
+        input.update(cx, |field, _| {
+            field.set_placeholder(Key::CommandPalette.tr(language));
+        });
+
+        let list = v_flex()
+            .id("command-palette-list")
+            .overflow_y_scroll()
+            .max_h(px(320.0))
+            .children(entries.iter().enumerate().map(|(ix, entry)| {
+                let command_id = entry.id.clone();
+                ListItem::new(("command", ix))
+                    .selected(ix == selected_ix)
+                    .child(
+                        Label::new(entry.label.clone())
+                            .size(LabelSize::Small)
+                            .single_line(),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.execute_command(&command_id, window, cx);
+                    }))
+            }));
+
+        Some(
+            div()
+                .id("command-palette-backdrop")
+                .absolute()
+                .inset_0()
+                .bg(gpui::hsla(0., 0., 0., 0.45))
+                .flex()
+                .items_start()
+                .justify_center()
+                .pt(px(80.0))
+                .occlude()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(palette) = &mut this.command_palette {
+                        palette.open = false;
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id("command-palette-panel")
+                        .w(px(520.0))
+                        .flex()
+                        .flex_col()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(border)
+                        .bg(panel_bg)
+                        .shadow_lg()
+                        .text_color(text)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(div().px_3().pt_3().pb_2().child(input))
+                        .child(div().h(px(1.0)).bg(border))
+                        .child(div().p_1().child(list)),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Writes the current settings to disk immediately (synchronous, best-effort).
@@ -973,6 +1340,7 @@ impl RootView {
                 self.search_blur_requested = true;
                 cx.notify();
             }
+            HostEvent::CommandPalette => self.toggle_command_palette_from_webview(cx),
         }
     }
 
@@ -1035,7 +1403,7 @@ impl RootView {
 
     /// Opens the preferences in their own window (like Zed). If it is already
     /// open, just brings it to the front rather than spawning a duplicate.
-    fn open_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(handle) = self.settings_window {
             if handle
                 .update(cx, |_, window, _| window.activate_window())
@@ -1071,7 +1439,7 @@ impl RootView {
     }
 
     /// Opens the compose window, or focuses it if it is already open.
-    fn open_compose(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_compose(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(handle) = self.compose_window {
             if handle
                 .update(cx, |_, window, _| window.activate_window())
@@ -1172,7 +1540,7 @@ impl RootView {
     }
 
     /// Show or hide the accounts sidebar (toolbar toggle, like Mail).
-    fn toggle_sidebar(&mut self) {
+    pub(crate) fn toggle_sidebar(&mut self) {
         self.show_sidebar = !self.show_sidebar;
     }
 
@@ -1572,18 +1940,29 @@ impl RootView {
                                             .gap_1()
                                             .child(Self::icon_button_with_tooltip(
                                                 "trash",
-                                                Key::MailboxTrash.tr(language),
-                                                IconButton::new("trash", IconName::Trash),
+                                                Key::CommandDelete.tr(language),
+                                                IconButton::new("trash", IconName::Trash).on_click(
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.delete_message_to_trash(cx);
+                                                    }),
+                                                ),
                                             ))
                                             .child(Self::icon_button_with_tooltip(
                                                 "archive",
-                                                Key::MailboxArchive.tr(language),
-                                                IconButton::new("archive", IconName::Archive),
+                                                Key::CommandArchive.tr(language),
+                                                IconButton::new("archive", IconName::Archive)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.archive_message(cx);
+                                                    })),
                                             ))
                                             .child(Self::icon_button_with_tooltip(
                                                 "junk",
-                                                Key::MailboxJunk.tr(language),
-                                                IconButton::new("junk", IconName::Junk),
+                                                Key::CommandMarkJunk.tr(language),
+                                                IconButton::new("junk", IconName::Junk).on_click(
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.mark_message_junk(cx);
+                                                    }),
+                                                ),
                                             )),
                                     )
                                 })
@@ -1591,15 +1970,23 @@ impl RootView {
                                     cluster.child(Self::render_toolbar_separator(border)).child(
                                         h_flex()
                                             .gap_1()
-                                            .child(Self::render_dropdown_button(
+                                            .child(Self::icon_button_with_tooltip(
                                                 "flag",
-                                                IconName::Flag,
                                                 Key::ToolbarFlag.tr(language),
+                                                IconButton::new("flag", IconName::Flag).on_click(
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.toggle_message_flag(cx);
+                                                    }),
+                                                ),
                                             ))
-                                            .child(Self::render_dropdown_button(
+                                            .child(Self::icon_button_with_tooltip(
                                                 "move",
-                                                IconName::Folder,
                                                 Key::ToolbarMove.tr(language),
+                                                IconButton::new("move", IconName::Folder).on_click(
+                                                    cx.listener(|this, _, window, cx| {
+                                                        this.toggle_command_palette(window, cx);
+                                                    }),
+                                                ),
                                             )),
                                     )
                                 }),
@@ -1702,26 +2089,6 @@ impl RootView {
     /// A thin vertical divider used to separate toolbar button groups.
     fn render_toolbar_separator(color: Hsla) -> impl IntoElement {
         div().w(px(1.0)).h(px(20.0)).bg(color)
-    }
-
-    /// A toolbar control that pairs an icon with a small chevron to hint a
-    /// dropdown menu (mirrors the "move to folder" / "flag" buttons in Mail).
-    fn render_dropdown_button(
-        id: &'static str,
-        icon: IconName,
-        tooltip: &'static str,
-    ) -> impl IntoElement {
-        div().id(id).tooltip(Tooltip::text(tooltip)).child(
-            h_flex()
-                .items_center()
-                .gap_0p5()
-                .child(IconButton::new(id, icon))
-                .child(
-                    Icon::new(IconName::ChevronDown)
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
-                ),
-        )
     }
 
     // ----- Sidebar (accounts and mailboxes) -------------------------------
@@ -2244,8 +2611,7 @@ impl RootView {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected_message_id = Some(message_id);
                 this.last_webview_sig = None;
-                this.reload_selected_detail();
-                cx.notify();
+                this.on_message_selection_changed(cx);
             }))
     }
 
@@ -2978,6 +3344,7 @@ impl Render for RootView {
             self.search_blur_requested = false;
             self.blur_search_if_focused(window, cx);
         }
+        self.focus_command_palette_if_requested(window, cx);
         if !self.search_is_compact() {
             self.search_force_expanded = false;
         }
@@ -3085,6 +3452,38 @@ impl Render for RootView {
             .bg(background)
             .text_color(text)
             .font_family("Helvetica")
+            .on_action(cx.listener(|this, _: &ComposeNew, window, cx| {
+                this.open_compose(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_settings(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.toggle_sidebar();
+                this.sync_app_menus(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &MessageDelete, _, cx| {
+                this.delete_message_to_trash(cx);
+            }))
+            .on_action(cx.listener(|this, _: &MessageDeletePermanent, _, cx| {
+                this.delete_message_permanently(cx);
+            }))
+            .on_action(cx.listener(|this, _: &MessageRestore, _, cx| {
+                this.restore_message(cx);
+            }))
+            .on_action(cx.listener(|this, _: &MessageArchive, _, cx| {
+                this.archive_message(cx);
+            }))
+            .on_action(cx.listener(|this, _: &MessageMarkJunk, _, cx| {
+                this.mark_message_junk(cx);
+            }))
+            .on_action(cx.listener(|this, _: &MessageToggleFlag, _, cx| {
+                this.toggle_message_flag(cx);
+            }))
+            .on_action(cx.listener(|this, action: &MoveMessageToFolder, _, cx| {
+                this.move_message_to_folder(action.path.as_ref(), cx);
+            }))
             // Any click on the GPUI UI dismisses a context menu open inside the
             // webview: such clicks neither blur the webview nor reach its DOM, so
             // the menu would otherwise linger. Capture phase so it still fires
@@ -3095,12 +3494,25 @@ impl Render for RootView {
                 }
                 this.blur_search_if_focused(window, cx);
             }))
+            .on_key_down(cx.listener(|this, event, window, cx| {
+                this.handle_command_palette_key(event, window, cx);
+            }))
             .child(self.render_toolbar(window, cx))
             .child(body)
             .child(self.render_status_bar(cx))
             .when(self.privacy_menu_open, |el| {
                 el.child(self.render_privacy_menu(cx))
             })
+            .when(
+                self.command_palette.as_ref().is_some_and(|p| p.open),
+                |el| {
+                    if let Some(palette) = self.render_command_palette(window, cx) {
+                        el.child(palette)
+                    } else {
+                        el
+                    }
+                },
+            )
             .into_any_element()
     }
 }
@@ -3108,6 +3520,7 @@ impl Render for RootView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::{self, CommandId};
     use tempfile::TempDir;
 
     fn test_view() -> (TempDir, RootView) {
@@ -3479,5 +3892,31 @@ mod tests {
         view.sync_layout(px(1600.0));
         view.search_force_expanded = true;
         assert!(!view.should_collapse_search_after_blur(""));
+    }
+
+    #[test]
+    fn move_to_trash_updates_folder_membership() {
+        let (_dir, mut view) = test_view();
+        let id = view.selected_message_id.expect("seed selects a message");
+        view.db.move_message_to_trash(id).unwrap();
+        view.reload_message_list();
+        let csv = view
+            .db
+            .get_message(id)
+            .unwrap()
+            .expect("message")
+            .folders_csv;
+        assert!(csv.contains(storage::system::TRASH));
+    }
+
+    #[test]
+    fn command_context_reflects_trash_state() {
+        let (_dir, mut view) = test_view();
+        let id = view.selected_message_id.unwrap();
+        view.db.move_message_to_trash(id).unwrap();
+        view.reload_selected_detail();
+        let ctx = view.command_context();
+        assert!(commands::command_enabled(&CommandId::MessageRestore, &ctx));
+        assert!(!commands::command_enabled(&CommandId::MessageDelete, &ctx));
     }
 }

@@ -304,14 +304,16 @@
 - ⬜ Read / mark read-unread
 - ⬜ Compose / reply / reply all / forward
 - ⬜ Send (SMTP + Gmail)
-- ⬜ Move / delete / archive / junk
-- ⬜ Star / flag
+- ✅ Move / delete / archive / junk (SQLite folder membership + toolbar/menus)
+- ✅ Star / flag (toggle starred + `sys:flagged` folder)
+- ✅ Command palette (Ctrl/Cmd+P) with contextual message commands
+- ✅ macOS menu bar (File/Edit/View/Message; unavailable actions omitted on GPUI 0.2)
 - ⬜ Attachments (view, download, attach)
 - ⬜ Search (UI mock done — DB-backed accent-insensitive search in Stage 2;
       full IMAP/search scope in Stage 4)
 
 ## Stage 5 — Polish
-- ⬜ Keyboard shortcuts
+- 🔄 Keyboard shortcuts (command palette + Cmd+Q; per-action bindings still TODO)
 - ⬜ Accessibility
 - ⬜ Native notifications
 - ⬜ Packaging (macOS `.app`, Linux, Windows)
