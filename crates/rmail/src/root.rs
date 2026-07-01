@@ -79,6 +79,8 @@ const ITEM_PADDING: f32 = 4.0;
 const DRAG_THRESHOLD: f32 = 2.0;
 /// Width of the expanded search field in the toolbar, in pixels.
 const SEARCH_FIELD_WIDTH: f32 = 220.0;
+/// Delay after typing before the message list applies the search query.
+const SEARCH_DEBOUNCE_MS: u64 = 150;
 /// Body text color used when the reader is forced onto a white background. A near
 /// black (not pure) for comfortable contrast on white, independent of the theme.
 /// Shared with the compose body when the same preference is enabled.
@@ -380,9 +382,11 @@ pub struct RootView {
     /// When the toolbar is narrow the search field collapses to an icon; this
     /// flag keeps it expanded after the user clicks that icon.
     search_force_expanded: bool,
-    /// Last search query used to drive [`Self::sync_search_selection`]. Compared
-    /// each frame so we don't need an observer that re-enters this view.
+    /// Last search query applied to the message list.
     last_search_query: String,
+    /// Token for the delayed search application. New keystrokes invalidate older
+    /// timers so only the latest query reloads the list.
+    search_debounce_seq: u64,
     /// Sidebar selection restored when the search box is cleared.
     pre_search_mailbox: Option<Selection>,
 }
@@ -500,6 +504,7 @@ impl RootView {
             search_input: None,
             search_force_expanded: false,
             last_search_query: String::new(),
+            search_debounce_seq: 0,
             pre_search_mailbox: None,
         }
     }
@@ -644,14 +649,14 @@ impl RootView {
         if self.search_input.is_none() {
             let placeholder = Key::SearchPlaceholder.tr(language);
             let input = cx.new(|cx| TextInput::new(placeholder, cx));
-            // Re-render the root when the query changes. Defer so we never
-            // update this view while it is already on the stack (GPUI panics).
+            // Apply the search after a short debounce. Defer so we never update
+            // this view while it is already on the stack (GPUI panics).
             let root = cx.weak_entity();
             cx.observe(&input, move |_, _, cx| {
                 let root = root.clone();
                 cx.defer(move |cx| {
                     if let Some(root) = root.upgrade() {
-                        root.update(cx, |_, cx| cx.notify());
+                        root.update(cx, |this, cx| this.schedule_search_sync(cx));
                     }
                 });
             })
@@ -690,6 +695,32 @@ impl RootView {
         self.sync_search_selection();
     }
 
+    fn next_search_debounce_token(&mut self) -> u64 {
+        self.search_debounce_seq = self.search_debounce_seq.wrapping_add(1);
+        self.search_debounce_seq
+    }
+
+    fn search_debounce_token_current(&self, token: u64) -> bool {
+        self.search_debounce_seq == token
+    }
+
+    fn schedule_search_sync(&mut self, cx: &mut Context<Self>) {
+        let token = self.next_search_debounce_token();
+        let timer = cx
+            .background_executor()
+            .timer(Duration::from_millis(SEARCH_DEBOUNCE_MS));
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search_debounce_token_current(token) {
+                    this.sync_search_if_needed(cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Current search query (empty when the field has not been created yet).
     fn search_query(&self, cx: &App) -> String {
         self.search_input
@@ -699,8 +730,8 @@ impl RootView {
     }
 
     /// Whether the search query is non-empty.
-    fn search_is_active(&self, cx: &App) -> bool {
-        !self.search_query(cx).trim().is_empty()
+    fn search_is_active(&self, _cx: &App) -> bool {
+        !self.last_search_query.trim().is_empty()
     }
 
     /// Whether the toolbar should show the expanded search field (as opposed to
@@ -2827,7 +2858,6 @@ impl Render for RootView {
         // Make sure the scrollbar state entities exist before the panels render.
         self.ensure_scrollbar_states(cx);
         self.ensure_search_input(cx.language(), cx);
-        self.sync_search_if_needed(cx);
         if !self.search_is_compact() {
             self.search_force_expanded = false;
         }
@@ -3288,5 +3318,16 @@ mod tests {
         assert!(!view.show_search_expanded());
         view.prepare_search_focus();
         assert!(view.show_search_expanded());
+    }
+
+    #[test]
+    fn search_debounce_token_invalidates_previous_timer() {
+        let (_dir, mut view) = test_view();
+        let first = view.next_search_debounce_token();
+        assert!(view.search_debounce_token_current(first));
+
+        let second = view.next_search_debounce_token();
+        assert!(!view.search_debounce_token_current(first));
+        assert!(view.search_debounce_token_current(second));
     }
 }

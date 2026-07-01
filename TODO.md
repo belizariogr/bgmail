@@ -274,6 +274,7 @@
 - ✅ Fix main-window search focus on first click so the text input accepts typing
       immediately on Windows
 - ✅ Refine text-input caret metrics in the search field (2px width, 4px vertical padding)
+- ✅ Debounce the search filter by 150ms after typing
 - ✅ E-mail composition screen/panel (mock): toolbar compose button opens a
       dedicated `ComposeView` window (reused/refocused if already open) with Send,
       Attach and Discard actions (FontAwesome SVG icons), header fields
