@@ -50,36 +50,131 @@ actions!(
         Delete,
         Left,
         Right,
+        WordLeft,
+        WordRight,
         SelectLeft,
         SelectRight,
+        SelectWordLeft,
+        SelectWordRight,
         SelectAll,
         Home,
         End,
+        SelectHome,
+        SelectEnd,
         Paste,
         Cut,
         Copy,
     ]
 );
 
+/// Byte offset of the previous word start (Windows-style Ctrl+Left).
+fn previous_word_start(content: &str, offset: usize) -> usize {
+    if offset == 0 {
+        return 0;
+    }
+    let before = &content[..offset.min(content.len())];
+    let trimmed_end = before.trim_end().len();
+    if trimmed_end == 0 {
+        return 0;
+    }
+    let before_word = &before[..trimmed_end];
+    if let Some((ws_idx, ws)) = before_word
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+    {
+        let after_ws = ws_idx + ws.len_utf8();
+        content[after_ws..trimmed_end]
+            .char_indices()
+            .find(|(_, c)| !c.is_whitespace())
+            .map(|(i, _)| after_ws + i)
+            .unwrap_or(after_ws)
+    } else {
+        0
+    }
+}
+
+/// Byte offset of the next word start (Windows-style Ctrl+Right).
+fn next_word_start(content: &str, offset: usize) -> usize {
+    let len = content.len();
+    if offset >= len {
+        return len;
+    }
+    let after = &content[offset..];
+    let skip_word = after
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(after.len());
+    let mut pos = offset + skip_word;
+    while pos < len {
+        let ch = content[pos..].chars().next().unwrap();
+        if !ch.is_whitespace() {
+            break;
+        }
+        pos += ch.len_utf8();
+    }
+    pos
+}
+
 /// Registers the key bindings consumed by [`TextInput`]. Call once at app startup.
 pub fn bind_keys(cx: &mut App) {
+    const CONTEXT: Option<&str> = Some("TextInput");
+
     cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, Some("TextInput")),
-        KeyBinding::new("delete", Delete, Some("TextInput")),
-        KeyBinding::new("left", Left, Some("TextInput")),
-        KeyBinding::new("right", Right, Some("TextInput")),
-        KeyBinding::new("shift-left", SelectLeft, Some("TextInput")),
-        KeyBinding::new("shift-right", SelectRight, Some("TextInput")),
-        KeyBinding::new("cmd-a", SelectAll, Some("TextInput")),
-        KeyBinding::new("ctrl-a", SelectAll, Some("TextInput")),
-        KeyBinding::new("cmd-v", Paste, Some("TextInput")),
-        KeyBinding::new("ctrl-v", Paste, Some("TextInput")),
-        KeyBinding::new("cmd-c", Copy, Some("TextInput")),
-        KeyBinding::new("ctrl-c", Copy, Some("TextInput")),
-        KeyBinding::new("cmd-x", Cut, Some("TextInput")),
-        KeyBinding::new("ctrl-x", Cut, Some("TextInput")),
-        KeyBinding::new("home", Home, Some("TextInput")),
-        KeyBinding::new("end", End, Some("TextInput")),
+        KeyBinding::new("backspace", Backspace, CONTEXT),
+        KeyBinding::new("delete", Delete, CONTEXT),
+        KeyBinding::new("left", Left, CONTEXT),
+        KeyBinding::new("right", Right, CONTEXT),
+        KeyBinding::new("shift-left", SelectLeft, CONTEXT),
+        KeyBinding::new("shift-right", SelectRight, CONTEXT),
+        KeyBinding::new("home", Home, CONTEXT),
+        KeyBinding::new("end", End, CONTEXT),
+        KeyBinding::new("shift-home", SelectHome, CONTEXT),
+        KeyBinding::new("shift-end", SelectEnd, CONTEXT),
+        KeyBinding::new("cmd-a", SelectAll, CONTEXT),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-a", SelectAll, CONTEXT),
+        KeyBinding::new("cmd-v", Paste, CONTEXT),
+        KeyBinding::new("ctrl-v", Paste, CONTEXT),
+        KeyBinding::new("cmd-c", Copy, CONTEXT),
+        KeyBinding::new("ctrl-c", Copy, CONTEXT),
+        KeyBinding::new("cmd-x", Cut, CONTEXT),
+        KeyBinding::new("ctrl-x", Cut, CONTEXT),
+    ]);
+
+    // Windows/Linux: Ctrl for word and document navigation (Zed default-windows).
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-left", WordLeft, CONTEXT),
+        KeyBinding::new("ctrl-right", WordRight, CONTEXT),
+        KeyBinding::new("ctrl-shift-left", SelectWordLeft, CONTEXT),
+        KeyBinding::new("ctrl-shift-right", SelectWordRight, CONTEXT),
+        KeyBinding::new("ctrl-home", Home, CONTEXT),
+        KeyBinding::new("ctrl-end", End, CONTEXT),
+        KeyBinding::new("ctrl-shift-home", SelectHome, CONTEXT),
+        KeyBinding::new("ctrl-shift-end", SelectEnd, CONTEXT),
+    ]);
+
+    // macOS: Option for words, Command for line/document (Zed default-macos).
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("alt-left", WordLeft, CONTEXT),
+        KeyBinding::new("alt-right", WordRight, CONTEXT),
+        KeyBinding::new("alt-shift-left", SelectWordLeft, CONTEXT),
+        KeyBinding::new("alt-shift-right", SelectWordRight, CONTEXT),
+        KeyBinding::new("cmd-left", Home, CONTEXT),
+        KeyBinding::new("cmd-right", End, CONTEXT),
+        KeyBinding::new("cmd-shift-left", SelectHome, CONTEXT),
+        KeyBinding::new("cmd-shift-right", SelectEnd, CONTEXT),
+        KeyBinding::new("cmd-up", Home, CONTEXT),
+        KeyBinding::new("cmd-down", End, CONTEXT),
+        KeyBinding::new("cmd-shift-up", SelectHome, CONTEXT),
+        KeyBinding::new("cmd-shift-down", SelectEnd, CONTEXT),
+        KeyBinding::new("cmd-home", Home, CONTEXT),
+        KeyBinding::new("cmd-end", End, CONTEXT),
+        KeyBinding::new("ctrl-a", Home, CONTEXT),
+        KeyBinding::new("ctrl-e", End, CONTEXT),
+        KeyBinding::new("ctrl-shift-a", SelectHome, CONTEXT),
+        KeyBinding::new("ctrl-shift-e", SelectEnd, CONTEXT),
     ]);
 }
 
@@ -146,12 +241,56 @@ impl TextInput {
         }
     }
 
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(
+                previous_word_start(self.content.as_str(), self.cursor_offset()),
+                cx,
+            );
+        } else {
+            self.move_to(self.selected_range.start, cx);
+        }
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(
+                next_word_start(self.content.as_str(), self.cursor_offset()),
+                cx,
+            );
+        } else {
+            self.move_to(self.selected_range.end, cx);
+        }
+    }
+
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(
+            previous_word_start(self.content.as_str(), self.cursor_offset()),
+            cx,
+        );
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(
+            next_word_start(self.content.as_str(), self.cursor_offset()),
+            cx,
+        );
+    }
+
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -641,8 +780,14 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
@@ -660,5 +805,26 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_word_start, previous_word_start};
+
+    #[test]
+    fn previous_word_start_moves_to_prior_word() {
+        let text = "hello world";
+        assert_eq!(previous_word_start(text, text.len()), 6);
+        assert_eq!(previous_word_start(text, 6), 0);
+        assert_eq!(previous_word_start(text, 3), 0);
+    }
+
+    #[test]
+    fn next_word_start_moves_to_following_word() {
+        let text = "hello world";
+        assert_eq!(next_word_start(text, 0), 6);
+        assert_eq!(next_word_start(text, 3), 6);
+        assert_eq!(next_word_start(text, 6), text.len());
     }
 }
