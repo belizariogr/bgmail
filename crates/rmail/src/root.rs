@@ -857,7 +857,7 @@ impl RootView {
         let list = v_flex()
             .id("command-palette-list")
             .overflow_y_scroll()
-            .max_h(px(320.0))
+            .max_h(px(330.0))
             .children(entries.iter().enumerate().map(|(ix, entry)| {
                 let command_id = entry.id.clone();
                 ListItem::new(("command", ix))
