@@ -11,7 +11,7 @@ and [`TODO.md`](TODO.md) (current state).
    session and keep it in mind for every decision.
 2. **Rust project using Zed's UI foundation** (GPUI framework + patterns from the
    `ui` crate). Do not introduce another UI framework.
-3. **Use Zed as a reference.** The source code lives in `~/dev/zed`. Whenever you
+3. **Use Zed as a reference.** The source code lives in `../zed`. Whenever you
    need a component, layout pattern or GPUI API, **consult Zed** before inventing.
    Mirror its names and patterns to ease portability.
 4. **Best practices and reuse.** Always prefer reusing existing components and
