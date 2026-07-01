@@ -14,6 +14,9 @@ use gpui::{Bounds, Pixels, Size, Window, WindowBounds};
 /// processed the latest resize. When a maximized open is expected we also wait
 /// for the OS to report the window as maximized, so the UI is never revealed at
 /// the pre-maximize size.
+// Only the Windows open sequence polls this at runtime; the test build exercises
+// it directly. Other platforms compile but don't call it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn window_layout_settled(
     expect_maximized: bool,
     is_maximized: bool,
@@ -70,6 +73,7 @@ pub fn nudge_window_resize(window: &Window) {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
 pub fn nudge_window_resize(_window: &Window) {}
 
 /// Hides or reveals the window without changing its layout, so the first paint

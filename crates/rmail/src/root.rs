@@ -430,6 +430,8 @@ impl RootView {
 
     /// Reveals the UI once the window has reached its final size (see
     /// [`Self::content_ready`]). Idempotent; redraws on the transition.
+    // Only the Windows open sequence calls this; other platforms reveal eagerly.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn mark_content_ready(&mut self, cx: &mut Context<Self>) {
         if !self.content_ready {
             self.content_ready = true;
