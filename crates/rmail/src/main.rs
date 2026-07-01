@@ -8,8 +8,10 @@
 mod compose;
 mod config;
 mod data;
+mod db_seed;
 mod locale;
 mod root;
+mod startup;
 mod web_view;
 mod window_drag;
 mod window_frame;
@@ -53,15 +55,20 @@ fn app_menus() -> Vec<Menu> {
 }
 
 fn main() {
+    startup::mark_start();
+    startup::log_milestone("main entered");
+
     configure_windows_webview_hosting();
 
     Application::new()
         .with_assets(ui::Assets)
         .run(|cx: &mut App| {
+            startup::log_milestone("application run callback");
             // Initialize the theme system starting in dark mode.
             theme::init(theme::Appearance::Dark, cx);
             // Initialize localization (English by default).
             locale::init(locale::Language::default(), cx);
+            ui::bind_keys(cx);
 
             // Wire up the global menu bar and the standard Quit (Cmd+Q) shortcut, so
             // the app shows its name in the menu bar and can be quit like a native app.
@@ -217,6 +224,8 @@ fn main() {
                 },
             )
             .expect("failed to open the main window");
+
+            startup::log_milestone("main window opened");
 
             cx.activate(true);
         });

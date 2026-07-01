@@ -125,7 +125,8 @@ impl Mailbox {
     }
 
     /// Display name: the custom label when present, otherwise the localized name
-    /// derived from the kind.
+    /// derived from the kind. Used by settings/compose mock accounts.
+    #[allow(dead_code)]
     pub fn display_name(&self, language: Language) -> SharedString {
         match &self.label {
             Some(name) => name.clone(),

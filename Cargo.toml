@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/theme",
     "crates/ui",
+    "crates/storage",
     "crates/rmail",
 ]
 
@@ -28,6 +29,7 @@ serde_json = "1"
 # Internal crates
 theme = { path = "crates/theme" }
 ui = { path = "crates/ui" }
+storage = { path = "crates/storage" }
 
 [profile.dev]
 # Faster incremental builds while keeping the app responsive during development.

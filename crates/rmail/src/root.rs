@@ -12,24 +12,26 @@ use std::f32::consts::FRAC_PI_2;
 use gpui::{
     anchored, canvas, deferred, ease_in_out, point, radians, size, svg, Animation,
     AnimationExt as _, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Corner,
-    DragMoveEvent, Empty, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Point, ScrollHandle, Size, Svg, TitlebarOptions, Transformation, WeakEntity, Window,
-    WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
+    DragMoveEvent, Empty, Entity, Focusable, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Point, ScrollHandle, Size, Svg, TitlebarOptions, Transformation, WeakEntity,
+    Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
 };
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
 use ui::{
     Button, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize, ListItem,
-    Scrollbar, ScrollbarState, Switch, Tooltip,
+    Scrollbar, ScrollbarState, Switch, TextInput, Tooltip,
 };
 
 use crate::compose::{self, ComposeView};
 use crate::config::{self, Config};
-use crate::data::{self, Account, GlobalMailbox, MailboxKind, Message, MessageBody};
+use crate::data::{self, GlobalMailbox, MailboxKind};
+use crate::db_seed;
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::web_view::{
     email_document, ContextMenuLabels, DocumentColors, EmailWebView, HostEvent, WEBVIEW_SUPPORTED,
 };
+use storage::{MailListQuery, MessageDetail, MessageListItem};
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
 const SIDEBAR_MIN_WIDTH: f32 = 150.0;
@@ -116,13 +118,36 @@ enum ResizeHandle {
 struct ResizeDrag(ResizeHandle);
 
 /// What is currently selected in the sidebar: a global (unified) mailbox at the
-/// top, or a specific mailbox within an account group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// top, or a specific folder within an account group.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Selection {
     /// A unified mailbox spanning all accounts.
     Global(GlobalMailbox),
-    /// A mailbox within an account: `(account index, mailbox index)`.
-    Mailbox(usize, usize),
+    /// A folder within an account (`account_id` + storage path, e.g. `sys:inbox`).
+    Mailbox {
+        account_id: i64,
+        folder_path: String,
+    },
+}
+
+/// Builds the SQLite list query for the current sidebar selection or search.
+fn mail_list_query(selection: &Selection, search: &str) -> MailListQuery {
+    if !search.trim().is_empty() {
+        MailListQuery::Search(search.to_string())
+    } else {
+        match selection {
+            Selection::Global(global) => {
+                MailListQuery::GlobalSystemFolder(db_seed::global_folder_path(*global).to_string())
+            }
+            Selection::Mailbox {
+                account_id,
+                folder_path,
+            } => MailListQuery::AccountFolder {
+                account_id: *account_id,
+                folder_path: folder_path.clone(),
+            },
+        }
+    }
 }
 
 /// An in-flight fold (collapse/expand) animation for one sidebar account.
@@ -213,18 +238,24 @@ fn chevron_svg(color: Hsla, angle: f32) -> Svg {
 /// frames) the expensive HTML rebuild + diff is skipped.
 #[derive(Clone, Copy, PartialEq)]
 struct WebviewSignature {
-    selected: usize,
+    selected: i64,
     colors: DocumentColors,
     language: Language,
     load_remote: bool,
     reader_white_background: bool,
 }
 
-/// Application state (mock).
+/// Application state.
 pub struct RootView {
-    accounts: Vec<Account>,
-    messages: Vec<Message>,
-    /// Current sidebar selection (a global mailbox or an account's mailbox).
+    db: storage::Database,
+    accounts: Vec<storage::Account>,
+    /// Folders keyed by account id (loaded from SQLite).
+    folders_by_account: std::collections::HashMap<i64, Vec<storage::Folder>>,
+    /// Messages currently shown in the list column.
+    list_messages: Vec<MessageListItem>,
+    /// Full body of the selected message (for the reader).
+    selected_detail: Option<MessageDetail>,
+    /// Current sidebar selection (a global mailbox or an account folder).
     selected_mailbox: Selection,
     /// Indices of the accounts whose mailbox list is collapsed (target state).
     collapsed_accounts: HashSet<usize>,
@@ -233,8 +264,8 @@ pub struct RootView {
     fold_anim: HashMap<usize, FoldAnim>,
     /// Monotonic counter handing out unique [`FoldAnim`] tokens.
     fold_seq: u64,
-    /// Index of the message selected in the list.
-    selected_message: usize,
+    /// Id of the message selected in the list.
+    selected_message_id: Option<i64>,
     /// Whether the accounts sidebar is visible (toggled from the toolbar).
     show_sidebar: bool,
     /// User-adjustable width of the accounts/folders sidebar.
@@ -335,19 +366,45 @@ pub struct RootView {
     content_blocked_count: usize,
     /// Indices of messages the user fully unblocked via the shield menu.
     /// Unblocking is per message (not the global setting).
-    unblocked_messages: HashSet<usize>,
+    unblocked_messages: HashSet<i64>,
     /// Per message, the remote image URLs the user revealed one at a time (via
     /// the in-body "Show remote image" menu). Kept so those images stay shown
     /// across re-renders (theme/language switches, reselecting the message).
-    shown_images: HashMap<usize, HashSet<String>>,
+    shown_images: HashMap<i64, HashSet<String>>,
     /// Whether the privacy menu (offering to unblock remote content) is open,
     /// and the window-space anchor where it was summoned.
     privacy_menu_open: bool,
     privacy_menu_pos: Point<Pixels>,
+    /// Toolbar search field. Created lazily on first render.
+    search_input: Option<Entity<TextInput>>,
+    /// When the toolbar is narrow the search field collapses to an icon; this
+    /// flag keeps it expanded after the user clicks that icon.
+    search_force_expanded: bool,
+    /// Last search query used to drive [`Self::sync_search_selection`]. Compared
+    /// each frame so we don't need an observer that re-enters this view.
+    last_search_query: String,
+    /// Sidebar selection restored when the search box is cleared.
+    pre_search_mailbox: Option<Selection>,
+}
+
+/// Adapts stored accounts for compose/settings views that still use [`data::Account`].
+fn ui_accounts(accounts: &[storage::Account]) -> Vec<data::Account> {
+    accounts
+        .iter()
+        .map(|account| data::Account {
+            name: account.name.clone().into(),
+            email: account.email.clone().into(),
+            mailboxes: Vec::new(),
+        })
+        .collect()
 }
 
 impl RootView {
     pub fn new(settings: Config) -> Self {
+        Self::new_with_database(settings, storage::database_path())
+    }
+
+    fn new_with_database(settings: Config, db_path: impl AsRef<std::path::Path>) -> Self {
         // Restore persisted column widths, clamped to their minimums so a stale
         // config can't produce an unusable layout.
         let sidebar_width = px(settings.sidebar_width.max(SIDEBAR_MIN_WIDTH));
@@ -364,14 +421,44 @@ impl RootView {
             px(settings.compose_width.max(compose::COMPOSE_MIN_WIDTH)),
             px(settings.compose_height.max(compose::COMPOSE_MIN_HEIGHT)),
         );
+        let db = storage::Database::open(db_path).expect("failed to open mail database");
+        storage::seed_if_empty(
+            db.conn(),
+            &db_seed::seed_accounts(),
+            &db_seed::seed_messages(),
+        )
+        .expect("failed to seed mail database");
+
+        let accounts = db.list_accounts().expect("failed to load accounts");
+        let mut folders_by_account = HashMap::new();
+        for account in &accounts {
+            folders_by_account.insert(
+                account.id,
+                db.list_folders(account.id).expect("failed to load folders"),
+            );
+        }
+
+        let selected_mailbox = Selection::Global(GlobalMailbox::Inbox);
+        let list_messages = db
+            .list_messages(&mail_list_query(&selected_mailbox, ""))
+            .expect("failed to load messages");
+        let selected_message_id = list_messages
+            .get(3.min(list_messages.len().saturating_sub(1)))
+            .map(|m| m.id)
+            .or_else(|| list_messages.first().map(|m| m.id));
+        let selected_detail = selected_message_id.and_then(|id| db.get_message(id).ok().flatten());
+
         Self {
-            accounts: data::sample_accounts(),
-            messages: data::sample_messages(),
-            selected_mailbox: Selection::Global(GlobalMailbox::Inbox),
+            db,
+            accounts,
+            folders_by_account,
+            list_messages,
+            selected_detail,
+            selected_mailbox,
             collapsed_accounts: settings.collapsed_accounts.iter().copied().collect(),
             fold_anim: HashMap::new(),
             fold_seq: 0,
-            selected_message: 3,
+            selected_message_id,
             show_sidebar: true,
             sidebar_width,
             list_width,
@@ -410,7 +497,35 @@ impl RootView {
             shown_images: HashMap::new(),
             privacy_menu_open: false,
             privacy_menu_pos: point(px(0.0), px(0.0)),
+            search_input: None,
+            search_force_expanded: false,
+            last_search_query: String::new(),
+            pre_search_mailbox: None,
         }
+    }
+
+    fn reload_message_list(&mut self) {
+        let query = mail_list_query(&self.selected_mailbox, &self.last_search_query);
+        if !self.last_search_query.trim().is_empty() {
+            self.list_messages = self
+                .db
+                .list_messages(&MailListQuery::Search(self.last_search_query.clone()))
+                .unwrap_or_default();
+        } else {
+            self.list_messages = self.db.list_messages(&query).unwrap_or_default();
+        }
+        let selected = self.selected_message_id.unwrap_or(-1);
+        if !self.list_messages.iter().any(|m| m.id == selected) {
+            self.selected_message_id = self.list_messages.first().map(|m| m.id);
+            self.last_webview_sig = None;
+        }
+        self.reload_selected_detail();
+    }
+
+    fn reload_selected_detail(&mut self) {
+        self.selected_detail = self
+            .selected_message_id
+            .and_then(|id| self.db.get_message(id).ok().flatten());
     }
 
     /// Writes the current settings to disk immediately (synchronous, best-effort).
@@ -517,20 +632,124 @@ impl RootView {
         }
     }
 
+    /// Lazily creates the toolbar search field.
+    fn ensure_search_input(&mut self, language: Language, cx: &mut Context<Self>) {
+        if self.search_input.is_none() {
+            let placeholder = Key::SearchPlaceholder.tr(language);
+            let input = cx.new(|cx| TextInput::new(placeholder, cx));
+            // Re-render the root when the query changes. Defer so we never
+            // update this view while it is already on the stack (GPUI panics).
+            let root = cx.weak_entity();
+            cx.observe(&input, move |_, _, cx| {
+                let root = root.clone();
+                cx.defer(move |cx| {
+                    if let Some(root) = root.upgrade() {
+                        root.update(cx, |_, cx| cx.notify());
+                    }
+                });
+            })
+            .detach();
+            self.search_input = Some(input);
+        } else if let Some(input) = &self.search_input {
+            input.update(cx, |field, _| {
+                field.set_placeholder(Key::SearchPlaceholder.tr(language));
+            });
+        }
+    }
+
+    /// Reconciles selection/scroll when the search query changed since the last
+    /// frame. Called from [`Render::render`] so we never observe the input
+    /// entity (that would try to update this view while it is already on the
+    /// stack and panic).
+    fn sync_search_if_needed(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_query(cx);
+        if query == self.last_search_query {
+            return;
+        }
+        let was_active = !self.last_search_query.trim().is_empty();
+        let now_active = !query.trim().is_empty();
+        if now_active && !was_active {
+            self.pre_search_mailbox = Some(self.selected_mailbox.clone());
+        }
+        if !now_active && was_active {
+            if let Some(prev) = self.pre_search_mailbox.take() {
+                self.selected_mailbox = prev;
+            }
+        }
+        self.last_search_query = query;
+        self.reload_message_list();
+        self.sync_search_selection();
+    }
+
+    /// Current search query (empty when the field has not been created yet).
+    fn search_query(&self, cx: &App) -> String {
+        self.search_input
+            .as_ref()
+            .map(|input| input.read(cx).content().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Indices of messages visible under the current search filter.
+    fn filtered_message_indices(&self) -> Vec<usize> {
+        self.list_messages
+            .iter()
+            .enumerate()
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Whether the search query is non-empty.
+    fn search_is_active(&self, cx: &App) -> bool {
+        !self.search_query(cx).trim().is_empty()
+    }
+
+    /// Whether the toolbar should show the expanded search field (as opposed to
+    /// the compact magnifying-glass button).
+    fn show_search_expanded(&self) -> bool {
+        !self.search_is_compact() || self.search_force_expanded
+    }
+
+    /// Keeps the selected message inside the filtered list and scrolls back to
+    /// the top when the query changes.
+    fn sync_search_selection(&mut self) {
+        let indices = self.filtered_message_indices();
+        if indices.is_empty() {
+            self.list_scroll.scroll_to_top_of_item(0);
+            return;
+        }
+        let selected = self.selected_message_id.unwrap_or(-1);
+        if !self.list_messages.iter().any(|m| m.id == selected) {
+            self.selected_message_id = self.list_messages.first().map(|m| m.id);
+            self.last_webview_sig = None;
+            self.reload_selected_detail();
+        }
+        let visible = self
+            .list_messages
+            .iter()
+            .position(|m| m.id == self.selected_message_id.unwrap_or(-1))
+            .unwrap_or(0);
+        self.list_scroll.scroll_to_top_of_item(visible);
+    }
+
+    fn focus_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_force_expanded = true;
+        if let Some(input) = &self.search_input {
+            window.focus(&input.read(cx).focus_handle(cx));
+        }
+        cx.notify();
+    }
+
     /// Creates (on first use) and updates the embedded webview to reflect the
     /// selected message and the current theme. Hides it when the reader is not
     /// on screen so it doesn't float over other views.
     fn sync_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = self.selected_detail.as_ref() else {
+            return;
+        };
+        let message_id = detail.id;
         let colors = cx.theme().colors();
         let language = cx.language();
-        // The document depends only on the selected message, the theme colors and
-        // the language (which localizes the image context menu). Re-rendering
-        // happens on every animation frame, so skip the (potentially large) HTML
-        // rebuild + diff entirely when none of those inputs changed.
-        // Remote content loads when the global setting is on or the user
-        // unblocked this specific message.
-        let load_remote =
-            self.load_remote_images || self.unblocked_messages.contains(&self.selected_message);
+        let load_remote = self.load_remote_images || self.unblocked_messages.contains(&message_id);
         // Force a white page (dark text) when the user keeps the reader light,
         // regardless of the app theme; otherwise follow the theme.
         let (body_bg, body_text) = if self.reader_white_background {
@@ -548,7 +767,7 @@ impl RootView {
             menu_text: colors.text,
         };
         let signature = WebviewSignature {
-            selected: self.selected_message,
+            selected: message_id,
             colors: doc_colors,
             language,
             load_remote,
@@ -560,9 +779,10 @@ impl RootView {
         self.last_webview_sig = Some(signature);
 
         let empty_shown: HashSet<String> = HashSet::new();
+        let body = db_seed::message_body_from_detail(detail);
         let rendered = email_document(
             doc_colors,
-            &self.messages[self.selected_message].body,
+            &body,
             ContextMenuLabels {
                 image_open: Key::CtxOpenImage.tr(language),
                 image_download: Key::CtxDownloadImage.tr(language),
@@ -578,9 +798,7 @@ impl RootView {
                 },
             },
             load_remote,
-            self.shown_images
-                .get(&self.selected_message)
-                .unwrap_or(&empty_shown),
+            self.shown_images.get(&message_id).unwrap_or(&empty_shown),
         );
         self.content_has_remote = rendered.has_remote;
         self.content_blocked_count = rendered.blocked_images;
@@ -643,10 +861,9 @@ impl RootView {
     /// flips to its loaded (green) state. The webview already swapped the image
     /// in place, so no document rebuild is needed here.
     fn image_shown(&mut self, url: String, cx: &mut Context<Self>) {
-        self.shown_images
-            .entry(self.selected_message)
-            .or_default()
-            .insert(url);
+        if let Some(id) = self.selected_message_id {
+            self.shown_images.entry(id).or_default().insert(url);
+        }
         self.content_blocked_count = self.content_blocked_count.saturating_sub(1);
         cx.notify();
     }
@@ -709,7 +926,7 @@ impl RootView {
             self.settings_window = None;
         }
 
-        let accounts = self.accounts.clone();
+        let accounts = ui_accounts(&self.accounts);
         let root = cx.entity().downgrade();
         let bounds = Bounds::centered(None, size(px(760.0), px(560.0)), cx);
         let options = WindowOptions {
@@ -744,7 +961,7 @@ impl RootView {
             self.compose_window = None;
         }
 
-        let accounts = self.accounts.clone();
+        let accounts = ui_accounts(&self.accounts);
         let root = cx.entity().downgrade();
         let compose_white = self.compose_white_background;
         let title = compose::window_title(cx.language());
@@ -786,7 +1003,15 @@ impl RootView {
     /// Selects a sidebar mailbox and redraws. See [`Self::apply_mailbox_selection`]
     /// for the dismissal behavior in the narrow layout.
     fn select_mailbox(&mut self, selection: Selection, cx: &mut Context<Self>) {
+        if self.search_is_active(cx) {
+            if let Some(input) = &self.search_input {
+                input.update(cx, |field, cx| field.clear(cx));
+            }
+            self.last_search_query.clear();
+            self.pre_search_mailbox = None;
+        }
         self.apply_mailbox_selection(selection);
+        self.reload_message_list();
         cx.notify();
     }
 
@@ -938,13 +1163,25 @@ impl RootView {
     /// and inside the list's own header otherwise.
     fn render_list_controls(&self, show_count: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let language = cx.language();
-        let list_title: SharedString = match self.selected_mailbox {
-            Selection::Global(global) => global.display_name(language).into(),
-            Selection::Mailbox(account_idx, mailbox_idx) => {
-                self.accounts[account_idx].mailboxes[mailbox_idx].display_name(language)
+        let list_title: SharedString = if self.search_is_active(cx) {
+            Key::SearchActiveTitle.tr(language).into()
+        } else {
+            match &self.selected_mailbox {
+                Selection::Global(global) => global.display_name(language).into(),
+                Selection::Mailbox {
+                    account_id,
+                    folder_path,
+                } => self
+                    .folders_by_account
+                    .get(account_id)
+                    .and_then(|folders| folders.iter().find(|f| f.path == *folder_path))
+                    .map(|folder| {
+                        db_seed::folder_display_name(&folder.path, &folder.display_name, language)
+                    })
+                    .unwrap_or_else(|| folder_path.clone().into()),
             }
         };
-        let list_count = locale::message_count(language, self.messages.len());
+        let list_count = locale::message_count(language, self.list_messages.len());
 
         h_flex()
             .w_full()
@@ -1041,7 +1278,7 @@ impl RootView {
 
     // ----- Top toolbar (unified title bar) --------------------------------
 
-    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let bg = colors.title_bar_background;
         let border = colors.border;
@@ -1069,8 +1306,9 @@ impl RootView {
         });
 
         // When the reader's toolbar segment gets too tight the full search field
-        // would be clipped, so we collapse it into a single icon button.
-        let compact_search = self.search_is_compact();
+        // would be clipped, so we collapse it into a single icon button unless
+        // the user explicitly expanded it.
+        let compact_search = !self.show_search_expanded();
 
         h_flex()
             .h(px(52.0))
@@ -1247,14 +1485,20 @@ impl RootView {
                     })
                     .child(div().flex_1())
                     .child(if compact_search {
-                        Self::icon_button_with_tooltip(
-                            "search",
-                            Key::SearchPlaceholder.tr(language),
-                            IconButton::new("search", IconName::Search),
-                        )
-                        .into_any_element()
+                        div()
+                            .id("search")
+                            .tooltip(Tooltip::text(Key::SearchPlaceholder.tr(language)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.focus_search_input(window, cx);
+                                }),
+                            )
+                            .child(IconButton::new("search", IconName::Search))
+                            .into_any_element()
                     } else {
                         h_flex()
+                            .id("search")
                             .w(px(SEARCH_FIELD_WIDTH))
                             .h(px(28.0))
                             .px_2()
@@ -1268,9 +1512,9 @@ impl RootView {
                                     .color(Color::Muted),
                             )
                             .child(
-                                Label::new(Key::SearchPlaceholder.tr(language))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
+                                self.search_input
+                                    .clone()
+                                    .expect("search input is created before render"),
                             )
                             .into_any_element()
                     }),
@@ -1383,17 +1627,8 @@ impl RootView {
     /// is derived from the sample data; it will come from the real mail layer
     /// later. Inbox sums every account's inbox; Flagged counts starred messages.
     fn global_unread(&self, global: GlobalMailbox) -> usize {
-        match global {
-            GlobalMailbox::Inbox => self
-                .accounts
-                .iter()
-                .flat_map(|account| account.mailboxes.iter())
-                .filter(|mailbox| mailbox.kind == MailboxKind::Inbox)
-                .map(|mailbox| mailbox.unread)
-                .sum(),
-            GlobalMailbox::Flagged => self.messages.iter().filter(|m| m.starred).count(),
-            GlobalMailbox::Drafts | GlobalMailbox::Sent => 0,
-        }
+        let path = db_seed::global_folder_path(global);
+        self.db.global_unread(path).unwrap_or(0)
     }
 
     /// The unified mailboxes pinned to the top of the sidebar, above the account
@@ -1443,7 +1678,7 @@ impl RootView {
     fn render_account(
         &self,
         account_idx: usize,
-        account: &Account,
+        account: &storage::Account,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let language = cx.language();
@@ -1492,33 +1727,57 @@ impl RootView {
         }
 
         let mut list = v_flex();
-        for (mailbox_idx, mailbox) in account.mailboxes.iter().enumerate() {
-            let selected = self.selected_mailbox == Selection::Mailbox(account_idx, mailbox_idx);
-            let badge = if mailbox.unread > 0 {
-                Some(self.render_count_badge(mailbox.unread, selected, cx))
+        let folders = self
+            .folders_by_account
+            .get(&account.id)
+            .cloned()
+            .unwrap_or_default();
+        for (mailbox_idx, folder) in folders.iter().enumerate() {
+            let kind = db_seed::folder_kind_from_path(&folder.path);
+            let selected = self.selected_mailbox
+                == Selection::Mailbox {
+                    account_id: account.id,
+                    folder_path: folder.path.clone(),
+                };
+            let unread = self
+                .db
+                .unread_in_folder(Some(account.id), &folder.path)
+                .unwrap_or(0);
+            let badge = if unread > 0 {
+                Some(self.render_count_badge(unread, selected, cx))
             } else {
                 None
             };
+            let folder_path = folder.path.clone();
+            let account_id = account.id;
 
             let mut item = ListItem::new(("mailbox", account_idx * 100 + mailbox_idx))
                 .selected(selected)
                 .inset(px(ITEM_PADDING))
-                .start_slot(
-                    Icon::new(mailbox_icon(mailbox.kind))
-                        .size(IconSize::Small)
-                        .color(if selected {
-                            Color::Accent
-                        } else {
-                            Color::Muted
-                        }),
-                )
+                .start_slot(Icon::new(mailbox_icon(kind)).size(IconSize::Small).color(
+                    if selected {
+                        Color::Accent
+                    } else {
+                        Color::Muted
+                    },
+                ))
                 .child(
-                    Label::new(mailbox.display_name(language))
-                        .size(LabelSize::Small)
-                        .single_line(),
+                    Label::new(db_seed::folder_display_name(
+                        &folder.path,
+                        &folder.display_name,
+                        language,
+                    ))
+                    .size(LabelSize::Small)
+                    .single_line(),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.select_mailbox(Selection::Mailbox(account_idx, mailbox_idx), cx);
+                    this.select_mailbox(
+                        Selection::Mailbox {
+                            account_id,
+                            folder_path: folder_path.clone(),
+                        },
+                        cx,
+                    );
                 }));
 
             if let Some(badge) = badge {
@@ -1544,7 +1803,12 @@ impl RootView {
         // in/out so the reveal isn't purely geometric. Keyed by token so each
         // toggle replays from the start; once cleared the list renders at its
         // natural (and identical) height and full opacity, so there is no snap.
-        let content_height = px(account.mailboxes.len() as f32 * SIDEBAR_ROW_HEIGHT);
+        let folder_count = self
+            .folders_by_account
+            .get(&account.id)
+            .map(|f| f.len())
+            .unwrap_or(0);
+        let content_height = px(folder_count as f32 * SIDEBAR_ROW_HEIGHT);
         let list_el = match self.fold_anim.get(&account_idx).copied() {
             Some(anim) => div()
                 .overflow_hidden()
@@ -1636,13 +1900,15 @@ impl RootView {
 
     // ----- Message list ---------------------------------------------------
 
-    fn render_message_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_message_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         // Match the reader pane (the email panel) rather than the sidebar, so the
         // list and the open message share one surface.
         let bg = colors.background;
         let border = colors.border;
         let header_bg = colors.panel_background;
+        let language = cx.language();
+        let filtered = &self.list_messages;
 
         let mut content = v_flex()
             .id("message-list")
@@ -1653,8 +1919,18 @@ impl RootView {
                 Self::note_scroll([this.list_scrollbar.clone()], cx);
             }));
 
-        for (idx, message) in self.messages.iter().enumerate() {
-            content = content.child(self.render_message_row(idx, message, cx));
+        if filtered.is_empty() && self.search_is_active(cx) {
+            content = content.child(
+                div().w_full().py_8().flex().justify_center().child(
+                    Label::new(Key::SearchNoResults.tr(language))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
+            );
+        } else {
+            for message in filtered {
+                content = content.child(self.render_message_row(message, cx));
+            }
         }
 
         let scrollbar = self
@@ -1703,12 +1979,11 @@ impl RootView {
 
     fn render_message_row(
         &self,
-        idx: usize,
-        message: &Message,
+        message: &MessageListItem,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let selected = self.selected_message == idx;
+        let selected = self.selected_message_id == Some(message.id);
         let bg_selected = colors.element_selected;
         let hover = colors.element_hover;
         let border = colors.border_variant;
@@ -1747,13 +2022,14 @@ impl RootView {
             );
         }
         meta = meta.child(
-            Label::new(message.time.clone())
+            Label::new(message.received_at.clone())
                 .size(LabelSize::XSmall)
                 .color(Color::Muted),
         );
 
+        let message_id = message.id;
         h_flex()
-            .id(("message", idx))
+            .id(("message", message_id as u64))
             .w_full()
             .items_start()
             .gap_2()
@@ -1794,7 +2070,9 @@ impl RootView {
                     ),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.selected_message = idx;
+                this.selected_message_id = Some(message_id);
+                this.last_webview_sig = None;
+                this.reload_selected_detail();
                 cx.notify();
             }))
     }
@@ -1920,8 +2198,9 @@ impl RootView {
                     .child(Label::new(Key::UnblockRemote.tr(language)).size(LabelSize::Small))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.privacy_menu_open = false;
-                        // Unblock only this message, not the global setting.
-                        this.unblocked_messages.insert(this.selected_message);
+                        if let Some(id) = this.selected_message_id {
+                            this.unblocked_messages.insert(id);
+                        }
                         cx.notify();
                     })),
             );
@@ -1958,7 +2237,10 @@ impl RootView {
         let accent = colors.accent;
         let on_accent = colors.text_on_accent;
 
-        let message = &self.messages[self.selected_message];
+        let Some(message) = self.selected_detail.as_ref() else {
+            return div().flex_1().min_w_0().h_full().bg(bg).into_any_element();
+        };
+
         let initial = message
             .sender
             .chars()
@@ -2030,7 +2312,7 @@ impl RootView {
                             ),
                     )
                     .child(
-                        Label::new(message.time.clone())
+                        Label::new(message.received_at.clone())
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     ),
@@ -2074,16 +2356,20 @@ impl RootView {
             .bg(bg)
             .child(header)
             .child(body_area)
+            .into_any_element()
     }
 
     /// Plain-text reader used where the embedded webview isn't available.
-    fn render_text_fallback(&self, message: &Message, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_text_fallback(
+        &self,
+        message: &MessageDetail,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let text = match &message.body {
-            MessageBody::Text(plain) => plain.clone(),
-            MessageBody::Html(_) => {
-                SharedString::from("HTML preview is only available on macOS and Windows for now.")
-            }
+        let text = if message.raw_format == "text" {
+            message.raw_content.clone().into()
+        } else {
+            SharedString::from("HTML preview is only available on macOS and Windows for now.")
         };
 
         div()
@@ -2104,12 +2390,23 @@ impl RootView {
         let colors = cx.theme().colors();
         let language = cx.language();
         let total_unread: usize = self
-            .accounts
-            .iter()
-            .flat_map(|a| a.mailboxes.iter())
-            .map(|m| m.unread)
-            .sum();
-
+            .db
+            .global_unread(storage::system::INBOX)
+            .unwrap_or(0);
+        let total_messages = self
+            .db
+            .message_count_all()
+            .unwrap_or(self.list_messages.len());
+        let left_status = if self.search_is_active(cx) {
+            locale::status_search_counts(
+                language,
+                self.accounts.len(),
+                self.list_messages.len(),
+                total_messages,
+            )
+        } else {
+            locale::status_counts(language, self.accounts.len(), self.list_messages.len())
+        };
         h_flex()
             .relative()
             .h(px(24.0))
@@ -2122,13 +2419,9 @@ impl RootView {
             .border_color(colors.border)
             .justify_between()
             .child(
-                Label::new(locale::status_counts(
-                    language,
-                    self.accounts.len(),
-                    self.messages.len(),
-                ))
-                .size(LabelSize::XSmall)
-                .color(Color::Muted),
+                Label::new(left_status)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
             )
             .child(
                 Label::new(locale::status_unread(language, total_unread))
@@ -2166,7 +2459,7 @@ impl RootView {
 /// window). Theme and language are app-wide globals, so changes made here are
 /// reflected in the main window immediately.
 struct SettingsView {
-    accounts: Vec<Account>,
+    accounts: Vec<data::Account>,
     section: SettingsSection,
     /// Back-reference to the main view, used to read and toggle preferences that
     /// live there (e.g. loading remote images). Weak so the settings window can
@@ -2175,7 +2468,7 @@ struct SettingsView {
 }
 
 impl SettingsView {
-    fn new(accounts: Vec<Account>, root: WeakEntity<RootView>) -> Self {
+    fn new(accounts: Vec<data::Account>, root: WeakEntity<RootView>) -> Self {
         Self {
             accounts,
             section: SettingsSection::General,
@@ -2490,8 +2783,18 @@ impl Render for RootView {
                 .into_any_element();
         }
 
+        static FIRST_READY_FRAME: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if FIRST_READY_FRAME.set(()).is_ok() {
+            crate::startup::log_milestone("first ready frame");
+        }
+
         // Make sure the scrollbar state entities exist before the panels render.
         self.ensure_scrollbar_states(cx);
+        self.ensure_search_input(cx.language(), cx);
+        self.sync_search_if_needed(cx);
+        if !self.search_is_compact() {
+            self.search_force_expanded = false;
+        }
         // Keep the embedded e-mail webview in sync with the selection and theme.
         self.sync_webview(window, cx);
 
@@ -2618,15 +2921,24 @@ impl Render for RootView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn test_view() -> (TempDir, RootView) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let view = RootView::new_with_database(Config::default(), &path);
+        (dir, view)
+    }
 
     #[test]
     fn sidebar_starts_visible() {
-        assert!(RootView::new(Config::default()).show_sidebar);
+        let (_dir, view) = test_view();
+        assert!(view.show_sidebar);
     }
 
     #[test]
     fn toggle_sidebar_flips_visibility() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.toggle_sidebar();
         assert!(!view.show_sidebar);
         view.toggle_sidebar();
@@ -2635,7 +2947,7 @@ mod tests {
 
     #[test]
     fn selecting_in_narrow_layout_dismisses_floating_sidebar() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.narrow = true;
         view.show_sidebar = true;
         view.apply_mailbox_selection(Selection::Global(GlobalMailbox::Sent));
@@ -2651,17 +2963,28 @@ mod tests {
 
     #[test]
     fn selecting_in_wide_layout_keeps_sidebar_open() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.narrow = false;
         view.show_sidebar = true;
-        view.apply_mailbox_selection(Selection::Mailbox(0, 0));
-        assert_eq!(view.selected_mailbox, Selection::Mailbox(0, 0));
+        let account_id = view.accounts[0].id;
+        let folder_path = view.folders_by_account[&account_id][0].path.clone();
+        view.apply_mailbox_selection(Selection::Mailbox {
+            account_id,
+            folder_path: folder_path.clone(),
+        });
+        assert_eq!(
+            view.selected_mailbox,
+            Selection::Mailbox {
+                account_id,
+                folder_path,
+            }
+        );
         assert!(view.show_sidebar, "docked sidebar should stay open");
     }
 
     #[test]
     fn default_selection_is_global_inbox() {
-        let view = RootView::new(Config::default());
+        let (_dir, view) = test_view();
         assert_eq!(
             view.selected_mailbox,
             Selection::Global(GlobalMailbox::Inbox)
@@ -2669,36 +2992,32 @@ mod tests {
     }
 
     #[test]
-    fn global_inbox_sums_every_account_inbox() {
-        let view = RootView::new(Config::default());
-        let expected: usize = view
-            .accounts
-            .iter()
-            .flat_map(|a| a.mailboxes.iter())
-            .filter(|m| m.kind == MailboxKind::Inbox)
-            .map(|m| m.unread)
-            .sum();
-        assert_eq!(view.global_unread(GlobalMailbox::Inbox), expected);
-        assert!(expected > 0);
+    fn global_inbox_has_unread() {
+        let (_dir, view) = test_view();
+        assert!(view.global_unread(GlobalMailbox::Inbox) > 0);
     }
 
     #[test]
-    fn global_flagged_counts_starred_messages() {
-        let view = RootView::new(Config::default());
-        let starred = view.messages.iter().filter(|m| m.starred).count();
-        assert_eq!(view.global_unread(GlobalMailbox::Flagged), starred);
+    fn global_flagged_counts_flagged_folder() {
+        let (_dir, view) = test_view();
+        let flagged = view
+            .db
+            .global_unread(storage::system::FLAGGED)
+            .unwrap();
+        assert_eq!(view.global_unread(GlobalMailbox::Flagged), flagged);
+        assert!(flagged > 0);
     }
 
     #[test]
     fn global_drafts_and_sent_have_no_unread() {
-        let view = RootView::new(Config::default());
+        let (_dir, view) = test_view();
         assert_eq!(view.global_unread(GlobalMailbox::Drafts), 0);
         assert_eq!(view.global_unread(GlobalMailbox::Sent), 0);
     }
 
     #[test]
     fn accounts_start_expanded() {
-        let view = RootView::new(Config::default());
+        let (_dir, view) = test_view();
         for idx in 0..view.accounts.len() {
             assert!(!view.is_account_collapsed(idx));
         }
@@ -2706,7 +3025,7 @@ mod tests {
 
     #[test]
     fn toggle_account_collapses_and_expands() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         let collapsing = view.toggle_account(1);
         assert!(collapsing.collapsing);
         assert!(view.is_account_collapsed(1));
@@ -2719,7 +3038,7 @@ mod tests {
 
     #[test]
     fn toggle_account_hands_out_unique_tokens() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         let first = view.toggle_account(0).token;
         let second = view.toggle_account(0).token;
         assert_ne!(first, second);
@@ -2727,7 +3046,7 @@ mod tests {
 
     #[test]
     fn collapsing_account_stays_visible_until_finalized() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         let anim = view.toggle_account(2);
         // Mid-collapse the list is still rendered so it can animate out.
         assert!(view.is_account_collapsed(2));
@@ -2739,7 +3058,7 @@ mod tests {
 
     #[test]
     fn clear_fold_ignores_stale_token() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         let stale = view.toggle_account(0).token;
         // A second toggle supersedes the first, bumping the token.
         let _current = view.toggle_account(0);
@@ -2750,13 +3069,13 @@ mod tests {
 
     #[test]
     fn expanded_account_is_visible_without_animation() {
-        let view = RootView::new(Config::default());
+        let (_dir, view) = test_view();
         assert!(view.account_list_visible(0));
     }
 
     #[test]
     fn narrow_window_auto_collapses_sidebar() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.sync_layout(px(800.0));
         assert!(view.narrow);
         assert!(!view.show_sidebar);
@@ -2764,7 +3083,7 @@ mod tests {
 
     #[test]
     fn resizing_while_narrow_recollapses_floating_sidebar() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.sync_layout(px(850.0));
         // User reopens the sidebar as a floating overlay.
         view.show_sidebar = true;
@@ -2776,7 +3095,7 @@ mod tests {
 
     #[test]
     fn floating_sidebar_stays_open_without_resize() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.sync_layout(px(850.0));
         view.show_sidebar = true;
         // Re-render at the same width (e.g. from an unrelated notify) keeps it.
@@ -2786,7 +3105,7 @@ mod tests {
 
     #[test]
     fn widening_window_restores_sidebar() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.sync_layout(px(800.0));
         assert!(!view.show_sidebar);
         view.sync_layout(px(1200.0));
@@ -2796,7 +3115,7 @@ mod tests {
 
     #[test]
     fn resize_respects_sidebar_minimum() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.sync_layout(px(1400.0));
         view.resize(ResizeHandle::Sidebar, px(50.0), px(1400.0));
         assert_eq!(view.sidebar_width, px(SIDEBAR_MIN_WIDTH));
@@ -2804,7 +3123,7 @@ mod tests {
 
     #[test]
     fn resize_respects_list_minimum() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.sync_layout(px(1400.0));
         // Drag the list/reader divider far to the left (x near the sidebar edge).
         view.resize(
@@ -2818,7 +3137,7 @@ mod tests {
     #[test]
     fn resize_keeps_reader_minimum() {
         let total = px(1400.0);
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.sync_layout(total);
         // Try to make the list fill the whole row; the reader floor must hold.
         view.resize(ResizeHandle::List, total, total);
@@ -2833,7 +3152,7 @@ mod tests {
     #[test]
     fn resize_locks_panels_once_reader_minimum_is_reached() {
         let total = px(1400.0);
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.sync_layout(total);
 
         // Grow the list as far right as the cursor can go.
@@ -2852,7 +3171,7 @@ mod tests {
 
     #[test]
     fn search_collapses_when_reader_segment_is_narrow() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         // Just-docked layout (at the narrow breakpoint): the sidebar and list eat
         // most of the row, leaving the reader's toolbar segment below the collapse
         // threshold, so the search field turns into an icon. Holds on every
@@ -2863,7 +3182,7 @@ mod tests {
 
     #[test]
     fn search_expands_on_wide_reader_segment() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         // Wide docked layout leaves the reader segment well above the threshold.
         view.sync_layout(px(1600.0));
         assert!(!view.search_is_compact());
@@ -2871,14 +3190,14 @@ mod tests {
 
     #[test]
     fn all_action_groups_show_on_wide_window() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.sync_layout(px(1600.0));
         assert_eq!(view.visible_action_groups(), 3);
     }
 
     #[test]
     fn action_groups_drop_as_reader_segment_shrinks() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.narrow = false;
         view.show_sidebar = true;
         view.sidebar_width = px(SIDEBAR_MIN_WIDTH);
@@ -2895,7 +3214,7 @@ mod tests {
 
     #[test]
     fn action_groups_vanish_but_search_survives_when_tiny() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         view.narrow = true;
         view.show_sidebar = false;
         // Artificially tiny reader segment: every action group is dropped.
@@ -2907,7 +3226,7 @@ mod tests {
 
     #[test]
     fn sync_layout_shrinks_columns_to_fit() {
-        let mut view = RootView::new(Config::default());
+        let (_dir, mut view) = test_view();
         // Wide (docked) window so the sidebar keeps its column; an oversized list
         // must shrink to preserve the reader's minimum width.
         view.list_width = px(900.0);
@@ -2915,5 +3234,15 @@ mod tests {
         let reader = px(1400.0) - view.sidebar_width - view.list_width;
         assert!(reader >= px(READER_MIN_WIDTH));
         assert!(view.list_width >= px(LIST_MIN_WIDTH));
+    }
+
+    #[test]
+    fn search_force_expanded_overrides_compact_layout() {
+        let (_dir, mut view) = test_view();
+        view.sync_layout(px(NARROW_BREAKPOINT));
+        assert!(view.search_is_compact());
+        assert!(!view.show_search_expanded());
+        view.search_force_expanded = true;
+        assert!(view.show_search_expanded());
     }
 }

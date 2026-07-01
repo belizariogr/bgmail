@@ -10,3 +10,4 @@ path = "src/ui.rs"
 [dependencies]
 gpui.workspace = true
 theme.workspace = true
+unicode-segmentation = "1"

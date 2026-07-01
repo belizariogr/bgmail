@@ -121,7 +121,9 @@
       (~500ms, token-guarded) so a live window/column drag only writes once it
       settles. Tested: JSON round-trip, partial/invalid configs falling back to
       defaults, on-disk save/load round-trip and the fixed path shape.
-- 🔄 **Measure the startup time** with instrumentation (still informal)
+- ✅ **Measure the startup time** with instrumentation (`startup.rs`: monotonic
+      milestones logged to stderr in debug builds — `main entered`, `application
+      run callback`, `main window opened`, `first ready frame`)
 - ✅ Clickable links / external navigation policy for the webview (open in the
       system browser instead of inside the embedded view)
 - ✅ Disable the webview's OS Web Inspector (`with_devtools(false)`): wry enables
@@ -268,7 +270,7 @@
 - ⬜ Verify the WebView2 GPU workaround visually on the affected Windows host
       after fully restarting the app process
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
-- ⬜ Functional search field (filters the mock list)
+- ✅ Functional search field (filters the mock list)
 - ✅ E-mail composition screen/panel (mock): toolbar compose button opens a
       dedicated `ComposeView` window (reused/refocused if already open) with Send,
       Attach and Discard actions (FontAwesome SVG icons), header fields
@@ -277,8 +279,15 @@
       in `config.json` (default 790×720, centered on first open)
 ## Stage 2 — Domain layer
 - ⬜ `mail_core` crate: `Account`, `Mailbox`, `Message`, `Thread`, `Attachment`
-- ⬜ `storage` crate: local persistence (SQLite) + tests
-- ⬜ Synchronization state machine
+- ✅ `storage` crate: SQLite persistence (`accounts`, `folders`, `messages` with
+      `plain_text` + `raw_content`, `folders_csv` multi-folder membership,
+      accent-insensitive `search_text` + tests)
+- ✅ Seed visual mock into `~/.config/rMail/mail.db` on first open
+      (`db_seed` + `storage::seed_if_empty`)
+- ✅ `RootView` wired to SQLite: folder selection, global mailboxes, list
+      preview from plain text, reader from raw HTML/text, search mode
+      ("Searching" / "Buscando") across all accounts
+- 🔄 Synchronization state machine
 
 ## Stage 3 — Connectivity
 - ⬜ `protocols` crate: generic traits (Fetch/Send) + IMAP/POP3/SMTP
@@ -292,7 +301,8 @@
 - ⬜ Move / delete / archive / junk
 - ⬜ Star / flag
 - ⬜ Attachments (view, download, attach)
-- ⬜ Search
+- ⬜ Search (UI mock done — DB-backed accent-insensitive search in Stage 2;
+      full IMAP/search scope in Stage 4)
 
 ## Stage 5 — Polish
 - ⬜ Keyboard shortcuts
@@ -302,5 +312,6 @@
 
 ## Notes / open decisions
 - Reassess GPUI crates.io `0.2.2` vs `main` if some API is missing.
-- Define the local storage format (SQLite vs files) in Stage 2.
+- ~~Define the local storage format (SQLite vs files) in Stage 2.~~ **SQLite**
+      (`crates/storage`, `mail.db` under `~/.config/rMail/`).
 - Add more UI languages by extending `locale::Language` and the catalog.

@@ -74,6 +74,8 @@ pub enum Key {
     RemoteContentLoaded,
 
     SearchPlaceholder,
+    SearchActiveTitle,
+    SearchNoResults,
 
     ToolbarToggleSidebar,
     ToolbarReply,
@@ -186,6 +188,10 @@ impl Key {
 
             (SearchPlaceholder, E) => "Search",
             (SearchPlaceholder, P) => "Buscar",
+            (SearchActiveTitle, E) => "Searching",
+            (SearchActiveTitle, P) => "Buscando",
+            (SearchNoResults, E) => "No messages match your search",
+            (SearchNoResults, P) => "Nenhuma mensagem corresponde à busca",
 
             (ToolbarToggleSidebar, E) => "Show or hide sidebar",
             (ToolbarToggleSidebar, P) => "Mostrar ou ocultar barra lateral",
@@ -263,6 +269,19 @@ pub fn status_counts(language: Language, accounts: usize, messages: usize) -> St
     }
 }
 
+/// Status bar (left) while a search filter is active.
+pub fn status_search_counts(
+    language: Language,
+    accounts: usize,
+    showing: usize,
+    total: usize,
+) -> String {
+    match language {
+        Language::English => format!("{accounts} accounts · {showing} of {total} messages"),
+        Language::Portuguese => format!("{accounts} contas · {showing} de {total} mensagens"),
+    }
+}
+
 /// Status bar (right): unread count plus a "synced" hint.
 pub fn status_unread(language: Language, unread: usize) -> String {
     match language {
@@ -305,7 +324,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 59] = [
+    const ALL_KEYS: [Key; 61] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -338,6 +357,8 @@ mod tests {
         Key::UnblockRemote,
         Key::RemoteContentLoaded,
         Key::SearchPlaceholder,
+        Key::SearchActiveTitle,
+        Key::SearchNoResults,
         Key::ToolbarToggleSidebar,
         Key::ToolbarReply,
         Key::ToolbarReplyAll,

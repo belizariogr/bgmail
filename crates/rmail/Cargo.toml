@@ -16,6 +16,7 @@ path = "src/main.rs"
 gpui.workspace = true
 theme.workspace = true
 ui.workspace = true
+storage.workspace = true
 # Carries link-hover URLs from the webview's IPC callback (any thread) to the
 # GPUI view, which drains them asynchronously to update the status bar.
 async-channel = "2"
@@ -65,3 +66,6 @@ windows = { version = "0.61", features = [
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(feature, values("cargo-clippy"))',
 ] }
+
+[dev-dependencies]
+tempfile = "3"
