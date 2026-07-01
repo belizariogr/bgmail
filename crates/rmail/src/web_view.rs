@@ -1090,6 +1090,11 @@ mod platform {
                 .evaluate_script("window.__rmCloseMenu&&window.__rmCloseMenu()");
         }
 
+        /// Hides the native webview (e.g. when no message is selected).
+        pub fn hide(&mut self) {
+            self.set_visible(false);
+        }
+
         fn set_visible(&mut self, visible: bool) {
             if self.visible != visible && self.webview.set_visible(visible).is_ok() {
                 self.visible = visible;
@@ -1120,6 +1125,7 @@ mod platform {
         pub fn set_notify_text(&self, _body: String) {}
         pub fn position(&mut self, _bounds: Bounds<Pixels>) {}
         pub fn dismiss_context_menu(&self) {}
+        pub fn hide(&mut self) {}
     }
 }
 

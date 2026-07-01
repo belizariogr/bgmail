@@ -514,12 +514,19 @@ impl RootView {
         } else {
             self.list_messages = self.db.list_messages(&query).unwrap_or_default();
         }
-        let selected = self.selected_message_id.unwrap_or(-1);
-        if !self.list_messages.iter().any(|m| m.id == selected) {
-            self.selected_message_id = self.list_messages.first().map(|m| m.id);
-            self.last_webview_sig = None;
+        if let Some(selected) = self.selected_message_id {
+            if self.list_messages.iter().any(|m| m.id == selected) {
+                self.reload_selected_detail();
+            } else {
+                self.clear_message_selection();
+            }
         }
-        self.reload_selected_detail();
+    }
+
+    fn clear_message_selection(&mut self) {
+        self.selected_message_id = None;
+        self.selected_detail = None;
+        self.last_webview_sig = None;
     }
 
     fn reload_selected_detail(&mut self) {
@@ -670,11 +677,13 @@ impl RootView {
         let now_active = !query.trim().is_empty();
         if now_active && !was_active {
             self.pre_search_mailbox = Some(self.selected_mailbox.clone());
+            self.clear_message_selection();
         }
         if !now_active && was_active {
             if let Some(prev) = self.pre_search_mailbox.take() {
                 self.selected_mailbox = prev;
             }
+            self.clear_message_selection();
         }
         self.last_search_query = query;
         self.reload_message_list();
@@ -687,15 +696,6 @@ impl RootView {
             .as_ref()
             .map(|input| input.read(cx).content().to_string())
             .unwrap_or_default()
-    }
-
-    /// Indices of messages visible under the current search filter.
-    fn filtered_message_indices(&self) -> Vec<usize> {
-        self.list_messages
-            .iter()
-            .enumerate()
-            .map(|(index, _)| index)
-            .collect()
     }
 
     /// Whether the search query is non-empty.
@@ -712,21 +712,18 @@ impl RootView {
     /// Keeps the selected message inside the filtered list and scrolls back to
     /// the top when the query changes.
     fn sync_search_selection(&mut self) {
-        let indices = self.filtered_message_indices();
-        if indices.is_empty() {
+        if self.list_messages.is_empty() {
             self.list_scroll.scroll_to_top_of_item(0);
             return;
         }
-        let selected = self.selected_message_id.unwrap_or(-1);
-        if !self.list_messages.iter().any(|m| m.id == selected) {
-            self.selected_message_id = self.list_messages.first().map(|m| m.id);
-            self.last_webview_sig = None;
-            self.reload_selected_detail();
+        if let Some(selected) = self.selected_message_id {
+            if !self.list_messages.iter().any(|m| m.id == selected) {
+                self.clear_message_selection();
+            }
         }
         let visible = self
-            .list_messages
-            .iter()
-            .position(|m| m.id == self.selected_message_id.unwrap_or(-1))
+            .selected_message_id
+            .and_then(|id| self.list_messages.iter().position(|m| m.id == id))
             .unwrap_or(0);
         self.list_scroll.scroll_to_top_of_item(visible);
     }
@@ -744,6 +741,10 @@ impl RootView {
     /// on screen so it doesn't float over other views.
     fn sync_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(detail) = self.selected_detail.as_ref() else {
+            self.last_webview_sig = None;
+            if let Some(webview) = &mut self.email_webview {
+                webview.hide();
+            }
             return;
         };
         let message_id = detail.id;
@@ -1010,6 +1011,7 @@ impl RootView {
             self.last_search_query.clear();
             self.pre_search_mailbox = None;
         }
+        self.clear_message_selection();
         self.apply_mailbox_selection(selection);
         self.reload_message_list();
         cx.notify();
@@ -1917,6 +1919,10 @@ impl RootView {
             .track_scroll(&self.list_scroll)
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                 Self::note_scroll([this.list_scrollbar.clone()], cx);
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.clear_message_selection();
+                cx.notify();
             }));
 
         if filtered.is_empty() && self.search_is_active(cx) {
@@ -2040,6 +2046,7 @@ impl RootView {
             .when(selected, |el| el.bg(bg_selected))
             .when(!selected, |el| el.hover(move |el| el.bg(hover)))
             .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(div().pt_1().child(unread_dot))
             .child(
                 v_flex()
@@ -2238,7 +2245,21 @@ impl RootView {
         let on_accent = colors.text_on_accent;
 
         let Some(message) = self.selected_detail.as_ref() else {
-            return div().flex_1().min_w_0().h_full().bg(bg).into_any_element();
+            let language = cx.language();
+            return v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .bg(bg)
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(24.0))
+                        .text_color(colors.text_muted)
+                        .child(Key::ReaderNoSelection.tr(language)),
+                )
+                .into_any_element();
         };
 
         let initial = message
@@ -2980,6 +3001,17 @@ mod tests {
             }
         );
         assert!(view.show_sidebar, "docked sidebar should stay open");
+    }
+
+    #[test]
+    fn mailbox_change_clears_reader_selection() {
+        let (_dir, mut view) = test_view();
+        assert!(view.selected_message_id.is_some());
+        view.clear_message_selection();
+        view.apply_mailbox_selection(Selection::Global(GlobalMailbox::Sent));
+        view.reload_message_list();
+        assert!(view.selected_message_id.is_none());
+        assert!(view.selected_detail.is_none());
     }
 
     #[test]

@@ -76,6 +76,7 @@ pub enum Key {
     SearchPlaceholder,
     SearchActiveTitle,
     SearchNoResults,
+    ReaderNoSelection,
 
     ToolbarToggleSidebar,
     ToolbarReply,
@@ -192,6 +193,8 @@ impl Key {
             (SearchActiveTitle, P) => "Buscando",
             (SearchNoResults, E) => "No messages match your search",
             (SearchNoResults, P) => "Nenhuma mensagem corresponde à busca",
+            (ReaderNoSelection, E) => "No Message Selected",
+            (ReaderNoSelection, P) => "Nenhuma Mensagem Selecionada",
 
             (ToolbarToggleSidebar, E) => "Show or hide sidebar",
             (ToolbarToggleSidebar, P) => "Mostrar ou ocultar barra lateral",
@@ -324,7 +327,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 61] = [
+    const ALL_KEYS: [Key; 62] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -359,6 +362,7 @@ mod tests {
         Key::SearchPlaceholder,
         Key::SearchActiveTitle,
         Key::SearchNoResults,
+        Key::ReaderNoSelection,
         Key::ToolbarToggleSidebar,
         Key::ToolbarReply,
         Key::ToolbarReplyAll,
