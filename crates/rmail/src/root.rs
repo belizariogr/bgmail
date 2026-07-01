@@ -745,6 +745,47 @@ impl RootView {
         self.search_force_expanded = true;
     }
 
+    /// Whether the clear affordance inside the expanded search field should stay
+    /// visible even when the query is empty (compact toolbar forced open).
+    fn show_search_clear_in_field(&self, cx: &App) -> bool {
+        self.show_search_clear_in_field_for_query(&self.search_query(cx))
+    }
+
+    fn show_search_clear_in_field_for_query(&self, query: &str) -> bool {
+        if self.search_is_compact() && self.search_force_expanded {
+            return true;
+        }
+        !query.trim().is_empty()
+    }
+
+    /// Clears the query, restores the pre-search mailbox when needed, and
+    /// collapses a force-expanded compact search back to the icon button.
+    fn clear_search(&mut self, cx: &mut Context<Self>) {
+        let collapse = self.search_is_compact() && self.search_force_expanded;
+        let had_text = !self.search_query(cx).trim().is_empty();
+
+        if let Some(input) = &self.search_input {
+            input.update(cx, |field, cx| field.clear(cx));
+        }
+        // Drop any pending debounced apply so stale text cannot re-enter search.
+        self.next_search_debounce_token();
+
+        let was_active = !self.last_search_query.trim().is_empty();
+        if was_active || had_text {
+            if let Some(prev) = self.pre_search_mailbox.take() {
+                self.selected_mailbox = prev;
+            }
+            self.last_search_query.clear();
+            self.reload_message_list();
+            self.sync_search_selection();
+        }
+
+        if collapse {
+            self.search_force_expanded = false;
+        }
+        cx.notify();
+    }
+
     /// Keeps the selected message inside the filtered list and scrolls back to
     /// the top when the query changes.
     fn sync_search_selection(&mut self) {
@@ -1527,50 +1568,87 @@ impl RootView {
                         )
                     })
                     .child(div().flex_1())
-                    .child(if compact_search {
-                        div()
-                            .id("search")
-                            .tooltip(Tooltip::text(Key::SearchPlaceholder.tr(language)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.focus_search_input(window, cx);
-                                }),
-                            )
-                            .child(IconButton::new("search", IconName::Search))
-                            .into_any_element()
-                    } else {
-                        h_flex()
-                            .id("search")
-                            .w(px(SEARCH_FIELD_WIDTH))
-                            .h(px(28.0))
-                            .px_2()
-                            .gap_1p5()
-                            .items_center()
-                            .rounded_md()
-                            .bg(search_bg)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.focus_search_input(window, cx);
-                                }),
-                            )
-                            .child(
-                                Icon::new(IconName::Search)
-                                    .size(IconSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                self.search_input
-                                    .clone()
-                                    .expect("search input is created before render"),
-                            )
-                            .into_any_element()
-                    }),
+                    .child(self.render_search_control(compact_search, search_bg, language, cx)),
             )
             .children(crate::window_frame::render_right_window_controls(window))
+    }
+
+    /// Search control: compact magnifying-glass icon, or expanded field with clear.
+    fn render_search_control(
+        &self,
+        compact_search: bool,
+        search_bg: Hsla,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if compact_search {
+            return div()
+                .id("search")
+                .child(Self::icon_button_with_tooltip(
+                    "search-open",
+                    Key::SearchPlaceholder.tr(language),
+                    IconButton::new("search", IconName::Search).on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.focus_search_input(window, cx);
+                        },
+                    )),
+                ))
+                .into_any_element();
+        }
+
+        h_flex()
+            .id("search")
+            .w(px(SEARCH_FIELD_WIDTH))
+            .h(px(28.0))
+            .px_2()
+            .gap_1p5()
+            .items_center()
+            .rounded_md()
+            .bg(search_bg)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.focus_search_input(window, cx);
+                }),
+            )
+            .child(
+                Icon::new(IconName::Search)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                self.search_input
+                    .clone()
+                    .expect("search input is created before render"),
+            )
+            .when(self.show_search_clear_in_field(cx), |el| {
+                el.child(Self::render_search_clear_button(language, cx))
+            })
+            .into_any_element()
+    }
+
+    /// Micro clear control at the end of the expanded search field.
+    fn render_search_clear_button(language: Language, cx: &mut Context<Self>) -> impl IntoElement {
+        let hover_bg = cx.theme().colors().element_hover;
+        div()
+            .id("search-clear")
+            .tooltip(Tooltip::text(Key::SearchClear.tr(language)))
+            .flex()
+            .flex_shrink_0()
+            .justify_center()
+            .items_center()
+            .size(px(20.0))
+            .rounded_md()
+            .hover(move |el| el.bg(hover_bg))
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, _, cx| this.clear_search(cx)))
+            .child(
+                Icon::new(IconName::Clear)
+                    .size(IconSize::XXSmall)
+                    .color(Color::Muted),
+            )
     }
 
     /// Wraps an [`IconButton`] with a localized tooltip (GPUI attaches tooltips to
@@ -3329,5 +3407,21 @@ mod tests {
         let second = view.next_search_debounce_token();
         assert!(!view.search_debounce_token_current(first));
         assert!(view.search_debounce_token_current(second));
+    }
+
+    #[test]
+    fn search_clear_shows_in_expanded_field_only_with_text_on_wide_toolbar() {
+        let (_dir, mut view) = test_view();
+        view.sync_layout(px(1600.0));
+        assert!(!view.show_search_clear_in_field_for_query(""));
+        assert!(view.show_search_clear_in_field_for_query("hello"));
+    }
+
+    #[test]
+    fn search_clear_always_shows_in_force_expanded_compact_field() {
+        let (_dir, mut view) = test_view();
+        view.sync_layout(px(NARROW_BREAKPOINT));
+        view.search_force_expanded = true;
+        assert!(view.show_search_clear_in_field_for_query(""));
     }
 }

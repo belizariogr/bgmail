@@ -275,6 +275,8 @@
       immediately on Windows
 - ✅ Refine text-input caret metrics in the search field (2px width, 4px vertical padding)
 - ✅ Debounce the search filter by 150ms after typing
+- ✅ Search clear micro-button inside the expanded field (with text on wide toolbar;
+      always visible when compact search is force-expanded; clears and collapses)
 - ✅ E-mail composition screen/panel (mock): toolbar compose button opens a
       dedicated `ComposeView` window (reused/refocused if already open) with Send,
       Attach and Discard actions (FontAwesome SVG icons), header fields

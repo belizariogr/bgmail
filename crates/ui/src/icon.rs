@@ -68,6 +68,8 @@ pub enum IconName {
     Shield,
     ShieldSolid,
     Check,
+    /// Dismiss / clear (search field, etc.).
+    Clear,
 }
 
 impl IconName {
@@ -104,6 +106,7 @@ impl IconName {
             IconName::Shield => crate::SHIELD_HALVED,
             IconName::ShieldSolid => crate::SHIELD,
             IconName::Check => crate::CHECK,
+            IconName::Clear => crate::XMARK,
         }
     }
 }
@@ -159,7 +162,7 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 30] = [
+    const ALL: [IconName; 31] = [
         IconName::Inbox,
         IconName::Sent,
         IconName::Drafts,
@@ -190,6 +193,7 @@ mod tests {
         IconName::Shield,
         IconName::ShieldSolid,
         IconName::Check,
+        IconName::Clear,
     ];
 
     #[test]

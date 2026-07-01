@@ -74,6 +74,7 @@ pub enum Key {
     RemoteContentLoaded,
 
     SearchPlaceholder,
+    SearchClear,
     SearchActiveTitle,
     SearchNoResults,
     ReaderNoSelection,
@@ -189,6 +190,8 @@ impl Key {
 
             (SearchPlaceholder, E) => "Search",
             (SearchPlaceholder, P) => "Buscar",
+            (SearchClear, E) => "Clear search",
+            (SearchClear, P) => "Limpar busca",
             (SearchActiveTitle, E) => "Searching",
             (SearchActiveTitle, P) => "Buscando",
             (SearchNoResults, E) => "No messages match your search",
@@ -327,7 +330,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 62] = [
+    const ALL_KEYS: [Key; 63] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -360,6 +363,7 @@ mod tests {
         Key::UnblockRemote,
         Key::RemoteContentLoaded,
         Key::SearchPlaceholder,
+        Key::SearchClear,
         Key::SearchActiveTitle,
         Key::SearchNoResults,
         Key::ReaderNoSelection,

@@ -60,6 +60,7 @@ icon_assets! {
     (SHIELD_HALVED, "icons/shield-halved.svg"),
     (SHIELD, "icons/shield.svg"),
     (CHECK, "icons/check.svg"),
+    (XMARK, "icons/xmark.svg"),
 }
 
 /// Asset source that serves the UI crate's embedded SVGs. Register it once with
