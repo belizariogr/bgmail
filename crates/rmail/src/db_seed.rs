@@ -5,8 +5,7 @@ use storage::{
 };
 
 use crate::data::{
-    sample_accounts, sample_messages, GlobalMailbox, Mailbox,
-    MailboxKind, Message, MessageBody,
+    sample_accounts, sample_messages, GlobalMailbox, Mailbox, MailboxKind, Message, MessageBody,
 };
 
 /// Accounts + folders for the initial database population.

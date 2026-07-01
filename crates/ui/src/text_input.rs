@@ -17,6 +17,32 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::prelude::*;
 
+#[cfg(target_os = "windows")]
+pub fn set_native_text_focus(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+
+    // Fully qualified to disambiguate from GPUI's inherent `Window::window_handle`.
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut core::ffi::c_void);
+
+    // SAFETY: `hwnd` is GPUI's live native window handle and is used only during
+    // the current click/focus event. `SetFocus` transfers keyboard focus to that
+    // HWND without taking ownership or retaining the handle.
+    unsafe {
+        let _ = SetFocus(Some(hwnd));
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn set_native_text_focus(_window: &Window) {}
+
 actions!(
     text_input,
     [
@@ -158,9 +184,12 @@ impl TextInput {
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        set_native_text_focus(window);
+        window.focus(&self.focus_handle);
+        cx.stop_propagation();
         self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
@@ -526,12 +555,14 @@ impl Element for TextInputElement {
 
         let cursor_pos = line.x_for_index(cursor);
         let (selection, cursor) = if selected_range.is_empty() {
+            let caret_top = bounds.top() + px(4.0);
+            let caret_bottom = bounds.bottom() - px(4.0);
             (
                 None,
                 Some(fill(
-                    Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
-                        gpui::size(px(1.5), bounds.bottom() - bounds.top()),
+                    Bounds::from_corners(
+                        point(bounds.left() + cursor_pos, caret_top),
+                        point(bounds.left() + cursor_pos + px(2.0), caret_bottom),
                     ),
                     colors.accent,
                 )),

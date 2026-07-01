@@ -271,6 +271,9 @@
       after fully restarting the app process
 - ⬜ UI tests with `gpui::TestAppContext` (after stabilizing the mock)
 - ✅ Functional search field (filters the mock list)
+- ✅ Fix main-window search focus on first click so the text input accepts typing
+      immediately on Windows
+- ✅ Refine text-input caret metrics in the search field (2px width, 4px vertical padding)
 - ✅ E-mail composition screen/panel (mock): toolbar compose button opens a
       dedicated `ComposeView` window (reused/refocused if already open) with Send,
       Attach and Discard actions (FontAwesome SVG icons), header fields

@@ -19,8 +19,8 @@ use gpui::{
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
 use ui::{
-    Button, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize, ListItem,
-    Scrollbar, ScrollbarState, Switch, TextInput, Tooltip,
+    set_native_text_focus, Button, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label,
+    LabelSize, ListItem, Scrollbar, ScrollbarState, Switch, TextInput, Tooltip,
 };
 
 use crate::compose::{self, ComposeView};
@@ -709,6 +709,11 @@ impl RootView {
         !self.search_is_compact() || self.search_force_expanded
     }
 
+    /// Keeps the compact toolbar search expanded so its input can receive focus.
+    fn prepare_search_focus(&mut self) {
+        self.search_force_expanded = true;
+    }
+
     /// Keeps the selected message inside the filtered list and scrolls back to
     /// the top when the query changes.
     fn sync_search_selection(&mut self) {
@@ -729,9 +734,14 @@ impl RootView {
     }
 
     fn focus_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_force_expanded = true;
+        self.prepare_search_focus();
+        set_native_text_focus(window);
         if let Some(input) = &self.search_input {
-            window.focus(&input.read(cx).focus_handle(cx));
+            let focus_handle = input.read(cx).focus_handle(cx);
+            window.defer(cx, move |window, _| {
+                set_native_text_focus(window);
+                window.focus(&focus_handle);
+            });
         }
         cx.notify();
     }
@@ -1493,6 +1503,7 @@ impl RootView {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| {
+                                    cx.stop_propagation();
                                     this.focus_search_input(window, cx);
                                 }),
                             )
@@ -1508,6 +1519,13 @@ impl RootView {
                             .items_center()
                             .rounded_md()
                             .bg(search_bg)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.focus_search_input(window, cx);
+                                }),
+                            )
                             .child(
                                 Icon::new(IconName::Search)
                                     .size(IconSize::Small)
@@ -2410,10 +2428,7 @@ impl RootView {
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let language = cx.language();
-        let total_unread: usize = self
-            .db
-            .global_unread(storage::system::INBOX)
-            .unwrap_or(0);
+        let total_unread: usize = self.db.global_unread(storage::system::INBOX).unwrap_or(0);
         let total_messages = self
             .db
             .message_count_all()
@@ -3032,10 +3047,7 @@ mod tests {
     #[test]
     fn global_flagged_counts_flagged_folder() {
         let (_dir, view) = test_view();
-        let flagged = view
-            .db
-            .global_unread(storage::system::FLAGGED)
-            .unwrap();
+        let flagged = view.db.global_unread(storage::system::FLAGGED).unwrap();
         assert_eq!(view.global_unread(GlobalMailbox::Flagged), flagged);
         assert!(flagged > 0);
     }
@@ -3274,7 +3286,7 @@ mod tests {
         view.sync_layout(px(NARROW_BREAKPOINT));
         assert!(view.search_is_compact());
         assert!(!view.show_search_expanded());
-        view.search_force_expanded = true;
+        view.prepare_search_focus();
         assert!(view.show_search_expanded());
     }
 }
