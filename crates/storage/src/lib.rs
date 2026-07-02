@@ -10,7 +10,8 @@ mod types;
 
 pub use database::{database_path, global_folder_path, Database};
 pub use folder::{
-    folders_csv, is_system_path, system, user_folder_path, SYSTEM_PREFIX, USER_PREFIX,
+    folders_csv, is_manual_move_destination_forbidden, is_system_path, system, user_folder_path,
+    SYSTEM_PREFIX, USER_PREFIX,
 };
 pub use search::{build_search_text, fold_for_search, search_like_pattern};
 pub use seed::{

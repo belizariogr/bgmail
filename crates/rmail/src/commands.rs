@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use gpui::SharedString;
-use storage::{system, Folder, MessageDetail};
+use storage::{is_manual_move_destination_forbidden, system, Folder, MessageDetail};
 
 use crate::data::MailboxKind;
 use crate::locale::{Key, Language};
@@ -64,7 +64,7 @@ impl CommandContext {
             .get(&detail.account_id)
             .into_iter()
             .flatten()
-            .filter(|folder| folder.path != system::FLAGGED && folder.path != system::DRAFTS)
+            .filter(|folder| !is_manual_move_destination_forbidden(&folder.path))
             .map(|folder| {
                 (
                     folder_display_name(folder, Language::English).into(),
@@ -312,5 +312,19 @@ mod tests {
     fn command_filter_is_case_insensitive() {
         assert!(command_matches_query("Archive Message", "ARCH"));
         assert!(!command_matches_query("Archive Message", "junk"));
+    }
+
+    #[test]
+    fn move_targets_exclude_sent_drafts_and_flagged() {
+        let ctx = ctx_with_message(false, false);
+        let paths: Vec<_> = ctx
+            .move_targets()
+            .into_iter()
+            .map(|(_, path)| path.to_string())
+            .collect();
+        assert!(!paths.contains(&system::SENT.to_string()));
+        assert!(!paths.contains(&system::DRAFTS.to_string()));
+        assert!(!paths.contains(&system::FLAGGED.to_string()));
+        assert!(paths.contains(&user_folder_path("Clients")));
     }
 }

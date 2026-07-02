@@ -2,7 +2,9 @@
 
 use rusqlite::params;
 
-use crate::folder::{folder_like_pattern, folders_csv, system};
+use crate::folder::{
+    folder_like_pattern, folders_csv, is_manual_move_destination_forbidden, system,
+};
 use crate::Database;
 
 /// Parses a `folders_csv` column into folder paths (without empty segments).
@@ -119,7 +121,7 @@ impl Database {
 
     /// Moves the message to an arbitrary folder path for its account.
     pub fn move_message_to_folder(&self, id: i64, folder_path: &str) -> rusqlite::Result<()> {
-        if is_virtual_flagged_folder(folder_path) {
+        if is_manual_move_destination_forbidden(folder_path) {
             return Ok(());
         }
         self.set_primary_folder(id, folder_path)
@@ -344,5 +346,15 @@ mod tests {
         let csv = message_csv(&db, "Inbox");
         assert!(message_has_folder(&csv, &custom));
         assert!(!message_has_folder(&csv, system::INBOX));
+    }
+
+    #[test]
+    fn move_to_sent_is_noop() {
+        let (_file, db) = seeded_db();
+        let id = message_id(&db, "Inbox");
+        db.move_message_to_folder(id, system::SENT).unwrap();
+        let csv = message_csv(&db, "Inbox");
+        assert!(message_has_folder(&csv, system::INBOX));
+        assert!(!message_has_folder(&csv, system::SENT));
     }
 }

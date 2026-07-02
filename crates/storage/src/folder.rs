@@ -41,6 +41,11 @@ pub fn is_system_path(path: &str) -> bool {
     path.starts_with(SYSTEM_PREFIX)
 }
 
+/// System folders that must not be chosen as a manual move destination.
+pub fn is_manual_move_destination_forbidden(path: &str) -> bool {
+    matches!(path, system::FLAGGED | system::DRAFTS | system::SENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,5 +67,16 @@ mod tests {
     #[test]
     fn user_folder_path_uses_prefix() {
         assert_eq!(user_folder_path("Clients"), "user:Clients");
+    }
+
+    #[test]
+    fn manual_move_forbidden_for_sent_drafts_and_flagged() {
+        assert!(is_manual_move_destination_forbidden(system::SENT));
+        assert!(is_manual_move_destination_forbidden(system::DRAFTS));
+        assert!(is_manual_move_destination_forbidden(system::FLAGGED));
+        assert!(!is_manual_move_destination_forbidden(system::INBOX));
+        assert!(!is_manual_move_destination_forbidden(&user_folder_path(
+            "Clients"
+        )));
     }
 }
