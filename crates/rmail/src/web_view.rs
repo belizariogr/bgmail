@@ -98,7 +98,8 @@ pub fn email_document(
          data-rm-img-show=\"{img_show}\" \
          data-rm-link-open=\"{link_open}\" data-rm-link-copy=\"{link_copy}\" \
          data-rm-sel-copy=\"{sel_copy}\" data-rm-copy-key=\"{copy_key}\">\
-         {inner}</body></html>",
+         {inner}\
+         <script>{palette_shortcut_script}</script></body></html>",
         css = document_css(colors),
         img_open = escape_html(labels.image_open),
         img_download = escape_html(labels.image_download),
@@ -107,6 +108,7 @@ pub fn email_document(
         link_copy = escape_html(labels.link_copy),
         sel_copy = escape_html(labels.selection_copy),
         copy_key = escape_html(labels.copy_shortcut),
+        palette_shortcut_script = COMMAND_PALETTE_SHORTCUT_SCRIPT,
     );
     RenderedEmail {
         html,
@@ -375,6 +377,14 @@ pub enum HostEvent {
     CommandPalette,
 }
 
+/// Opens rMail's command palette from inside the reader document (Ctrl/Cmd+P).
+/// Inlined in every rendered message so it survives `load_html` navigations.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const COMMAND_PALETTE_SHORTCUT_SCRIPT: &str = r#"document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&!e.shiftKey&&!e.altKey&&e.key&&e.key.toLowerCase()==='p'){e.preventDefault();e.stopPropagation();window.ipc.postMessage('P\n');}},true);"#;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const COMMAND_PALETTE_SHORTCUT_SCRIPT: &str = "";
+
 /// Injected into every rendered message. Two responsibilities:
 ///
 /// 1. Report the URL under the cursor to the host (status-bar mirroring): link
@@ -523,12 +533,6 @@ const CONTENT_SCRIPT: &str = r#"(function () {
   }, true);
   document.addEventListener('scroll', closeMenu, true);
   document.addEventListener('keydown', function (e) {
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key && e.key.toLowerCase() === 'p') {
-      e.preventDefault();
-      e.stopPropagation();
-      send('P', '');
-      return;
-    }
     if (e.key === 'Escape') closeMenu();
   }, true);
   window.addEventListener('blur', closeMenu);
@@ -1683,5 +1687,23 @@ mod tests {
         assert!(doc.contains("data-rm-link-copy=\"Copy link\""));
         assert!(doc.contains("data-rm-sel-copy=\"Copy\""));
         assert!(doc.contains("data-rm-copy-key=\"\u{2318}C\""));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn document_embeds_command_palette_shortcut_script() {
+        let doc = email_document(
+            doc_colors(
+                hsla(0.0, 0.0, 1.0, 1.0),
+                hsla(0.0, 0.0, 0.0, 1.0),
+                hsla(0.6, 0.7, 0.5, 1.0),
+            ),
+            &body_html(),
+            labels(),
+            true,
+            &HashSet::new(),
+        )
+        .html;
+        assert!(doc.contains("window.ipc.postMessage('P\\n')"));
     }
 }

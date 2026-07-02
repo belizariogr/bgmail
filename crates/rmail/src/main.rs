@@ -8,6 +8,7 @@
 mod actions;
 mod app_menus;
 mod command_palette;
+mod command_palette_overlay;
 mod commands;
 mod compose;
 mod config;
