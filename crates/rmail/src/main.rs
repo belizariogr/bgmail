@@ -16,6 +16,7 @@ mod data;
 mod db_seed;
 mod locale;
 mod root;
+mod shortcuts;
 mod startup;
 mod web_view;
 mod window_drag;
@@ -24,8 +25,8 @@ mod window_frame;
 use std::time::Duration;
 
 use gpui::{
-    point, px, size, App, AppContext, Application, Bounds, Global, KeyBinding, Keystroke, Menu,
-    Subscription, WindowHandle, WindowOptions,
+    point, px, size, App, AppContext, Application, Bounds, Global, Keystroke, Menu, Subscription,
+    WindowHandle, WindowOptions,
 };
 
 use crate::commands::CommandId;
@@ -153,13 +154,7 @@ fn main() {
             locale::init(locale::Language::default(), cx);
             ui::bind_keys(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.bind_keys([
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-p", ToggleCommandPalette, None),
-                KeyBinding::new("ctrl-p", ToggleCommandPalette, None),
-                KeyBinding::new("cmd-p", ToggleCommandPalette, Some("TextInput")),
-                KeyBinding::new("ctrl-p", ToggleCommandPalette, Some("TextInput")),
-            ]);
+            shortcuts::bind_app_shortcuts(cx);
             cx.set_menus(app_menus());
 
             // Restore the persisted layout (window/column sizes), clamped to the

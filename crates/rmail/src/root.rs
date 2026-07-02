@@ -35,6 +35,7 @@ use crate::config::{self, Config};
 use crate::data::{self, GlobalMailbox, MailboxKind};
 use crate::db_seed;
 use crate::locale::{self, ActiveLanguage, Key, Language};
+use crate::shortcuts;
 use crate::web_view::{
     email_document, ContextMenuLabels, DocumentColors, EmailWebView, HostEvent, WEBVIEW_SUPPORTED,
 };
@@ -1689,11 +1690,16 @@ impl RootView {
                     .child(Self::icon_button_with_tooltip(
                         "filter",
                         Key::ToolbarFilter.tr(language),
+                        None,
                         IconButton::new("filter", IconName::Filter),
                     ))
                     .child(Self::icon_button_with_tooltip(
                         "more",
                         Key::ToolbarMore.tr(language),
+                        Some((
+                            shortcuts::COMMAND_PALETTE_MAC,
+                            shortcuts::COMMAND_PALETTE_OTHER,
+                        )),
                         IconButton::new("more", IconName::More).on_click(cx.listener(
                             |this, _, window, cx| {
                                 this.toggle_command_palette(window, cx);
@@ -1861,6 +1867,10 @@ impl RootView {
                     .child(Self::icon_button_with_tooltip(
                         "toggle-sidebar",
                         Key::ToolbarToggleSidebar.tr(language),
+                        Some((
+                            shortcuts::TOGGLE_SIDEBAR_MAC,
+                            shortcuts::TOGGLE_SIDEBAR_OTHER,
+                        )),
                         IconButton::new("toggle-sidebar", IconName::Sidebar)
                             .selected(self.show_sidebar)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -1871,6 +1881,7 @@ impl RootView {
                     .child(Self::icon_button_with_tooltip(
                         "settings",
                         Key::SettingsTitle.tr(language),
+                        Some((shortcuts::SETTINGS_MAC, shortcuts::SETTINGS_OTHER)),
                         IconButton::new("settings", IconName::Settings).on_click(cx.listener(
                             |this, _, window, cx| {
                                 this.open_settings(window, cx);
@@ -1897,6 +1908,7 @@ impl RootView {
                     .child(Self::icon_button_with_tooltip(
                         "compose",
                         Key::ComposeWindowTitle.tr(language),
+                        Some((shortcuts::COMPOSE_MAC, shortcuts::COMPOSE_OTHER)),
                         IconButton::new("compose", IconName::Compose)
                             .size(IconSize::Medium)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -1919,16 +1931,19 @@ impl RootView {
                                             .child(Self::icon_button_with_tooltip(
                                                 "reply",
                                                 Key::ToolbarReply.tr(language),
+                                                None,
                                                 IconButton::new("reply", IconName::Reply),
                                             ))
                                             .child(Self::icon_button_with_tooltip(
                                                 "reply-all",
                                                 Key::ToolbarReplyAll.tr(language),
+                                                None,
                                                 IconButton::new("reply-all", IconName::ReplyAll),
                                             ))
                                             .child(Self::icon_button_with_tooltip(
                                                 "forward",
                                                 Key::ToolbarForward.tr(language),
+                                                None,
                                                 IconButton::new("forward", IconName::Forward),
                                             )),
                                     )
@@ -1940,6 +1955,10 @@ impl RootView {
                                             .child(Self::icon_button_with_tooltip(
                                                 "trash",
                                                 Key::CommandDelete.tr(language),
+                                                Some((
+                                                    shortcuts::DELETE_MESSAGE_MAC,
+                                                    shortcuts::DELETE_MESSAGE_OTHER,
+                                                )),
                                                 IconButton::new("trash", IconName::Trash).on_click(
                                                     cx.listener(|this, _, _, cx| {
                                                         this.delete_message_to_trash(cx);
@@ -1949,6 +1968,10 @@ impl RootView {
                                             .child(Self::icon_button_with_tooltip(
                                                 "archive",
                                                 Key::CommandArchive.tr(language),
+                                                Some((
+                                                    shortcuts::ARCHIVE_MAC,
+                                                    shortcuts::ARCHIVE_OTHER,
+                                                )),
                                                 IconButton::new("archive", IconName::Archive)
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.archive_message(cx);
@@ -1957,6 +1980,10 @@ impl RootView {
                                             .child(Self::icon_button_with_tooltip(
                                                 "junk",
                                                 Key::CommandMarkJunk.tr(language),
+                                                Some((
+                                                    shortcuts::MARK_JUNK_MAC,
+                                                    shortcuts::MARK_JUNK_OTHER,
+                                                )),
                                                 IconButton::new("junk", IconName::Junk).on_click(
                                                     cx.listener(|this, _, _, cx| {
                                                         this.mark_message_junk(cx);
@@ -1972,6 +1999,10 @@ impl RootView {
                                             .child(Self::icon_button_with_tooltip(
                                                 "flag",
                                                 Key::ToolbarFlag.tr(language),
+                                                Some((
+                                                    shortcuts::TOGGLE_FLAG_MAC,
+                                                    shortcuts::TOGGLE_FLAG_OTHER,
+                                                )),
                                                 IconButton::new("flag", IconName::Flag).on_click(
                                                     cx.listener(|this, _, _, cx| {
                                                         this.toggle_message_flag(cx);
@@ -1981,6 +2012,7 @@ impl RootView {
                                             .child(Self::icon_button_with_tooltip(
                                                 "move",
                                                 Key::ToolbarMove.tr(language),
+                                                None,
                                                 IconButton::new("move", IconName::Folder),
                                             )),
                                     )
@@ -2007,6 +2039,7 @@ impl RootView {
                 .child(Self::icon_button_with_tooltip(
                     "search-open",
                     Key::SearchPlaceholder.tr(language),
+                    None,
                     IconButton::new("search", IconName::Search).on_click(cx.listener(
                         |this, _, window, cx| {
                             this.focus_search_input(window, cx);
@@ -2075,10 +2108,19 @@ impl RootView {
     /// elements via `div`, not to `IconButton` directly).
     fn icon_button_with_tooltip(
         id: &'static str,
-        tooltip: &'static str,
+        label: &'static str,
+        shortcut: Option<(&'static str, &'static str)>,
         button: IconButton,
     ) -> impl IntoElement {
-        div().id(id).tooltip(Tooltip::text(tooltip)).child(button)
+        if let Some((mac, other)) = shortcut {
+            let formatted = shortcuts::format_binding(shortcuts::primary_binding(mac, other));
+            div()
+                .id(id)
+                .tooltip(Tooltip::with_shortcut(label, formatted))
+                .child(button)
+        } else {
+            div().id(id).tooltip(Tooltip::text(label)).child(button)
+        }
     }
 
     /// A thin vertical divider used to separate toolbar button groups.
