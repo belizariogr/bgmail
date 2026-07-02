@@ -28,7 +28,12 @@ use gpui::{
     Subscription, WindowHandle, WindowOptions,
 };
 
-use actions::{Quit, ToggleCommandPalette};
+use crate::commands::CommandId;
+use actions::{
+    ComposeNew, MessageArchive, MessageDelete, MessageDeletePermanent, MessageMarkJunk,
+    MessageRestore, MessageToggleFlag, MoveMessageToFolder, OpenSettings, Quit,
+    ToggleCommandPalette, ToggleSidebar,
+};
 use root::{RootView, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH};
 
 /// Handle to the main mail window, used to route global shortcuts.
@@ -52,8 +57,42 @@ fn is_command_palette_keystroke(keystroke: &Keystroke) -> bool {
 
 fn toggle_command_palette(cx: &mut App) {
     let main = cx.global::<MainWindow>().0;
-    let _ = main.update(cx, |view, window, cx| {
-        view.toggle_command_palette(window, cx);
+    cx.defer(move |cx| {
+        let _ = main.update(cx, |view, window, cx| {
+            view.toggle_command_palette(window, cx);
+        });
+    });
+}
+
+fn schedule_menu_command(id: CommandId, cx: &mut App) {
+    let main = cx.global::<MainWindow>().0;
+    cx.defer(move |cx| {
+        let _ = main.update(cx, |view, window, cx| {
+            let ctx = view.command_context();
+            if commands::command_enabled(&id, &ctx) {
+                view.execute_command(&id, window, cx);
+            }
+        });
+    });
+}
+
+/// Global handlers keep macOS menu items enabled when a native webview holds focus.
+fn register_global_menu_actions(cx: &mut App) {
+    cx.on_action(|_: &ComposeNew, cx| schedule_menu_command(CommandId::ComposeNew, cx));
+    cx.on_action(|_: &OpenSettings, cx| schedule_menu_command(CommandId::OpenSettings, cx));
+    cx.on_action(|_: &ToggleSidebar, cx| schedule_menu_command(CommandId::ToggleSidebar, cx));
+    cx.on_action(|_: &MessageDelete, cx| schedule_menu_command(CommandId::MessageDelete, cx));
+    cx.on_action(|_: &MessageDeletePermanent, cx| {
+        schedule_menu_command(CommandId::MessageDeletePermanent, cx);
+    });
+    cx.on_action(|_: &MessageRestore, cx| schedule_menu_command(CommandId::MessageRestore, cx));
+    cx.on_action(|_: &MessageArchive, cx| schedule_menu_command(CommandId::MessageArchive, cx));
+    cx.on_action(|_: &MessageMarkJunk, cx| schedule_menu_command(CommandId::MessageMarkJunk, cx));
+    cx.on_action(|_: &MessageToggleFlag, cx| {
+        schedule_menu_command(CommandId::MessageToggleFlag, cx);
+    });
+    cx.on_action(|action: &MoveMessageToFolder, cx| {
+        schedule_menu_command(CommandId::MoveToFolder(action.path.clone()), cx);
     });
 }
 
@@ -276,6 +315,7 @@ fn main() {
                 .expect("failed to open the main window");
             cx.set_global(MainWindow(main_window));
             register_command_palette_shortcuts(cx);
+            register_global_menu_actions(cx);
 
             startup::log_milestone("main window opened");
 

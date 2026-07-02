@@ -26,11 +26,7 @@ use ui::{
     LabelSize, ListItem, Scrollbar, ScrollbarState, Switch, TextInput, Tooltip,
 };
 
-use crate::actions::{
-    ComposeNew, MessageArchive, MessageDelete, MessageDeletePermanent, MessageMarkJunk,
-    MessageRestore, MessageToggleFlag, MoveMessageToFolder, OpenSettings, ToggleCommandPalette,
-    ToggleSidebar,
-};
+use crate::actions::ToggleCommandPalette;
 use crate::app_menus;
 use crate::command_palette::CommandPaletteState;
 use crate::commands::{CommandContext, CommandId};
@@ -702,7 +698,11 @@ impl RootView {
     /// Opens the palette popup on the app foreground, outside any [`RootView`] update.
     /// `cx.open_window` renders synchronously; doing that inside `root.update` would
     /// re-enter the entity and panic.
-    fn open_command_palette_popup(root: WeakEntity<RootView>, bounds: Bounds<Pixels>, cx: &mut App) {
+    fn open_command_palette_popup(
+        root: WeakEntity<RootView>,
+        bounds: Bounds<Pixels>,
+        cx: &mut App,
+    ) {
         let Some(root_entity) = root.upgrade() else {
             return;
         };
@@ -773,6 +773,7 @@ impl RootView {
             CommandId::ToggleSidebar => {
                 self.toggle_sidebar();
                 self.sync_app_menus(cx);
+                cx.notify();
             }
             CommandId::MessageDelete => self.delete_message_to_trash(cx),
             CommandId::MessageDeletePermanent => self.delete_message_permanently(cx),
@@ -3462,40 +3463,8 @@ impl Render for RootView {
             .bg(background)
             .text_color(text)
             .font_family("Helvetica")
-            .on_action(cx.listener(|this, _: &ComposeNew, window, cx| {
-                this.open_compose(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                this.open_settings(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.toggle_sidebar();
-                this.sync_app_menus(cx);
-                cx.notify();
-            }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &MessageDelete, _, cx| {
-                this.delete_message_to_trash(cx);
-            }))
-            .on_action(cx.listener(|this, _: &MessageDeletePermanent, _, cx| {
-                this.delete_message_permanently(cx);
-            }))
-            .on_action(cx.listener(|this, _: &MessageRestore, _, cx| {
-                this.restore_message(cx);
-            }))
-            .on_action(cx.listener(|this, _: &MessageArchive, _, cx| {
-                this.archive_message(cx);
-            }))
-            .on_action(cx.listener(|this, _: &MessageMarkJunk, _, cx| {
-                this.mark_message_junk(cx);
-            }))
-            .on_action(cx.listener(|this, _: &MessageToggleFlag, _, cx| {
-                this.toggle_message_flag(cx);
-            }))
-            .on_action(cx.listener(|this, action: &MoveMessageToFolder, _, cx| {
-                this.move_message_to_folder(action.path.as_ref(), cx);
             }))
             // Any click on the GPUI UI dismisses a context menu open inside the
             // webview: such clicks neither blur the webview nor reach its DOM, so
