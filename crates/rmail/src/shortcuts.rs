@@ -6,8 +6,8 @@
 use gpui::{App, KeyBinding, KeybindingKeystroke, Keystroke};
 
 use crate::actions::{
-    ComposeNew, MessageArchive, MessageDelete, MessageMarkJunk, MessageToggleFlag, OpenSettings,
-    Quit, ToggleCommandPalette, ToggleSidebar,
+    ComposeClose, ComposeNew, MessageArchive, MessageDelete, MessageMarkJunk, MessageToggleFlag,
+    OpenSettings, Quit, ToggleCommandPalette, ToggleSidebar,
 };
 
 /// GPUI keystroke string shown in tooltips on macOS.
@@ -35,6 +35,9 @@ pub const MARK_JUNK_OTHER: &str = "ctrl-shift-j";
 
 pub const TOGGLE_FLAG_MAC: &str = "cmd-shift-l";
 pub const TOGGLE_FLAG_OTHER: &str = "ctrl-shift-l";
+
+pub const COMPOSE_CLOSE_MAC: &str = "cmd-w";
+pub const COMPOSE_CLOSE_OTHER: &str = "ctrl-w";
 
 /// Primary binding label for tooltips on the current platform.
 pub fn primary_binding<'a>(mac: &'a str, other: &'a str) -> &'a str {
@@ -79,6 +82,8 @@ pub fn bind_app_shortcuts(cx: &mut App) {
         KeyBinding::new(MARK_JUNK_OTHER, MessageMarkJunk, None),
         KeyBinding::new(TOGGLE_FLAG_MAC, MessageToggleFlag, None),
         KeyBinding::new(TOGGLE_FLAG_OTHER, MessageToggleFlag, None),
+        KeyBinding::new(COMPOSE_CLOSE_MAC, ComposeClose, None),
+        KeyBinding::new(COMPOSE_CLOSE_OTHER, ComposeClose, None),
     ]);
 }
 

@@ -577,9 +577,37 @@ impl RootView {
 
     /// Refreshes the global menu bar (disabled states follow the current selection).
     pub(crate) fn sync_app_menus(&self, cx: &mut Context<Self>) {
+        if self.compose_window_open_and_active(cx) {
+            return;
+        }
         let ctx = self.command_context();
         let language = cx.language();
         app_menus::sync_menus(cx, &ctx, language);
+    }
+
+    /// Called when the compose window closes (menu, shortcut, or traffic lights).
+    pub(crate) fn on_compose_window_closed(&mut self, cx: &mut Context<Self>) {
+        self.compose_window = None;
+        self.persist_now();
+        self.sync_app_menus(cx);
+    }
+
+    fn compose_window_open_and_active(&self, cx: &mut Context<Self>) -> bool {
+        self.compose_window
+            .as_ref()
+            .is_some_and(|handle| handle.is_active(cx).unwrap_or(false))
+    }
+
+    pub(crate) fn with_compose_window<R>(
+        &self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut ComposeView, &mut Window, &mut Context<ComposeView>) -> R,
+    ) -> Option<R> {
+        self.compose_window.as_ref().and_then(|compose| {
+            compose
+                .update(cx, |view, window, cx| f(view, window, cx))
+                .ok()
+        })
     }
 
     fn refresh_after_message_action(&mut self, cx: &mut Context<Self>) {
@@ -1470,9 +1498,8 @@ impl RootView {
             let view = cx.new(|_| ComposeView::new(accounts, root, compose_white));
             window.on_window_should_close(cx, move |_, cx| {
                 if let Some(root) = root_for_close.upgrade() {
-                    root.update(cx, |root, _| {
-                        root.compose_window = None;
-                        root.persist_now();
+                    root.update(cx, |root, cx| {
+                        root.on_compose_window_closed(cx);
                     });
                 }
                 true
@@ -3377,6 +3404,12 @@ impl Render for RootView {
         static FIRST_READY_FRAME: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         if FIRST_READY_FRAME.set(()).is_ok() {
             crate::startup::log_milestone("first ready frame");
+        }
+
+        if window.is_window_active()
+            && app_menus::active_menu_surface(cx) != app_menus::MenuSurface::Main
+        {
+            self.sync_app_menus(cx);
         }
 
         // Make sure the scrollbar state entities exist before the panels render.

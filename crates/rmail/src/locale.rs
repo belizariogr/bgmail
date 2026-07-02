@@ -102,6 +102,7 @@ pub enum Key {
     ComposeSend,
     ComposeAttach,
     ComposeDiscard,
+    ComposeClose,
     ComposeFrom,
     ComposeTo,
     ComposeCc,
@@ -253,6 +254,8 @@ impl Key {
             (ComposeAttach, P) => "Anexar arquivo",
             (ComposeDiscard, E) => "Discard draft",
             (ComposeDiscard, P) => "Descartar rascunho",
+            (ComposeClose, E) => "Close",
+            (ComposeClose, P) => "Fechar",
             (ComposeFrom, E) => "From:",
             (ComposeFrom, P) => "De:",
             (ComposeTo, E) => "To:",
@@ -359,7 +362,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 63] = [
+    const ALL_KEYS: [Key; 64] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -408,6 +411,7 @@ mod tests {
         Key::ComposeSend,
         Key::ComposeAttach,
         Key::ComposeDiscard,
+        Key::ComposeClose,
         Key::ComposeFrom,
         Key::ComposeTo,
         Key::ComposeCc,

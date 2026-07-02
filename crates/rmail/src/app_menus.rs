@@ -6,18 +6,62 @@
 //! [`App::on_action`] handler when focus is outside the main view tree (e.g. the
 //! native e-mail webview). Keyboard shortcuts are registered in [`crate::shortcuts`]
 //! and appear in the menu bar automatically via GPUI's keymap integration.
+//!
+//! When a compose window is key, [`MenuSurface::Compose`] menus replace the mail
+//! reader menus until the main window is focused again.
 
-use gpui::{App, Menu, MenuItem, SystemMenuType};
+use gpui::{App, Global, Menu, MenuItem, SystemMenuType};
 
 use crate::actions::{
-    ComposeNew, MessageArchive, MessageDelete, MessageDeletePermanent, MessageMarkJunk,
-    MessageRestore, MessageToggleFlag, MoveMessageToFolder, OpenSettings, Quit,
-    ToggleCommandPalette, ToggleSidebar,
+    ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, MessageArchive,
+    MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessageRestore, MessageToggleFlag,
+    MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette, ToggleSidebar,
 };
 use crate::commands::{self, CommandContext, CommandId};
 use crate::locale::{Key, Language};
 
-/// Builds the full application menu tree for the current command context.
+/// Which window's commands are reflected in the global menu bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuSurface {
+    Main,
+    Compose,
+}
+
+/// Tracks the menu bar layout last applied via [`sync_main_menus`] /
+/// [`sync_compose_menus`].
+pub struct ActiveMenuSurface(pub MenuSurface);
+
+impl Global for ActiveMenuSurface {}
+
+fn app_menu() -> Menu {
+    Menu {
+        name: "rMail".into(),
+        items: vec![
+            MenuItem::action("About rMail", gpui::NoAction),
+            MenuItem::separator(),
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Quit rMail", Quit),
+        ],
+    }
+}
+
+fn edit_menu() -> Menu {
+    Menu {
+        name: "Edit".into(),
+        items: vec![
+            MenuItem::os_action("Undo", gpui::NoAction, gpui::OsAction::Undo),
+            MenuItem::os_action("Redo", gpui::NoAction, gpui::OsAction::Redo),
+            MenuItem::separator(),
+            MenuItem::os_action("Cut", gpui::NoAction, gpui::OsAction::Cut),
+            MenuItem::os_action("Copy", gpui::NoAction, gpui::OsAction::Copy),
+            MenuItem::os_action("Paste", gpui::NoAction, gpui::OsAction::Paste),
+            MenuItem::os_action("Select All", gpui::NoAction, gpui::OsAction::SelectAll),
+        ],
+    }
+}
+
+/// Builds the menu tree for the main mail window.
 pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
     let move_items: Vec<MenuItem> = ctx
         .move_targets()
@@ -85,16 +129,7 @@ pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
     }
 
     vec![
-        Menu {
-            name: "rMail".into(),
-            items: vec![
-                MenuItem::action("About rMail", gpui::NoAction),
-                MenuItem::separator(),
-                MenuItem::os_submenu("Services", SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action("Quit rMail", Quit),
-            ],
-        },
+        app_menu(),
         Menu {
             name: "File".into(),
             items: vec![
@@ -103,18 +138,7 @@ pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
                 MenuItem::action(Key::SettingsTitle.tr(language), OpenSettings),
             ],
         },
-        Menu {
-            name: "Edit".into(),
-            items: vec![
-                MenuItem::os_action("Undo", gpui::NoAction, gpui::OsAction::Undo),
-                MenuItem::os_action("Redo", gpui::NoAction, gpui::OsAction::Redo),
-                MenuItem::separator(),
-                MenuItem::os_action("Cut", gpui::NoAction, gpui::OsAction::Cut),
-                MenuItem::os_action("Copy", gpui::NoAction, gpui::OsAction::Copy),
-                MenuItem::os_action("Paste", gpui::NoAction, gpui::OsAction::Paste),
-                MenuItem::os_action("Select All", gpui::NoAction, gpui::OsAction::SelectAll),
-            ],
-        },
+        edit_menu(),
         Menu {
             name: "View".into(),
             items: vec![
@@ -130,6 +154,32 @@ pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
     ]
 }
 
+/// Builds the menu tree while a compose window is key.
+pub fn build_compose_menus(language: Language) -> Vec<Menu> {
+    vec![
+        app_menu(),
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action(Key::ComposeSend.tr(language), ComposeSend),
+                MenuItem::action(Key::ComposeAttach.tr(language), ComposeAttach),
+                MenuItem::separator(),
+                MenuItem::action(Key::ComposeClose.tr(language), ComposeClose),
+                MenuItem::separator(),
+                MenuItem::action(Key::ComposeDiscard.tr(language), ComposeDiscard),
+            ],
+        },
+        edit_menu(),
+    ]
+}
+
+/// Returns the current menu surface, defaulting to [`MenuSurface::Main`].
+pub fn active_menu_surface(cx: &App) -> MenuSurface {
+    cx.try_global::<ActiveMenuSurface>()
+        .map(|surface| surface.0)
+        .unwrap_or(MenuSurface::Main)
+}
+
 fn push_if_enabled<A: gpui::Action>(
     items: &mut Vec<MenuItem>,
     label: &'static str,
@@ -142,9 +192,21 @@ fn push_if_enabled<A: gpui::Action>(
     }
 }
 
+/// Refreshes the global menu bar for the main mail window.
+pub fn sync_main_menus(cx: &mut App, ctx: &CommandContext, language: Language) {
+    cx.set_global(ActiveMenuSurface(MenuSurface::Main));
+    cx.set_menus(build_menus(ctx, language));
+}
+
+/// Refreshes the global menu bar for the compose window.
+pub fn sync_compose_menus(cx: &mut App, language: Language) {
+    cx.set_global(ActiveMenuSurface(MenuSurface::Compose));
+    cx.set_menus(build_compose_menus(language));
+}
+
 /// Refreshes the global menu bar from `ctx`.
 pub fn sync_menus(cx: &mut App, ctx: &CommandContext, language: Language) {
-    cx.set_menus(build_menus(ctx, language));
+    sync_main_menus(cx, ctx, language);
 }
 
 /// Returns whether `menu` contains an action item whose label matches `label`.
@@ -232,5 +294,38 @@ mod tests {
             file_menu,
             Key::ComposeWindowTitle.tr(Language::English),
         ));
+    }
+
+    #[test]
+    fn compose_menus_include_send_attach_close_and_discard() {
+        let menus = build_compose_menus(Language::English);
+        let file_menu = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "File")
+            .expect("File menu");
+        assert!(menu_has_action_label(
+            file_menu,
+            Key::ComposeSend.tr(Language::English),
+        ));
+        assert!(menu_has_action_label(
+            file_menu,
+            Key::ComposeAttach.tr(Language::English),
+        ));
+        assert!(menu_has_action_label(
+            file_menu,
+            Key::ComposeClose.tr(Language::English),
+        ));
+        assert!(menu_has_action_label(
+            file_menu,
+            Key::ComposeDiscard.tr(Language::English),
+        ));
+        assert!(
+            !menus.iter().any(|menu| menu.name.as_ref() == "Message"),
+            "compose surface should not show the Message menu"
+        );
+        assert!(
+            !menus.iter().any(|menu| menu.name.as_ref() == "View"),
+            "compose surface should not show the View menu"
+        );
     }
 }

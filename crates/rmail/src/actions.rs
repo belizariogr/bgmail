@@ -16,6 +16,10 @@ actions!(
         MessageArchive,
         MessageMarkJunk,
         MessageToggleFlag,
+        ComposeSend,
+        ComposeAttach,
+        ComposeDiscard,
+        ComposeClose,
     ]
 );
 

@@ -31,10 +31,11 @@ use gpui::{
 
 use crate::commands::CommandId;
 use actions::{
-    ComposeNew, MessageArchive, MessageDelete, MessageDeletePermanent, MessageMarkJunk,
-    MessageRestore, MessageToggleFlag, MoveMessageToFolder, OpenSettings, Quit,
-    ToggleCommandPalette, ToggleSidebar,
+    ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, MessageArchive,
+    MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessageRestore, MessageToggleFlag,
+    MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette, ToggleSidebar,
 };
+use compose::ComposeView;
 use root::{RootView, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH};
 
 /// Handle to the main mail window, used to route global shortcuts.
@@ -77,6 +78,18 @@ fn schedule_menu_command(id: CommandId, cx: &mut App) {
     });
 }
 
+fn schedule_compose_action(
+    cx: &mut App,
+    action: impl FnOnce(&mut ComposeView, &mut gpui::Window, &mut gpui::Context<ComposeView>) + 'static,
+) {
+    let main = cx.global::<MainWindow>().0;
+    cx.defer(move |cx| {
+        let _ = main.update(cx, |root, _, cx| {
+            root.with_compose_window(cx, action);
+        });
+    });
+}
+
 /// Global handlers keep macOS menu items enabled when a native webview holds focus.
 fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &ComposeNew, cx| schedule_menu_command(CommandId::ComposeNew, cx));
@@ -94,6 +107,18 @@ fn register_global_menu_actions(cx: &mut App) {
     });
     cx.on_action(|action: &MoveMessageToFolder, cx| {
         schedule_menu_command(CommandId::MoveToFolder(action.path.clone()), cx);
+    });
+    cx.on_action(|_: &ComposeSend, cx| {
+        schedule_compose_action(cx, |view, _, cx| view.send_message(cx));
+    });
+    cx.on_action(|_: &ComposeAttach, cx| {
+        schedule_compose_action(cx, |view, _, cx| view.attach_file(cx));
+    });
+    cx.on_action(|_: &ComposeDiscard, cx| {
+        schedule_compose_action(cx, |view, window, cx| view.discard_draft(window, cx));
+    });
+    cx.on_action(|_: &ComposeClose, cx| {
+        schedule_compose_action(cx, |view, window, cx| view.close_window(window, cx));
     });
 }
 

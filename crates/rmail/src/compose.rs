@@ -13,6 +13,8 @@ use ui::{
     Button, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize, Tooltip,
 };
 
+use crate::actions::{ComposeAttach, ComposeClose, ComposeDiscard, ComposeSend};
+use crate::app_menus;
 use crate::data::Account;
 use crate::locale::{ActiveLanguage, Key, Language};
 use crate::root::RootView;
@@ -117,6 +119,40 @@ impl ComposeView {
         cx.notify();
     }
 
+    /// Mock send — real delivery lands with the domain layer.
+    pub(crate) fn send_message(&mut self, cx: &mut Context<Self>) {
+        let _ = cx;
+    }
+
+    /// Mock attach — file picker lands with the domain layer.
+    pub(crate) fn attach_file(&mut self, cx: &mut Context<Self>) {
+        let _ = cx;
+    }
+
+    /// Mock discard — closes the compose window after the mock phase.
+    pub(crate) fn discard_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_window(window, cx);
+    }
+
+    /// Closes this compose window and restores the main-window menu bar.
+    pub(crate) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        window.defer(cx, move |window, cx| {
+            if let Some(root) = root.upgrade() {
+                root.update(cx, |root, cx| {
+                    root.on_compose_window_closed(cx);
+                });
+            }
+            window.remove_window();
+        });
+    }
+
+    fn sync_menus_if_active(&self, window: &Window, language: Language, cx: &mut Context<Self>) {
+        if window.is_window_active() {
+            app_menus::sync_compose_menus(cx, language);
+        }
+    }
+
     fn selected_from_address(&self) -> &str {
         self.accounts
             .get(self.from_account)
@@ -136,14 +172,23 @@ impl ComposeView {
                 div()
                     .id("compose-discard")
                     .tooltip(Tooltip::text(Key::ComposeDiscard.tr(language)))
-                    .child(IconButton::new("compose-discard", IconName::Trash).color(Color::Muted)),
+                    .child(
+                        IconButton::new("compose-discard", IconName::Trash)
+                            .color(Color::Muted)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.discard_draft(window, cx);
+                            })),
+                    ),
             )
             .child(div().flex_1())
             .child(
                 div()
                     .id("compose-attach")
                     .tooltip(Tooltip::text(Key::ComposeAttach.tr(language)))
-                    .child(IconButton::new("compose-attach", IconName::Attachment)),
+                    .child(
+                        IconButton::new("compose-attach", IconName::Attachment)
+                            .on_click(cx.listener(|this, _, _, cx| this.attach_file(cx))),
+                    ),
             )
             .child(
                 div()
@@ -152,7 +197,8 @@ impl ComposeView {
                     .child(
                         Button::new("compose-send", Key::ComposeSend.tr(language))
                             .icon(IconName::Send)
-                            .style(ButtonStyle::Filled),
+                            .style(ButtonStyle::Filled)
+                            .on_click(cx.listener(|this, _, _, cx| this.send_message(cx))),
                     ),
             )
     }
@@ -348,14 +394,27 @@ impl Render for ComposeView {
             }
         }
 
-        let colors = cx.theme().colors();
         let language = cx.language();
+        self.sync_menus_if_active(window, language, cx);
+        let colors = cx.theme().colors();
 
         v_flex()
             .size_full()
             .bg(colors.background)
             .text_color(colors.text)
             .font_family("Helvetica")
+            .on_action(cx.listener(|this, _: &ComposeSend, _, cx| {
+                this.send_message(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ComposeAttach, _, cx| {
+                this.attach_file(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ComposeDiscard, window, cx| {
+                this.discard_draft(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ComposeClose, window, cx| {
+                this.close_window(window, cx);
+            }))
             .child(self.render_header(language, cx))
             .child(self.render_body(language, self.white_background))
             .child(self.render_toolbar(language, cx))
