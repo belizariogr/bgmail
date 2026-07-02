@@ -39,6 +39,7 @@ use crate::shortcuts;
 use crate::web_view::{
     email_document, ContextMenuLabels, DocumentColors, EmailWebView, HostEvent, WEBVIEW_SUPPORTED,
 };
+use crate::MainWindow;
 use storage::{MailListQuery, MessageDetail, MessageListItem};
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
@@ -665,14 +666,7 @@ impl RootView {
 
     pub(crate) fn toggle_command_palette(&mut self, window: &Window, cx: &mut Context<Self>) {
         let bounds = window.window_bounds().get_bounds();
-        let root = cx.weak_entity();
-        cx.defer(move |cx| {
-            if let Some(root) = root.upgrade() {
-                root.update(cx, |view, cx| {
-                    view.toggle_command_palette_internal(bounds, cx);
-                });
-            }
-        });
+        self.toggle_command_palette_internal(bounds, window, cx);
     }
 
     fn toggle_command_palette_from_webview(&mut self, cx: &mut Context<Self>) {
@@ -683,6 +677,7 @@ impl RootView {
     fn toggle_command_palette_internal(
         &mut self,
         main_bounds: Bounds<Pixels>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         self.ensure_command_palette(cx);
@@ -691,6 +686,9 @@ impl RootView {
         };
         if palette.open {
             self.close_command_palette(cx);
+            return;
+        }
+        if !can_open_command_palette(window.is_window_active()) {
             return;
         }
         palette.open = true;
@@ -3475,13 +3473,11 @@ impl Render for RootView {
         if self.command_palette_toggle_requested {
             self.command_palette_toggle_requested = false;
             let bounds = window.window_bounds().get_bounds();
-            let root = cx.weak_entity();
             cx.defer(move |cx| {
-                if let Some(root) = root.upgrade() {
-                    root.update(cx, |view, cx| {
-                        view.toggle_command_palette_internal(bounds, cx);
-                    });
-                }
+                let main = cx.global::<MainWindow>().0;
+                let _ = main.update(cx, |view, window, cx| {
+                    view.toggle_command_palette_internal(bounds, window, cx);
+                });
             });
         }
         if !self.search_is_compact() {
@@ -3622,6 +3618,11 @@ pub(crate) fn should_close_command_palette_on_focus_loss(
     palette_open && !palette_popup_active.unwrap_or(false)
 }
 
+/// The command palette may only be opened while the main window is key.
+pub(crate) fn can_open_command_palette(main_window_active: bool) -> bool {
+    main_window_active
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3664,6 +3665,12 @@ mod tests {
             false,
             Some(false)
         ));
+    }
+
+    #[test]
+    fn command_palette_only_opens_when_main_window_is_focused() {
+        assert!(can_open_command_palette(true));
+        assert!(!can_open_command_palette(false));
     }
 
     #[test]

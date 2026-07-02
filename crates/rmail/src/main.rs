@@ -39,7 +39,7 @@ use compose::ComposeView;
 use root::{RootView, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH};
 
 /// Handle to the main mail window, used to route global shortcuts.
-struct MainWindow(WindowHandle<RootView>);
+pub(crate) struct MainWindow(WindowHandle<RootView>);
 
 impl Global for MainWindow {}
 
