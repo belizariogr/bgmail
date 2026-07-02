@@ -26,7 +26,7 @@ use ui::{
     LabelSize, ListItem, Scrollbar, ScrollbarState, Switch, TextInput, Tooltip,
 };
 
-use crate::actions::ToggleCommandPalette;
+use crate::actions::{ComposeClose, ToggleCommandPalette};
 use crate::app_menus;
 use crate::command_palette::CommandPaletteState;
 use crate::commands::{CommandContext, CommandId};
@@ -591,6 +591,37 @@ impl RootView {
         self.compose_window = None;
         self.persist_now();
         self.sync_app_menus(cx);
+    }
+
+    /// Called when the settings window closes (menu, shortcut, or traffic lights).
+    pub(crate) fn on_settings_window_closed(&mut self, cx: &mut Context<Self>) {
+        self.settings_window = None;
+        self.sync_app_menus(cx);
+        cx.notify();
+    }
+
+    /// Closes the auxiliary window that currently has focus (settings or compose).
+    pub(crate) fn close_focused_auxiliary_window(&mut self, cx: &mut Context<Self>) {
+        if self
+            .settings_window
+            .as_ref()
+            .is_some_and(|handle| handle.is_active(cx).unwrap_or(false))
+        {
+            self.close_settings_window(cx);
+            return;
+        }
+        let _ = self.with_compose_window(cx, |view, window, cx| {
+            view.close_window(window, cx);
+        });
+    }
+
+    /// Closes the settings window when it is open (global shortcut / menu fallback).
+    pub(crate) fn close_settings_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.settings_window.as_ref() {
+            let _ = handle.update(cx, |view, window, cx| {
+                view.close_window(window, cx);
+            });
+        }
     }
 
     fn compose_window_open_and_active(&self, cx: &mut Context<Self>) -> bool {
@@ -1504,8 +1535,18 @@ impl RootView {
             ..Default::default()
         };
 
-        if let Ok(handle) = cx.open_window(options, |_window, cx| {
-            cx.new(|_| SettingsView::new(accounts, root))
+        if let Ok(handle) = cx.open_window(options, |window, cx| {
+            let root_for_close = root.clone();
+            let view = cx.new(|_| SettingsView::new(accounts, root));
+            window.on_window_should_close(cx, move |_, cx| {
+                if let Some(root) = root_for_close.upgrade() {
+                    root.update(cx, |root, cx| {
+                        root.on_settings_window_closed(cx);
+                    });
+                }
+                true
+            });
+            view
         }) {
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             self.settings_window = Some(handle);
@@ -3145,6 +3186,18 @@ impl SettingsView {
         }
     }
 
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        window.defer(cx, move |window, cx| {
+            if let Some(root) = root.upgrade() {
+                root.update(cx, |root, cx| {
+                    root.on_settings_window_closed(cx);
+                });
+            }
+            window.remove_window();
+        });
+    }
+
     fn render_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let language = cx.language();
@@ -3414,6 +3467,9 @@ impl Render for SettingsView {
             .bg(colors.background)
             .text_color(colors.text)
             .font_family("Helvetica")
+            .on_action(cx.listener(|this, _: &ComposeClose, window, cx| {
+                this.close_window(window, cx);
+            }))
             .child(self.render_nav(cx))
             .child(
                 div()

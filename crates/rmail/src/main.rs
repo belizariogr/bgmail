@@ -90,6 +90,15 @@ fn schedule_compose_action(
     });
 }
 
+fn schedule_compose_close(cx: &mut App) {
+    let main = cx.global::<MainWindow>().0;
+    cx.defer(move |cx| {
+        let _ = main.update(cx, |root, _, cx| {
+            root.close_focused_auxiliary_window(cx);
+        });
+    });
+}
+
 /// Global handlers keep macOS menu items enabled when a native webview holds focus.
 fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &ComposeNew, cx| schedule_menu_command(CommandId::ComposeNew, cx));
@@ -118,7 +127,7 @@ fn register_global_menu_actions(cx: &mut App) {
         schedule_compose_action(cx, |view, window, cx| view.discard_draft(window, cx));
     });
     cx.on_action(|_: &ComposeClose, cx| {
-        schedule_compose_action(cx, |view, window, cx| view.close_window(window, cx));
+        schedule_compose_close(cx);
     });
 }
 
@@ -263,6 +272,7 @@ fn main() {
                             if let Some(view) = weak.upgrade() {
                                 view.update(cx, |view, _| view.persist_now());
                             }
+                            cx.quit();
                             true
                         });
                         // Windows: keep the window cloaked (invisible to the compositor)
