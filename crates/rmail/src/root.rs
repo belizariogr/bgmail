@@ -724,6 +724,57 @@ impl RootView {
         cx.notify();
     }
 
+    /// Defers a focus check so the palette popup can become key before we decide
+    /// to close (opening the popup deactivates the main window in the same frame).
+    pub(crate) fn schedule_close_command_palette_if_not_focused(&mut self, cx: &mut Context<Self>) {
+        if !self
+            .command_palette
+            .as_ref()
+            .is_some_and(|palette| palette.open)
+        {
+            return;
+        }
+        let root = cx.weak_entity();
+        cx.defer(move |cx| {
+            if let Some(root) = root.upgrade() {
+                root.update(cx, |root, cx| root.close_command_palette_if_not_focused(cx));
+            }
+        });
+    }
+
+    pub(crate) fn close_command_palette_if_not_focused(&mut self, cx: &mut Context<Self>) {
+        if should_close_command_palette_on_focus_loss(
+            self.command_palette
+                .as_ref()
+                .is_some_and(|palette| palette.open),
+            self.command_palette_window
+                .as_ref()
+                .and_then(|handle| handle.is_active(cx)),
+        ) {
+            self.close_command_palette(cx);
+        }
+    }
+
+    fn register_command_palette_focus_observer(
+        handle: &WindowHandle<CommandPaletteOverlay>,
+        root: WeakEntity<RootView>,
+        cx: &mut App,
+    ) {
+        let _ = handle.update(cx, |_, window, cx| {
+            cx.observe_window_activation(window, move |_, window, cx| {
+                if window.is_window_active() {
+                    return;
+                }
+                if let Some(root) = root.upgrade() {
+                    root.update(cx, |root, cx| {
+                        root.schedule_close_command_palette_if_not_focused(cx);
+                    });
+                }
+            })
+            .detach();
+        });
+    }
+
     /// Opens the palette popup on the app foreground, outside any [`RootView`] update.
     /// `cx.open_window` renders synchronously; doing that inside `root.update` would
     /// re-enter the entity and panic.
@@ -745,6 +796,7 @@ impl RootView {
         }
         if let Some(handle) = root_entity.read(cx).command_palette_window {
             let _ = handle.update(cx, |_, window, _| window.activate_window());
+            Self::register_command_palette_focus_observer(&handle, root.clone(), cx);
             return;
         }
 
@@ -778,6 +830,7 @@ impl RootView {
             return;
         };
         let _ = handle.update(cx, |_, window, _| window.activate_window());
+        Self::register_command_palette_focus_observer(&handle, root.clone(), cx);
         root_entity.update(cx, |root, cx| {
             root.command_palette_window = Some(handle);
             cx.notify();
@@ -3561,6 +3614,14 @@ impl Render for RootView {
     }
 }
 
+/// Whether an open command palette should close after focus leaves its popup.
+pub(crate) fn should_close_command_palette_on_focus_loss(
+    palette_open: bool,
+    palette_popup_active: Option<bool>,
+) -> bool {
+    palette_open && !palette_popup_active.unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3578,6 +3639,31 @@ mod tests {
     fn sidebar_starts_visible() {
         let (_dir, view) = test_view();
         assert!(view.show_sidebar);
+    }
+
+    #[test]
+    fn command_palette_stays_open_while_popup_is_focused() {
+        assert!(!should_close_command_palette_on_focus_loss(
+            false,
+            Some(true)
+        ));
+        assert!(!should_close_command_palette_on_focus_loss(
+            true,
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn command_palette_closes_when_popup_loses_focus() {
+        assert!(should_close_command_palette_on_focus_loss(
+            true,
+            Some(false)
+        ));
+        assert!(should_close_command_palette_on_focus_loss(true, None));
+        assert!(!should_close_command_palette_on_focus_loss(
+            false,
+            Some(false)
+        ));
     }
 
     #[test]

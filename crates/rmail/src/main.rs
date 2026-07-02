@@ -246,7 +246,15 @@ fn main() {
                             .detach();
                             RootView::new(settings)
                         });
-                        view.update(cx, |view, cx| view.sync_app_menus(cx));
+                        view.update(cx, |view, cx| {
+                            cx.observe_window_activation(window, |this, window, cx| {
+                                if !window.is_window_active() {
+                                    this.schedule_close_command_palette_if_not_focused(cx);
+                                }
+                            })
+                            .detach();
+                            view.sync_app_menus(cx);
+                        });
                         // Closing the window (e.g. the macOS traffic-light button)
                         // doesn't necessarily quit the app, so flush the layout here
                         // too — not just on app quit.
