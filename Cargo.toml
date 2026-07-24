@@ -17,10 +17,6 @@ repository = "https://github.com/belizario/bgmail"
 # UI framework (Zed's GPU-accelerated UI). Pinned to the published, standalone-buildable release.
 gpui = "0.2.2"
 
-# Native embedded webview used to render e-mail HTML (WKWebView on macOS,
-# WebView2 on Windows, WebKitGTK on Linux).
-wry = "0.55"
-
 # Serialization for persisted settings (window/column sizes) stored as JSON.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

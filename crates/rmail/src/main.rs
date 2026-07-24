@@ -7,7 +7,7 @@
 
 mod actions;
 mod app_menus;
-#[cfg(all(target_os = "linux", feature = "linux-webview"))]
+#[cfg(feature = "cef-osr")]
 mod cef_osr;
 mod command_palette;
 mod command_palette_overlay;
@@ -133,46 +133,27 @@ fn register_global_menu_actions(cx: &mut App) {
     });
 }
 
-/// GPUI's Windows renderer uses DirectComposition by default (`WS_EX_NOREDIRECTIONBITMAP`).
-/// That path does not compose reliably with the child HWND used by WebView2: the
-/// page can be interactive while its pixels, especially text/selection, never
-/// become visible. This env var is read by GPUI during platform initialization.
-#[cfg(target_os = "windows")]
-const GPUI_DISABLE_DIRECT_COMPOSITION: (&str, &str) = ("GPUI_DISABLE_DIRECT_COMPOSITION", "1");
-
-#[cfg(target_os = "windows")]
-fn configure_windows_webview_hosting() {
-    std::env::set_var(
-        GPUI_DISABLE_DIRECT_COMPOSITION.0,
-        GPUI_DISABLE_DIRECT_COMPOSITION.1,
-    );
-}
-
-#[cfg(not(target_os = "windows"))]
-fn configure_windows_webview_hosting() {}
-
-/// On Linux the HTML reader is Chromium via CEF windowless off-screen rendering,
-/// composited by GPUI as a texture (Wayland-native — unlike wry's WebKitGTK,
-/// which can only embed as an X11 child window). Initialize CEF once up front;
-/// the reader drives its message pump each frame and it is shut down on quit.
-#[cfg(all(target_os = "linux", feature = "linux-webview"))]
-fn init_linux_webview() {
+/// The HTML reader is Chromium via CEF windowless off-screen rendering on every
+/// platform, composited by GPUI as a texture. Initialize CEF once up front; the
+/// reader drives its message pump each frame and it is shut down on quit.
+#[cfg(feature = "cef-osr")]
+fn init_cef_osr() {
     if !cef_osr::initialize() {
         eprintln!("BGMail: CEF initialization failed; HTML reader disabled");
     }
 }
 
-#[cfg(not(all(target_os = "linux", feature = "linux-webview")))]
-fn init_linux_webview() {}
+#[cfg(not(feature = "cef-osr"))]
+fn init_cef_osr() {}
 
-/// Shuts the Linux web engine down on exit. No-op elsewhere.
-#[cfg(all(target_os = "linux", feature = "linux-webview"))]
-fn shutdown_linux_webview() {
+/// Shuts the CEF runtime down on exit. No-op when the feature is disabled.
+#[cfg(feature = "cef-osr")]
+fn shutdown_cef_osr() {
     cef_osr::shutdown_cef();
 }
 
-#[cfg(not(all(target_os = "linux", feature = "linux-webview")))]
-fn shutdown_linux_webview() {}
+#[cfg(not(feature = "cef-osr"))]
+fn shutdown_cef_osr() {}
 
 /// Builds the macOS application menu. The first menu's name becomes the bold
 /// "app menu" in the global menu bar, so it carries the application name.
@@ -198,10 +179,10 @@ fn register_command_palette_shortcuts(cx: &mut App) {
 }
 
 fn main() {
-    // On Linux, CEF re-executes this binary for each of its sub-processes
-    // (renderer, GPU, utility, …), passing a `--type=` switch. Those must run
-    // CEF's sub-process logic and exit before we bring up GPUI.
-    #[cfg(all(target_os = "linux", feature = "linux-webview"))]
+    // CEF re-executes this binary for each of its sub-processes (renderer, GPU,
+    // utility, …), passing a `--type=` switch. Those must run CEF's sub-process
+    // logic and exit before we bring up GPUI.
+    #[cfg(feature = "cef-osr")]
     if cef_osr::run_if_subprocess() {
         return;
     }
@@ -209,8 +190,7 @@ fn main() {
     startup::mark_start();
     startup::log_milestone("main entered");
 
-    configure_windows_webview_hosting();
-    init_linux_webview();
+    init_cef_osr();
 
     Application::new()
         .with_assets(ui::Assets)
@@ -294,8 +274,6 @@ fn main() {
                             cx.observe_window_activation(window, |this, window, cx| {
                                 if window.is_window_active() {
                                     this.on_main_window_activated(cx);
-                                } else {
-                                    this.schedule_close_command_palette_if_not_focused(cx);
                                 }
                             })
                             .detach();
@@ -398,7 +376,7 @@ fn main() {
         });
 
     // `run` blocks until the app exits; tear CEF down cleanly afterward.
-    shutdown_linux_webview();
+    shutdown_cef_osr();
 }
 
 #[cfg(test)]
@@ -438,14 +416,5 @@ mod tests {
         assert!(is_command_palette_keystroke(&cmd_p));
         assert!(is_command_palette_keystroke(&uppercase_ctrl_p));
         assert!(!is_command_palette_keystroke(&plain_p));
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_webview_hosting_disables_gpui_direct_composition() {
-        assert_eq!(
-            super::GPUI_DISABLE_DIRECT_COMPOSITION,
-            ("GPUI_DISABLE_DIRECT_COMPOSITION", "1")
-        );
     }
 }

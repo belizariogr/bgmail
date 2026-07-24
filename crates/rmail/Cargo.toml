@@ -13,10 +13,12 @@ name = "BGMail"
 path = "src/main.rs"
 
 [features]
-# On Linux, CEF off-screen rendering is on by default so plain `cargo run`
-# embeds the HTML reader on Wayland. Disable with: cargo run --no-default-features
-default = ["linux-webview"]
-linux-webview = ["cef", "open", "image", "smallvec", "urlencoding"]
+# CEF windowless OSR for the HTML reader on every platform. Disable with:
+# cargo run --no-default-features
+default = ["cef-osr"]
+cef-osr = ["dep:cef", "dep:open", "dep:image", "dep:smallvec", "dep:urlencoding"]
+# Back-compat alias for the former Linux-only feature name.
+linux-webview = ["cef-osr"]
 
 [dependencies]
 gpui.workspace = true
@@ -37,14 +39,8 @@ serde_json.workspace = true
 # reader must never render (scripts, frames, media, editable controls).
 lol_html = "3.0.0"
 
-# Embedded webview on macOS/Windows via wry (WKWebView / WebView2).
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-wry.workspace = true
-open = "5"
-
-# Linux: CEF windowless OSR → GPUI texture (Wayland-native). Optional so the
-# workspace still builds with `--no-default-features` without downloading CEF.
-[target.'cfg(target_os = "linux")'.dependencies]
+# Chromium Embedded Framework — windowless OSR composited by GPUI. Optional so
+# `--no-default-features` still builds without downloading the CEF runtime.
 cef = { version = "=150.2.1", optional = true, default-features = false }
 open = { version = "5", optional = true }
 image = { version = "0.25", optional = true, default-features = false }
@@ -58,11 +54,8 @@ urlencoding = { version = "2", optional = true }
 objc = "0.2"
 raw-window-handle = "0.6"
 
-# Windows-only: we disable DirectComposition (so WebView2 text composes), which
-# makes GPUI's maximize-on-open asynchronous; the resize message that grows its
-# viewport can be lost during the busy open sequence. We re-post `WM_SIZE` from
-# the native handle so GPUI re-reads the real size. Kept isolated in
-# `window_drag.rs`. `windows` matches the version GPUI already pulls in.
+# Windows-only: maximize-on-open can drop `WM_SIZE` during the busy open sequence;
+# we re-post it from the native handle. Kept isolated in `window_drag.rs`.
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"
 windows = { version = "0.61", features = [

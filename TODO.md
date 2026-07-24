@@ -88,9 +88,8 @@
       ~250ms after scrolling stops or when the mouse leaves the strip. Tested via
       pure thumb-geometry + scroll-recency functions. Mock expanded (18 messages,
       5 accounts, long bodies) so the panels overflow.
-- ✅ HTML e-mail viewer via a **native embedded webview** (`wry`: WKWebView on
-      macOS, WebView2 on Windows; CEF OSR → GPUI texture on Linux via default
-      `linux-webview`),
+- ✅ HTML e-mail viewer via **CEF windowless OSR** on all platforms (default
+      `cef-osr` feature → GPUI texture; plain text with `--no-default-features`),
       replacing the hand-rolled GPUI renderer. The OS engine handles layout,
       scrolling, text selection and copy natively. The webview is a child of the
       GPUI window, layered over the reader body; a `canvas` element keeps its
@@ -243,17 +242,13 @@
 - ✅ Linux client-side decorations (Zed-style): request
       `WindowDecorations::Client`, draw caption buttons in the toolbar, and wrap
       the main UI with shadow/resize chrome when the compositor grants CSD
-- ✅ Linux HTML reader via **CEF windowless off-screen rendering** (replaces the
-      earlier WebKitGTK/`wry` X11-only child embed), on by default via the
-      `linux-webview` feature (`cef` crate downloads the CEF runtime on first
-      build). Chromium renders each body to an off-screen BGRA buffer that GPUI
-      composites as a `RenderImage` texture in the reader pane — works natively on
-      Wayland and X11. `crates/rmail/src/cef_osr.rs` owns the CEF integration
-      (app/render/display/request handlers, external message pump, mouse input,
-      `data:` URL loading, and the console→IPC bridge that mirrors the `wry`
-      `with_ipc_handler`). `web_view.rs` selects the backend: `wry` child webview
-      on macOS/Windows (`COMPOSITES_IN_GPUI = false`), CEF OSR on Linux
-      (`COMPOSITES_IN_GPUI = true`, reader drives `paint` + pointer forwarding).
+- ✅ HTML reader via **CEF windowless off-screen rendering** on Windows, Linux and
+      macOS, on by default via the `cef-osr` feature (`linux-webview` remains an
+      alias). Chromium renders each body to an off-screen BGRA buffer that GPUI
+      composites as a `RenderImage` (`COMPOSITES_IN_GPUI = true` everywhere; the
+      reader drives `paint` + pointer/keyboard forwarding). `crates/rmail/src/cef_osr.rs`
+      owns the CEF integration (handlers, external message pump, console→IPC).
+      The former `wry` child webviews (WKWebView / WebView2) are removed.
       Scroll path tuned for soft OSR: disable Chromium smooth-scrolling (full-buffer
       paints per tick), coalesce trackpad wheel deltas per GPUI frame, reuse the
       BGRA staging buffer across `on_paint`, and keep a short redraw warm loop via
@@ -344,7 +339,8 @@
 - ⬜ Send (SMTP + Gmail)
 - ✅ Move / delete / archive / junk (SQLite folder membership + toolbar/menus)
 - ✅ Star / flag (toggle starred + `sys:flagged` folder)
-- ✅ Command palette (Ctrl/Cmd+P) with contextual message commands
+- ✅ Command palette (Ctrl/Cmd+P) with contextual message commands — in-window
+      GPUI overlay (no `WindowKind::PopUp`; OSR composites under it on all platforms)
 - ✅ macOS menu bar (File/Edit/View/Message; unavailable actions omitted on GPUI 0.2)
 - ⬜ Attachments (view, download, attach)
 - ⬜ Search (UI mock done — DB-backed accent-insensitive search in Stage 2;

@@ -15,11 +15,10 @@ use gpui::{
     CursorStyle, DragMoveEvent, Empty, Entity, FocusHandle, Focusable, FontWeight, Hsla,
     KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point,
     ScrollDelta, ScrollHandle, ScrollWheelEvent, Size, Svg, TitlebarOptions, Transformation,
-    WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle,
-    WindowKind, WindowOptions,
+    WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
 };
 
-use crate::command_palette_overlay::CommandPaletteOverlay;
+use crate::command_palette_overlay;
 use theme::{ActiveTheme, Appearance};
 use ui::prelude::*;
 use ui::{
@@ -41,7 +40,6 @@ use crate::web_view::{
     email_document, ContextMenuLabels, DocumentColors, EmailWebView, HostEvent, WebviewCursor,
     WebviewMouseButton, COMPOSITES_IN_GPUI, WEBVIEW_SUPPORTED,
 };
-use crate::MainWindow;
 use storage::{MailListQuery, MessageDetail, MessageListItem};
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
@@ -450,10 +448,11 @@ pub struct RootView {
     pre_search_mailbox: Option<Selection>,
     /// Set when a webview click should drop search focus on the next frame.
     search_blur_requested: bool,
-    /// Command palette state (UI lives in a popup window — see [`CommandPaletteOverlay`]).
+    /// Command palette state (rendered as an in-window overlay — see
+    /// [`command_palette_overlay`]).
     pub(crate) command_palette: Option<CommandPaletteState>,
-    /// Popup window stacked above the main window (and its native webview).
-    command_palette_window: Option<WindowHandle<CommandPaletteOverlay>>,
+    /// Focus the palette search field once after open.
+    command_palette_focus_pending: bool,
     /// Set when the webview asks for the palette; handled on the next main-window frame.
     command_palette_toggle_requested: bool,
 }
@@ -579,7 +578,7 @@ impl RootView {
             pre_search_mailbox: None,
             search_blur_requested: false,
             command_palette: None,
-            command_palette_window: None,
+            command_palette_focus_pending: false,
             command_palette_toggle_requested: false,
         }
     }
@@ -713,7 +712,6 @@ impl RootView {
                     if let Some(root) = root.upgrade() {
                         root.update(cx, |this, cx| {
                             this.sync_command_palette_query(cx);
-                            this.notify_command_palette_overlay(cx);
                         });
                     }
                 });
@@ -728,12 +726,6 @@ impl RootView {
         }
     }
 
-    fn notify_command_palette_overlay(&self, cx: &mut Context<Self>) {
-        if let Some(handle) = &self.command_palette_window {
-            let _ = handle.update(cx, |_, _, cx| cx.notify());
-        }
-    }
-
     fn sync_command_palette_query(&mut self, cx: &mut Context<Self>) {
         let Some(palette) = &mut self.command_palette else {
             return;
@@ -745,13 +737,12 @@ impl RootView {
             .unwrap_or_default();
         if query != palette.query {
             palette.on_query_change(query);
-            self.notify_command_palette_overlay(cx);
+            cx.notify();
         }
     }
 
     pub(crate) fn toggle_command_palette(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let bounds = window.window_bounds().get_bounds();
-        self.toggle_command_palette_internal(bounds, window, cx);
+        self.toggle_command_palette_internal(window, cx);
     }
 
     fn toggle_command_palette_from_webview(&mut self, cx: &mut Context<Self>) {
@@ -759,12 +750,7 @@ impl RootView {
         cx.notify();
     }
 
-    fn toggle_command_palette_internal(
-        &mut self,
-        main_bounds: Bounds<Pixels>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn toggle_command_palette_internal(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.ensure_command_palette(cx);
         let Some(palette) = &mut self.command_palette else {
             return;
@@ -782,148 +768,38 @@ impl RootView {
         if let Some(input) = &palette.input {
             input.update(cx, |field, cx| field.clear(cx));
         }
+        self.command_palette_focus_pending = true;
         cx.notify();
-        let root = cx.weak_entity();
-        cx.defer(move |cx| Self::open_command_palette_popup(root, main_bounds, cx));
     }
 
     pub(crate) fn dismiss_command_palette(&mut self, cx: &mut Context<Self>) {
         if let Some(palette) = &mut self.command_palette {
             palette.open = false;
         }
-        self.command_palette_window = None;
+        self.command_palette_focus_pending = false;
         cx.notify();
     }
 
     pub(crate) fn close_command_palette(&mut self, cx: &mut Context<Self>) {
-        if let Some(palette) = &mut self.command_palette {
-            palette.open = false;
-        }
-        if let Some(handle) = self.command_palette_window.take() {
-            cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
-            });
-        }
-        cx.notify();
+        self.dismiss_command_palette(cx);
     }
 
-    /// Defers a focus check so the palette popup can become key before we decide
-    /// to close (opening the popup deactivates the main window in the same frame).
-    pub(crate) fn schedule_close_command_palette_if_not_focused(&mut self, cx: &mut Context<Self>) {
-        if !self
-            .command_palette
-            .as_ref()
-            .is_some_and(|palette| palette.open)
-        {
-            return;
-        }
-        let root = cx.weak_entity();
-        cx.defer(move |cx| {
-            if let Some(root) = root.upgrade() {
-                root.update(cx, |root, cx| root.close_command_palette_if_not_focused(cx));
-            }
-        });
-    }
-
-    pub(crate) fn close_command_palette_if_not_focused(&mut self, cx: &mut Context<Self>) {
-        if should_close_command_palette_on_focus_loss(
-            self.command_palette
-                .as_ref()
-                .is_some_and(|palette| palette.open),
-            self.command_palette_window
-                .as_ref()
-                .and_then(|handle| handle.is_active(cx)),
-        ) {
-            self.close_command_palette(cx);
-        }
-    }
-
-    fn register_command_palette_focus_observer(
-        handle: &WindowHandle<CommandPaletteOverlay>,
-        root: WeakEntity<RootView>,
-        cx: &mut App,
-    ) {
-        let _ = handle.update(cx, |_, window, cx| {
-            cx.observe_window_activation(window, move |_, window, cx| {
-                if window.is_window_active() {
-                    return;
-                }
-                if let Some(root) = root.upgrade() {
-                    root.update(cx, |root, cx| {
-                        root.schedule_close_command_palette_if_not_focused(cx);
-                    });
-                }
-            })
-            .detach();
-        });
-    }
-
-    /// Opens the palette popup on the app foreground, outside any [`RootView`] update.
-    /// `cx.open_window` renders synchronously; doing that inside `root.update` would
-    /// re-enter the entity and panic.
-    fn open_command_palette_popup(
-        root: WeakEntity<RootView>,
-        bounds: Bounds<Pixels>,
-        cx: &mut App,
-    ) {
-        let Some(root_entity) = root.upgrade() else {
-            return;
+    /// Snapshot of palette rows for the in-window overlay.
+    fn command_palette_render_args(
+        &self,
+        cx: &App,
+    ) -> Option<(Vec<crate::commands::CommandEntry>, usize, Entity<TextInput>)> {
+        let palette = self.command_palette.as_ref().filter(|p| p.open)?;
+        let language = cx.language();
+        let ctx = self.command_context();
+        let entries = palette.filtered_entries(language, &ctx);
+        let selected_ix = if entries.is_empty() {
+            0
+        } else {
+            palette.selected_ix.min(entries.len() - 1)
         };
-        if !root_entity
-            .read(cx)
-            .command_palette
-            .as_ref()
-            .is_some_and(|palette| palette.open)
-        {
-            return;
-        }
-        if let Some(handle) = root_entity.read(cx).command_palette_window {
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
-            Self::register_command_palette_focus_observer(&handle, root.clone(), cx);
-            return;
-        }
-
-        let root_for_close = root.clone();
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: None,
-            window_background: WindowBackgroundAppearance::Transparent,
-            focus: true,
-            show: true,
-            kind: WindowKind::PopUp,
-            is_movable: false,
-            is_resizable: false,
-            is_minimizable: false,
-            ..Default::default()
-        };
-
-        let Ok(handle) = cx.open_window(options, |window, cx| {
-            let view = cx.new(|_| CommandPaletteOverlay::new(root_for_close.clone()));
-            window.on_window_should_close(cx, move |_, cx| {
-                let root_for_close = root_for_close.clone();
-                cx.defer(move |cx| {
-                    if let Some(root) = root_for_close.upgrade() {
-                        root.update(cx, |root, cx| root.dismiss_command_palette(cx));
-                    }
-                });
-                true
-            });
-            view
-        }) else {
-            return;
-        };
-        let _ = handle.update(cx, |_, window, _| window.activate_window());
-        Self::register_command_palette_focus_observer(&handle, root.clone(), cx);
-        root_entity.update(cx, |root, cx| {
-            root.command_palette_window = Some(handle);
-            cx.notify();
-        });
-    }
-
-    /// Whether the privacy-shield dropdown is open. Only that menu still hides
-    /// the native webview; the command palette uses its own popup window.
-    fn gpui_overlay_covers_webview(&self) -> bool {
-        self.privacy_menu_open
+        let input = palette.input.clone()?;
+        Some((entries, selected_ix, input))
     }
 
     pub(crate) fn execute_command(
@@ -1030,8 +906,8 @@ impl RootView {
         }
         match event.keystroke.key.as_str() {
             "escape" => {
-                // Handled in [`CommandPaletteOverlay::handle_key`] via `dismiss_popup`.
-                false
+                self.dismiss_command_palette(cx);
+                true
             }
             "up" => {
                 let changed = self
@@ -1040,7 +916,7 @@ impl RootView {
                     .expect("palette open")
                     .move_selection(-1, entries.len());
                 if changed {
-                    self.notify_command_palette_overlay(cx);
+                    cx.notify();
                 }
                 true
             }
@@ -1051,7 +927,7 @@ impl RootView {
                     .expect("palette open")
                     .move_selection(1, entries.len());
                 if changed {
-                    self.notify_command_palette_overlay(cx);
+                    cx.notify();
                 }
                 true
             }
@@ -3334,10 +3210,8 @@ impl RootView {
                 // Match the forced-white body so no themed background shows behind
                 // the webview while it loads or at sub-pixel edges.
                 .when(self.reader_white_background, |el| el.bg(gpui::white()))
-                // On the Linux OSR backend GPUI composites the page texture, so it
-                // must also relay pointer input to the off-screen browser (text
-                // selection, scrolling, the custom menus). The `wry` backends get
-                // input from the OS directly, so this is skipped there.
+                // CEF OSR is composited by GPUI, so overlays (privacy menu, command
+                // palette) stack above the reader texture without hiding it.
                 .when(COMPOSITES_IN_GPUI, |el| {
                     let focus = reader_focus
                         .clone()
@@ -3359,20 +3233,15 @@ impl RootView {
                         move |bounds, _, window, cx| {
                             let _ = view.update(cx, |this, cx| {
                                 this.webview_bounds = Some(bounds);
-                                let hide_for_overlay = this.gpui_overlay_covers_webview();
                                 if let Some(webview) = &mut this.email_webview {
-                                    if hide_for_overlay {
-                                        webview.hide();
-                                    } else {
-                                        webview.position(bounds);
-                                        // Soft OSR may need follow-up frames; notify
-                                        // instead of request_animation_frame (which
-                                        // panics outside paint of the element tree's
-                                        // current_view in some paths, and is unsafe
-                                        // from input handlers).
-                                        if webview.paint(bounds, window, cx) {
-                                            cx.notify();
-                                        }
+                                    webview.position(bounds);
+                                    // Soft OSR may need follow-up frames; notify
+                                    // instead of request_animation_frame (which
+                                    // panics outside paint of the element tree's
+                                    // current_view in some paths, and is unsafe
+                                    // from input handlers).
+                                    if webview.paint(bounds, window, cx) {
+                                        cx.notify();
                                     }
                                 }
                             });
@@ -3851,13 +3720,20 @@ impl Render for RootView {
         }
         if self.command_palette_toggle_requested {
             self.command_palette_toggle_requested = false;
-            let bounds = window.window_bounds().get_bounds();
-            cx.defer(move |cx| {
-                let main = cx.global::<MainWindow>().0;
-                let _ = main.update(cx, |view, window, cx| {
-                    view.toggle_command_palette_internal(bounds, window, cx);
+            self.toggle_command_palette_internal(window, cx);
+        }
+        if self.command_palette_focus_pending {
+            self.command_palette_focus_pending = false;
+            if let Some(input) = self
+                .command_palette
+                .as_ref()
+                .and_then(|palette| palette.input.clone())
+            {
+                let focus_handle = input.read(cx).focus_handle(cx);
+                window.defer(cx, move |window, _| {
+                    window.focus(&focus_handle);
                 });
-            });
+            }
         }
         if !self.search_is_compact() {
             self.search_force_expanded = false;
@@ -3970,9 +3846,8 @@ impl Render for RootView {
                 this.toggle_command_palette(window, cx);
             }))
             // Dismiss the in-page context menu only when the click is *outside*
-            // the reader. On Linux OSR the same click is forwarded into CEF; closing
-            // the menu here would race ahead of the item's mousedown (Copy / Show
-            // image never ran). Child webviews never deliver those clicks to GPUI.
+            // the reader. OSR forwards the same click into CEF; closing the menu
+            // here would race ahead of the item's mousedown (Copy / Show image).
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 if should_dismiss_webview_context_menu(event.position, this.webview_bounds) {
                     if let Some(webview) = &this.email_webview {
@@ -3987,6 +3862,25 @@ impl Render for RootView {
             .when(self.privacy_menu_open, |el| {
                 el.child(self.render_privacy_menu(cx))
             })
+            .when(
+                self.command_palette
+                    .as_ref()
+                    .is_some_and(|palette| palette.open),
+                |el| {
+                    if let Some((entries, selected_ix, input)) =
+                        self.command_palette_render_args(cx)
+                    {
+                        el.child(command_palette_overlay::render_command_palette(
+                            cx,
+                            entries,
+                            selected_ix,
+                            input,
+                        ))
+                    } else {
+                        el
+                    }
+                },
+            )
             .into_any_element();
 
         // Linux CSD: wrap with shadow/resize chrome when the compositor granted
@@ -3997,22 +3891,14 @@ impl Render for RootView {
 
 /// Whether a GPUI click should close the in-page webview context menu.
 ///
-/// Clicks inside the reader bounds are left to the page (Linux OSR forwards them
-/// into CEF). Clicks on chrome (toolbar, list, sidebar) never reach the DOM, so
-/// we dismiss from the host.
+/// Clicks inside the reader bounds are left to the page (CEF OSR forwards them
+/// into Chromium). Clicks on chrome (toolbar, list, sidebar) never reach the DOM,
+/// so we dismiss from the host.
 pub(crate) fn should_dismiss_webview_context_menu(
     click: Point<Pixels>,
     webview_bounds: Option<Bounds<Pixels>>,
 ) -> bool {
     !webview_bounds.is_some_and(|bounds| bounds.contains(&click))
-}
-
-/// Whether an open command palette should close after focus leaves its popup.
-pub(crate) fn should_close_command_palette_on_focus_loss(
-    palette_open: bool,
-    palette_popup_active: Option<bool>,
-) -> bool {
-    palette_open && !palette_popup_active.unwrap_or(false)
 }
 
 /// The command palette may only be opened while the main window is key.
@@ -4037,31 +3923,6 @@ mod tests {
     fn sidebar_starts_visible() {
         let (_dir, view) = test_view();
         assert!(view.show_sidebar);
-    }
-
-    #[test]
-    fn command_palette_stays_open_while_popup_is_focused() {
-        assert!(!should_close_command_palette_on_focus_loss(
-            false,
-            Some(true)
-        ));
-        assert!(!should_close_command_palette_on_focus_loss(
-            true,
-            Some(true)
-        ));
-    }
-
-    #[test]
-    fn command_palette_closes_when_popup_loses_focus() {
-        assert!(should_close_command_palette_on_focus_loss(
-            true,
-            Some(false)
-        ));
-        assert!(should_close_command_palette_on_focus_loss(true, None));
-        assert!(!should_close_command_palette_on_focus_loss(
-            false,
-            Some(false)
-        ));
     }
 
     #[test]
@@ -4094,15 +3955,12 @@ mod tests {
     }
 
     #[test]
-    fn gpui_overlay_covers_webview_when_privacy_menu_open() {
-        let (_dir, mut view) = test_view();
-        assert!(!view.gpui_overlay_covers_webview());
-
-        view.privacy_menu_open = true;
-        assert!(view.gpui_overlay_covers_webview());
-
-        view.privacy_menu_open = false;
-        assert!(!view.gpui_overlay_covers_webview());
+    fn command_palette_starts_closed() {
+        let (_dir, view) = test_view();
+        assert!(view
+            .command_palette
+            .as_ref()
+            .is_none_or(|palette| !palette.open));
     }
 
     #[test]

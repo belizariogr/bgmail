@@ -1,24 +1,12 @@
 //! Embedded webview used to render e-mail HTML.
 //!
-//! The message body is rendered by a real web engine layered into the reader
-//! pane. This replaces the hand-rolled HTML element renderer: the engine handles
-//! layout, scrolling, text selection and copy natively, which is both simpler and
-//! far more capable. Two backends exist behind a single [`EmailWebView`] API:
+//! The message body is rendered by Chromium via CEF **windowless off-screen
+//! rendering** (see [`crate::cef_osr`]) on every platform. CEF paints into an
+//! off-screen BGRA buffer that GPUI composites as a texture in the reader pane
+//! ([`COMPOSITES_IN_GPUI`] is `true`). The reader calls [`EmailWebView::paint`]
+//! each frame and forwards pointer/keyboard input through the `handle_*` methods.
 //!
-//! - **macOS / Windows** — a native *child webview* (`wry`: WKWebView /
-//!   WebView2) hosted as a child of the GPUI window and floated over the reader
-//!   pane. GPUI does not composite it; it lives in its own OS surface, so
-//!   [`COMPOSITES_IN_GPUI`] is `false` and [`EmailWebView::paint`] is a no-op.
-//!
-//! - **Linux** — Chromium via CEF **windowless off-screen rendering** (see
-//!   [`crate::cef_osr`]). `wry`'s WebKitGTK can only embed as an X11 child window,
-//!   which does not work under Wayland; CEF renders the page to an off-screen
-//!   buffer that GPUI composites as a texture. Here [`COMPOSITES_IN_GPUI`] is
-//!   `true`: the reader calls [`EmailWebView::paint`] each frame and forwards
-//!   mouse input through the `handle_*` methods.
-//!
-//! Input, sanitization and the content script are shared across backends; only
-//! the hosting/compositing differs.
+//! With the `cef-osr` feature disabled the reader falls back to plain text.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -32,8 +20,7 @@ pub use platform::{EmailWebView, COMPOSITES_IN_GPUI};
 
 /// A mouse button forwarded from the reader to the webview backend. Kept
 /// independent of GPUI's `MouseButton` so [`EmailWebView`]'s API is the same on
-/// every platform (only the Linux OSR backend acts on it; the `wry` child
-/// webviews receive input from the OS directly).
+/// every platform (the OSR backend consumes it; the plain-text stub ignores it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebviewMouseButton {
     Left,
@@ -63,17 +50,12 @@ pub enum WebviewCursor {
 }
 
 /// Whether the native embedded webview backend is available on this target.
-pub const WEBVIEW_SUPPORTED: bool = cfg!(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", feature = "linux-webview")
-));
+pub const WEBVIEW_SUPPORTED: bool = cfg!(feature = "cef-osr");
 
-/// Advances the platform web engine's event loop so it can process input and
-/// paint. On Linux this drives CEF's external message pump; no-op elsewhere
-/// (the `wry` child webviews run on the OS's own loop).
+/// Advances CEF's external message pump so the OSR browser can process input
+/// and paint. No-op when the `cef-osr` feature is disabled.
 pub fn pump_platform_events() {
-    #[cfg(all(target_os = "linux", feature = "linux-webview"))]
+    #[cfg(feature = "cef-osr")]
     {
         crate::cef_osr::pump();
     }
@@ -442,18 +424,10 @@ pub enum HostEvent {
 
 /// Opens BGMail's command palette from inside the reader document (Ctrl/Cmd+P).
 /// Inlined in every rendered message so it survives `load_html` navigations.
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", feature = "linux-webview")
-))]
+#[cfg(feature = "cef-osr")]
 const COMMAND_PALETTE_SHORTCUT_SCRIPT: &str = r#"document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&!e.shiftKey&&!e.altKey&&e.key&&e.key.toLowerCase()==='p'){e.preventDefault();e.stopPropagation();window.ipc.postMessage('P\n');}},true);"#;
 
-#[cfg(not(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", feature = "linux-webview")
-)))]
+#[cfg(not(feature = "cef-osr"))]
 const COMMAND_PALETTE_SHORTCUT_SCRIPT: &str = "";
 
 /// Injected into every rendered message. Two responsibilities:
@@ -472,11 +446,7 @@ const COMMAND_PALETTE_SHORTCUT_SCRIPT: &str = "";
 ///    nothing on empty background. Labels are read from `<body data-rm-*>` and
 ///    colors from the document's CSS variables, so all menus follow the active
 ///    language and theme without rebuilding the view.
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", feature = "linux-webview")
-))]
+#[cfg(feature = "cef-osr")]
 pub(crate) const CONTENT_SCRIPT: &str = r#"(function () {
   function send(tag, value) { window.ipc.postMessage(tag + '\n' + (value || '')); }
 
@@ -980,335 +950,9 @@ fn escape_html(input: &str) -> String {
     out
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-mod platform {
-    use async_channel::Sender;
-    use gpui::{Bounds, Pixels, Window};
-    use wry::{
-        dpi::{LogicalPosition, LogicalSize},
-        NewWindowResponse, Rect, WebView, WebViewBuilder,
-    };
-
-    /// The `wry` child webviews render into their own OS surface, floated over the
-    /// reader pane — GPUI never composites them, so [`EmailWebView::paint`] is a
-    /// no-op and the reader positions the view instead.
-    pub const COMPOSITES_IN_GPUI: bool = false;
-
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use super::{
-        decode_data_uri, downloads_dir, is_external_link, parse_ipc_message, unique_download_path,
-        HostEvent, IpcMessage, CONTENT_SCRIPT,
-    };
-
-    /// Opens `url` in the user's default browser, detached so it never blocks the
-    /// UI thread. Errors are ignored: a failed launch shouldn't crash the reader.
-    fn open_external(url: &str) {
-        let _ = open::that_detached(url);
-    }
-
-    /// Routes a message sent from the document's content script. Actions that
-    /// touch app state (hover) or need GPUI (clipboard) are forwarded to the
-    /// foreground over `to_host`; open/download run here on the main thread.
-    /// `notify_body` is the localized text shown after a successful download.
-    fn handle_ipc(message: &str, to_host: &Sender<HostEvent>, notify_body: &str) {
-        match parse_ipc_message(message) {
-            Some(IpcMessage::Hover(url)) => {
-                let _ = to_host.try_send(HostEvent::HoverLink(url.to_string()));
-            }
-            Some(IpcMessage::OpenExternal(url)) => open_in_new_window(url),
-            Some(IpcMessage::DownloadImage(url)) => download_image(url, notify_body),
-            Some(IpcMessage::CopyToClipboard(text)) => {
-                let _ = to_host.try_send(HostEvent::CopyToClipboard(text.to_string()));
-            }
-            Some(IpcMessage::ShowImage(url)) => {
-                let _ = to_host.try_send(HostEvent::ImageShown(url.to_string()));
-            }
-            Some(IpcMessage::BodyMouseDown) => {
-                let _ = to_host.try_send(HostEvent::BodyMouseDown);
-            }
-            Some(IpcMessage::CommandPalette) => {
-                let _ = to_host.try_send(HostEvent::CommandPalette);
-            }
-            None => {}
-        }
-    }
-
-    /// Handles a "open in new window" request (links or images): the embedded
-    /// reader never spawns its own window. Remote targets go to the system
-    /// browser; an inline `data:` image — which has no URL to navigate to — is
-    /// written to a temp file and handed to the OS default viewer instead.
-    fn open_in_new_window(url: &str) {
-        if is_external_link(url) {
-            open_external(url);
-        } else if let Some((extension, bytes)) = decode_data_uri(url) {
-            if let Some(path) = persist_temp_file(extension, &bytes) {
-                let _ = open::that_detached(path);
-            }
-        }
-    }
-
-    /// Saves an image straight to the user's Downloads folder (no dialog) and
-    /// fires a desktop notification. This backs the custom context menu's
-    /// "Download image", which exists because WebKit's own "Download Image" item
-    /// never reaches the download delegate.
-    ///
-    /// Inline `data:` images are decoded and written directly. Remote images
-    /// would need a network fetch we don't have yet, so we fall back to opening
-    /// them in the browser, where the user can save them.
-    fn download_image(url: &str, notify_body: &str) {
-        let Some((extension, bytes)) = decode_data_uri(url) else {
-            if is_external_link(url) {
-                open_external(url);
-            }
-            return;
-        };
-        let Some(dir) = downloads_dir() else {
-            return;
-        };
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        let path = unique_download_path(&dir, "image", extension, |candidate| candidate.exists());
-        if std::fs::write(&path, bytes).is_ok() {
-            notify(notify_body);
-        }
-    }
-
-    /// Shows a desktop notification confirming the download. On macOS we shell
-    /// out to `osascript`, which works for an unbundled binary (`cargo run`) —
-    /// unlike `UNUserNotificationCenter`, which needs an app bundle. Other
-    /// platforms are a no-op until their notification backend lands.
-    #[allow(unused_variables)]
-    fn notify(body: &str) {
-        #[cfg(target_os = "macos")]
-        {
-            let script = format!(
-                "display notification {} with title {}",
-                super::applescript_string(body),
-                super::applescript_string("BGMail"),
-            );
-            let _ = std::process::Command::new("osascript")
-                .arg("-e")
-                .arg(script)
-                .spawn();
-        }
-    }
-
-    /// Writes `bytes` to a uniquely named file in the OS temp directory and
-    /// returns its path. The nanosecond timestamp keeps successive opens from
-    /// clobbering each other. Returns `None` if the write fails.
-    fn persist_temp_file(extension: &str, bytes: &[u8]) -> Option<std::path::PathBuf> {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()?
-            .as_nanos();
-        let mut path = std::env::temp_dir();
-        path.push(format!("rmail-image-{nanos}.{extension}"));
-        std::fs::write(&path, bytes).ok()?;
-        Some(path)
-    }
-
-    /// A native webview hosted as a child of the GPUI window. It floats over the
-    /// reader pane; we only have to keep its bounds, HTML and visibility in sync.
-    pub struct EmailWebView {
-        webview: WebView,
-        last_html: String,
-        last_bounds: Option<(f32, f32, f32, f32)>,
-        visible: bool,
-        /// Localized text shown after a successful image download. Shared with
-        /// the IPC closure so [`Self::set_notify_text`] can relocalize it live
-        /// (the view isn't rebuilt on a language switch).
-        notify_body: Rc<RefCell<String>>,
-    }
-
-    impl EmailWebView {
-        /// Creates the child webview hosted by `window`, initially hidden so it
-        /// doesn't flash at the default origin before it is first positioned.
-        pub fn new(
-            window: &Window,
-            html: &str,
-            to_host: Sender<HostEvent>,
-            notify_body: String,
-        ) -> Option<Self> {
-            let notify_body = Rc::new(RefCell::new(notify_body));
-            let notify_for_ipc = notify_body.clone();
-            let webview = WebViewBuilder::new()
-                .with_html(html)
-                // Links must open in the system browser, not hijack the reader.
-                // We cancel external navigations and hand the URL to the OS.
-                .with_navigation_handler(|url| {
-                    if is_external_link(&url) {
-                        open_external(&url);
-                        false
-                    } else {
-                        true
-                    }
-                })
-                // "Open Link/Image in New Window", `target="_blank"` and
-                // `window.open` never spawn an embedded window: links go to the
-                // system browser and inline images are opened by the OS.
-                .with_new_window_req_handler(|url, _features| {
-                    open_in_new_window(&url);
-                    NewWindowResponse::Deny
-                })
-                // Hovered-link reporting + the custom image context menu (the
-                // native "Download Image" is inert in WebKit, so we provide our
-                // own and route the action through IPC).
-                .with_initialization_script(CONTENT_SCRIPT)
-                .with_ipc_handler(move |req| {
-                    handle_ipc(&req.into_body(), &to_host, &notify_for_ipc.borrow());
-                })
-                // Never expose the OS Web Inspector ("Inspect Element"). wry turns
-                // devtools on by default in debug builds, which both pollutes the
-                // context menu and, once opened, attaches an inspector that resizes
-                // the child WKWebView so it overflows the reader pane. This is an
-                // e-mail reader, not a browser: the body stays sandboxed.
-                .with_devtools(false)
-                .with_visible(false)
-                .build_as_child(window)
-                .ok()?;
-            Some(Self {
-                webview,
-                last_html: html.to_string(),
-                last_bounds: None,
-                visible: false,
-                notify_body,
-            })
-        }
-
-        /// Reloads the document if it changed (e.g. another message was selected
-        /// or the theme toggled). Returns `None` — the child webview owns its
-        /// surface, so there is no GPUI texture to drop (Linux OSR returns one).
-        pub fn set_html(&mut self, html: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
-            if self.last_html == html {
-                return None;
-            }
-            if self.webview.load_html(html).is_ok() {
-                self.last_html = html.to_string();
-            }
-            None
-        }
-
-        /// No-op on child-webview backends (the OS keeps the surface alive).
-        pub fn on_window_activated(&mut self) {}
-
-        /// No-op: child webviews are not driven by a GPUI tick.
-        pub fn on_osr_tick(&mut self) -> bool {
-            false
-        }
-
-        /// No-op: child webviews paint on their own surfaces.
-        pub fn note_load_progress(&mut self) {}
-
-        /// Updates the localized notification text used after a download, so a
-        /// language switch is reflected without rebuilding the webview.
-        pub fn set_notify_text(&self, body: String) {
-            *self.notify_body.borrow_mut() = body;
-        }
-
-        /// Positions the webview over `bounds` (window-relative, logical pixels)
-        /// and makes it visible. Bounds are only pushed to the OS when they change.
-        pub fn position(&mut self, bounds: Bounds<Pixels>) {
-            let next = (
-                f32::from(bounds.origin.x),
-                f32::from(bounds.origin.y),
-                f32::from(bounds.size.width),
-                f32::from(bounds.size.height),
-            );
-            if self.last_bounds != Some(next) {
-                let rect = Rect {
-                    position: LogicalPosition::new(next.0, next.1).into(),
-                    size: LogicalSize::new(next.2.max(1.0), next.3.max(1.0)).into(),
-                };
-                let _ = self.webview.set_bounds(rect);
-                self.last_bounds = Some(next);
-            }
-            self.set_visible(true);
-        }
-
-        /// Closes any custom context menu currently open inside the document.
-        /// Clicking a sibling GPUI view neither blurs the webview nor delivers a
-        /// DOM event, so the host calls this on any outside click to dismiss it.
-        pub fn dismiss_context_menu(&self) {
-            let _ = self
-                .webview
-                .evaluate_script("window.__rmCloseMenu&&window.__rmCloseMenu()");
-        }
-
-        /// Hides the native webview (e.g. when no message is selected).
-        pub fn hide(&mut self) {
-            self.set_visible(false);
-        }
-
-        /// No-op: the child webview composites in its own OS surface, not through
-        /// GPUI. Present so the reader's paint path is uniform across backends.
-        /// Always returns `false` (no follow-up GPUI frame needed).
-        pub fn paint(
-            &mut self,
-            _bounds: Bounds<Pixels>,
-            _window: &mut Window,
-            _cx: &mut gpui::App,
-        ) -> bool {
-            false
-        }
-
-        /// No-op: the OS delivers input to the child webview directly. Present so
-        /// the reader can wire the same handlers on every backend.
-        pub fn handle_mouse_move(
-            &self,
-            _x: f32,
-            _y: f32,
-            _shift: bool,
-            _control: bool,
-            _alt: bool,
-            _meta: bool,
-        ) {
-        }
-
-        pub fn handle_mouse_button(
-            &self,
-            _x: f32,
-            _y: f32,
-            _button: super::WebviewMouseButton,
-            _pressed: bool,
-            _click_count: i32,
-        ) {
-        }
-
-        pub fn handle_scroll(&self, _x: f32, _y: f32, _delta_x: f32, _delta_y: f32) {}
-
-        pub fn handle_key(
-            &mut self,
-            _pressed: bool,
-            _key: &str,
-            _key_char: Option<&str>,
-            _shift: bool,
-            _control: bool,
-            _alt: bool,
-            _meta: bool,
-        ) {
-        }
-
-        pub fn set_focused(&self, _focused: bool) {}
-
-        pub fn has_mouse_capture(&self) -> bool {
-            false
-        }
-
-        fn set_visible(&mut self, visible: bool) {
-            if self.visible != visible && self.webview.set_visible(visible).is_ok() {
-                self.visible = visible;
-            }
-        }
-    }
-}
-
-/// Linux backend: Chromium windowless OSR composited by GPUI (see
-/// [`crate::cef_osr`]). The reader drives painting and input explicitly.
-#[cfg(all(target_os = "linux", feature = "linux-webview"))]
+/// CEF windowless OSR backend (see [`crate::cef_osr`]). The reader drives
+/// painting and input explicitly on every platform.
+#[cfg(feature = "cef-osr")]
 mod platform {
     use async_channel::Sender;
     use gpui::{Bounds, Pixels, Window};
@@ -1320,8 +964,7 @@ mod platform {
     /// reader must call [`EmailWebView::paint`] each frame and forward input.
     pub const COMPOSITES_IN_GPUI: bool = true;
 
-    /// Off-screen Chromium browser wrapper exposing the same surface as the `wry`
-    /// backend, plus GPUI painting and input forwarding.
+    /// Off-screen Chromium browser wrapper with GPUI painting and input forwarding.
     pub struct EmailWebView {
         inner: OsrBrowser,
         /// Whether the view should paint this frame (mirrors show/hide so a hidden
@@ -1602,11 +1245,7 @@ mod platform {
     }
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", feature = "linux-webview")
-)))]
+#[cfg(not(feature = "cef-osr"))]
 mod platform {
     use gpui::{Bounds, Pixels, Window};
 
@@ -2224,11 +1863,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", feature = "linux-webview")
-    ))]
+    #[cfg(feature = "cef-osr")]
     fn document_embeds_command_palette_shortcut_script() {
         let doc = email_document(
             doc_colors(
@@ -2246,11 +1881,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", feature = "linux-webview")
-    ))]
+    #[cfg(feature = "cef-osr")]
     fn content_script_runs_menu_actions_on_mousedown() {
         // Soft OSR often drops the synthesized `click` after a right-click menu;
         // actions must fire on mousedown and body-mousedown must ignore menu hits.

@@ -31,20 +31,23 @@ cargo test --workspace    # runs the tests
 cargo clippy --workspace  # lint
 ```
 
-### Linux: HTML reader (CEF off-screen rendering)
+### HTML reader (CEF off-screen rendering)
 
-On Linux the HTML reader uses **CEF** (Chromium Embedded Framework) in
-**windowless off-screen rendering** mode: Chromium renders each message body into
-an off-screen buffer that GPUI composites as a texture in the reader pane. This
-works natively on **Wayland** (and X11) — unlike the macOS/Windows `wry` child
-webviews, whose WebKitGTK equivalent can only embed as an X11 child window.
+The HTML reader uses **CEF** (Chromium Embedded Framework) in **windowless
+off-screen rendering** mode on **Windows, Linux and macOS**: Chromium renders each
+message body into an off-screen buffer that GPUI composites as a texture in the
+reader pane (including native **Wayland** on Linux).
 
-`linux-webview` is enabled by default, so plain `cargo run` embeds HTML messages.
-The `cef` crate downloads the matching CEF binary distribution on first build, so
-the initial build needs network access and takes a little longer.
+The `cef-osr` feature is enabled by default, so plain `cargo run` embeds HTML
+messages. The `cef` crate downloads the matching CEF binary distribution on first
+build, so the initial build needs network access and takes a little longer.
 
-Runtime dependencies (Chromium's shared libraries) are typically already present
-on a desktop system; if the browser fails to start, install:
+**macOS note:** a production `.app` must ship the CEF framework and helper apps
+(see `bundle-cef-app` from the `cef` crate). Unbundled `cargo run` may need that
+layout before the reader starts.
+
+Runtime dependencies on Linux (Chromium's shared libraries) are typically already
+present on a desktop system; if the browser fails to start, install:
 
 ```bash
 sudo apt install libnss3 libnspr4 libgbm1 libasound2 libxkbcommon0 libgtk-3-0
@@ -55,8 +58,7 @@ To build without the HTML reader (plain-text reader only):
 
 CEF re-executes the BGMail binary for its own sub-processes (renderer, GPU,
 utility); this is handled automatically at startup and those processes exit on
-their own — no configuration needed. `BGMAIL_NATIVE_WAYLAND` is no longer
-required and has no effect.
+their own — no configuration needed.
 
 ### macOS: Metal Toolchain (Xcode 26+)
 

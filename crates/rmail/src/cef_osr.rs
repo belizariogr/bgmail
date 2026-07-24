@@ -1,24 +1,12 @@
-//! Linux e-mail body rendering via CEF (Chromium Embedded Framework) using
-//! **windowless off-screen rendering (OSR)**.
+//! Linux / macOS / Windows e-mail body rendering via CEF (Chromium Embedded
+//! Framework) using **windowless off-screen rendering (OSR)**.
 //!
-//! # Why OSR on Linux (and not a child webview)
+//! Chromium renders the page into an off-screen BGRA buffer (`on_paint`) and we
+//! upload that buffer as a [`gpui::RenderImage`] which GPUI composites into the
+//! reader pane like any other texture. Soft OSR (`shared_texture_enabled: false`)
+//! keeps the dependency surface small and works the same on Wayland, X11,
+//! Windows, and macOS.
 //!
-//! On macOS and Windows the reader embeds a native child webview (`wry`:
-//! WKWebView / WebView2) layered over the GPUI reader pane. On Linux `wry` uses
-//! WebKitGTK, which can only be embedded as a *child window on X11*. Under a
-//! Wayland session there is no X11 child-window model to reparent into, so the
-//! child-webview approach only works via XWayland — a compatibility shim we do
-//! not want to depend on.
-//!
-//! Instead, on Linux we run Chromium in **windowless mode**: CEF renders the page
-//! into an off-screen BGRA buffer (`on_paint`) and we upload that buffer as a
-//! [`gpui::RenderImage`] which GPUI composites into the reader pane like any other
-//! texture. This composites natively on Wayland (and X11) with no reparenting.
-//!
-//! We use **soft OSR** (`shared_texture_enabled: false`): CEF hands us a CPU BGRA
-//! buffer that we copy. Zero-copy GPU import (DMA-BUF) exists behind CEF's
-//! `accelerated_osr` feature but pulls in `wgpu`/`ash`; a CPU copy of a single
-//! reader-sized surface is inexpensive and keeps the dependency surface small.
 //! Soft OSR makes Chromium's *smooth scrolling* expensive (many full-buffer
 //! paints), so we disable it and rely on discrete wheel steps plus a short
 //! GPUI redraw loop (`Context::notify` after paint/input) to show each
@@ -34,7 +22,7 @@
 //! The IPC used by the injected content script (see [`crate::web_view`]) is
 //! bridged over the browser's console: a tiny shim maps `window.ipc.postMessage`
 //! to `console.log('__BGMAIL_IPC__' + msg)`, and [`DisplayHandler::on_console_message`]
-//! strips the prefix and routes the message just like the `wry` `with_ipc_handler`.
+//! strips the prefix and routes the message.
 
 #![allow(clippy::type_complexity)]
 
@@ -624,16 +612,16 @@ wrap_client! {
     }
 }
 
-// --- IPC routing (shared with the wry backend's semantics) --------------------
+// --- IPC routing --------------------------------------------------------------
 
 /// Prefix the injected shim prepends to every `window.ipc.postMessage` payload
 /// so [`DisplayHandler::on_console_message`] can tell our messages apart from
 /// ordinary page logging.
 const IPC_CONSOLE_PREFIX: &str = "__BGMAIL_IPC__";
 
-/// Routes a bridged IPC message exactly like the `wry` backend: foreground
-/// actions (hover, clipboard, image-shown, palette) go over `to_host`; open and
-/// download run here on the main thread.
+/// Routes a bridged IPC message: foreground actions (hover, clipboard,
+/// image-shown, palette) go over `to_host`; open and download run here on the
+/// main thread.
 fn handle_ipc(message: &str, to_host: &Sender<HostEvent>, notify_body: &str) {
     match parse_ipc_message(message) {
         Some(IpcMessage::Hover(url)) => {
@@ -672,9 +660,8 @@ fn open_in_new_window(url: &str) {
 
 /// Saves an inline `data:` image straight to the user's Downloads folder (no
 /// dialog). Remote images have no local bytes yet, so we fall back to opening
-/// them in the browser where the user can save them. `_notify_body` mirrors the
-/// wry backend's API; desktop notifications on Linux land with the notification
-/// backend later.
+/// them in the browser where the user can save them. Desktop notifications on
+/// Linux land with the notification backend later.
 fn download_image(url: &str, _notify_body: &str) {
     let Some((extension, bytes)) = decode_data_uri(url) else {
         if is_external_link(url) {
@@ -718,9 +705,9 @@ fn ipc_shim_script() -> String {
     )
 }
 
-/// Wraps a rendered e-mail document with the pieces the `wry` backend injects out
-/// of band: the IPC shim (first, in `<head>`) and the reader's content script
-/// (last, before `</body>`), which drives hover reporting and the custom menus.
+/// Wraps a rendered e-mail document with the IPC shim (first, in `<head>`) and
+/// the reader's content script (last, before `</body>`), which drives hover
+/// reporting and the custom menus.
 fn compose_document(html: &str) -> String {
     let shim = ipc_shim_script();
     let content = format!("<script>{CONTENT_SCRIPT}</script>");
