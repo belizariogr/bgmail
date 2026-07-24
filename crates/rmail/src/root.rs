@@ -13,9 +13,9 @@ use gpui::{
     anchored, canvas, deferred, ease_in_out, point, radians, size, svg, Animation,
     AnimationExt as _, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Corner,
     DragMoveEvent, Empty, Entity, Focusable, FontWeight, Hsla, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Point, ScrollHandle, Size, Svg, TitlebarOptions, Transformation, WeakEntity,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle, WindowKind,
-    WindowOptions,
+    MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent, Size, Svg,
+    TitlebarOptions, Transformation, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowHandle, WindowKind, WindowOptions,
 };
 
 use crate::command_palette_overlay::CommandPaletteOverlay;
@@ -37,7 +37,8 @@ use crate::db_seed;
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::shortcuts;
 use crate::web_view::{
-    email_document, ContextMenuLabels, DocumentColors, EmailWebView, HostEvent, WEBVIEW_SUPPORTED,
+    email_document, ContextMenuLabels, DocumentColors, EmailWebView, HostEvent, WebviewMouseButton,
+    COMPOSITES_IN_GPUI, WEBVIEW_SUPPORTED,
 };
 use crate::MainWindow;
 use storage::{MailListQuery, MessageDetail, MessageListItem};
@@ -99,6 +100,20 @@ pub(crate) const READER_LIGHT_TEXT: Hsla = Hsla {
     l: 0.13,
     a: 1.0,
 };
+/// Pixels scrolled per wheel "line" when forwarding line-based scroll deltas to
+/// the OSR browser (only the Linux backend consumes this).
+const READER_LINE_SCROLL: f32 = 40.0;
+
+/// Maps a GPUI mouse button to the webview backend's button. Navigation buttons
+/// (back/forward) have no meaning inside an e-mail body, so they are dropped.
+fn reader_mouse_button(button: MouseButton) -> Option<WebviewMouseButton> {
+    match button {
+        MouseButton::Left => Some(WebviewMouseButton::Left),
+        MouseButton::Right => Some(WebviewMouseButton::Right),
+        MouseButton::Middle => Some(WebviewMouseButton::Middle),
+        _ => None,
+    }
+}
 /// Width of the collapsed search button (icon only), in pixels.
 const SEARCH_ICON_WIDTH: f32 = 28.0;
 /// When the container that holds the reader's toolbar buttons (compose, action
@@ -352,8 +367,12 @@ pub struct RootView {
     sidebar_scrollbar: Option<Entity<ScrollbarState>>,
     /// Native webview that renders the selected message's HTML body. Scrolling,
     /// text selection and copy are handled by the OS engine. `None` on targets
-    /// without a webview backend (Linux) or until it has been created.
+    /// without a webview backend or until it has been created.
     email_webview: Option<EmailWebView>,
+    /// Last laid-out reader body rectangle (window-relative, logical pixels), set
+    /// during the reader's canvas paint. On the Linux OSR backend the mouse-event
+    /// handlers use it to translate window coordinates into view-relative ones.
+    webview_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     /// Inputs that last produced the webview document (selected message index and
     /// the theme colors it was themed with). Used to skip rebuilding the HTML on
     /// every render — e.g. on every frame of an animation — when nothing that
@@ -508,6 +527,7 @@ impl RootView {
             sidebar_scroll: ScrollHandle::new(),
             sidebar_scrollbar: None,
             email_webview: None,
+            webview_bounds: None,
             last_webview_sig: None,
             load_remote_images: settings.load_remote_images,
             reader_white_background: settings.reader_white_background,
@@ -1332,6 +1352,7 @@ impl RootView {
     /// selected message and the current theme. Hides it when the reader is not
     /// on screen so it doesn't float over other views.
     fn sync_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::web_view::pump_platform_events();
         let Some(detail) = self.selected_detail.as_ref() else {
             self.last_webview_sig = None;
             if let Some(webview) = &mut self.email_webview {
@@ -1448,6 +1469,113 @@ impl RootView {
             }
             HostEvent::CommandPalette => self.toggle_command_palette_from_webview(cx),
         }
+    }
+
+    /// Translates a window-relative pointer position into coordinates relative to
+    /// the reader body (where the OSR page is laid out). `None` before the body
+    /// has been laid out at least once.
+    fn reader_relative_position(&self, position: Point<gpui::Pixels>) -> Option<(f32, f32)> {
+        let bounds = self.webview_bounds?;
+        Some((
+            f32::from(position.x - bounds.origin.x),
+            f32::from(position.y - bounds.origin.y),
+        ))
+    }
+
+    /// Forwards pointer motion to the OSR browser (Linux). Drives hover reporting
+    /// and drag-based text selection inside the page.
+    fn on_reader_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((x, y)) = self.reader_relative_position(event.position) else {
+            return;
+        };
+        let Some(webview) = self.email_webview.as_mut() else {
+            return;
+        };
+        webview.handle_mouse_move(
+            x,
+            y,
+            event.modifiers.shift,
+            event.modifiers.control,
+            event.modifiers.alt,
+        );
+        // While dragging a selection the page paints continuously; keep GPUI
+        // in lockstep with CEF's soft OSR frames. Prefer `notify` over
+        // `request_animation_frame` — the latter panics outside paint/prepaint.
+        if webview.has_mouse_capture() {
+            crate::web_view::pump_platform_events();
+            cx.notify();
+        }
+    }
+
+    /// Forwards a mouse press to the OSR browser (Linux).
+    fn on_reader_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((x, y)) = self.reader_relative_position(event.position) else {
+            return;
+        };
+        let Some(button) = reader_mouse_button(event.button) else {
+            return;
+        };
+        let Some(webview) = self.email_webview.as_mut() else {
+            return;
+        };
+        webview.handle_mouse_button(x, y, button, true, event.click_count as i32);
+        crate::web_view::pump_platform_events();
+        cx.notify();
+    }
+
+    /// Forwards a mouse release to the OSR browser (Linux).
+    fn on_reader_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((x, y)) = self.reader_relative_position(event.position) else {
+            return;
+        };
+        let Some(button) = reader_mouse_button(event.button) else {
+            return;
+        };
+        let Some(webview) = self.email_webview.as_mut() else {
+            return;
+        };
+        webview.handle_mouse_button(x, y, button, false, event.click_count as i32);
+        crate::web_view::pump_platform_events();
+        cx.notify();
+    }
+
+    /// Forwards scroll-wheel input to the OSR browser (Linux).
+    fn on_reader_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((x, y)) = self.reader_relative_position(event.position) else {
+            return;
+        };
+        let Some(webview) = self.email_webview.as_mut() else {
+            return;
+        };
+        let (delta_x, delta_y) = match event.delta {
+            ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
+            ScrollDelta::Lines(delta) => {
+                (delta.x * READER_LINE_SCROLL, delta.y * READER_LINE_SCROLL)
+            }
+        };
+        webview.handle_scroll(x, y, delta_x, delta_y);
+        // Wheel is coalesced until paint; notify so flush_input runs next frame.
+        cx.notify();
     }
 
     /// Records that the user revealed one blocked remote image in the body. The
@@ -3039,17 +3167,38 @@ impl RootView {
                 // Match the forced-white body so no themed background shows behind
                 // the webview while it loads or at sub-pixel edges.
                 .when(self.reader_white_background, |el| el.bg(gpui::white()))
+                // On the Linux OSR backend GPUI composites the page texture, so it
+                // must also relay pointer input to the off-screen browser (text
+                // selection, scrolling, the custom menus). The `wry` backends get
+                // input from the OS directly, so this is skipped there.
+                .when(COMPOSITES_IN_GPUI, |el| {
+                    el.on_mouse_move(cx.listener(Self::on_reader_mouse_move))
+                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_reader_mouse_down))
+                        .on_mouse_down(MouseButton::Right, cx.listener(Self::on_reader_mouse_down))
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_reader_mouse_up))
+                        .on_mouse_up(MouseButton::Right, cx.listener(Self::on_reader_mouse_up))
+                        .on_scroll_wheel(cx.listener(Self::on_reader_scroll))
+                })
                 .child(
                     canvas(
                         |_, _, _| {},
-                        move |bounds, _, _window, cx| {
-                            let _ = view.update(cx, |this, _| {
+                        move |bounds, _, window, cx| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.webview_bounds = Some(bounds);
                                 let hide_for_overlay = this.gpui_overlay_covers_webview();
                                 if let Some(webview) = &mut this.email_webview {
                                     if hide_for_overlay {
                                         webview.hide();
                                     } else {
                                         webview.position(bounds);
+                                        // Soft OSR may need follow-up frames; notify
+                                        // instead of request_animation_frame (which
+                                        // panics outside paint of the element tree's
+                                        // current_view in some paths, and is unsafe
+                                        // from input handlers).
+                                        if webview.paint(bounds, window, cx) {
+                                            cx.notify();
+                                        }
                                     }
                                 }
                             });
@@ -3082,7 +3231,7 @@ impl RootView {
         let text = if message.raw_format == "text" {
             message.raw_content.clone().into()
         } else {
-            SharedString::from("HTML preview is only available on macOS and Windows for now.")
+            SharedString::from("HTML preview is unavailable on this platform.")
         };
 
         div()
@@ -3638,7 +3787,7 @@ impl Render for RootView {
             row.into_any_element()
         };
 
-        v_flex()
+        let content = v_flex()
             .size_full()
             .bg(background)
             .text_color(text)
@@ -3662,7 +3811,11 @@ impl Render for RootView {
             .when(self.privacy_menu_open, |el| {
                 el.child(self.render_privacy_menu(cx))
             })
-            .into_any_element()
+            .into_any_element();
+
+        // Linux CSD: wrap with shadow/resize chrome when the compositor granted
+        // client-side decorations (requested in `main` via WindowOptions).
+        crate::window_frame::wrap_client_decorations(content, window, cx.theme().colors().border)
     }
 }
 

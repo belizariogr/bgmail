@@ -17,9 +17,8 @@ repository = "https://github.com/belizario/bgmail"
 # UI framework (Zed's GPU-accelerated UI). Pinned to the published, standalone-buildable release.
 gpui = "0.2.2"
 
-# Native embedded webview used to render e-mail HTML (WKWebView on macOS, WebView2
-# on Windows). Linux (webkit2gtk) is intentionally left out for now, so this is
-# only depended on for the supported targets in the `rmail` crate.
+# Native embedded webview used to render e-mail HTML (WKWebView on macOS,
+# WebView2 on Windows, WebKitGTK on Linux).
 wry = "0.55"
 
 # Serialization for persisted settings (window/column sizes) stored as JSON.

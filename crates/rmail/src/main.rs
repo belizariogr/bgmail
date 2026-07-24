@@ -7,6 +7,8 @@
 
 mod actions;
 mod app_menus;
+#[cfg(all(target_os = "linux", feature = "linux-webview"))]
+mod cef_osr;
 mod command_palette;
 mod command_palette_overlay;
 mod commands;
@@ -149,6 +151,29 @@ fn configure_windows_webview_hosting() {
 #[cfg(not(target_os = "windows"))]
 fn configure_windows_webview_hosting() {}
 
+/// On Linux the HTML reader is Chromium via CEF windowless off-screen rendering,
+/// composited by GPUI as a texture (Wayland-native — unlike wry's WebKitGTK,
+/// which can only embed as an X11 child window). Initialize CEF once up front;
+/// the reader drives its message pump each frame and it is shut down on quit.
+#[cfg(all(target_os = "linux", feature = "linux-webview"))]
+fn init_linux_webview() {
+    if !cef_osr::initialize() {
+        eprintln!("BGMail: CEF initialization failed; HTML reader disabled");
+    }
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-webview")))]
+fn init_linux_webview() {}
+
+/// Shuts the Linux web engine down on exit. No-op elsewhere.
+#[cfg(all(target_os = "linux", feature = "linux-webview"))]
+fn shutdown_linux_webview() {
+    cef_osr::shutdown_cef();
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-webview")))]
+fn shutdown_linux_webview() {}
+
 /// Builds the macOS application menu. The first menu's name becomes the bold
 /// "app menu" in the global menu bar, so it carries the application name.
 /// Full menus are refreshed from [`RootView`] as selection changes.
@@ -173,10 +198,19 @@ fn register_command_palette_shortcuts(cx: &mut App) {
 }
 
 fn main() {
+    // On Linux, CEF re-executes this binary for each of its sub-processes
+    // (renderer, GPU, utility, …), passing a `--type=` switch. Those must run
+    // CEF's sub-process logic and exit before we bring up GPUI.
+    #[cfg(all(target_os = "linux", feature = "linux-webview"))]
+    if cef_osr::run_if_subprocess() {
+        return;
+    }
+
     startup::mark_start();
     startup::log_milestone("main entered");
 
     configure_windows_webview_hosting();
+    init_linux_webview();
 
     Application::new()
         .with_assets(ui::Assets)
@@ -226,6 +260,7 @@ fn main() {
                         window_bounds: Some(window_bounds),
                         window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
                         titlebar: Some(window_frame::main_titlebar_options()),
+                        window_decorations: window_frame::main_window_decorations(),
                         // Windows opens hidden so we can cloak it and run the
                         // (asynchronous) maximize + first layout off-screen, then reveal
                         // the finished window — see the spawn below. Elsewhere GPUI shows
@@ -359,6 +394,9 @@ fn main() {
 
             cx.activate(true);
         });
+
+    // `run` blocks until the app exits; tear CEF down cleanly afterward.
+    shutdown_linux_webview();
 }
 
 #[cfg(test)]

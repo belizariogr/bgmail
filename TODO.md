@@ -89,15 +89,16 @@
       pure thumb-geometry + scroll-recency functions. Mock expanded (18 messages,
       5 accounts, long bodies) so the panels overflow.
 - ✅ HTML e-mail viewer via a **native embedded webview** (`wry`: WKWebView on
-      macOS, WebView2 on Windows), replacing the hand-rolled GPUI renderer. The
-      OS engine handles layout, scrolling, text selection and copy natively. The
-      webview is a child of the GPUI window, layered over the reader body; a
-      `canvas` element keeps its bounds in sync each paint, and it is hidden when
-      the reader isn't on screen. `crates/rmail/src/web_view.rs` owns the platform
-      abstraction (`EmailWebView`, no-op on unsupported targets) plus a themed
-      `email_document` builder (theme-aware CSS, dark/light `color-scheme`); the
-      reader falls back to a plain-text view where no webview backend exists
-      (Linux is deferred — see `AGENTS.md`). `Message::body` stays a
+      macOS, WebView2 on Windows; CEF OSR → GPUI texture on Linux via default
+      `linux-webview`),
+      replacing the hand-rolled GPUI renderer. The OS engine handles layout,
+      scrolling, text selection and copy natively. The webview is a child of the
+      GPUI window, layered over the reader body; a `canvas` element keeps its
+      bounds in sync each paint, and it is hidden when the reader isn't on screen.
+      `crates/rmail/src/web_view.rs` owns the platform abstraction (`EmailWebView`,
+      no-op on unsupported targets) plus a themed `email_document` builder
+      (theme-aware CSS, dark/light `color-scheme`); the reader falls back to a
+      plain-text view where no webview backend exists. `Message::body` stays a
       `MessageBody::{Html, Text}` and the mock mixes both. The first mock message
       embeds a real 700×200 PNG (`crates/rmail/assets/tweezers.png`) as a
       self-contained base64 `data:` URI with explicit `width`/`height`. Tested:
@@ -239,6 +240,33 @@
       explicit minimize/maximize/close actions. The buttons occlude the draggable
       toolbar hitbox, so window dragging still works without changing the macOS
       traffic-light layout
+- ✅ Linux client-side decorations (Zed-style): request
+      `WindowDecorations::Client`, draw caption buttons in the toolbar, and wrap
+      the main UI with shadow/resize chrome when the compositor grants CSD
+- ✅ Linux HTML reader via **CEF windowless off-screen rendering** (replaces the
+      earlier WebKitGTK/`wry` X11-only child embed), on by default via the
+      `linux-webview` feature (`cef` crate downloads the CEF runtime on first
+      build). Chromium renders each body to an off-screen BGRA buffer that GPUI
+      composites as a `RenderImage` texture in the reader pane — works natively on
+      Wayland and X11. `crates/rmail/src/cef_osr.rs` owns the CEF integration
+      (app/render/display/request handlers, external message pump, mouse input,
+      `data:` URL loading, and the console→IPC bridge that mirrors the `wry`
+      `with_ipc_handler`). `web_view.rs` selects the backend: `wry` child webview
+      on macOS/Windows (`COMPOSITES_IN_GPUI = false`), CEF OSR on Linux
+      (`COMPOSITES_IN_GPUI = true`, reader drives `paint` + pointer forwarding).
+      Scroll path tuned for soft OSR: disable Chromium smooth-scrolling (full-buffer
+      paints per tick), coalesce trackpad wheel deltas per GPUI frame, reuse the
+      BGRA staging buffer across `on_paint`, and keep a short redraw warm loop via
+      `Context::notify` so late CEF paints are not dropped. On window resize, a
+      stale buffer is drawn at its native pixel size (top-left) instead of being
+      stretched into the new bounds, and CEF is `was_resized`/`invalidate`d until a
+      matching frame arrives.
+      GTK/XWayland preference and `BGMAIL_NATIVE_WAYLAND` are gone. Disable with
+      `--no-default-features`.
+      - ⬜ Follow-ups: keyboard input forwarding (typing/shortcuts into the page),
+        zero-copy GPU texture import (CEF `accelerated_osr`/DMA-BUF), desktop
+        notification backend for image downloads, and production sandbox
+        (currently `no_sandbox` for dev).
 - ✅ Fix Windows WebView2 text compositing in the reader by giving the native
       child webview an explicit opaque background that matches the e-mail document
 - ✅ Work around Windows WebView2 GPU/DirectComposition transparency failures:

@@ -12,6 +12,12 @@ default-run = "BGMail"
 name = "BGMail"
 path = "src/main.rs"
 
+[features]
+# On Linux, CEF off-screen rendering is on by default so plain `cargo run`
+# embeds the HTML reader on Wayland. Disable with: cargo run --no-default-features
+default = ["linux-webview"]
+linux-webview = ["cef", "open", "image", "smallvec", "urlencoding"]
+
 [dependencies]
 gpui.workspace = true
 theme.workspace = true
@@ -31,13 +37,19 @@ serde_json.workspace = true
 # reader must never render (scripts, frames, media, editable controls).
 lol_html = "3.0.0"
 
-# The embedded webview is only available where wry has a native backend we
-# support (macOS/Windows). Other targets fall back to a plain-text reader.
-# `open` launches links from message bodies in the user's default browser
-# (per-platform, shell-injection-safe — important for untrusted e-mail URLs).
+# Embedded webview on macOS/Windows via wry (WKWebView / WebView2).
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 wry.workspace = true
 open = "5"
+
+# Linux: CEF windowless OSR → GPUI texture (Wayland-native). Optional so the
+# workspace still builds with `--no-default-features` without downloading CEF.
+[target.'cfg(target_os = "linux")'.dependencies]
+cef = { version = "=150.2.1", optional = true, default-features = false }
+open = { version = "5", optional = true }
+image = { version = "0.25", optional = true, default-features = false }
+smallvec = { version = "1", optional = true }
+urlencoding = { version = "2", optional = true }
 
 # macOS-only: GPUI 0.2 doesn't implement `start_window_move` on macOS, so we
 # drag the window via AppKit's `performWindowDragWithEvent:` using the native

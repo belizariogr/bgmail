@@ -31,6 +31,33 @@ cargo test --workspace    # runs the tests
 cargo clippy --workspace  # lint
 ```
 
+### Linux: HTML reader (CEF off-screen rendering)
+
+On Linux the HTML reader uses **CEF** (Chromium Embedded Framework) in
+**windowless off-screen rendering** mode: Chromium renders each message body into
+an off-screen buffer that GPUI composites as a texture in the reader pane. This
+works natively on **Wayland** (and X11) — unlike the macOS/Windows `wry` child
+webviews, whose WebKitGTK equivalent can only embed as an X11 child window.
+
+`linux-webview` is enabled by default, so plain `cargo run` embeds HTML messages.
+The `cef` crate downloads the matching CEF binary distribution on first build, so
+the initial build needs network access and takes a little longer.
+
+Runtime dependencies (Chromium's shared libraries) are typically already present
+on a desktop system; if the browser fails to start, install:
+
+```bash
+sudo apt install libnss3 libnspr4 libgbm1 libasound2 libxkbcommon0 libgtk-3-0
+```
+
+To build without the HTML reader (plain-text reader only):
+`cargo run -p rmail --no-default-features`.
+
+CEF re-executes the BGMail binary for its own sub-processes (renderer, GPU,
+utility); this is handled automatically at startup and those processes exit on
+their own — no configuration needed. `BGMAIL_NATIVE_WAYLAND` is no longer
+required and has no effect.
+
 ### macOS: Metal Toolchain (Xcode 26+)
 
 GPUI compiles Metal shaders at build time. On Xcode 26 the Metal Toolchain was

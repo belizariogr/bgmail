@@ -146,6 +146,7 @@ pub fn set_window_cloaked(window: &Window, cloaked: bool) {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[allow(dead_code)] // Part of the portable API; macOS/Windows use real impls.
 pub fn set_window_cloaked(_window: &Window, _cloaked: bool) {}
 
 /// Picks the `WindowBounds` to open the main window with.

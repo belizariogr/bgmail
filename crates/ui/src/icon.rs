@@ -70,6 +70,12 @@ pub enum IconName {
     Check,
     /// Dismiss / clear (search field, etc.).
     Clear,
+    /// Window caption: minimize.
+    WindowMinimize,
+    /// Window caption: maximize.
+    WindowMaximize,
+    /// Window caption: restore (un-maximize).
+    WindowRestore,
 }
 
 impl IconName {
@@ -107,6 +113,9 @@ impl IconName {
             IconName::ShieldSolid => crate::SHIELD,
             IconName::Check => crate::CHECK,
             IconName::Clear => crate::XMARK,
+            IconName::WindowMinimize => crate::WINDOW_MINIMIZE,
+            IconName::WindowMaximize => crate::WINDOW_MAXIMIZE,
+            IconName::WindowRestore => crate::WINDOW_RESTORE,
         }
     }
 }
@@ -162,7 +171,7 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 31] = [
+    const ALL: [IconName; 34] = [
         IconName::Inbox,
         IconName::Sent,
         IconName::Drafts,
@@ -194,6 +203,9 @@ mod tests {
         IconName::ShieldSolid,
         IconName::Check,
         IconName::Clear,
+        IconName::WindowMinimize,
+        IconName::WindowMaximize,
+        IconName::WindowRestore,
     ];
 
     #[test]

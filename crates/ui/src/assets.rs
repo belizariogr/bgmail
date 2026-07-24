@@ -61,6 +61,9 @@ icon_assets! {
     (SHIELD, "icons/shield.svg"),
     (CHECK, "icons/check.svg"),
     (XMARK, "icons/xmark.svg"),
+    (WINDOW_MINIMIZE, "icons/window-minimize.svg"),
+    (WINDOW_MAXIMIZE, "icons/window-maximize.svg"),
+    (WINDOW_RESTORE, "icons/window-restore.svg"),
 }
 
 /// Asset source that serves the UI crate's embedded SVGs. Register it once with

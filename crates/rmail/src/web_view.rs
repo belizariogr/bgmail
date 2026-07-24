@@ -1,13 +1,24 @@
 //! Embedded webview used to render e-mail HTML.
 //!
-//! On macOS and Windows the message body is rendered by a native OS webview
-//! (`wry`: WKWebView / WebView2) layered over the reader pane. This replaces the
-//! hand-rolled HTML element renderer: the OS engine handles layout, scrolling,
-//! text selection and copy natively, which is both simpler and far more capable.
+//! The message body is rendered by a real web engine layered into the reader
+//! pane. This replaces the hand-rolled HTML element renderer: the engine handles
+//! layout, scrolling, text selection and copy natively, which is both simpler and
+//! far more capable. Two backends exist behind a single [`EmailWebView`] API:
 //!
-//! Linux is intentionally left out for now (webkit2gtk integration is deferred —
-//! see `AGENTS.md`). There [`EmailWebView::new`] returns `None` and the reader
-//! falls back to a plain-text view, so the app still builds and runs everywhere.
+//! - **macOS / Windows** — a native *child webview* (`wry`: WKWebView /
+//!   WebView2) hosted as a child of the GPUI window and floated over the reader
+//!   pane. GPUI does not composite it; it lives in its own OS surface, so
+//!   [`COMPOSITES_IN_GPUI`] is `false` and [`EmailWebView::paint`] is a no-op.
+//!
+//! - **Linux** — Chromium via CEF **windowless off-screen rendering** (see
+//!   [`crate::cef_osr`]). `wry`'s WebKitGTK can only embed as an X11 child window,
+//!   which does not work under Wayland; CEF renders the page to an off-screen
+//!   buffer that GPUI composites as a texture. Here [`COMPOSITES_IN_GPUI`] is
+//!   `true`: the reader calls [`EmailWebView::paint`] each frame and forwards
+//!   mouse input through the `handle_*` methods.
+//!
+//! Input, sanitization and the content script are shared across backends; only
+//! the hosting/compositing differs.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -17,8 +28,35 @@ use lol_html::html_content::Element;
 
 use crate::data::MessageBody;
 
+pub use platform::{EmailWebView, COMPOSITES_IN_GPUI};
+
+/// A mouse button forwarded from the reader to the webview backend. Kept
+/// independent of GPUI's `MouseButton` so [`EmailWebView`]'s API is the same on
+/// every platform (only the Linux OSR backend acts on it; the `wry` child
+/// webviews receive input from the OS directly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebviewMouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
 /// Whether the native embedded webview backend is available on this target.
-pub const WEBVIEW_SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+pub const WEBVIEW_SUPPORTED: bool = cfg!(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", feature = "linux-webview")
+));
+
+/// Advances the platform web engine's event loop so it can process input and
+/// paint. On Linux this drives CEF's external message pump; no-op elsewhere
+/// (the `wry` child webviews run on the OS's own loop).
+pub fn pump_platform_events() {
+    #[cfg(all(target_os = "linux", feature = "linux-webview"))]
+    {
+        crate::cef_osr::pump();
+    }
+}
 
 /// Localized labels for the custom context menus (images and links). They are
 /// embedded in the rendered document (as `data-*` attributes) and read by the
@@ -205,7 +243,7 @@ fn channel(value: f32) -> u8 {
 /// instead of being followed inside the reader's webview. We treat real web and
 /// mail destinations as external; in-document navigations (the `about:`/`data:`
 /// document we load the body into, anchor fragments, etc.) stay in-place.
-fn is_external_link(url: &str) -> bool {
+pub(crate) fn is_external_link(url: &str) -> bool {
     let url = url.trim().to_ascii_lowercase();
     url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:")
 }
@@ -217,7 +255,7 @@ fn is_external_link(url: &str) -> bool {
 ///
 /// Returns `None` for anything that isn't a non-empty, base64-encoded `data:`
 /// URI (e.g. plain URLs or the percent-encoded text form).
-fn decode_data_uri(url: &str) -> Option<(&'static str, Vec<u8>)> {
+pub(crate) fn decode_data_uri(url: &str) -> Option<(&'static str, Vec<u8>)> {
     let trimmed = url.trim();
     let rest = trimmed
         .get(..5)
@@ -258,7 +296,7 @@ fn extension_for_mime(mime: &str) -> &'static str {
 /// `%USERPROFILE%\Downloads` on Windows). Used as the fixed save location for
 /// the image-download action, mirroring how `config.rs` resolves the home dir
 /// without pulling in an extra dependency.
-fn downloads_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn downloads_dir() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
     if home.is_empty() {
         return None;
@@ -270,7 +308,7 @@ fn downloads_dir() -> Option<std::path::PathBuf> {
 /// before the extension when earlier files exist (like browsers do). `exists`
 /// reports whether a candidate is already taken, kept injectable so the naming
 /// logic is testable without touching the filesystem.
-fn unique_download_path(
+pub(crate) fn unique_download_path(
     dir: &Path,
     stem: &str,
     extension: &str,
@@ -321,7 +359,7 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 /// as `"<tag>\n<payload>"` so a single channel can carry several intents (see
 /// [`CONTENT_SCRIPT`] and [`parse_ipc_message`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IpcMessage<'a> {
+pub(crate) enum IpcMessage<'a> {
     /// The link under the cursor changed (payload is the URL, empty when none).
     /// Mirrored into the status bar like a browser.
     Hover(&'a str),
@@ -344,7 +382,7 @@ enum IpcMessage<'a> {
 
 /// Parses an IPC message produced by [`CONTENT_SCRIPT`]. Returns `None` for an
 /// unknown tag or a message missing its `\n` separator.
-fn parse_ipc_message(message: &str) -> Option<IpcMessage<'_>> {
+pub(crate) fn parse_ipc_message(message: &str) -> Option<IpcMessage<'_>> {
     let (tag, payload) = message.split_once('\n')?;
     match tag {
         "H" => Some(IpcMessage::Hover(payload)),
@@ -379,10 +417,18 @@ pub enum HostEvent {
 
 /// Opens BGMail's command palette from inside the reader document (Ctrl/Cmd+P).
 /// Inlined in every rendered message so it survives `load_html` navigations.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", feature = "linux-webview")
+))]
 const COMMAND_PALETTE_SHORTCUT_SCRIPT: &str = r#"document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&!e.shiftKey&&!e.altKey&&e.key&&e.key.toLowerCase()==='p'){e.preventDefault();e.stopPropagation();window.ipc.postMessage('P\n');}},true);"#;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", feature = "linux-webview")
+)))]
 const COMMAND_PALETTE_SHORTCUT_SCRIPT: &str = "";
 
 /// Injected into every rendered message. Two responsibilities:
@@ -401,8 +447,12 @@ const COMMAND_PALETTE_SHORTCUT_SCRIPT: &str = "";
 ///    nothing on empty background. Labels are read from `<body data-rm-*>` and
 ///    colors from the document's CSS variables, so all menus follow the active
 ///    language and theme without rebuilding the view.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-const CONTENT_SCRIPT: &str = r#"(function () {
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", feature = "linux-webview")
+))]
+pub(crate) const CONTENT_SCRIPT: &str = r#"(function () {
   function send(tag, value) { window.ipc.postMessage(tag + '\n' + (value || '')); }
 
   function closestTag(el, tag) {
@@ -870,8 +920,6 @@ fn escape_html(input: &str) -> String {
     out
 }
 
-pub use platform::EmailWebView;
-
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod platform {
     use async_channel::Sender;
@@ -880,6 +928,11 @@ mod platform {
         dpi::{LogicalPosition, LogicalSize},
         NewWindowResponse, Rect, WebView, WebViewBuilder,
     };
+
+    /// The `wry` child webviews render into their own OS surface, floated over the
+    /// reader pane — GPUI never composites them, so [`EmailWebView::paint`] is a
+    /// no-op and the reader positions the view instead.
+    pub const COMPOSITES_IN_GPUI: bool = false;
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1117,6 +1170,46 @@ mod platform {
             self.set_visible(false);
         }
 
+        /// No-op: the child webview composites in its own OS surface, not through
+        /// GPUI. Present so the reader's paint path is uniform across backends.
+        /// Always returns `false` (no follow-up GPUI frame needed).
+        pub fn paint(
+            &mut self,
+            _bounds: Bounds<Pixels>,
+            _window: &mut Window,
+            _cx: &mut gpui::App,
+        ) -> bool {
+            false
+        }
+
+        /// No-op: the OS delivers input to the child webview directly. Present so
+        /// the reader can wire the same handlers on every backend.
+        pub fn handle_mouse_move(
+            &self,
+            _x: f32,
+            _y: f32,
+            _shift: bool,
+            _control: bool,
+            _alt: bool,
+        ) {
+        }
+
+        pub fn handle_mouse_button(
+            &self,
+            _x: f32,
+            _y: f32,
+            _button: super::WebviewMouseButton,
+            _pressed: bool,
+            _click_count: i32,
+        ) {
+        }
+
+        pub fn handle_scroll(&self, _x: f32, _y: f32, _delta_x: f32, _delta_y: f32) {}
+
+        pub fn has_mouse_capture(&self) -> bool {
+            false
+        }
+
         fn set_visible(&mut self, visible: bool) {
             if self.visible != visible && self.webview.set_visible(visible).is_ok() {
                 self.visible = visible;
@@ -1125,13 +1218,217 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// Linux backend: Chromium windowless OSR composited by GPUI (see
+/// [`crate::cef_osr`]). The reader drives painting and input explicitly.
+#[cfg(all(target_os = "linux", feature = "linux-webview"))]
+mod platform {
+    use async_channel::Sender;
+    use gpui::{Bounds, Pixels, Window};
+
+    use super::{HostEvent, WebviewMouseButton};
+    use crate::cef_osr::{modifier_flags, MouseButton, OsrBrowser};
+
+    /// The OSR frame is uploaded as a GPUI texture and composited in-tree, so the
+    /// reader must call [`EmailWebView::paint`] each frame and forward input.
+    pub const COMPOSITES_IN_GPUI: bool = true;
+
+    /// Off-screen Chromium browser wrapper exposing the same surface as the `wry`
+    /// backend, plus GPUI painting and input forwarding.
+    pub struct EmailWebView {
+        inner: OsrBrowser,
+        /// Whether the view should paint this frame (mirrors show/hide so a hidden
+        /// reader neither paints nor drives CEF rendering).
+        visible: bool,
+        /// Extra GPUI frames to request after input. Soft OSR often delivers
+        /// `on_paint` a tick or two after `do_message_loop_work`, so a single
+        /// paint after scroll would miss the new buffer.
+        warm_frames: u8,
+    }
+
+    /// How many follow-up GPUI frames to schedule after pointer input so late
+    /// CEF paints still reach the texture.
+    const INPUT_WARM_FRAMES: u8 = 8;
+
+    impl EmailWebView {
+        /// Creates the off-screen browser. Returns `None` if CEF isn't ready yet
+        /// (the reader retries on a later frame) or failed to create the browser.
+        pub fn new(
+            _window: &Window,
+            html: &str,
+            to_host: Sender<HostEvent>,
+            notify_body: String,
+        ) -> Option<Self> {
+            Some(Self {
+                inner: OsrBrowser::new(html, to_host, notify_body)?,
+                visible: true,
+                // First load needs several frames before the initial paint lands.
+                warm_frames: INPUT_WARM_FRAMES,
+            })
+        }
+
+        /// Reloads the document if it changed.
+        pub fn set_html(&mut self, html: &str) {
+            self.inner.set_html(html);
+            self.warm_frames = INPUT_WARM_FRAMES;
+        }
+
+        /// Updates the localized download-confirmation text live.
+        pub fn set_notify_text(&self, body: String) {
+            self.inner.set_notify_text(body);
+        }
+
+        /// Marks the view visible over `bounds`. The actual size sync + upload
+        /// happens in [`Self::paint`], which has the window (and thus the scale
+        /// factor) in hand.
+        pub fn position(&mut self, _bounds: Bounds<Pixels>) {
+            self.visible = true;
+            self.inner.set_visible(true);
+        }
+
+        /// Hides the view (no message selected, or a GPUI overlay covers it).
+        pub fn hide(&mut self) {
+            self.visible = false;
+            self.inner.set_visible(false);
+            self.warm_frames = 0;
+        }
+
+        /// Syncs the render size to `bounds`/scale, flushes coalesced input,
+        /// pulls the latest painted frame and composites it into the reader pane.
+        ///
+        /// Returns `true` when the caller should schedule another GPUI frame
+        /// (via [`gpui::Context::notify`]) so late CEF paints are not dropped.
+        /// We deliberately avoid [`Window::request_animation_frame`]: it requires
+        /// an active paint/prepaint phase and panics when called from input
+        /// handlers.
+        ///
+        /// After a resize, a stale CEF buffer is painted at its **native** pixel
+        /// size (top-left, clipped) instead of being stretched into the new
+        /// bounds — that stretch was the visible distortion during window drag.
+        pub fn paint(
+            &mut self,
+            bounds: Bounds<Pixels>,
+            window: &mut Window,
+            _cx: &mut gpui::App,
+        ) -> bool {
+            if !self.visible {
+                return false;
+            }
+            let scale = window.scale_factor();
+            let resized = self.inner.set_size(
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+                scale,
+            );
+            if resized {
+                // Keep redrawing until CEF delivers a buffer that matches the view.
+                self.warm_frames = INPUT_WARM_FRAMES;
+            }
+            // Flush wheel + pump before sampling so this paint sees scroll/resize.
+            self.inner.flush_input();
+            // Swap in a new frame if one arrived, releasing the previous texture.
+            let had_new = if let Some((_new, previous)) = self.inner.take_frame() {
+                if let Some(previous) = previous {
+                    let _ = window.drop_image(previous);
+                }
+                true
+            } else {
+                false
+            };
+            if let (Some(frame), Some((fw, fh))) =
+                (self.inner.current_frame(), self.inner.current_frame_px())
+            {
+                // Fill the reader only when the buffer matches the view; otherwise
+                // draw 1:1 at the top-left so resize never squashes the page.
+                let paint_bounds = if self.inner.current_frame_fits_view() {
+                    bounds
+                } else {
+                    let scale = scale.max(0.01);
+                    Bounds {
+                        origin: bounds.origin,
+                        size: gpui::size(
+                            gpui::px((fw as f32 / scale).max(1.0)),
+                            gpui::px((fh as f32 / scale).max(1.0)),
+                        ),
+                    }
+                };
+                let _ = window.paint_image(paint_bounds, gpui::Corners::default(), frame, 0, false);
+            }
+            if had_new {
+                // CEF may still be catching up (e.g. after a large scroll).
+                self.warm_frames = self.warm_frames.max(2);
+            }
+            // Stay warm while the displayed buffer is still the wrong size.
+            if !self.inner.current_frame_fits_view() {
+                self.warm_frames = self.warm_frames.max(2);
+            }
+            if self.warm_frames > 0 {
+                self.warm_frames -= 1;
+                true
+            } else {
+                self.inner.has_pending_frame()
+            }
+        }
+
+        /// Forwards a mouse move at view-relative logical coordinates.
+        pub fn handle_mouse_move(&self, x: f32, y: f32, shift: bool, control: bool, alt: bool) {
+            self.inner
+                .mouse_move(x, y, modifier_flags(shift, control, alt));
+        }
+
+        /// Forwards a mouse press/release.
+        pub fn handle_mouse_button(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: WebviewMouseButton,
+            pressed: bool,
+            click_count: i32,
+        ) {
+            self.inner
+                .mouse_click(x, y, map_button(button), pressed, click_count);
+            self.warm_frames = INPUT_WARM_FRAMES;
+        }
+
+        /// Queues a scroll-wheel delta (coalesced until the next paint).
+        pub fn handle_scroll(&mut self, x: f32, y: f32, delta_x: f32, delta_y: f32) {
+            self.inner.mouse_wheel(x, y, delta_x, delta_y);
+            self.warm_frames = INPUT_WARM_FRAMES;
+        }
+
+        /// Closes any custom context menu open inside the document.
+        pub fn dismiss_context_menu(&self) {
+            self.inner.dismiss_context_menu();
+        }
+
+        /// Whether a mouse button is currently held (for drag-selection redraws).
+        pub fn has_mouse_capture(&self) -> bool {
+            self.inner.has_mouse_capture()
+        }
+    }
+
+    fn map_button(button: WebviewMouseButton) -> MouseButton {
+        match button {
+            WebviewMouseButton::Left => MouseButton::Left,
+            WebviewMouseButton::Right => MouseButton::Right,
+            WebviewMouseButton::Middle => MouseButton::Middle,
+        }
+    }
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", feature = "linux-webview")
+)))]
 mod platform {
     use gpui::{Bounds, Pixels, Window};
 
-    use super::HostEvent;
+    use super::{HostEvent, WebviewMouseButton};
 
-    /// No-op stand-in on targets without a supported webview backend (Linux).
+    /// No backend on this target; the reader falls back to plain text.
+    pub const COMPOSITES_IN_GPUI: bool = false;
+
+    /// No-op stand-in on targets without a supported webview backend.
     pub struct EmailWebView;
 
     impl EmailWebView {
@@ -1148,6 +1445,36 @@ mod platform {
         pub fn position(&mut self, _bounds: Bounds<Pixels>) {}
         pub fn dismiss_context_menu(&self) {}
         pub fn hide(&mut self) {}
+        pub fn paint(
+            &mut self,
+            _bounds: Bounds<Pixels>,
+            _window: &mut Window,
+            _cx: &mut gpui::App,
+        ) -> bool {
+            false
+        }
+        pub fn handle_mouse_move(
+            &self,
+            _x: f32,
+            _y: f32,
+            _shift: bool,
+            _control: bool,
+            _alt: bool,
+        ) {
+        }
+        pub fn handle_mouse_button(
+            &self,
+            _x: f32,
+            _y: f32,
+            _button: WebviewMouseButton,
+            _pressed: bool,
+            _click_count: i32,
+        ) {
+        }
+        pub fn handle_scroll(&self, _x: f32, _y: f32, _delta_x: f32, _delta_y: f32) {}
+        pub fn has_mouse_capture(&self) -> bool {
+            false
+        }
     }
 }
 
@@ -1690,7 +2017,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", feature = "linux-webview")
+    ))]
     fn document_embeds_command_palette_shortcut_script() {
         let doc = email_document(
             doc_colors(
