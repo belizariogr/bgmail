@@ -1,6 +1,6 @@
 # AGENTS.md — Rules for AI agents (and humans)
 
-This file guides any AI agent working on **rMail**. Read it in full **before
+This file guides any AI agent working on **BGMail**. Read it in full **before
 writing or modifying code**. In case of conflict, these rules take precedence.
 See also [`docs/PLANEJAMENTO.md`](docs/PLANEJAMENTO.md) (vision and architecture)
 and [`TODO.md`](TODO.md) (current state).
@@ -68,7 +68,7 @@ and [`TODO.md`](TODO.md) (current state).
 ## Repository structure
 
 ```
-rMail/
+BGMail/
 ├── AGENTS.md ← you are here (rules)
 ├── README.md ← overview and how to run
 ├── TODO.md ← living progress

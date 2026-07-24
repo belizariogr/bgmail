@@ -27,7 +27,7 @@ impl IconSize {
     }
 }
 
-/// Set of icons used by rMail.
+/// Set of icons used by BGMail.
 ///
 /// Each icon is an SVG embedded in the binary (see [`crate::Assets`]) and
 /// rendered with [`gpui::svg`], which tints it with the icon's color. SVGs are

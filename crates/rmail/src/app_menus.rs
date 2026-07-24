@@ -35,13 +35,13 @@ impl Global for ActiveMenuSurface {}
 
 fn app_menu() -> Menu {
     Menu {
-        name: "rMail".into(),
+        name: "BGMail".into(),
         items: vec![
-            MenuItem::action("About rMail", gpui::NoAction),
+            MenuItem::action("About BGMail", gpui::NoAction),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Quit rMail", Quit),
+            MenuItem::action("Quit BGMail", Quit),
         ],
     }
 }

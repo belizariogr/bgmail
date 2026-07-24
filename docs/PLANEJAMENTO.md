@@ -1,4 +1,4 @@
-# rMail Planning
+# BGMail Planning
 
 > Guidance document for humans **and AI agents**. Before writing any code, also
 > read [`AGENTS.md`](../AGENTS.md) (mandatory rules) and [`TODO.md`](../TODO.md)
@@ -6,7 +6,7 @@
 
 ## 1. Vision
 
-**rMail** is a **fast** (near-instant startup), **simple** desktop e-mail client
+**BGMail** is a **fast** (near-instant startup), **simple** desktop e-mail client
 with a **beautiful and elegant design**. It reuses the UI foundation of the
 [Zed](https://github.com/zed-industries/zed) editor — the **GPUI** framework and
 the component patterns from the `ui` crate — to deliver a native, GPU-accelerated

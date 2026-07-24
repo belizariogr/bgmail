@@ -1,4 +1,4 @@
-//! GPUI actions for rMail menus and key bindings.
+//! GPUI actions for BGMail menus and key bindings.
 
 use gpui::{actions, Action, SharedString};
 

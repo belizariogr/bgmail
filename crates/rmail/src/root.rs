@@ -1,4 +1,4 @@
-//! Root view of the rMail visual prototype.
+//! Root view of the BGMail visual prototype.
 //!
 //! Reproduces the macOS mail client layout (three columns, a unified top toolbar
 //! and a status bar), using the components from the `ui` crate. All interaction
@@ -1528,7 +1528,7 @@ impl RootView {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(520.0), px(420.0))),
             titlebar: Some(TitlebarOptions {
-                title: Some("rMail Settings".into()),
+                title: Some("BGMail Settings".into()),
                 appears_transparent: false,
                 traffic_light_position: None,
             }),
@@ -3250,7 +3250,7 @@ impl SettingsView {
         let content = match section {
             SettingsSection::General => v_flex()
                 .gap_2()
-                .child(settings_row(Key::AppNameLabel.tr(language), "rMail"))
+                .child(settings_row(Key::AppNameLabel.tr(language), "BGMail"))
                 .child(settings_row(
                     Key::VersionLabel.tr(language),
                     env!("CARGO_PKG_VERSION"),

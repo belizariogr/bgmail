@@ -280,10 +280,10 @@ pub fn sample_messages() -> Vec<Message> {
             "Yesterday",
         ),
         (
-            "rMail Team",
-            "hello@rmail.app",
-            "Welcome to rMail",
-            "Thanks for trying rMail — a fast and elegant e-mail client.",
+            "BGMail Team",
+            "hello@bgmail.app",
+            "Welcome to BGMail",
+            "Thanks for trying BGMail — a fast and elegant e-mail client.",
             false,
             false,
             false,
@@ -461,7 +461,7 @@ fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> Sha
         "<h2>{subject}</h2>\
          <p>{preview}</p>\
          <p>Hi there,</p>\
-         <p>This message is rendered by rMail's built-in <strong>HTML viewer</strong>. \
+         <p>This message is rendered by BGMail's built-in <strong>HTML viewer</strong>. \
          It supports <em>emphasis</em>, <u>underline</u>, <s>strikethrough</s>, \
          <a href=\"https://example.com\">links</a> and <code>inline code</code>.</p>\
          <p>Here is a deliberately long link so you can see how the status bar \
@@ -482,7 +482,7 @@ fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> Sha
            <li>Reply when ready</li>\
          </ol>\
          <blockquote>\"Simplicity is the ultimate sophistication.\"</blockquote>\
-         <pre>fn main() {{\n    println!(\"Hello, rMail!\");\n}}</pre>\
+         <pre>fn main() {{\n    println!(\"Hello, BGMail!\");\n}}</pre>\
          <hr>\
          <p>Messages can embed images; inline (<code>data:</code>) ones always \
          render, while remote ones load only when you allow remote content in \

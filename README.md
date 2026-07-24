@@ -1,4 +1,4 @@
-# rMail
+# BGMail
 
 A **fast**, **simple** and **elegant** desktop e-mail client, written in Rust on
 top of **GPUI** (the GPU-accelerated UI framework from

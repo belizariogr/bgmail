@@ -337,7 +337,7 @@ enum IpcMessage<'a> {
     /// A mouse press landed inside the webview (no payload). Lets the host close
     /// any open GPUI overlay, since those clicks never reach GPUI's catcher.
     BodyMouseDown,
-    /// Ctrl/Cmd+P inside the native webview should open rMail's command palette,
+    /// Ctrl/Cmd+P inside the native webview should open BGMail's command palette,
     /// not the browser engine's Print dialog.
     CommandPalette,
 }
@@ -377,7 +377,7 @@ pub enum HostEvent {
     CommandPalette,
 }
 
-/// Opens rMail's command palette from inside the reader document (Ctrl/Cmd+P).
+/// Opens BGMail's command palette from inside the reader document (Ctrl/Cmd+P).
 /// Inlined in every rendered message so it survives `load_html` navigations.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const COMMAND_PALETTE_SHORTCUT_SCRIPT: &str = r#"document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&!e.shiftKey&&!e.altKey&&e.key&&e.key.toLowerCase()==='p'){e.preventDefault();e.stopPropagation();window.ipc.postMessage('P\n');}},true);"#;
@@ -975,7 +975,7 @@ mod platform {
             let script = format!(
                 "display notification {} with title {}",
                 super::applescript_string(body),
-                super::applescript_string("rMail"),
+                super::applescript_string("BGMail"),
             );
             let _ = std::process::Command::new("osascript")
                 .arg("-e")

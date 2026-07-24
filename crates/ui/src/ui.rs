@@ -1,6 +1,6 @@
 //! # UI
 //!
-//! rMail's visual component library, inspired by Zed's `ui` crate.
+//! BGMail's visual component library, inspired by Zed's `ui` crate.
 //!
 //! Provides a small, reusable set of components (`Label`, `Icon`, `Button`,
 //! `IconButton`, `ListItem`) and layout helpers (`h_flex`, `v_flex`), all

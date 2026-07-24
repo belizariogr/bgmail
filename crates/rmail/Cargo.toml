@@ -3,13 +3,13 @@ name = "rmail"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-default-run = "rMail"
+default-run = "BGMail"
 
-# The binary is intentionally named "rMail" (mixed case): on macOS, when running
+# The binary is intentionally named "BGMail" (mixed case): on macOS, when running
 # unbundled (e.g. `cargo run`), the application menu title comes from the running
-# process name, so this makes the global menu show "rMail" instead of "rmail".
+# process name, so this makes the global menu show "BGMail" instead of "rmail".
 [[bin]]
-name = "rMail"
+name = "BGMail"
 path = "src/main.rs"
 
 [dependencies]
@@ -22,7 +22,7 @@ storage.workspace = true
 async-channel = "2"
 
 # Persisted settings (window/column sizes) serialized as JSON under
-# ~/.config/rMail/config.json on every platform.
+# ~/.config/BGMail/config.json on every platform.
 serde.workspace = true
 serde_json.workspace = true
 

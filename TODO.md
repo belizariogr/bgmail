@@ -1,4 +1,4 @@
-# TODO — rMail
+# TODO — BGMail
 
 > Source of truth for progress. **Keep it up to date** (see rule 8 in
 > [`AGENTS.md`](AGENTS.md)). Legend: ✅ done · 🔄 in progress · ⬜ pending.
@@ -115,7 +115,7 @@
       window settles, so opening never overwrites the saved layout. Also the two
       resizable column widths (sidebar default 200px, min 150px; list), stored as
       JSON at
-      `~/.config/rMail/config.json` on every platform (fixed path; home resolved
+      `~/.config/BGMail/config.json` on every platform (fixed path; home resolved
       via `HOME`/`USERPROFILE`, no extra dep). Loaded at startup (clamped to the
       window/column minimums); saved best-effort on a background thread, debounced
       (~500ms, token-guarded) so a live window/column drag only writes once it
@@ -288,7 +288,7 @@
 - ✅ `storage` crate: SQLite persistence (`accounts`, `folders`, `messages` with
       `plain_text` + `raw_content`, `folders_csv` multi-folder membership,
       accent-insensitive `search_text` + tests)
-- ✅ Seed visual mock into `~/.config/rMail/mail.db` on first open
+- ✅ Seed visual mock into `~/.config/BGMail/mail.db` on first open
       (`db_seed` + `storage::seed_if_empty`)
 - ✅ `RootView` wired to SQLite: folder selection, global mailboxes, list
       preview from plain text, reader from raw HTML/text, search mode
@@ -313,6 +313,8 @@
       full IMAP/search scope in Stage 4)
 
 ## Stage 5 — Polish
+- ✅ Rename product to **BGMail** (binary, window/menu titles, themes, docs;
+      config/db under `~/.config/BGMail/`)
 - 🔄 Keyboard shortcuts (command palette + Cmd+Q; per-action bindings still TODO)
 - ⬜ Accessibility
 - ⬜ Native notifications
@@ -321,5 +323,5 @@
 ## Notes / open decisions
 - Reassess GPUI crates.io `0.2.2` vs `main` if some API is missing.
 - ~~Define the local storage format (SQLite vs files) in Stage 2.~~ **SQLite**
-      (`crates/storage`, `mail.db` under `~/.config/rMail/`).
+      (`crates/storage`, `mail.db` under `~/.config/BGMail/`).
 - Add more UI languages by extending `locale::Language` and the catalog.

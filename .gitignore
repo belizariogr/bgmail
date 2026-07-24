@@ -8,6 +8,6 @@
 .vscode/
 
 # Local secrets / accounts (never commit real credentials)
-/.rmail
+/.bgmail
 *.local.toml
 secrets.toml

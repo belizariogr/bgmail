@@ -1,4 +1,4 @@
-//! rMail — a fast and elegant e-mail client built with GPUI.
+//! BGMail — a fast and elegant e-mail client built with GPUI.
 //!
 //! For now this binary is a **visual prototype (mock)**: it validates the layout
 //! (inspired by macOS Mail) and the startup speed, without any real e-mail logic.

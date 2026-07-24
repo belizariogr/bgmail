@@ -17,7 +17,7 @@ const WINDOWS_CONTROLS_WIDTH: f32 = WINDOWS_BUTTON_WIDTH * 3.0;
 
 pub fn main_titlebar_options() -> TitlebarOptions {
     TitlebarOptions {
-        title: Some("rMail".into()),
+        title: Some("BGMail".into()),
         appears_transparent: true,
         traffic_light_position: traffic_light_position(),
     }
@@ -187,7 +187,7 @@ mod tests {
         let options = main_titlebar_options();
         assert!(options.appears_transparent);
         let title = options.title.as_ref().map(|title| title.to_string());
-        assert_eq!(title.as_deref(), Some("rMail"));
+        assert_eq!(title.as_deref(), Some("BGMail"));
 
         if cfg!(target_os = "macos") {
             assert!(options.traffic_light_position.is_some());

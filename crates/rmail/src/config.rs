@@ -2,7 +2,7 @@
 //!
 //! For now we only remember a few layout sizes (the main window and the two
 //! resizable sidebar/list columns) so the app reopens the way the user left it.
-//! Settings are stored as JSON at `~/.config/rMail/config.json` on every
+//! Settings are stored as JSON at `~/.config/BGMail/config.json` on every
 //! platform — by request, we use this fixed path rather than each OS's native
 //! config directory. Reads and writes are best-effort: any error (missing file,
 //! bad JSON, no home directory) falls back to defaults and never crashes.
@@ -103,10 +103,10 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Absolute path to the config file (`~/.config/rMail/config.json`), or `None`
+/// Absolute path to the config file (`~/.config/BGMail/config.json`), or `None`
 /// if the home directory can't be determined.
 pub fn config_path() -> Option<PathBuf> {
-    home_dir().map(|home| home.join(".config").join("rMail").join("config.json"))
+    home_dir().map(|home| home.join(".config").join("BGMail").join("config.json"))
 }
 
 /// Loads the settings, returning defaults if the file is missing or unreadable.
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn config_path_uses_fixed_dot_config_location() {
         if let Some(path) = config_path() {
-            assert!(path.ends_with("rMail/config.json"));
+            assert!(path.ends_with("BGMail/config.json"));
             assert!(path.to_string_lossy().contains(".config"));
         }
     }

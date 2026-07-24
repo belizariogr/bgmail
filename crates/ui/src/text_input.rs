@@ -1,6 +1,6 @@
 //! Single-line text field backed by GPUI's platform input handler.
 //!
-//! Adapted from GPUI's `examples/input.rs`, styled for rMail and exposed as a
+//! Adapted from GPUI's `examples/input.rs`, styled for BGMail and exposed as a
 //! reusable component (search box, settings fields, etc.).
 
 use std::ops::Range;

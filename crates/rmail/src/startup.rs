@@ -27,7 +27,7 @@ pub fn format_elapsed(duration: Duration) -> String {
 /// Logs a named milestone when building in debug mode.
 pub fn log_milestone(label: &str) {
     if cfg!(debug_assertions) {
-        eprintln!("[rMail startup] {label}: {}", format_elapsed(elapsed()));
+        eprintln!("[BGMail startup] {label}: {}", format_elapsed(elapsed()));
     }
 }
 

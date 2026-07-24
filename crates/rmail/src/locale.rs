@@ -1,4 +1,4 @@
-//! Lightweight localization (i18n) for the rMail UI.
+//! Lightweight localization (i18n) for the BGMail UI.
 //!
 //! The active [`Language`] is stored as a [`gpui::Global`] and read through the
 //! [`ActiveLanguage`] trait, mirroring how the theme is handled. UI strings are

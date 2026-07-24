@@ -12,7 +12,7 @@ use crate::schema::{
 use crate::search::search_like_pattern;
 use crate::types::{Account, Folder, MailListQuery, MessageDetail, MessageListItem};
 
-/// Default database path: `~/.config/rMail/mail.db`.
+/// Default database path: `~/.config/BGMail/mail.db`.
 pub fn database_path() -> PathBuf {
     config_dir().join("mail.db")
 }
@@ -22,9 +22,9 @@ fn config_dir() -> PathBuf {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
     {
-        home.join(".config").join("rMail")
+        home.join(".config").join("BGMail")
     } else {
-        PathBuf::from(".config/rMail")
+        PathBuf::from(".config/BGMail")
     }
 }
 
@@ -315,9 +315,9 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn database_path_uses_dot_config_rmail() {
+    fn database_path_uses_dot_config_bgmail() {
         let path = database_path();
-        assert!(path.to_string_lossy().contains("rMail"));
+        assert!(path.to_string_lossy().contains("BGMail"));
         assert_eq!(path.file_name().unwrap(), "mail.db");
     }
 

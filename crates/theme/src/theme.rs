@@ -1,6 +1,6 @@
 //! # Theme
 //!
-//! rMail's theme system, modeled after Zed's `theme` crate, but lean and focused
+//! BGMail's theme system, modeled after Zed's `theme` crate, but lean and focused
 //! on the elements an e-mail client needs.
 //!
 //! A [`Theme`] is a collection of colors ([`ThemeColors`]) used to build a
@@ -156,7 +156,7 @@ impl Theme {
     /// Built-in dark theme, based on *VSCode Dark Modern*.
     pub fn dark() -> Self {
         Theme {
-            name: "rMail Dark",
+            name: "BGMail Dark",
             appearance: Appearance::Dark,
             colors: ThemeColors {
                 background: hex(0x1f1f1f),
@@ -201,7 +201,7 @@ impl Theme {
     /// Built-in light theme, based on *VSCode Light Modern*.
     pub fn light() -> Self {
         Theme {
-            name: "rMail Light",
+            name: "BGMail Light",
             appearance: Appearance::Light,
             colors: ThemeColors {
                 background: hex(0xffffff),
@@ -306,8 +306,8 @@ mod tests {
     fn builtin_themes_have_matching_appearance() {
         assert_eq!(Theme::dark().appearance(), Appearance::Dark);
         assert_eq!(Theme::light().appearance(), Appearance::Light);
-        assert_eq!(Theme::dark().name, "rMail Dark");
-        assert_eq!(Theme::light().name, "rMail Light");
+        assert_eq!(Theme::dark().name, "BGMail Dark");
+        assert_eq!(Theme::light().name, "BGMail Light");
     }
 
     #[test]
