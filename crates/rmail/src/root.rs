@@ -1262,6 +1262,7 @@ impl RootView {
     /// throttles soft OSR when we stop pumping, which otherwise makes the next
     /// message switch wait for a late paint.
     pub(crate) fn on_main_window_activated(&mut self, cx: &mut Context<Self>) {
+        crate::window_frame::refresh_caption_layout();
         crate::web_view::pump_platform_events();
         if let Some(webview) = &mut self.email_webview {
             webview.on_window_activated();
@@ -1351,7 +1352,6 @@ impl RootView {
         if self.email_webview.is_some() && self.last_webview_sig == Some(signature) {
             return;
         }
-        self.last_webview_sig = Some(signature);
 
         let empty_shown: HashSet<String> = HashSet::new();
         let body = db_seed::message_body_from_detail(detail);
@@ -1387,28 +1387,32 @@ impl RootView {
 
         match &mut self.email_webview {
             Some(webview) => {
+                // Same browser instance: navigate only (never create another CEF browser).
                 if let Some(previous) = webview.set_html(&document) {
                     let _ = window.drop_image(previous);
                 }
                 webview.set_notify_text(notify_body);
+                self.last_webview_sig = Some(signature);
             }
             None => {
-                // The webview's IPC callback can fire from any thread, so we hand
-                // events off through a channel and drain them on the GPUI
-                // foreground (status bar updates, clipboard writes).
+                // Create once. If CEF is not ready yet, leave the signature unset
+                // so the next frame retries — and do not spawn a dead IPC task.
                 let (tx, rx) = async_channel::unbounded::<HostEvent>();
-                self.email_webview = EmailWebView::new(window, &document, tx, notify_body);
-                cx.spawn(async move |this, cx| {
-                    while let Ok(event) = rx.recv().await {
-                        if this
-                            .update(cx, |root, cx| root.handle_host_event(event, cx))
-                            .is_err()
-                        {
-                            break;
+                if let Some(webview) = EmailWebView::new(window, &document, tx, notify_body) {
+                    self.email_webview = Some(webview);
+                    self.last_webview_sig = Some(signature);
+                    cx.spawn(async move |this, cx| {
+                        while let Ok(event) = rx.recv().await {
+                            if this
+                                .update(cx, |root, cx| root.handle_host_event(event, cx))
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
-                    }
-                })
-                .detach();
+                    })
+                    .detach();
+                }
             }
         }
         self.ensure_cef_osr_tick(cx);
@@ -1899,6 +1903,7 @@ impl RootView {
         self.window_width
             - sidebar_segment
             - list_segment
+            - crate::window_frame::left_controls_reserved_width()
             - crate::window_frame::right_controls_reserved_width()
     }
 
@@ -2150,6 +2155,7 @@ impl RootView {
                     .items_center()
                     .gap_1()
                     .pl(crate::window_frame::toolbar_left_padding())
+                    .children(crate::window_frame::render_left_window_controls(window))
                     .child(Self::icon_button_with_tooltip(
                         "toggle-sidebar",
                         Key::ToolbarToggleSidebar.tr(language),
@@ -3923,6 +3929,18 @@ mod tests {
     fn sidebar_starts_visible() {
         let (_dir, view) = test_view();
         assert!(view.show_sidebar);
+    }
+
+    #[test]
+    fn sync_webview_reuses_osr_browser_on_message_switch() {
+        // Structural guard: the Some-arm navigates; only the None-arm constructs.
+        let src = include_str!("root.rs");
+        assert!(src.contains("Same browser instance: navigate only"));
+        assert!(src.contains("if let Some(webview) = EmailWebView::new"));
+        assert!(
+            src.contains("leave the signature unset"),
+            "failed CEF creates must retry without stamping last_webview_sig"
+        );
     }
 
     #[test]

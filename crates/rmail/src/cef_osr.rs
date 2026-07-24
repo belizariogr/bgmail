@@ -28,6 +28,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_channel::Sender;
@@ -83,6 +84,17 @@ thread_local! {
     /// [`initialize`] succeeds; cleared by [`shutdown_cef`]. CEF and the objects
     /// it references must stay on the main thread, hence a thread-local.
     static CEF: RefCell<Option<CefRuntime>> = const { RefCell::new(None) };
+}
+
+/// How many windowless browsers have been successfully created in this process.
+/// Used to catch accidental re-creation (message switches must only `load_url`).
+static BROWSER_CREATE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Number of successful [`OsrBrowser::new`] calls since process start.
+/// Intended for leak diagnostics and tests (message switches must not bump this).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn browser_create_count() -> u64 {
+    BROWSER_CREATE_COUNT.load(Ordering::Relaxed)
 }
 
 /// Owns everything that must outlive `cef::initialize`: the `App` (whose handlers
@@ -812,6 +824,7 @@ impl OsrBrowser {
             None,
             None,
         )?;
+        BROWSER_CREATE_COUNT.fetch_add(1, Ordering::Relaxed);
 
         Some(Self {
             browser,
@@ -1105,6 +1118,16 @@ impl OsrBrowser {
     }
 }
 
+impl Drop for OsrBrowser {
+    fn drop(&mut self) {
+        // Force-close so we never leave a windowless browser alive after the
+        // GPUI wrapper is gone (would look like a create leak under `ps`).
+        if let Some(host) = self.browser.host() {
+            host.close_browser(1);
+        }
+    }
+}
+
 /// Translates GPUI keyboard modifier state into CEF `event_flags`, so
 /// Chromium sees Shift/Ctrl/Alt/Cmd while selecting, clicking, or typing.
 pub fn modifier_flags(shift: bool, control: bool, alt: bool, meta: bool) -> u32 {
@@ -1307,5 +1330,37 @@ mod tests {
         assert!(frame_matches_view(800, 600, 800, 600));
         assert!(frame_matches_view(801, 600, 800, 600));
         assert!(!frame_matches_view(820, 600, 800, 600));
+    }
+
+    #[test]
+    fn browser_create_is_single_call_site_and_set_html_navigates() {
+        // Message switches must `load_url` on the existing browser — never call
+        // `browser_host_create_browser_sync` again (that would spawn more CEF work).
+        let src = include_str!("cef_osr.rs");
+        let production = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section before tests");
+        assert_eq!(
+            production
+                .matches("browser_host_create_browser_sync")
+                .count(),
+            1,
+            "only OsrBrowser::new may create a CEF browser"
+        );
+        assert!(
+            production.contains("frame.load_url"),
+            "set_html must navigate the existing browser"
+        );
+        assert!(
+            production.contains("impl Drop for OsrBrowser"),
+            "dropping the wrapper must close the CEF browser"
+        );
+    }
+
+    #[test]
+    fn browser_create_count_is_zero_without_cef_init() {
+        // Unit tests never call `initialize`, so no windowless browser exists.
+        assert_eq!(browser_create_count(), 0);
     }
 }

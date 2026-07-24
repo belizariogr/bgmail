@@ -277,6 +277,8 @@ fn main() {
                                 }
                             })
                             .detach();
+                            // Pick up GNOME button-layout before the first toolbar paint.
+                            crate::window_frame::refresh_caption_layout();
                             view.sync_app_menus(cx);
                         });
                         // Closing the window (e.g. the macOS traffic-light button)

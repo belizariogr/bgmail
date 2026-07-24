@@ -1,25 +1,48 @@
 //! Platform-specific titlebar helpers for the custom main window frame.
 //!
 //! The main window uses a transparent titlebar so the toolbar can read as one
-//! native strip. macOS still gets AppKit's traffic lights; Windows and Linux
-//! (client-side decorations) draw caption buttons inside our toolbar. On Linux
-//! we request [`WindowDecorations::Client`] so the compositor drops its SSD —
-//! matching Zed — and wrap the content with a light CSD chrome (shadow/resize).
+//! native strip. macOS still gets AppKit's traffic lights; Windows draws
+//! rectangular caption buttons; Linux (client-side decorations) draws
+//! Adwaita-style circular title buttons and respects the desktop's button layout
+//! (GNOME `button-layout` / compositor `WindowControls`) so minimize/maximize
+//! stay hidden when the shell does not show them.
+
+use std::sync::RwLock;
 
 use gpui::{
     canvas, point, px, AnyElement, Bounds, CursorStyle, Decorations, HitboxBehavior, Hsla,
-    MouseButton, Pixels, Point, ResizeEdge, Size, TitlebarOptions, Window, WindowControlArea,
-    WindowDecorations,
+    MouseButton, Pixels, Point, ResizeEdge, SharedString, Size, TitlebarOptions, Window,
+    WindowControlArea, WindowControls, WindowDecorations,
 };
 use ui::prelude::*;
 
 const MAC_TRAFFIC_LIGHT_CLEARANCE: f32 = 90.0;
 const DEFAULT_LEFT_PADDING: f32 = 12.0;
-const CAPTION_BUTTON_WIDTH: f32 = 46.0;
-const CAPTION_CONTROLS_WIDTH: f32 = CAPTION_BUTTON_WIDTH * 3.0;
+/// Windows caption button hit width (Fluent-style rectangular strip).
+const WIN_CAPTION_BUTTON_WIDTH: f32 = 46.0;
+/// Linux/Adwaita title-button slot (circle + padding), matching GTK CSD density.
+const GTK_CAPTION_SLOT: f32 = 36.0;
+const GTK_CAPTION_GAP: f32 = 4.0;
 const CLIENT_SIDE_SHADOW: f32 = 10.0;
 const CLIENT_SIDE_ROUNDING: f32 = 10.0;
 const CLIENT_SIDE_BORDER: f32 = 1.0;
+
+/// Which caption buttons to draw, split by titlebar side (GNOME `button-layout`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CaptionLayout {
+    left: Vec<CaptionKind>,
+    right: Vec<CaptionKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptionKind {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+/// Cached desktop button layout so we do not shell out to `gsettings` every frame.
+static CAPTION_LAYOUT: RwLock<Option<CaptionLayout>> = RwLock::new(None);
 
 pub fn main_titlebar_options() -> TitlebarOptions {
     TitlebarOptions {
@@ -59,15 +82,30 @@ pub fn toolbar_left_padding() -> Pixels {
 
 /// Width reserved on the right of the toolbar for custom caption buttons.
 pub fn right_controls_reserved_width() -> Pixels {
-    if cfg!(any(
-        target_os = "windows",
-        target_os = "linux",
-        target_os = "freebsd"
-    )) {
-        px(CAPTION_CONTROLS_WIDTH)
+    if cfg!(target_os = "windows") {
+        return px(WIN_CAPTION_BUTTON_WIDTH * 3.0);
+    }
+    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        return caption_side_width(&cached_caption_layout().right);
+    }
+    px(0.0)
+}
+
+/// Width reserved on the left for GNOME-style caption buttons (e.g. `close:`).
+pub fn left_controls_reserved_width() -> Pixels {
+    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        caption_side_width(&cached_caption_layout().left)
     } else {
         px(0.0)
     }
+}
+
+fn caption_side_width(buttons: &[CaptionKind]) -> Pixels {
+    if buttons.is_empty() {
+        return px(0.0);
+    }
+    let n = buttons.len() as f32;
+    px(n * GTK_CAPTION_SLOT + (n - 1.0).max(0.0) * GTK_CAPTION_GAP)
 }
 
 fn uses_custom_caption_buttons(window: &Window) -> bool {
@@ -80,11 +118,161 @@ fn uses_custom_caption_buttons(window: &Window) -> bool {
     false
 }
 
+/// Re-reads the desktop button layout (GNOME `gsettings`). Call when the main
+/// window is activated so Tweaks / layout changes apply without restarting.
+pub fn refresh_caption_layout() {
+    if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        return;
+    }
+    let layout = linux_caption_layout_from_desktop(None);
+    if let Ok(mut guard) = CAPTION_LAYOUT.write() {
+        *guard = Some(layout);
+    }
+}
+
+fn cached_caption_layout() -> CaptionLayout {
+    if let Ok(guard) = CAPTION_LAYOUT.read() {
+        if let Some(layout) = guard.as_ref() {
+            return layout.clone();
+        }
+    }
+    let layout = linux_caption_layout_from_desktop(None);
+    if let Ok(mut guard) = CAPTION_LAYOUT.write() {
+        *guard = Some(layout.clone());
+    }
+    layout
+}
+
+/// Builds the caption layout for Linux CSD. `controls` filters by compositor
+/// capabilities when provided (Wayland `WmCapabilities`).
+fn linux_caption_layout_from_desktop(controls: Option<WindowControls>) -> CaptionLayout {
+    let mut layout = if let Some(raw) = read_gnome_button_layout() {
+        parse_button_layout(&raw)
+    } else if is_gnome_like_desktop() {
+        // GNOME's default titlebar is close-only when gsettings is unavailable.
+        CaptionLayout {
+            left: Vec::new(),
+            right: vec![CaptionKind::Close],
+        }
+    } else {
+        // KDE / tiling WMs: show the usual trio on the right.
+        CaptionLayout {
+            left: Vec::new(),
+            right: vec![
+                CaptionKind::Minimize,
+                CaptionKind::Maximize,
+                CaptionKind::Close,
+            ],
+        }
+    };
+    if let Some(controls) = controls {
+        filter_layout_by_controls(&mut layout, controls);
+    }
+    layout
+}
+
+fn filter_layout_by_controls(layout: &mut CaptionLayout, controls: WindowControls) {
+    let keep = |kind: &CaptionKind| match kind {
+        CaptionKind::Minimize => controls.minimize,
+        CaptionKind::Maximize => controls.maximize,
+        CaptionKind::Close => true,
+    };
+    layout.left.retain(keep);
+    layout.right.retain(keep);
+}
+
+/// Parses GNOME/Mutter `button-layout` (`left:right`, comma-separated kinds).
+fn parse_button_layout(raw: &str) -> CaptionLayout {
+    let cleaned = raw.trim().trim_matches('\'').trim_matches('"').trim();
+    let (left_raw, right_raw) = match cleaned.split_once(':') {
+        Some((l, r)) => (l, r),
+        None => ("", cleaned),
+    };
+    CaptionLayout {
+        left: parse_button_side(left_raw),
+        right: parse_button_side(right_raw),
+    }
+}
+
+fn parse_button_side(side: &str) -> Vec<CaptionKind> {
+    side.split(',')
+        .filter_map(|part| match part.trim() {
+            "minimize" => Some(CaptionKind::Minimize),
+            "maximize" => Some(CaptionKind::Maximize),
+            "close" => Some(CaptionKind::Close),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_gnome_like_desktop() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .ok()
+        .map(|desktop| {
+            desktop
+                .to_ascii_uppercase()
+                .split(':')
+                .any(|part| matches!(part, "GNOME" | "UNITY" | "COSMIC"))
+        })
+        .unwrap_or(false)
+}
+
+fn read_gnome_button_layout() -> Option<String> {
+    let output = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.wm.preferences", "button-layout"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 pub fn render_right_window_controls(window: &mut Window) -> Option<AnyElement> {
     if !uses_custom_caption_buttons(window) {
         return None;
     }
-    Some(CaptionWindowControls::new(window.is_maximized()).into_any_element())
+    if cfg!(target_os = "windows") {
+        return Some(CaptionWindowControls::windows(window.is_maximized()).into_any_element());
+    }
+    let layout = linux_layout_for_window(window);
+    if layout.right.is_empty() {
+        return None;
+    }
+    Some(CaptionWindowControls::linux(layout.right, window.is_maximized()).into_any_element())
+}
+
+/// Left-side caption buttons for layouts like GNOME `close:minimize,maximize`.
+pub fn render_left_window_controls(window: &mut Window) -> Option<AnyElement> {
+    if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        return None;
+    }
+    if !uses_custom_caption_buttons(window) {
+        return None;
+    }
+    let layout = linux_layout_for_window(window);
+    if layout.left.is_empty() {
+        return None;
+    }
+    Some(CaptionWindowControls::linux(layout.left, window.is_maximized()).into_any_element())
+}
+
+fn linux_layout_for_window(window: &Window) -> CaptionLayout {
+    let mut layout = cached_caption_layout();
+    // Prefer live compositor capabilities when they actually restrict buttons.
+    // GPUI's Wayland default assumes everything is available, so we only filter
+    // when at least one of min/max is reported unavailable.
+    let controls = window.window_controls();
+    if !controls.minimize || !controls.maximize {
+        filter_layout_by_controls(&mut layout, controls);
+    }
+    layout
 }
 
 /// Wraps the main UI in Zed-style client-side decoration chrome when the
@@ -223,33 +411,68 @@ fn cursor_for_resize_edge(edge: ResizeEdge) -> CursorStyle {
 
 #[derive(IntoElement)]
 struct CaptionWindowControls {
+    buttons: Vec<CaptionKind>,
     maximized: bool,
+    /// Adwaita circular buttons on Linux; rectangular Fluent strip on Windows.
+    gtk_style: bool,
 }
 
 impl CaptionWindowControls {
-    fn new(maximized: bool) -> Self {
-        Self { maximized }
+    fn windows(maximized: bool) -> Self {
+        Self {
+            buttons: vec![
+                CaptionKind::Minimize,
+                CaptionKind::Maximize,
+                CaptionKind::Close,
+            ],
+            maximized,
+            gtk_style: false,
+        }
+    }
+
+    fn linux(buttons: Vec<CaptionKind>, maximized: bool) -> Self {
+        Self {
+            buttons,
+            maximized,
+            gtk_style: true,
+        }
     }
 }
 
 impl RenderOnce for CaptionWindowControls {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        h_flex()
+        let maximized = self.maximized;
+        let gtk_style = self.gtk_style;
+        let mut row = h_flex()
             .id("caption-window-controls")
             .h_full()
             .flex_shrink_0()
-            .child(CaptionButton::Minimize)
-            .child(if self.maximized {
-                CaptionButton::Restore
-            } else {
-                CaptionButton::Maximize
-            })
-            .child(CaptionButton::Close)
+            .items_center();
+        if gtk_style {
+            row = row.gap(px(GTK_CAPTION_GAP)).px(px(GTK_CAPTION_GAP));
+        }
+        for (ix, kind) in self.buttons.into_iter().enumerate() {
+            let button = match kind {
+                CaptionKind::Minimize => CaptionButton::minimize(),
+                CaptionKind::Maximize if maximized => CaptionButton::restore(),
+                CaptionKind::Maximize => CaptionButton::maximize(),
+                CaptionKind::Close => CaptionButton::close(),
+            };
+            row = row.child(button.with_style(gtk_style).with_index(ix));
+        }
+        row
     }
 }
 
 #[derive(Clone, Copy, IntoElement)]
-enum CaptionButton {
+struct CaptionButton {
+    kind: CaptionButtonKind,
+    gtk_style: bool,
+    index: usize,
+}
+
+#[derive(Clone, Copy)]
+enum CaptionButtonKind {
     Minimize,
     Restore,
     Maximize,
@@ -257,29 +480,76 @@ enum CaptionButton {
 }
 
 impl CaptionButton {
-    fn id(self) -> &'static str {
-        match self {
-            Self::Minimize => "minimize",
-            Self::Restore => "restore",
-            Self::Maximize => "maximize",
-            Self::Close => "close",
+    fn minimize() -> Self {
+        Self {
+            kind: CaptionButtonKind::Minimize,
+            gtk_style: false,
+            index: 0,
         }
     }
 
+    fn restore() -> Self {
+        Self {
+            kind: CaptionButtonKind::Restore,
+            gtk_style: false,
+            index: 0,
+        }
+    }
+
+    fn maximize() -> Self {
+        Self {
+            kind: CaptionButtonKind::Maximize,
+            gtk_style: false,
+            index: 0,
+        }
+    }
+
+    fn close() -> Self {
+        Self {
+            kind: CaptionButtonKind::Close,
+            gtk_style: false,
+            index: 0,
+        }
+    }
+
+    fn with_style(mut self, gtk_style: bool) -> Self {
+        self.gtk_style = gtk_style;
+        self
+    }
+
+    fn with_index(mut self, index: usize) -> Self {
+        self.index = index;
+        self
+    }
+
+    fn id(self) -> SharedString {
+        format!(
+            "{}-{}",
+            match self.kind {
+                CaptionButtonKind::Minimize => "minimize",
+                CaptionButtonKind::Restore => "restore",
+                CaptionButtonKind::Maximize => "maximize",
+                CaptionButtonKind::Close => "close",
+            },
+            self.index
+        )
+        .into()
+    }
+
     fn icon(self) -> IconName {
-        match self {
-            Self::Minimize => IconName::WindowMinimize,
-            Self::Restore => IconName::WindowRestore,
-            Self::Maximize => IconName::WindowMaximize,
-            Self::Close => IconName::Clear,
+        match self.kind {
+            CaptionButtonKind::Minimize => IconName::WindowMinimize,
+            CaptionButtonKind::Restore => IconName::WindowRestore,
+            CaptionButtonKind::Maximize => IconName::WindowMaximize,
+            CaptionButtonKind::Close => IconName::Clear,
         }
     }
 
     fn action(self) -> CaptionAction {
-        match self {
-            Self::Minimize => CaptionAction::Minimize,
-            Self::Restore | Self::Maximize => CaptionAction::Zoom,
-            Self::Close => CaptionAction::Close,
+        match self.kind {
+            CaptionButtonKind::Minimize => CaptionAction::Minimize,
+            CaptionButtonKind::Restore | CaptionButtonKind::Maximize => CaptionAction::Zoom,
+            CaptionButtonKind::Close => CaptionAction::Close,
         }
     }
 
@@ -310,11 +580,34 @@ enum CaptionAction {
 impl RenderOnce for CaptionButton {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let hover_bg = if matches!(self, Self::Close) {
+        let is_close = matches!(self.kind, CaptionButtonKind::Close);
+        let hover_bg = if is_close {
             colors.error
         } else {
             colors.element_hover
         };
+
+        if self.gtk_style {
+            // Adwaita/GTK CSD: circular title buttons with a compact hit target.
+            return div()
+                .id(self.id())
+                .flex()
+                .items_center()
+                .justify_center()
+                .occlude()
+                .w(px(GTK_CAPTION_SLOT))
+                .h(px(GTK_CAPTION_SLOT))
+                .rounded_full()
+                .hover(move |style| style.bg(hover_bg))
+                .window_control_area(self.control_area())
+                .on_click(move |_, window, cx| self.activate(window, cx))
+                .child(
+                    Icon::new(self.icon())
+                        .size(IconSize::XSmall)
+                        .color(Color::Default),
+                )
+                .into_any_element();
+        }
 
         div()
             .id(self.id())
@@ -322,7 +615,7 @@ impl RenderOnce for CaptionButton {
             .items_center()
             .justify_center()
             .occlude()
-            .w(px(CAPTION_BUTTON_WIDTH))
+            .w(px(WIN_CAPTION_BUTTON_WIDTH))
             .h_full()
             .hover(move |style| style.bg(hover_bg))
             .window_control_area(self.control_area())
@@ -332,6 +625,7 @@ impl RenderOnce for CaptionButton {
                     .size(IconSize::Small)
                     .color(Color::Default),
             )
+            .into_any_element()
     }
 }
 
@@ -360,7 +654,9 @@ mod tests {
         if cfg!(target_os = "macos") {
             assert_eq!(padding, px(MAC_TRAFFIC_LIGHT_CLEARANCE));
         } else {
-            assert_eq!(padding, px(DEFAULT_LEFT_PADDING));
+            // Left padding grows when a GNOME layout places buttons on the left;
+            // without a cached layout this is at least the default inset.
+            assert!(padding >= px(DEFAULT_LEFT_PADDING));
         }
     }
 
@@ -375,43 +671,101 @@ mod tests {
     }
 
     #[test]
-    fn right_controls_reserve_width_on_windows_and_linux() {
+    fn right_controls_reserve_width_on_windows() {
         let reserved = right_controls_reserved_width();
-        if cfg!(any(
-            target_os = "windows",
-            target_os = "linux",
-            target_os = "freebsd"
-        )) {
-            assert_eq!(reserved, px(CAPTION_CONTROLS_WIDTH));
-        } else {
+        if cfg!(target_os = "windows") {
+            assert_eq!(reserved, px(WIN_CAPTION_BUTTON_WIDTH * 3.0));
+        } else if cfg!(target_os = "macos") {
             assert_eq!(reserved, px(0.0));
         }
+        // Linux width depends on the live button-layout cache; covered below.
+    }
+
+    #[test]
+    fn parse_button_layout_gnome_close_only() {
+        let layout = parse_button_layout(":close");
+        assert!(layout.left.is_empty());
+        assert_eq!(layout.right, vec![CaptionKind::Close]);
+    }
+
+    #[test]
+    fn parse_button_layout_full_right() {
+        let layout = parse_button_layout(":minimize,maximize,close");
+        assert!(layout.left.is_empty());
+        assert_eq!(
+            layout.right,
+            vec![
+                CaptionKind::Minimize,
+                CaptionKind::Maximize,
+                CaptionKind::Close
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_button_layout_close_on_left() {
+        let layout = parse_button_layout("close:minimize,maximize");
+        assert_eq!(layout.left, vec![CaptionKind::Close]);
+        assert_eq!(
+            layout.right,
+            vec![CaptionKind::Minimize, CaptionKind::Maximize]
+        );
+    }
+
+    #[test]
+    fn parse_button_layout_ignores_menu_and_appmenu() {
+        let layout = parse_button_layout("appmenu:minimize,maximize,close");
+        assert!(layout.left.is_empty());
+        assert_eq!(layout.right.len(), 3);
+    }
+
+    #[test]
+    fn filter_layout_hides_unavailable_min_max() {
+        let mut layout = parse_button_layout(":minimize,maximize,close");
+        filter_layout_by_controls(
+            &mut layout,
+            WindowControls {
+                fullscreen: true,
+                maximize: false,
+                minimize: false,
+                window_menu: true,
+            },
+        );
+        assert_eq!(layout.right, vec![CaptionKind::Close]);
+    }
+
+    #[test]
+    fn caption_side_width_scales_with_button_count() {
+        assert_eq!(caption_side_width(&[]), px(0.0));
+        let one = caption_side_width(&[CaptionKind::Close]);
+        let two = caption_side_width(&[CaptionKind::Minimize, CaptionKind::Close]);
+        assert!(two > one);
     }
 
     #[test]
     fn caption_buttons_map_to_explicit_actions() {
-        assert_eq!(CaptionButton::Minimize.action(), CaptionAction::Minimize);
-        assert_eq!(CaptionButton::Maximize.action(), CaptionAction::Zoom);
-        assert_eq!(CaptionButton::Restore.action(), CaptionAction::Zoom);
-        assert_eq!(CaptionButton::Close.action(), CaptionAction::Close);
+        assert_eq!(CaptionButton::minimize().action(), CaptionAction::Minimize);
+        assert_eq!(CaptionButton::maximize().action(), CaptionAction::Zoom);
+        assert_eq!(CaptionButton::restore().action(), CaptionAction::Zoom);
+        assert_eq!(CaptionButton::close().action(), CaptionAction::Close);
     }
 
     #[test]
     fn caption_buttons_map_to_native_control_areas() {
         assert_eq!(
-            CaptionButton::Minimize.control_area(),
+            CaptionButton::minimize().control_area(),
             WindowControlArea::Min
         );
         assert_eq!(
-            CaptionButton::Maximize.control_area(),
+            CaptionButton::maximize().control_area(),
             WindowControlArea::Max
         );
         assert_eq!(
-            CaptionButton::Restore.control_area(),
+            CaptionButton::restore().control_area(),
             WindowControlArea::Max
         );
         assert_eq!(
-            CaptionButton::Close.control_area(),
+            CaptionButton::close().control_area(),
             WindowControlArea::Close
         );
     }

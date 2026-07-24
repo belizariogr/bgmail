@@ -241,7 +241,15 @@
       traffic-light layout
 - ✅ Linux client-side decorations (Zed-style): request
       `WindowDecorations::Client`, draw caption buttons in the toolbar, and wrap
-      the main UI with shadow/resize chrome when the compositor grants CSD
+      the main UI with shadow/resize chrome when the compositor grants CSD.
+      Caption buttons use an Adwaita-like circular GTK style and follow the desktop
+      `button-layout` (`gsettings org.gnome.desktop.wm.preferences button-layout`)
+      plus compositor `WindowControls`, so GNOME's default close-only titlebar hides
+      minimize/maximize; left/right placement from the layout string is respected.
+- ✅ CEF OSR browser lifecycle: a single windowless browser per main window;
+      message switches only `load_url` (`set_html`). Create counter + `Drop` close
+      the host; `sync_webview` retries without spawning IPC tasks when CEF is not
+      ready yet.
 - ✅ HTML reader via **CEF windowless off-screen rendering** on Windows, Linux and
       macOS, on by default via the `cef-osr` feature (`linux-webview` remains an
       alias). Chromium renders each body to an off-screen BGRA buffer that GPUI
