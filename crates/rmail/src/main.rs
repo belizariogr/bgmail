@@ -292,7 +292,9 @@ fn main() {
                         });
                         view.update(cx, |view, cx| {
                             cx.observe_window_activation(window, |this, window, cx| {
-                                if !window.is_window_active() {
+                                if window.is_window_active() {
+                                    this.on_main_window_activated(cx);
+                                } else {
                                     this.schedule_close_command_palette_if_not_focused(cx);
                                 }
                             })

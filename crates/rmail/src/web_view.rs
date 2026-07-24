@@ -41,6 +41,27 @@ pub enum WebviewMouseButton {
     Middle,
 }
 
+/// CSS-ish cursor requested by the page (Linux OSR). Mapped to GPUI's
+/// [`gpui::CursorStyle`] by the reader; child webviews set the OS cursor themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WebviewCursor {
+    #[default]
+    Arrow,
+    IBeam,
+    Hand,
+    Crosshair,
+    NotAllowed,
+    Grab,
+    Grabbing,
+    ColResize,
+    RowResize,
+    VerticalText,
+    ContextMenu,
+    Alias,
+    Copy,
+    None,
+}
+
 /// Whether the native embedded webview backend is available on this target.
 pub const WEBVIEW_SUPPORTED: bool = cfg!(any(
     target_os = "macos",
@@ -413,6 +434,10 @@ pub enum HostEvent {
     /// Toggle the command palette from a keyboard shortcut handled by the native
     /// webview document.
     CommandPalette,
+    /// The page wants a different mouse cursor (Linux OSR only).
+    CursorChanged(WebviewCursor),
+    /// CEF finished a navigation step or needs another GPUI composite (Linux OSR).
+    OsrNeedsRedraw,
 }
 
 /// Opens BGMail's command palette from inside the reader document (Ctrl/Cmd+P).
@@ -516,7 +541,14 @@ pub(crate) const CONTENT_SCRIPT: &str = r#"(function () {
         hint.textContent = it.hint;
         b.appendChild(hint);
       }
-      b.addEventListener('click', function () { it.run(); closeMenu(); });
+      // Use mousedown (not click): soft OSR often fails to synthesize a full
+      // click after right-click opened the menu, so Copy never ran.
+      b.addEventListener('mousedown', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        it.run();
+        closeMenu();
+      });
       menu.appendChild(b);
     });
     document.body.appendChild(menu);
@@ -530,16 +562,10 @@ pub(crate) const CONTENT_SCRIPT: &str = r#"(function () {
   document.addEventListener('contextmenu', function (e) {
     var data = document.body.dataset;
     var img = closestTag(e.target, 'IMG');
-    if (img && img.src) {
-      e.preventDefault();
-      openMenu(e.clientX, e.clientY, [
-        { label: data.rmImgOpen || 'Open image in browser', run: function () { send('O', img.src); } },
-        { label: data.rmImgDownload || 'Download image', run: function () { send('D', img.src); } }
-      ]);
-      return;
-    }
+    // Blocked remote images first: an <img> without a src attribute still has a
+    // truthy img.src (resolved against the document base), which would steal the
+    // menu into Open/Download instead of "Show remote image".
     if (img && img.dataset.rmBlockedSrc) {
-      // A remote image blocked for privacy: offer to load this one in place.
       e.preventDefault();
       openMenu(e.clientX, e.clientY, [
         { label: data.rmImgShow || 'Show remote image', run: function () {
@@ -550,6 +576,16 @@ pub(crate) const CONTENT_SCRIPT: &str = r#"(function () {
             // Tell the host so it keeps this image shown and updates the count.
             send('S', url);
         } }
+      ]);
+      return;
+    }
+    // Prefer the real attribute: img.src is never empty once the element exists.
+    var imgSrc = img && img.getAttribute('src');
+    if (img && imgSrc) {
+      e.preventDefault();
+      openMenu(e.clientX, e.clientY, [
+        { label: data.rmImgOpen || 'Open image in browser', run: function () { send('O', imgSrc); } },
+        { label: data.rmImgDownload || 'Download image', run: function () { send('D', imgSrc); } }
       ]);
       return;
     }
@@ -576,7 +612,12 @@ pub(crate) const CONTENT_SCRIPT: &str = r#"(function () {
     }
   }, true);
   document.addEventListener('mousedown', function (e) {
-    if (menu && !menu.contains(e.target)) closeMenu();
+    if (menu) {
+      // Clicks inside the menu are handled by the item's own mousedown; do not
+      // treat them as body clicks (that used to race with Copy on OSR).
+      if (menu.contains(e.target)) return;
+      closeMenu();
+    }
     // Report the click so the host can dismiss any GPUI overlay (e.g. the
     // privacy dropdown): clicks on the webview don't reach GPUI's catcher.
     send('B', '');
@@ -584,6 +625,25 @@ pub(crate) const CONTENT_SCRIPT: &str = r#"(function () {
   document.addEventListener('scroll', closeMenu, true);
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') closeMenu();
+    // Soft OSR has no OS clipboard integration for the child surface, so Ctrl/Cmd+C
+    // must go through our IPC bridge (same path as the selection context menu).
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key) {
+      var k = e.key.toLowerCase();
+      if (k === 'c') {
+        var copySel = window.getSelection();
+        var copyText = copySel ? copySel.toString() : '';
+        if (copyText.length > 0) {
+          e.preventDefault();
+          send('C', copyText);
+        }
+      } else if (k === 'a') {
+        e.preventDefault();
+        var range = document.createRange();
+        range.selectNodeContents(document.body);
+        var allSel = window.getSelection();
+        if (allSel) { allSel.removeAllRanges(); allSel.addRange(range); }
+      }
+    }
   }, true);
   window.addEventListener('blur', closeMenu);
   // Exposed so the host can dismiss the menu when the user clicks the GPUI UI
@@ -1120,15 +1180,28 @@ mod platform {
         }
 
         /// Reloads the document if it changed (e.g. another message was selected
-        /// or the theme toggled).
-        pub fn set_html(&mut self, html: &str) {
+        /// or the theme toggled). Returns `None` — the child webview owns its
+        /// surface, so there is no GPUI texture to drop (Linux OSR returns one).
+        pub fn set_html(&mut self, html: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
             if self.last_html == html {
-                return;
+                return None;
             }
             if self.webview.load_html(html).is_ok() {
                 self.last_html = html.to_string();
             }
+            None
         }
+
+        /// No-op on child-webview backends (the OS keeps the surface alive).
+        pub fn on_window_activated(&mut self) {}
+
+        /// No-op: child webviews are not driven by a GPUI tick.
+        pub fn on_osr_tick(&mut self) -> bool {
+            false
+        }
+
+        /// No-op: child webviews paint on their own surfaces.
+        pub fn note_load_progress(&mut self) {}
 
         /// Updates the localized notification text used after a download, so a
         /// language switch is reflected without rebuilding the webview.
@@ -1191,6 +1264,7 @@ mod platform {
             _shift: bool,
             _control: bool,
             _alt: bool,
+            _meta: bool,
         ) {
         }
 
@@ -1205,6 +1279,20 @@ mod platform {
         }
 
         pub fn handle_scroll(&self, _x: f32, _y: f32, _delta_x: f32, _delta_y: f32) {}
+
+        pub fn handle_key(
+            &mut self,
+            _pressed: bool,
+            _key: &str,
+            _key_char: Option<&str>,
+            _shift: bool,
+            _control: bool,
+            _alt: bool,
+            _meta: bool,
+        ) {
+        }
+
+        pub fn set_focused(&self, _focused: bool) {}
 
         pub fn has_mouse_capture(&self) -> bool {
             false
@@ -1243,11 +1331,19 @@ mod platform {
         /// `on_paint` a tick or two after `do_message_loop_work`, so a single
         /// paint after scroll would miss the new buffer.
         warm_frames: u8,
+        /// True between [`Self::set_html`] / first create and the next successful
+        /// frame upload. Keeps the redraw loop alive across slow navigations
+        /// (especially after the window was backgrounded and CEF throttled).
+        awaiting_paint: bool,
     }
 
     /// How many follow-up GPUI frames to schedule after pointer input so late
     /// CEF paints still reach the texture.
     const INPUT_WARM_FRAMES: u8 = 8;
+    /// After a full document reload (`data:` navigation) CEF needs many more
+    /// message-loop ticks — especially if the app was just un-backgrounded and
+    /// Chromium had throttled the OSR browser. Keep the GPUI loop alive longer.
+    const LOAD_WARM_FRAMES: u8 = 90;
 
     impl EmailWebView {
         /// Creates the off-screen browser. Returns `None` if CEF isn't ready yet
@@ -1261,20 +1357,62 @@ mod platform {
             Some(Self {
                 inner: OsrBrowser::new(html, to_host, notify_body)?,
                 visible: true,
-                // First load needs several frames before the initial paint lands.
-                warm_frames: INPUT_WARM_FRAMES,
+                warm_frames: LOAD_WARM_FRAMES,
+                awaiting_paint: true,
             })
         }
 
-        /// Reloads the document if it changed.
-        pub fn set_html(&mut self, html: &str) {
-            self.inner.set_html(html);
-            self.warm_frames = INPUT_WARM_FRAMES;
+        /// Reloads the document if it changed. Returns any previous texture the
+        /// caller should [`Window::drop_image`].
+        pub fn set_html(&mut self, html: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
+            let (navigated, previous) = self.inner.set_html(html);
+            if navigated {
+                self.awaiting_paint = true;
+                self.warm_frames = LOAD_WARM_FRAMES;
+                self.inner.pump_hard();
+            }
+            previous
         }
 
         /// Updates the localized download-confirmation text live.
         pub fn set_notify_text(&self, body: String) {
             self.inner.set_notify_text(body);
+        }
+
+        /// Called when the GPUI window becomes active again. Chromium throttles
+        /// OSR while we stop pumping in the background; wake it and keep painting.
+        pub fn on_window_activated(&mut self) {
+            self.visible = true;
+            self.inner.set_visible(true);
+            self.inner.set_focus(true);
+            self.inner.pump_hard();
+            self.warm_frames = self.warm_frames.max(LOAD_WARM_FRAMES);
+            if self.inner.current_frame().is_none() {
+                self.awaiting_paint = true;
+            }
+        }
+
+        /// Keeps CEF's external message pump alive between GPUI paints (the
+        /// window may be inactive and GPUI may not paint). Returns `true` when
+        /// the host should [`gpui::Context::notify`] so a pending frame is shown.
+        pub fn on_osr_tick(&mut self) -> bool {
+            if !self.visible {
+                return false;
+            }
+            if self.awaiting_paint || self.warm_frames > 0 || self.inner.has_pending_frame() {
+                self.inner.pump_hard();
+                true
+            } else {
+                false
+            }
+        }
+
+        /// Called when CEF reports load-end for the main document. Keeps the
+        /// redraw loop alive until `on_paint` delivers the new buffer.
+        pub fn note_load_progress(&mut self) {
+            self.awaiting_paint = true;
+            self.warm_frames = self.warm_frames.max(LOAD_WARM_FRAMES);
+            self.inner.pump_hard();
         }
 
         /// Marks the view visible over `bounds`. The actual size sync + upload
@@ -1290,6 +1428,7 @@ mod platform {
             self.visible = false;
             self.inner.set_visible(false);
             self.warm_frames = 0;
+            self.awaiting_paint = false;
         }
 
         /// Syncs the render size to `bounds`/scale, flushes coalesced input,
@@ -1323,8 +1462,14 @@ mod platform {
                 // Keep redrawing until CEF delivers a buffer that matches the view.
                 self.warm_frames = INPUT_WARM_FRAMES;
             }
-            // Flush wheel + pump before sampling so this paint sees scroll/resize.
-            self.inner.flush_input();
+            if self.awaiting_paint {
+                // A navigation in flight: pump harder so `on_paint` can land this
+                // frame instead of waiting for the next user event.
+                self.inner.pump_hard();
+            } else {
+                // Flush wheel + pump before sampling so this paint sees scroll/resize.
+                self.inner.flush_input();
+            }
             // Swap in a new frame if one arrived, releasing the previous texture.
             let had_new = if let Some((_new, previous)) = self.inner.take_frame() {
                 if let Some(previous) = previous {
@@ -1334,6 +1479,9 @@ mod platform {
             } else {
                 false
             };
+            if had_new {
+                self.awaiting_paint = false;
+            }
             if let (Some(frame), Some((fw, fh))) =
                 (self.inner.current_frame(), self.inner.current_frame_px())
             {
@@ -1361,6 +1509,11 @@ mod platform {
             if !self.inner.current_frame_fits_view() {
                 self.warm_frames = self.warm_frames.max(2);
             }
+            // Never stop the loop mid-navigation — fixed warm budgets expire too
+            // early after a background resume.
+            if self.awaiting_paint {
+                self.warm_frames = self.warm_frames.max(2);
+            }
             if self.warm_frames > 0 {
                 self.warm_frames -= 1;
                 true
@@ -1370,9 +1523,17 @@ mod platform {
         }
 
         /// Forwards a mouse move at view-relative logical coordinates.
-        pub fn handle_mouse_move(&self, x: f32, y: f32, shift: bool, control: bool, alt: bool) {
+        pub fn handle_mouse_move(
+            &self,
+            x: f32,
+            y: f32,
+            shift: bool,
+            control: bool,
+            alt: bool,
+            meta: bool,
+        ) {
             self.inner
-                .mouse_move(x, y, modifier_flags(shift, control, alt));
+                .mouse_move(x, y, modifier_flags(shift, control, alt, meta));
         }
 
         /// Forwards a mouse press/release.
@@ -1393,6 +1554,32 @@ mod platform {
         pub fn handle_scroll(&mut self, x: f32, y: f32, delta_x: f32, delta_y: f32) {
             self.inner.mouse_wheel(x, y, delta_x, delta_y);
             self.warm_frames = INPUT_WARM_FRAMES;
+        }
+
+        /// Forwards a key press/release into the off-screen browser.
+        #[allow(clippy::too_many_arguments)]
+        pub fn handle_key(
+            &mut self,
+            pressed: bool,
+            key: &str,
+            key_char: Option<&str>,
+            shift: bool,
+            control: bool,
+            alt: bool,
+            meta: bool,
+        ) {
+            self.inner.key_event(
+                pressed,
+                key,
+                key_char,
+                modifier_flags(shift, control, alt, meta),
+            );
+            self.warm_frames = INPUT_WARM_FRAMES;
+        }
+
+        /// Focuses or blurs the off-screen browser (required for keyboard shortcuts).
+        pub fn set_focused(&self, focused: bool) {
+            self.inner.set_focus(focused);
         }
 
         /// Closes any custom context menu open inside the document.
@@ -1440,7 +1627,14 @@ mod platform {
         ) -> Option<Self> {
             None
         }
-        pub fn set_html(&mut self, _html: &str) {}
+        pub fn set_html(&mut self, _html: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
+            None
+        }
+        pub fn on_window_activated(&mut self) {}
+        pub fn on_osr_tick(&mut self) -> bool {
+            false
+        }
+        pub fn note_load_progress(&mut self) {}
         pub fn set_notify_text(&self, _body: String) {}
         pub fn position(&mut self, _bounds: Bounds<Pixels>) {}
         pub fn dismiss_context_menu(&self) {}
@@ -1460,6 +1654,7 @@ mod platform {
             _shift: bool,
             _control: bool,
             _alt: bool,
+            _meta: bool,
         ) {
         }
         pub fn handle_mouse_button(
@@ -1472,6 +1667,18 @@ mod platform {
         ) {
         }
         pub fn handle_scroll(&self, _x: f32, _y: f32, _delta_x: f32, _delta_y: f32) {}
+        pub fn handle_key(
+            &mut self,
+            _pressed: bool,
+            _key: &str,
+            _key_char: Option<&str>,
+            _shift: bool,
+            _control: bool,
+            _alt: bool,
+            _meta: bool,
+        ) {
+        }
+        pub fn set_focused(&self, _focused: bool) {}
         pub fn has_mouse_capture(&self) -> bool {
             false
         }
@@ -2036,5 +2243,29 @@ mod tests {
         )
         .html;
         assert!(doc.contains("window.ipc.postMessage('P\\n')"));
+    }
+
+    #[test]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", feature = "linux-webview")
+    ))]
+    fn content_script_runs_menu_actions_on_mousedown() {
+        // Soft OSR often drops the synthesized `click` after a right-click menu;
+        // actions must fire on mousedown and body-mousedown must ignore menu hits.
+        assert!(CONTENT_SCRIPT.contains("b.addEventListener('mousedown'"));
+        assert!(CONTENT_SCRIPT.contains("it.run()"));
+        assert!(CONTENT_SCRIPT.contains("if (menu.contains(e.target)) return"));
+        assert!(!CONTENT_SCRIPT.contains("addEventListener('click', function () { it.run()"));
+        // Blocked images must win over the img.src Open/Download branch: without
+        // an attribute, img.src is still the document base URL and is truthy.
+        let blocked = CONTENT_SCRIPT
+            .find("img.dataset.rmBlockedSrc")
+            .expect("blocked-image menu");
+        let open = CONTENT_SCRIPT
+            .find("img.getAttribute('src')")
+            .expect("open/download uses getAttribute");
+        assert!(blocked < open);
     }
 }

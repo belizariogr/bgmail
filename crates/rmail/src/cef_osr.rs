@@ -24,9 +24,10 @@
 //! GPUI redraw loop (`Context::notify` after paint/input) to show each
 //! `on_paint` promptly.
 //!
-//! CEF is driven by an **external message pump**: the GPUI view calls [`pump`]
-//! each paint (and after input), which forwards to `cef::do_message_loop_work()`.
-//! Everything here runs on the main thread; painted frames are stashed in an
+//! CEF is driven by an **external message pump**: the host calls [`pump`]
+//! continuously (a short RootView timer while an OSR webview exists) and also
+//! from paint/input. Relying on paint alone freezes CEF when GPUI stops
+//! painting an inactive window. Painted frames are stashed in an
 //! `Arc<Mutex<..>>` and converted to a [`gpui::RenderImage`] on the caller's
 //! thread in [`OsrBrowser::take_frame`].
 //!
@@ -47,7 +48,7 @@ use gpui::RenderImage;
 
 use crate::web_view::{
     decode_data_uri, downloads_dir, is_external_link, parse_ipc_message, unique_download_path,
-    HostEvent, IpcMessage, CONTENT_SCRIPT,
+    HostEvent, IpcMessage, WebviewCursor, CONTENT_SCRIPT,
 };
 
 // CEF `cef_event_flags_t` bits we care about for mouse input. Declared locally to
@@ -59,6 +60,23 @@ const EVENTFLAG_ALT_DOWN: u32 = 1 << 3;
 const EVENTFLAG_LEFT_MOUSE_BUTTON: u32 = 1 << 4;
 const EVENTFLAG_MIDDLE_MOUSE_BUTTON: u32 = 1 << 5;
 const EVENTFLAG_RIGHT_MOUSE_BUTTON: u32 = 1 << 6;
+const EVENTFLAG_COMMAND_DOWN: u32 = 1 << 7;
+
+/// Windows virtual-key codes CEF expects in [`KeyEvent::windows_key_code`].
+const VK_BACK: i32 = 0x08;
+const VK_TAB: i32 = 0x09;
+const VK_RETURN: i32 = 0x0D;
+const VK_ESCAPE: i32 = 0x1B;
+const VK_SPACE: i32 = 0x20;
+const VK_PRIOR: i32 = 0x21;
+const VK_NEXT: i32 = 0x22;
+const VK_END: i32 = 0x23;
+const VK_HOME: i32 = 0x24;
+const VK_LEFT: i32 = 0x25;
+const VK_UP: i32 = 0x26;
+const VK_RIGHT: i32 = 0x27;
+const VK_DOWN: i32 = 0x28;
+const VK_DELETE: i32 = 0x2E;
 
 /// A logical mouse button, mirroring the subset GPUI reports that we forward to
 /// CEF. Kept independent of GPUI's own `MouseButton` so the reader glue does the
@@ -215,12 +233,25 @@ wrap_app! {
             // Soft OSR copies the full view each paint; Chromium smooth-scroll
             // would emit dozens of those per gesture and feel like molasses.
             command_line.append_switch(Some(&"disable-smooth-scrolling".into()));
+            // When BGMail loses focus (another window beside it), Chromium would
+            // throttle timers/rendering; the next message switch then waits seconds
+            // for the first OSR paint. Keep the embedded browser at full speed.
+            command_line.append_switch(Some(&"disable-background-timer-throttling".into()));
+            command_line.append_switch(Some(&"disable-backgrounding-occluded-windows".into()));
+            command_line.append_switch(Some(&"disable-renderer-backgrounding".into()));
             // Chromium's on-device ML stack probes WebGPU and logs
             // `Unable to get gpu adapter` when the adapter is unavailable (common
             // under Wayland OSR). We never use those models in the reader.
+            // Also disable native-window occlusion so focus loss does not pause OSR.
             command_line.append_switch_with_value(
                 Some(&"disable-features".into()),
-                Some(&"OnDeviceModel,OnDeviceModelService,OptimizationGuideOnDeviceModel".into()),
+                Some(
+                    &(
+                        "OnDeviceModel,OnDeviceModelService,OptimizationGuideOnDeviceModel,\
+                         CalculateNativeWinOcclusion"
+                    )
+                    .into(),
+                ),
             );
         }
 
@@ -384,6 +415,145 @@ wrap_display_handler! {
             }
             0
         }
+
+        fn on_cursor_change(
+            &self,
+            _browser: Option<&mut Browser>,
+            _cursor: ::std::os::raw::c_ulong,
+            type_: CursorType,
+            _custom_cursor_info: Option<&CursorInfo>,
+        ) -> ::std::os::raw::c_int {
+            let style = map_cef_cursor(type_);
+            let _ = self
+                .handler
+                .to_host
+                .try_send(HostEvent::CursorChanged(style));
+            // We apply the cursor in GPUI; tell CEF not to touch the OS cursor.
+            1
+        }
+    }
+}
+
+/// Maps CEF's cursor enum onto our portable [`WebviewCursor`] (the reader then
+/// picks a GPUI [`gpui::CursorStyle`]).
+fn map_cef_cursor(type_: CursorType) -> WebviewCursor {
+    let raw = type_.get_raw();
+    if raw == CursorType::IBEAM.get_raw() {
+        WebviewCursor::IBeam
+    } else if raw == CursorType::HAND.get_raw() {
+        WebviewCursor::Hand
+    } else if raw == CursorType::CROSS.get_raw() {
+        WebviewCursor::Crosshair
+    } else if raw == CursorType::NOTALLOWED.get_raw() || raw == CursorType::NODROP.get_raw() {
+        WebviewCursor::NotAllowed
+    } else if raw == CursorType::GRAB.get_raw() {
+        WebviewCursor::Grab
+    } else if raw == CursorType::GRABBING.get_raw() {
+        WebviewCursor::Grabbing
+    } else if raw == CursorType::COLUMNRESIZE.get_raw()
+        || raw == CursorType::EASTWESTRESIZE.get_raw()
+        || raw == CursorType::EASTRESIZE.get_raw()
+        || raw == CursorType::WESTRESIZE.get_raw()
+    {
+        WebviewCursor::ColResize
+    } else if raw == CursorType::ROWRESIZE.get_raw()
+        || raw == CursorType::NORTHSOUTHRESIZE.get_raw()
+        || raw == CursorType::NORTHRESIZE.get_raw()
+        || raw == CursorType::SOUTHRESIZE.get_raw()
+    {
+        WebviewCursor::RowResize
+    } else if raw == CursorType::VERTICALTEXT.get_raw() {
+        WebviewCursor::VerticalText
+    } else if raw == CursorType::CONTEXTMENU.get_raw() {
+        WebviewCursor::ContextMenu
+    } else if raw == CursorType::ALIAS.get_raw() || raw == CursorType::DND_LINK.get_raw() {
+        WebviewCursor::Alias
+    } else if raw == CursorType::COPY.get_raw() || raw == CursorType::DND_COPY.get_raw() {
+        WebviewCursor::Copy
+    } else if raw == CursorType::NONE.get_raw() {
+        WebviewCursor::None
+    } else {
+        WebviewCursor::Arrow
+    }
+}
+
+// --- Context menu handler (suppress CEF native menu; page owns HTML menus) ---
+
+#[derive(Clone)]
+struct BgContextMenu;
+
+wrap_context_menu_handler! {
+    struct ContextMenuHandlerBuilder {
+        handler: BgContextMenu,
+    }
+
+    impl ContextMenuHandler {
+        fn on_before_context_menu(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _params: Option<&mut ContextMenuParams>,
+            model: Option<&mut MenuModel>,
+        ) {
+            // Empty the Chromium menu so nothing native appears over the OSR
+            // texture; our CONTENT_SCRIPT builds its own HTML menu instead.
+            if let Some(model) = model {
+                let _ = model.clear();
+            }
+        }
+
+        fn run_context_menu(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _params: Option<&mut ContextMenuParams>,
+            _model: Option<&mut MenuModel>,
+            callback: Option<&mut RunContextMenuCallback>,
+        ) -> ::std::os::raw::c_int {
+            // Custom handling: cancel immediately so CEF never tries to pop a
+            // platform menu (unsupported / broken under windowless OSR).
+            if let Some(callback) = callback {
+                callback.cancel();
+            }
+            1
+        }
+    }
+}
+
+// --- Load handler (wake GPUI when a navigation finishes) ----------------------
+
+#[derive(Clone)]
+struct BgLoad {
+    to_host: Sender<HostEvent>,
+}
+
+wrap_load_handler! {
+    struct LoadHandlerBuilder {
+        handler: BgLoad,
+    }
+
+    impl LoadHandler {
+        fn on_load_end(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            _http_status_code: ::std::os::raw::c_int,
+        ) {
+            // Subframe loads (images, etc.) would spam redraws; only the main
+            // document matters for the first post-navigation OSR paint.
+            let is_main = frame.as_ref().is_some_and(|f| f.is_main() != 0);
+            if !is_main {
+                return;
+            }
+            if let Some(browser) = browser {
+                if let Some(host) = browser.host() {
+                    host.was_hidden(0);
+                    host.set_focus(1);
+                    host.invalidate(PaintElementType::default());
+                }
+            }
+            let _ = self.handler.to_host.try_send(HostEvent::OsrNeedsRedraw);
+        }
     }
 }
 
@@ -427,6 +597,8 @@ wrap_client! {
         render_handler: RenderHandler,
         display_handler: DisplayHandler,
         request_handler: RequestHandler,
+        context_menu_handler: ContextMenuHandler,
+        load_handler: LoadHandler,
     }
 
     impl Client {
@@ -440,6 +612,14 @@ wrap_client! {
 
         fn request_handler(&self) -> Option<RequestHandler> {
             Some(self.request_handler.clone())
+        }
+
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+            Some(self.context_menu_handler.clone())
+        }
+
+        fn load_handler(&self) -> Option<LoadHandler> {
+            Some(self.load_handler.clone())
         }
     }
 }
@@ -613,11 +793,13 @@ impl OsrBrowser {
             scale: scale.clone(),
         });
         let display = DisplayHandlerBuilder::new(BgDisplay {
-            to_host,
+            to_host: to_host.clone(),
             notify_body: notify_body.clone(),
         });
+        let load = LoadHandlerBuilder::new(BgLoad { to_host });
         let request = RequestHandlerBuilder::new(BgRequest);
-        let mut client = ClientBuilder::new(render, display, request);
+        let context_menu = ContextMenuHandlerBuilder::new(BgContextMenu);
+        let mut client = ClientBuilder::new(render, display, request, context_menu, load);
 
         // Windowless OSR requires the Alloy runtime style (the Chrome runtime does
         // not support off-screen rendering). Soft OSR: no shared texture / begin
@@ -660,14 +842,38 @@ impl OsrBrowser {
     }
 
     /// Reloads the document if it changed (new message selected, theme toggled).
-    pub fn set_html(&mut self, html: &str) {
+    /// Returns `(navigated, previous_frame)` — `previous_frame` should be released
+    /// via [`gpui::Window::drop_image`]. Cleared so the old message does not linger
+    /// while the new `data:` URL loads (slow after a background resume).
+    pub fn set_html(&mut self, html: &str) -> (bool, Option<Arc<RenderImage>>) {
         if self.last_html == html {
-            return;
+            return (false, None);
         }
         if let Some(frame) = self.browser.main_frame() {
             let url = CefString::from(data_url(html).as_str());
             frame.load_url(Some(&url));
             self.last_html = html.to_string();
+        }
+        if let Ok(mut guard) = self.frame.lock() {
+            *guard = None;
+        }
+        let previous = self.current.take();
+        self.current_px = None;
+        // Wake the browser in case Chromium throttled it while the window was
+        // inactive, and force a paint of the new document.
+        if let Some(host) = self.browser.host() {
+            host.was_hidden(0);
+            host.set_focus(1);
+            host.invalidate(PaintElementType::default());
+        }
+        (true, previous)
+    }
+
+    /// Advances the message loop several times. Used after a navigation or
+    /// window-activate when a single `pump` is not enough to produce `on_paint`.
+    pub fn pump_hard(&self) {
+        for _ in 0..8 {
+            pump();
         }
     }
 
@@ -855,6 +1061,53 @@ impl OsrBrowser {
         }
     }
 
+    /// Tells Chromium the OSR view is focused so keyboard shortcuts and caret
+    /// behaviour apply to the document (needed before [`Self::key_event`]).
+    pub fn set_focus(&self, focused: bool) {
+        if let Some(host) = self.browser.host() {
+            host.set_focus(if focused { 1 } else { 0 });
+        }
+    }
+
+    /// Forwards a key press or release. `key` is the GPUI key name (`"c"`,
+    /// `"escape"`, …); `key_char` is the typed character when present.
+    pub fn key_event(&self, pressed: bool, key: &str, key_char: Option<&str>, modifiers: u32) {
+        let Some(vk) = windows_virtual_key(key) else {
+            return;
+        };
+        let Some(host) = self.browser.host() else {
+            return;
+        };
+        let (character, unmodified) = key_characters(key, key_char, modifiers);
+        if pressed {
+            let mut down = KeyEvent {
+                type_: KeyEventType::RAWKEYDOWN,
+                modifiers,
+                windows_key_code: vk,
+                native_key_code: vk,
+                character,
+                unmodified_character: unmodified,
+                ..Default::default()
+            };
+            host.send_key_event(Some(&down));
+            // Character events drive editable fields and many page keydown handlers.
+            down.type_ = KeyEventType::CHAR;
+            down.windows_key_code = character as i32;
+            host.send_key_event(Some(&down));
+        } else {
+            let up = KeyEvent {
+                type_: KeyEventType::KEYUP,
+                modifiers,
+                windows_key_code: vk,
+                native_key_code: vk,
+                character,
+                unmodified_character: unmodified,
+                ..Default::default()
+            };
+            host.send_key_event(Some(&up));
+        }
+    }
+
     /// Closes any custom context menu open inside the document (the host calls
     /// this on outside clicks that never reach the document).
     pub fn dismiss_context_menu(&self) {
@@ -866,8 +1119,8 @@ impl OsrBrowser {
 }
 
 /// Translates GPUI keyboard modifier state into CEF `event_flags`, so
-/// Chromium sees Shift/Ctrl/Alt while selecting or clicking.
-pub fn modifier_flags(shift: bool, control: bool, alt: bool) -> u32 {
+/// Chromium sees Shift/Ctrl/Alt/Cmd while selecting, clicking, or typing.
+pub fn modifier_flags(shift: bool, control: bool, alt: bool, meta: bool) -> u32 {
     let mut flags = 0;
     if shift {
         flags |= EVENTFLAG_SHIFT_DOWN;
@@ -878,7 +1131,63 @@ pub fn modifier_flags(shift: bool, control: bool, alt: bool) -> u32 {
     if alt {
         flags |= EVENTFLAG_ALT_DOWN;
     }
+    if meta {
+        flags |= EVENTFLAG_COMMAND_DOWN;
+    }
     flags
+}
+
+/// Maps a GPUI key name to a Windows virtual-key code (what CEF's
+/// `windows_key_code` field expects, including on Linux).
+fn windows_virtual_key(key: &str) -> Option<i32> {
+    match key {
+        "backspace" => Some(VK_BACK),
+        "tab" => Some(VK_TAB),
+        "enter" | "return" => Some(VK_RETURN),
+        "escape" => Some(VK_ESCAPE),
+        "space" => Some(VK_SPACE),
+        "pageup" => Some(VK_PRIOR),
+        "pagedown" => Some(VK_NEXT),
+        "end" => Some(VK_END),
+        "home" => Some(VK_HOME),
+        "left" => Some(VK_LEFT),
+        "up" => Some(VK_UP),
+        "right" => Some(VK_RIGHT),
+        "down" => Some(VK_DOWN),
+        "delete" => Some(VK_DELETE),
+        k if k.len() == 1 => {
+            let ch = k.chars().next()?;
+            if ch.is_ascii_alphabetic() {
+                Some((ch.to_ascii_uppercase() as u8) as i32)
+            } else if ch.is_ascii_digit() {
+                Some(ch as i32)
+            } else if ch.is_ascii() {
+                Some(ch.to_ascii_uppercase() as i32)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Character payload for KEYEVENT_CHAR. Control shortcuts use the ASCII control
+/// code (e.g. Ctrl+C → 3); otherwise the typed glyph.
+fn key_characters(key: &str, key_char: Option<&str>, modifiers: u32) -> (u16, u16) {
+    let unmodified = key_char
+        .and_then(|s| s.chars().next())
+        .or_else(|| key.chars().next().filter(|c| c.len_utf8() == 1))
+        .map(|c| c as u16)
+        .unwrap_or(0);
+    let control_down = (modifiers & (EVENTFLAG_CONTROL_DOWN | EVENTFLAG_COMMAND_DOWN)) != 0;
+    let character = if control_down && unmodified >= b'a' as u16 && unmodified <= b'z' as u16 {
+        unmodified - b'a' as u16 + 1
+    } else if control_down && unmodified >= b'A' as u16 && unmodified <= b'Z' as u16 {
+        unmodified - b'A' as u16 + 1
+    } else {
+        unmodified
+    };
+    (character, unmodified)
 }
 
 #[cfg(test)]
@@ -918,12 +1227,44 @@ mod tests {
 
     #[test]
     fn modifier_flags_map_expected_bits() {
-        assert_eq!(modifier_flags(false, false, false), 0);
-        assert_eq!(modifier_flags(true, false, false), EVENTFLAG_SHIFT_DOWN);
+        assert_eq!(modifier_flags(false, false, false, false), 0);
         assert_eq!(
-            modifier_flags(true, true, true),
-            EVENTFLAG_SHIFT_DOWN | EVENTFLAG_CONTROL_DOWN | EVENTFLAG_ALT_DOWN
+            modifier_flags(true, false, false, false),
+            EVENTFLAG_SHIFT_DOWN
         );
+        assert_eq!(
+            modifier_flags(true, true, true, true),
+            EVENTFLAG_SHIFT_DOWN
+                | EVENTFLAG_CONTROL_DOWN
+                | EVENTFLAG_ALT_DOWN
+                | EVENTFLAG_COMMAND_DOWN
+        );
+    }
+
+    #[test]
+    fn windows_virtual_key_maps_letters_and_named_keys() {
+        assert_eq!(windows_virtual_key("c"), Some(0x43));
+        assert_eq!(windows_virtual_key("V"), Some(0x56));
+        assert_eq!(windows_virtual_key("escape"), Some(VK_ESCAPE));
+        assert_eq!(windows_virtual_key("enter"), Some(VK_RETURN));
+        assert_eq!(windows_virtual_key("unknown-key"), None);
+    }
+
+    #[test]
+    fn key_characters_use_control_codes_for_shortcuts() {
+        let mods = EVENTFLAG_CONTROL_DOWN;
+        assert_eq!(key_characters("c", Some("c"), mods), (3, b'c' as u16));
+        assert_eq!(
+            key_characters("c", Some("c"), 0),
+            (b'c' as u16, b'c' as u16)
+        );
+    }
+
+    #[test]
+    fn map_cef_cursor_hand_and_ibeam() {
+        assert_eq!(map_cef_cursor(CursorType::HAND), WebviewCursor::Hand);
+        assert_eq!(map_cef_cursor(CursorType::IBEAM), WebviewCursor::IBeam);
+        assert_eq!(map_cef_cursor(CursorType::POINTER), WebviewCursor::Arrow);
     }
 
     #[test]

@@ -260,13 +260,23 @@
       `Context::notify` so late CEF paints are not dropped. On window resize, a
       stale buffer is drawn at its native pixel size (top-left) instead of being
       stretched into the new bounds, and CEF is `was_resized`/`invalidate`d until a
-      matching frame arrives.
+      matching frame arrives. After focus loss, Chromium would throttle the OSR
+      browser and the next message switch could stall >2s: disable background
+      timer/renderer throttling, keep a persistent ~8ms CEF message-loop tick
+      while the webview exists (GPUI often stops painting when inactive), and wake
+      on `LoadHandler::on_load_end` / window activate (`was_hidden(0)`, `set_focus`,
+      `invalidate`).
       GTK/XWayland preference and `BGMAIL_NATIVE_WAYLAND` are gone. Disable with
       `--no-default-features`.
-      - ⬜ Follow-ups: keyboard input forwarding (typing/shortcuts into the page),
-        zero-copy GPU texture import (CEF `accelerated_osr`/DMA-BUF), desktop
-        notification backend for image downloads, and production sandbox
-        (currently `no_sandbox` for dev).
+      - ⬜ Follow-ups: zero-copy GPU texture import (CEF `accelerated_osr`/DMA-BUF),
+        desktop notification backend for image downloads, and production sandbox
+        (currently `no_sandbox` for dev). Keyboard + cursor for OSR are wired
+        (`send_key_event`, `on_cursor_change`, reader focus, Ctrl/Cmd+C via IPC).
+        Context-menu actions (Copy / Show remote image) run on `mousedown`; the
+        host only dismisses the menu for clicks *outside* the reader (OSR clicks
+        are forwarded into CEF, so an early `__rmCloseMenu` raced the item handler).
+        Blocked-image menu checks `data-rm-blocked-src` before `img.src` (empty
+        `src` still yields a truthy resolved URL against the `data:` document).
 - ✅ Fix Windows WebView2 text compositing in the reader by giving the native
       child webview an explicit opaque background that matches the e-mail document
 - ✅ Work around Windows WebView2 GPU/DirectComposition transparency failures:

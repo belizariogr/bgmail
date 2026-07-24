@@ -12,10 +12,11 @@ use std::f32::consts::FRAC_PI_2;
 use gpui::{
     anchored, canvas, deferred, ease_in_out, point, radians, size, svg, Animation,
     AnimationExt as _, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Corner,
-    DragMoveEvent, Empty, Entity, Focusable, FontWeight, Hsla, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent, Size, Svg,
-    TitlebarOptions, Transformation, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowHandle, WindowKind, WindowOptions,
+    CursorStyle, DragMoveEvent, Empty, Entity, FocusHandle, Focusable, FontWeight, Hsla,
+    KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point,
+    ScrollDelta, ScrollHandle, ScrollWheelEvent, Size, Svg, TitlebarOptions, Transformation,
+    WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle,
+    WindowKind, WindowOptions,
 };
 
 use crate::command_palette_overlay::CommandPaletteOverlay;
@@ -37,8 +38,8 @@ use crate::db_seed;
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::shortcuts;
 use crate::web_view::{
-    email_document, ContextMenuLabels, DocumentColors, EmailWebView, HostEvent, WebviewMouseButton,
-    COMPOSITES_IN_GPUI, WEBVIEW_SUPPORTED,
+    email_document, ContextMenuLabels, DocumentColors, EmailWebView, HostEvent, WebviewCursor,
+    WebviewMouseButton, COMPOSITES_IN_GPUI, WEBVIEW_SUPPORTED,
 };
 use crate::MainWindow;
 use storage::{MailListQuery, MessageDetail, MessageListItem};
@@ -112,6 +113,26 @@ fn reader_mouse_button(button: MouseButton) -> Option<WebviewMouseButton> {
         MouseButton::Right => Some(WebviewMouseButton::Right),
         MouseButton::Middle => Some(WebviewMouseButton::Middle),
         _ => None,
+    }
+}
+
+/// Maps the page's requested cursor onto a GPUI style for the OSR reader pane.
+fn webview_cursor_style(cursor: WebviewCursor) -> CursorStyle {
+    match cursor {
+        WebviewCursor::Arrow => CursorStyle::Arrow,
+        WebviewCursor::IBeam => CursorStyle::IBeam,
+        WebviewCursor::Hand => CursorStyle::PointingHand,
+        WebviewCursor::Crosshair => CursorStyle::Crosshair,
+        WebviewCursor::NotAllowed => CursorStyle::OperationNotAllowed,
+        WebviewCursor::Grab => CursorStyle::OpenHand,
+        WebviewCursor::Grabbing => CursorStyle::ClosedHand,
+        WebviewCursor::ColResize => CursorStyle::ResizeLeftRight,
+        WebviewCursor::RowResize => CursorStyle::ResizeUpDown,
+        WebviewCursor::VerticalText => CursorStyle::IBeamCursorForVerticalLayout,
+        WebviewCursor::ContextMenu => CursorStyle::ContextualMenu,
+        WebviewCursor::Alias => CursorStyle::DragLink,
+        WebviewCursor::Copy => CursorStyle::DragCopy,
+        WebviewCursor::None => CursorStyle::None,
     }
 }
 /// Width of the collapsed search button (icon only), in pixels.
@@ -373,6 +394,16 @@ pub struct RootView {
     /// during the reader's canvas paint. On the Linux OSR backend the mouse-event
     /// handlers use it to translate window coordinates into view-relative ones.
     webview_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    /// Focus target for the Linux OSR reader so Ctrl+C / arrows reach CEF. Created
+    /// lazily on first paint of a composited reader.
+    reader_focus: Option<FocusHandle>,
+    /// Cursor style requested by the OSR page (`on_cursor_change`).
+    reader_cursor: WebviewCursor,
+    /// Whether the Linux CEF OSR tick task is running. While an OSR webview
+    /// exists we must call `do_message_loop_work` even when GPUI is not painting
+    /// (window inactive beside another app); otherwise Chromium freezes and the
+    /// next message switch waits seconds for the first paint.
+    cef_osr_tick_running: bool,
     /// Inputs that last produced the webview document (selected message index and
     /// the theme colors it was themed with). Used to skip rebuilding the HTML on
     /// every render — e.g. on every frame of an animation — when nothing that
@@ -528,6 +559,9 @@ impl RootView {
             sidebar_scrollbar: None,
             email_webview: None,
             webview_bounds: None,
+            reader_focus: None,
+            reader_cursor: WebviewCursor::Arrow,
+            cef_osr_tick_running: false,
             last_webview_sig: None,
             load_remote_images: settings.load_remote_images,
             reader_white_background: settings.reader_white_background,
@@ -1348,6 +1382,57 @@ impl RootView {
         }
     }
 
+    /// Wakes the Linux OSR reader after the window was backgrounded: Chromium
+    /// throttles soft OSR when we stop pumping, which otherwise makes the next
+    /// message switch wait for a late paint.
+    pub(crate) fn on_main_window_activated(&mut self, cx: &mut Context<Self>) {
+        crate::web_view::pump_platform_events();
+        if let Some(webview) = &mut self.email_webview {
+            webview.on_window_activated();
+        }
+        self.ensure_cef_osr_tick(cx);
+        cx.notify();
+    }
+
+    /// Starts a persistent CEF message-loop tick while an OSR webview exists.
+    /// GPUI often stops painting when the window is inactive; without this, CEF's
+    /// external pump stalls and the next email switch can take seconds.
+    fn ensure_cef_osr_tick(&mut self, cx: &mut Context<Self>) {
+        if !COMPOSITES_IN_GPUI || self.cef_osr_tick_running || self.email_webview.is_none() {
+            return;
+        }
+        self.cef_osr_tick_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(8))
+                    .await;
+                let keep_going = this
+                    .update(cx, |root, cx| {
+                        if root.email_webview.is_none() {
+                            root.cef_osr_tick_running = false;
+                            return false;
+                        }
+                        // Always advance CEF, even when GPUI is not painting.
+                        crate::web_view::pump_platform_events();
+                        let needs_frame = root
+                            .email_webview
+                            .as_mut()
+                            .is_some_and(|wv| wv.on_osr_tick());
+                        if needs_frame {
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Creates (on first use) and updates the embedded webview to reflect the
     /// selected message and the current theme. Hides it when the reader is not
     /// on screen so it doesn't float over other views.
@@ -1426,7 +1511,9 @@ impl RootView {
 
         match &mut self.email_webview {
             Some(webview) => {
-                webview.set_html(&document);
+                if let Some(previous) = webview.set_html(&document) {
+                    let _ = window.drop_image(previous);
+                }
                 webview.set_notify_text(notify_body);
             }
             None => {
@@ -1448,6 +1535,7 @@ impl RootView {
                 .detach();
             }
         }
+        self.ensure_cef_osr_tick(cx);
     }
 
     /// Applies an action requested by the webview on the GPUI foreground.
@@ -1468,6 +1556,18 @@ impl RootView {
                 cx.notify();
             }
             HostEvent::CommandPalette => self.toggle_command_palette_from_webview(cx),
+            HostEvent::CursorChanged(cursor) => {
+                if self.reader_cursor != cursor {
+                    self.reader_cursor = cursor;
+                    cx.notify();
+                }
+            }
+            HostEvent::OsrNeedsRedraw => {
+                if let Some(webview) = &mut self.email_webview {
+                    webview.note_load_progress();
+                }
+                cx.notify();
+            }
         }
     }
 
@@ -1502,6 +1602,7 @@ impl RootView {
             event.modifiers.shift,
             event.modifiers.control,
             event.modifiers.alt,
+            event.modifiers.platform,
         );
         // While dragging a selection the page paints continuously; keep GPUI
         // in lockstep with CEF's soft OSR frames. Prefer `notify` over
@@ -1516,7 +1617,7 @@ impl RootView {
     fn on_reader_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some((x, y)) = self.reader_relative_position(event.position) else {
@@ -1525,9 +1626,14 @@ impl RootView {
         let Some(button) = reader_mouse_button(event.button) else {
             return;
         };
+        // Keyboard shortcuts (Ctrl+C, …) only reach CEF while the reader is focused.
+        if let Some(focus) = self.ensure_reader_focus(cx).as_ref() {
+            window.focus(focus);
+        }
         let Some(webview) = self.email_webview.as_mut() else {
             return;
         };
+        webview.set_focused(true);
         webview.handle_mouse_button(x, y, button, true, event.click_count as i32);
         crate::web_view::pump_platform_events();
         cx.notify();
@@ -1576,6 +1682,63 @@ impl RootView {
         webview.handle_scroll(x, y, delta_x, delta_y);
         // Wheel is coalesced until paint; notify so flush_input runs next frame.
         cx.notify();
+    }
+
+    /// Forwards a key press into the OSR browser (Linux).
+    fn on_reader_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(webview) = self.email_webview.as_mut() else {
+            return;
+        };
+        webview.handle_key(
+            true,
+            &event.keystroke.key,
+            event.keystroke.key_char.as_deref(),
+            event.keystroke.modifiers.shift,
+            event.keystroke.modifiers.control,
+            event.keystroke.modifiers.alt,
+            event.keystroke.modifiers.platform,
+        );
+        crate::web_view::pump_platform_events();
+        cx.notify();
+    }
+
+    /// Forwards a key release into the OSR browser (Linux).
+    fn on_reader_key_up(
+        &mut self,
+        event: &KeyUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(webview) = self.email_webview.as_mut() else {
+            return;
+        };
+        webview.handle_key(
+            false,
+            &event.keystroke.key,
+            event.keystroke.key_char.as_deref(),
+            event.keystroke.modifiers.shift,
+            event.keystroke.modifiers.control,
+            event.keystroke.modifiers.alt,
+            event.keystroke.modifiers.platform,
+        );
+        crate::web_view::pump_platform_events();
+        cx.notify();
+    }
+
+    /// Focus handle for the composited reader; created once on first use.
+    fn ensure_reader_focus(&mut self, cx: &mut Context<Self>) -> Option<&FocusHandle> {
+        if !COMPOSITES_IN_GPUI {
+            return None;
+        }
+        if self.reader_focus.is_none() {
+            self.reader_focus = Some(cx.focus_handle());
+        }
+        self.reader_focus.as_ref()
     }
 
     /// Records that the user revealed one blocked remote image in the body. The
@@ -3052,7 +3215,10 @@ impl RootView {
             )
     }
 
-    fn render_reader(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_reader(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Create before borrowing theme colors from `cx`.
+        let reader_focus = self.ensure_reader_focus(cx).cloned();
+        let reader_cursor = webview_cursor_style(self.reader_cursor);
         let colors = cx.theme().colors();
         let bg = colors.background;
         let border = colors.border;
@@ -3060,6 +3226,7 @@ impl RootView {
         let on_accent = colors.text_on_accent;
 
         let Some(message) = self.selected_detail.as_ref() else {
+            let _ = (reader_focus, reader_cursor);
             let language = cx.language();
             return v_flex()
                 .flex_1()
@@ -3172,12 +3339,19 @@ impl RootView {
                 // selection, scrolling, the custom menus). The `wry` backends get
                 // input from the OS directly, so this is skipped there.
                 .when(COMPOSITES_IN_GPUI, |el| {
-                    el.on_mouse_move(cx.listener(Self::on_reader_mouse_move))
+                    let focus = reader_focus
+                        .clone()
+                        .expect("reader focus exists when OSR composites");
+                    el.track_focus(&focus)
+                        .cursor(reader_cursor)
+                        .on_mouse_move(cx.listener(Self::on_reader_mouse_move))
                         .on_mouse_down(MouseButton::Left, cx.listener(Self::on_reader_mouse_down))
                         .on_mouse_down(MouseButton::Right, cx.listener(Self::on_reader_mouse_down))
                         .on_mouse_up(MouseButton::Left, cx.listener(Self::on_reader_mouse_up))
                         .on_mouse_up(MouseButton::Right, cx.listener(Self::on_reader_mouse_up))
                         .on_scroll_wheel(cx.listener(Self::on_reader_scroll))
+                        .on_key_down(cx.listener(Self::on_reader_key_down))
+                        .on_key_up(cx.listener(Self::on_reader_key_up))
                 })
                 .child(
                     canvas(
@@ -3795,13 +3969,15 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
-            // Any click on the GPUI UI dismisses a context menu open inside the
-            // webview: such clicks neither blur the webview nor reach its DOM, so
-            // the menu would otherwise linger. Capture phase so it still fires
-            // when children stop propagation (e.g. buttons).
-            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
-                if let Some(webview) = &this.email_webview {
-                    webview.dismiss_context_menu();
+            // Dismiss the in-page context menu only when the click is *outside*
+            // the reader. On Linux OSR the same click is forwarded into CEF; closing
+            // the menu here would race ahead of the item's mousedown (Copy / Show
+            // image never ran). Child webviews never deliver those clicks to GPUI.
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if should_dismiss_webview_context_menu(event.position, this.webview_bounds) {
+                    if let Some(webview) = &this.email_webview {
+                        webview.dismiss_context_menu();
+                    }
                 }
                 this.blur_search_if_focused(window, cx);
             }))
@@ -3817,6 +3993,18 @@ impl Render for RootView {
         // client-side decorations (requested in `main` via WindowOptions).
         crate::window_frame::wrap_client_decorations(content, window, cx.theme().colors().border)
     }
+}
+
+/// Whether a GPUI click should close the in-page webview context menu.
+///
+/// Clicks inside the reader bounds are left to the page (Linux OSR forwards them
+/// into CEF). Clicks on chrome (toolbar, list, sidebar) never reach the DOM, so
+/// we dismiss from the host.
+pub(crate) fn should_dismiss_webview_context_menu(
+    click: Point<Pixels>,
+    webview_bounds: Option<Bounds<Pixels>>,
+) -> bool {
+    !webview_bounds.is_some_and(|bounds| bounds.contains(&click))
 }
 
 /// Whether an open command palette should close after focus leaves its popup.
@@ -3880,6 +4068,29 @@ mod tests {
     fn command_palette_only_opens_when_main_window_is_focused() {
         assert!(can_open_command_palette(true));
         assert!(!can_open_command_palette(false));
+    }
+
+    #[test]
+    fn webview_context_menu_dismiss_skips_clicks_inside_reader() {
+        let bounds = Bounds {
+            origin: point(px(100.0), px(50.0)),
+            size: size(px(400.0), px(300.0)),
+        };
+        // Inside the reader: leave the menu to the page (Linux OSR forwards the click).
+        assert!(!should_dismiss_webview_context_menu(
+            point(px(120.0), px(80.0)),
+            Some(bounds)
+        ));
+        // Outside (toolbar / list): host must dismiss — DOM never sees the click.
+        assert!(should_dismiss_webview_context_menu(
+            point(px(10.0), px(10.0)),
+            Some(bounds)
+        ));
+        // No layout yet: dismiss is the safe default.
+        assert!(should_dismiss_webview_context_menu(
+            point(px(120.0), px(80.0)),
+            None
+        ));
     }
 
     #[test]
