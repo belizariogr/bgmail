@@ -118,7 +118,7 @@ Rules:
 - Only the root rail stays at `AGENTS.md`. Directory scopes use
   `.dox/<mirrored-path>/AGENTS.md`.
 - **Every Rust source file** under `crates/*/src/` has a matching per-file doc
-  at `.dox/crates/<crate>/src/<file>.rs.dox` (e.g. `actions.rs` →
+  at `.dox/crates/<crate>/src/<file>.<ext>.dox` (e.g. `actions.rs` →
   `actions.rs.dox`). That file owns the module's Purpose and **API Catalog**.
 - `<mirrored-path>` is the scope folder relative to the repo root, without a
   leading slash.
@@ -142,11 +142,11 @@ deepest mirror on that walk (file-level `.rs.dox` wins for that module).
 
 1. Read the root `AGENTS.md`
 2. Identify every file or folder you expect to touch; if its DOX mirror does not
-   exist, create it (directory → `AGENTS.md`; Rust `src` file → `<file>.rs.dox`)
+   exist, create it (directory → `AGENTS.md`; Rust `src` file → `<file>.<ext>.dox`)
 3. Walk from the repository root to each target path
 4. Along each route, read every mirrored directory doc at
-   `.dox/<path>/AGENTS.md`, then the per-file `.dox/.../<file>.rs.dox` when the
-   target is a Rust source file under `crates/*/src/`
+   `.dox/<path>/AGENTS.md`, then the per-file `.dox/.../<file>.<ext>.dox` when the
+   target is a source file
 5. If a parent doc lists a child doc whose scope contains the path, read that
    child at its `.dox/...` path and continue from there
 6. Use the nearest applicable doc as the local contract and parent docs for
@@ -170,20 +170,20 @@ Update the closest owning doc when a change affects:
 
 Update parent docs when parent-level structure, ownership, workflow, or child index changes. Update child docs under `.dox/` (including per-file `.rs.dox`) when parent changes alter local rules. Remove stale or contradictory text immediately. Small edits that do not change behavior or contracts may leave docs unchanged, but the DOX pass still must happen.
 
-If a DOX doc does not exist for a touched path, create it (directory `AGENTS.md` or source `<file>.rs.dox`).
+If a DOX doc does not exist for a touched path, create it (directory `AGENTS.md` or source `<file>.<ext>.dox`).
 
 ## Hierarchy
 
 - Root `AGENTS.md` is the DOX rail: project-wide instructions, global preferences, durable workflow rules, and the top-level Child DOX Index
 - Directory child docs live at `.dox/<mirrored-path>/AGENTS.md` and own domain-specific instructions plus their own Child DOX Index
-- Per-file Rust source contracts live at `.dox/crates/<crate>/src/<file>.rs.dox`
+- Per-file Rust source contracts live at `.dox/crates/<crate>/src/<file>.<ext>.dox`
 - Each parent explains what its direct children cover and what stays owned by the parent
 - The closer a doc is to the work, the more specific and practical it must be
 
 ## Child Doc Shape
 
 - Create a child doc at `.dox/<mirrored-path>/AGENTS.md` when a folder becomes a durable boundary with its own purpose, rules, responsibilities, workflow, materials, or quality standards
-- Create `.dox/crates/<crate>/src/<file>.rs.dox` for **every** Rust source file under `crates/*/src/` (one module contract per file)
+- Create `.dox/crates/<crate>/src/<file>.<ext>.dox` for **every** source file under (one module contract per file)
 - Work Guidance must reflect the current standards of the project or user instructions; if there are no specific standards or instructions yet, leave it empty
 - Verification must reflect an existing check; if no verification framework exists yet, leave it empty and update it when one exists
 
@@ -221,7 +221,7 @@ Default section order:
 When the user requests a durable behavior change, record it here or in the relevant child doc under `.dox/`
 
 - **Per-file source contracts in DOX:** every Rust file under `crates/*/src/`
-  has a matching `.dox/crates/<crate>/src/<file>.rs.dox`. That file documents
+  has a matching `.dox/crates/<crate>/src/<file>.<ext>.dox`. That file documents
   **every** function and method in the module — purpose and behavior — in an
   `## API Catalog` section (grouped by `impl` / context). Keep entries current
   when signatures or behavior change. Prefer rustdoc + observed control flow
