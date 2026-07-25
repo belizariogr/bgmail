@@ -24,8 +24,11 @@ isolated tests, and shorter incremental compiles.
   (`~/dev/zed`) is read-only reference only.
 - Empty / unused directories under `crates/` are not workspace members and must
   not receive DOX until they become real crates.
-- **Source API catalogs** live at `.dox/crates/<crate>/src/AGENTS.md` and must
-  list every function/method (purpose + behavior). Keep them in sync with code.
+- **Per-file source contracts** live at
+  `.dox/crates/<crate>/src/<file>.rs.dox` (one per Rust module). Each must list
+  every function/method in that file (purpose + behavior). Folder-level
+  `.dox/crates/<crate>/src/AGENTS.md` indexes those children. Keep them in sync
+  with code.
 
 ## Work Guidance
 

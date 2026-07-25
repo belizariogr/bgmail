@@ -103,23 +103,35 @@ BGMail/
 
 ## .dox Storage
 
-Child docs live under `.dox/`, mirroring the scope directory they govern. Source trees stay free of scattered AGENTS.md files.
+Child docs live under `.dox/`, mirroring the scope they govern. Source trees stay
+free of scattered AGENTS.md / `.dox` files beside code.
 
-| Scope (subtree root) | Doc path |
+| Scope | Doc path |
 |---|---|
 | Repository root | `AGENTS.md` |
-| `src/api/` | `.dox/src/api/AGENTS.md` |
-| `src/api/handlers/` | `.dox/src/api/handlers/AGENTS.md` |
+| Directory `crates/ui/` | `.dox/crates/ui/AGENTS.md` |
+| Directory `crates/ui/src/` | `.dox/crates/ui/src/AGENTS.md` |
+| Source file `crates/ui/src/button.rs` | `.dox/crates/ui/src/button.rs.dox` |
 
 Rules:
 
-- Only the root rail stays at `AGENTS.md`. Every other doc goes in `.dox/<mirrored-path>/AGENTS.md`.
-- `<mirrored-path>` is the scope folder relative to the repo root, without a leading slash.
-- Never create `AGENTS.md` beside source files or inside code directories.
-- When creating, moving, or deleting a child doc, update the matching path under `.dox/` and keep the mirror aligned with the scope folder.
-- Child DOX Index entries use the `.dox/...` path and name the scope folder they cover.
+- Only the root rail stays at `AGENTS.md`. Directory scopes use
+  `.dox/<mirrored-path>/AGENTS.md`.
+- **Every Rust source file** under `crates/*/src/` has a matching per-file doc
+  at `.dox/crates/<crate>/src/<file>.rs.dox` (e.g. `actions.rs` →
+  `actions.rs.dox`). That file owns the module's Purpose and **API Catalog**.
+- `<mirrored-path>` is the scope folder relative to the repo root, without a
+  leading slash.
+- Never create `AGENTS.md` or `*.dox` beside source files or inside code
+  directories — only under `.dox/`.
+- When creating, moving, or deleting a source file or child doc, update the
+  matching path under `.dox/` and keep the mirror aligned.
+- Child DOX Index entries use the `.dox/...` path and name the scope they cover.
 
-Resolution: for a target at `src/api/foo.ts`, walk `src/`, then `src/api/`, and read `.dox/src/AGENTS.md` and `.dox/src/api/AGENTS.md` when present. The nearest applicable doc is the deepest mirror on that walk.
+Resolution: for a target at `crates/bgmail/src/actions.rs`, walk directory
+mirrors (`.dox/crates/…/AGENTS.md`) and then read the per-file
+`.dox/crates/bgmail/src/actions.rs.dox`. The nearest applicable doc is the
+deepest mirror on that walk (file-level `.rs.dox` wins for that module).
 
 ## Core Contract
 
@@ -129,12 +141,18 @@ Resolution: for a target at `src/api/foo.ts`, walk `src/`, then `src/api/`, and 
 ## Read Before Editing
 
 1. Read the root `AGENTS.md`
-2. Identify every file or folder you expect to touch, in case it doesnt exists, create it for every file you touch
+2. Identify every file or folder you expect to touch; if its DOX mirror does not
+   exist, create it (directory → `AGENTS.md`; Rust `src` file → `<file>.rs.dox`)
 3. Walk from the repository root to each target path
-4. Along each route, read every mirrored doc at `.dox/<path>/AGENTS.md` for directories on that walk
-5. If a parent doc lists a child doc whose scope contains the path, read that child at its `.dox/...` path and continue from there
-6. Use the nearest applicable doc as the local contract and parent docs for repo-wide rules
-7. If docs conflict, the closer doc controls local work details, but no child doc may weaken DOX
+4. Along each route, read every mirrored directory doc at
+   `.dox/<path>/AGENTS.md`, then the per-file `.dox/.../<file>.rs.dox` when the
+   target is a Rust source file under `crates/*/src/`
+5. If a parent doc lists a child doc whose scope contains the path, read that
+   child at its `.dox/...` path and continue from there
+6. Use the nearest applicable doc as the local contract and parent docs for
+   repo-wide rules
+7. If docs conflict, the closer doc controls local work details, but no child
+   doc may weaken DOX
 
 Do not rely on memory. Re-read the applicable DOX chain in the current session before editing.
 
@@ -150,20 +168,22 @@ Update the closest owning doc when a change affects:
 - user preferences about behavior, communication, process, organization, or quality
 - doc creation, deletion, move, rename, or Child DOX Index contents under `.dox/`
 
-Update parent docs when parent-level structure, ownership, workflow, or child index changes. Update child docs under `.dox/` when parent changes alter local rules. Remove stale or contradictory text immediately. Small edits that do not change behavior or contracts may leave docs unchanged, but the DOX pass still must happen.
+Update parent docs when parent-level structure, ownership, workflow, or child index changes. Update child docs under `.dox/` (including per-file `.rs.dox`) when parent changes alter local rules. Remove stale or contradictory text immediately. Small edits that do not change behavior or contracts may leave docs unchanged, but the DOX pass still must happen.
 
-If DOX doc doest not exists, you have to create it!!
+If a DOX doc does not exist for a touched path, create it (directory `AGENTS.md` or source `<file>.rs.dox`).
 
 ## Hierarchy
 
 - Root `AGENTS.md` is the DOX rail: project-wide instructions, global preferences, durable workflow rules, and the top-level Child DOX Index
-- Child docs live at `.dox/<mirrored-path>/AGENTS.md` and own domain-specific instructions plus their own Child DOX Index
+- Directory child docs live at `.dox/<mirrored-path>/AGENTS.md` and own domain-specific instructions plus their own Child DOX Index
+- Per-file Rust source contracts live at `.dox/crates/<crate>/src/<file>.rs.dox`
 - Each parent explains what its direct children cover and what stays owned by the parent
 - The closer a doc is to the work, the more specific and practical it must be
 
 ## Child Doc Shape
 
 - Create a child doc at `.dox/<mirrored-path>/AGENTS.md` when a folder becomes a durable boundary with its own purpose, rules, responsibilities, workflow, materials, or quality standards
+- Create `.dox/crates/<crate>/src/<file>.rs.dox` for **every** Rust source file under `crates/*/src/` (one module contract per file)
 - Work Guidance must reflect the current standards of the project or user instructions; if there are no specific standards or instructions yet, leave it empty
 - Verification must reflect an existing check; if no verification framework exists yet, leave it empty and update it when one exists
 
@@ -174,8 +194,8 @@ Default section order:
 - Work Guidance
 - Verification
 - Child DOX Index
-- API Catalog _(required for `.dox/crates/*/src/` source scopes: every
-  function/method with purpose and behavior; see User Preferences)_
+- API Catalog _(required on each `.rs.dox` under `.dox/crates/*/src/`: every
+  function/method in that file with purpose and behavior; see User Preferences)_
 
 ## Style
 
@@ -200,12 +220,14 @@ Default section order:
 
 When the user requests a durable behavior change, record it here or in the relevant child doc under `.dox/`
 
-- **Full source API catalogs in DOX:** for every Rust source scope under
-  `.dox/crates/*/src/`, document **every** function and method — purpose and
-  behavior — in an `## API Catalog` section (grouped by module / `impl`). Keep
-  entries current when signatures or behavior change. Prefer rustdoc + observed
-  control flow over narration. Tests (`#[cfg(test)]`) are included when they
-  encode behavioral contracts.
+- **Per-file source contracts in DOX:** every Rust file under `crates/*/src/`
+  has a matching `.dox/crates/<crate>/src/<file>.rs.dox`. That file documents
+  **every** function and method in the module — purpose and behavior — in an
+  `## API Catalog` section (grouped by `impl` / context). Keep entries current
+  when signatures or behavior change. Prefer rustdoc + observed control flow
+  over narration. Tests (`#[cfg(test)]`) are included when they encode
+  behavioral contracts. Folder-level `.dox/crates/*/src/AGENTS.md` indexes the
+  `.rs.dox` children; it does not inline sibling catalogs.
 
 ## Child DOX Index
 

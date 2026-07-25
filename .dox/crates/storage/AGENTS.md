@@ -47,4 +47,4 @@ No GPUI, no network.
 
 | Scope | Doc | Owns |
 |---|---|---|
-| `crates/storage/src/` | [`.dox/crates/storage/src/AGENTS.md`](src/AGENTS.md) | Full API catalog (every fn/method) |
+| `crates/storage/src/` | [`.dox/crates/storage/src/AGENTS.md`](src/AGENTS.md) | Source tree index + per-file `.rs.dox` API catalogs |

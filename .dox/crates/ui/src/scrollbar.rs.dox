@@ -1,0 +1,207 @@
+# crates/ui/src/scrollbar.rs
+
+## Purpose
+
+Custom Scrollbar element and state.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/scrollbar.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `scrollbar.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **const `WIDTH`** (private): Thumb and track thickness — 6px.
+- **const `PADDING`** (private): Gap between thumb and container edge — 3px.
+- **const `HOVER_WIDTH`** (private): Wide invisible hover strip — 14px.
+- **const `MIN_THUMB`** (private): Minimum thumb length — 24px (keeps grab target).
+- **const `AUTO_HIDE`** (pub, L34): Duration thumb stays visible after scroll —
+  250ms.
+- **struct `ScrollbarState`**: Persistent entity state for drag, hover, and
+  auto-hide timing. Fields: `drag_grab`, `last_scroll`, `hovered`.
+- **struct `Scrollbar`**: Custom `Element` overlay bound to a `ScrollHandle` and
+  shared `ScrollbarState`. Fields: `state`, `handle`, `axis` (`Vertical` or
+  `Horizontal`).
+- **struct `ScrollbarLayout`**: Prepaint output consumed in `paint`. Fields:
+  `track`, `thumb`, `hover_hitbox`, `max_offset`.
+
+#### Functions / methods
+
+##### Context: `ScrollbarState`
+
+- **`new`** (pub, L49)
+  - Signature: `pub fn new() -> Self`
+  - Purpose: Creates idle scrollbar state.
+  - Behavior: Returns `Default` — no drag, no recent scroll, not hovered.
+
+- **`note_scroll`** (pub, L54)
+  - Signature: `pub fn note_scroll(&mut self)`
+  - Purpose: Marks scrolling activity for auto-hide visibility.
+  - Behavior: Sets `last_scroll` to `Instant::now()`. Callers invoke after wheel
+    or programmatic scroll so the thumb stays visible briefly.
+
+- **`recently_scrolled`** (private, L59)
+  - Signature: `fn recently_scrolled(&self) -> bool`
+  - Purpose: Reports whether scroll happened within `AUTO_HIDE`.
+  - Behavior: True when `last_scroll` exists and elapsed time is less than
+    `AUTO_HIDE`.
+
+##### Context: `Scrollbar`
+
+- **`vertical`** (pub, L73)
+  - Signature: `pub fn vertical(state: Entity<ScrollbarState>, handle: ScrollHandle) -> Self`
+  - Purpose: Builds a right-edge vertical scrollbar overlay.
+  - Behavior: Stores entities with `axis = Vertical`.
+
+- **`horizontal`** (pub, L82)
+  - Signature: `pub fn horizontal(state: Entity<ScrollbarState>, handle: ScrollHandle) -> Self`
+  - Purpose: Builds a bottom-edge horizontal scrollbar overlay.
+  - Behavior: Same as vertical but `axis = Horizontal`. Both axes can share one
+    handle/state pair.
+
+##### Context: `module`
+
+- **`main_axis`** (private, L92)
+  - Signature: `fn main_axis(horizontal: bool, p: Point<Pixels>) -> f32`
+  - Purpose: Extracts x or y from a point along the scrollbar axis.
+  - Behavior: Returns `p.x` when horizontal, else `p.y`, as `f32`.
+
+- **`origin_main`** (private, L101)
+  - Signature: `fn origin_main(horizontal: bool, bounds: &Bounds<Pixels>) -> f32`
+  - Purpose: Extracts origin coordinate along the scrollbar axis.
+  - Behavior: Returns `bounds.origin.x` or `.y` depending on axis.
+
+- **`size_main`** (private, L110)
+  - Signature: `fn size_main(horizontal: bool, bounds: &Bounds<Pixels>) -> f32`
+  - Purpose: Extracts extent along the scrollbar axis.
+  - Behavior: Returns `bounds.size.width` or `.height` depending on axis.
+
+- **`apply_offset`** (private, L119)
+  - Signature: `fn apply_offset(handle: &ScrollHandle, horizontal: bool, offset: f32)`
+  - Purpose: Writes scroll offset on one axis while preserving the other.
+  - Behavior: Reads current offset; sets x or y to `px(offset)` via
+    `handle.set_offset`.
+
+- **`thumb_geometry`** (private, L133)
+  - Signature: `fn thumb_geometry(track: f32, viewport: f32, max_offset: f32, scroll: f32) -> Option<(f32, f32)>`
+  - Purpose: Computes thumb position and length within the track.
+  - Behavior: Returns `None` when `max_offset`, `viewport`, or `track` is
+    non-positive, or when computed thumb would fill the entire track. Otherwise
+    thumb height scales with viewport/content ratio, clamped to `MIN_THUMB`.
+    Maps current scroll (clamped) to thumb top along remaining track slack.
+    Returns `(top, thumb_length)`.
+
+- **`offset_for_thumb_top`** (private, L148)
+  - Signature: `fn offset_for_thumb_top(thumb_top: f32, track: f32, thumb: f32, max_offset: f32) -> f32`
+  - Purpose: Inverse of thumb positioning — maps drag position to scroll offset.
+  - Behavior: Computes fraction of draggable track (`thumb_top / (track - thumb)`,
+    clamped 0–1) and returns negative scroll offset `-frac * max_offset`. Zero
+    denominator yields fraction 0.
+
+##### Context: `IntoElement for Scrollbar`
+
+- **`into_element`** (private, L170)
+  - Signature: `fn into_element(self) -> Self::Element`
+  - Purpose: Identity conversion for GPUI element pipeline.
+  - Behavior: Returns `self`.
+
+##### Context: `Element for Scrollbar`
+
+- **`id`** (private, L179)
+  - Signature: `fn id(&self) -> Option<ElementId>`
+  - Purpose: Element identity hook.
+  - Behavior: Always `None` (anonymous overlay).
+
+- **`source_location`** (private, L183)
+  - Signature: `fn source_location(&self) -> Option<&'static Location<'static>>`
+  - Purpose: Inspector source location hook.
+  - Behavior: Always `None`.
+
+- **`request_layout`** (private, L187)
+  - Signature: `fn request_layout(&mut self, …, window: &mut Window, cx: &mut App) -> (LayoutId, ())`
+  - Purpose: Requests absolute fill of parent container.
+  - Behavior: Builds absolute-positioned style filling 100% width/height; returns
+    layout id from `window.request_layout`.
+
+- **`prepaint`** (private, L203)
+  - Signature: `fn prepaint(&mut self, …, bounds: Bounds<Pixels>, …, window: &mut Window, …) -> Option<ScrollbarLayout>`
+  - Purpose: Computes track/thumb geometry and hover hitbox for the current frame.
+  - Behavior: Reads scroll handle bounds, max offset, and current offset along
+    active axis. Calls `thumb_geometry`; returns `None` (no scrollbar) when
+    content fits. Places track/thumb on bottom (horizontal) or right (vertical)
+    edge with `WIDTH`/`PADDING`. Inserts wider `hover_hitbox` strip for reveal.
+    Stores `max_offset` in layout.
+
+- **`paint`** (private, L285)
+  - Signature: `fn paint(&mut self, …, prepaint: &mut Option<ScrollbarLayout>, window: &mut Window, cx: &mut App)`
+  - Purpose: Draws thumb, handles drag/hover/track-click, and manages visibility.
+  - Behavior: No-op if prepaint was `None`. Sets arrow cursor over hover strip.
+    Reads drag/hover/recent-scroll flags from `ScrollbarState`. Paints rounded
+    thumb quad when hovered, dragging, or recently scrolled; uses hover thumb
+    color while dragging. Registers mouse-down: thumb drag captures grab offset;
+    track click jumps thumb center to click and starts drag. Mouse-move updates
+    hover flag (repaints on boundary cross) and applies scroll offset while
+    dragging. Mouse-up clears drag. All handlers stop propagation on active
+    interaction and call `window.refresh()`.
+
+##### Context: `module` (tests)
+
+- **`no_thumb_when_content_fits`** (private, L436)
+  - Signature: `fn no_thumb_when_content_fits()`
+  - Purpose: Validates no thumb when there is nothing to scroll.
+  - Behavior: Asserts `thumb_geometry` returns `None` for zero max offset and
+    for zero-sized inputs.
+
+- **`thumb_shrinks_with_more_content`** (private, L442)
+  - Signature: `fn thumb_shrinks_with_more_content()`
+  - Purpose: Validates proportional thumb sizing.
+  - Behavior: For viewport 200 of 400 total content, expects thumb height 100 at
+    top 0 on 200px track.
+
+- **`thumb_respects_minimum_height`** (private, L450)
+  - Signature: `fn thumb_respects_minimum_height()`
+  - Purpose: Validates `MIN_THUMB` floor.
+  - Behavior: With tiny viewport vs huge content, asserts thumb length ≥
+    `MIN_THUMB`.
+
+- **`thumb_moves_to_bottom_at_max_scroll`** (private, L457)
+  - Signature: `fn thumb_moves_to_bottom_at_max_scroll()`
+  - Purpose: Validates thumb reaches track end at max scroll.
+  - Behavior: At max scroll, asserts thumb top equals `track - thumb_height`.
+
+- **`scroll_marks_recently_scrolled`** (private, L464)
+  - Signature: `fn scroll_marks_recently_scrolled()`
+  - Purpose: Validates auto-hide timing flag.
+  - Behavior: Fresh state not recent; after `note_scroll()` becomes recent.
+
+- **`offset_round_trips_through_thumb_top`** (private, L472)
+  - Signature: `fn offset_round_trips_through_thumb_top()`
+  - Purpose: Validates inverse mapping for drag math.
+  - Behavior: Thumb at bottom yields `-max_offset`; thumb at top yields `0`.

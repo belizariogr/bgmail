@@ -1,0 +1,52 @@
+# crates/storage/src/schema.rs
+
+## Purpose
+
+SQL DDL and schema version constants.
+
+## Ownership
+
+- Owns: API surface of `crates/storage/src/schema.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/storage/src/AGENTS.md` and `.dox/crates/storage/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `schema.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `storage/` / `src/`.
+
+## Verification
+
+- `cargo test -p storage`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **const `SCHEMA_VERSION`**: Current schema version integer (`1`); written to `meta` on first migrate.
+- **const `CREATE_ACCOUNTS`**: DDL for `accounts` table (id, name, unique email).
+- **const `CREATE_FOLDERS`**: DDL for `folders` table with FK to accounts and unique `(account_id, path)`.
+- **const `CREATE_MESSAGES`**: DDL for `messages` table (headers, bodies, search blob, flags, `folders_csv`; `raw_format` constrained to `html` or `text`).
+- **const `CREATE_META`**: DDL for key/value `meta` table (schema version storage).
+- **const `INDEX_MESSAGES_SEARCH`**: Index on `messages.search_text` for search queries.
+- **const `INDEX_MESSAGES_ACCOUNT`**: Index on `messages.account_id` for per-account lists.
+- **const `INDEX_MESSAGES_FOLDERS`**: Index on `messages.folders_csv` for folder LIKE filters.
+
+#### Functions / methods
+
+_(No functions.)_

@@ -1,0 +1,56 @@
+# crates/ui/src/color.rs
+
+## Purpose
+
+Semantic Color roles resolved against ActiveTheme.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/color.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `color.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **enum `Color`**: Semantic color roles resolved at render time against the
+  active theme. Variants: `Default`, `Muted`, `Disabled`, `Accent`, `OnAccent`,
+  `Success`, `Warning`, `Error`, `Custom(Hsla)`. `Default` is the default
+  variant.
+
+#### Functions / methods
+
+##### Context: `Color`
+
+- **`hsla`** (pub, L35)
+  - Signature: `pub fn hsla(self, cx: &App) -> Hsla`
+  - Purpose: Resolves a semantic color to concrete theme pixels.
+  - Behavior: Reads `cx.theme().colors()` and maps each variant to the matching
+    theme field (`text`, `text_muted`, `text_disabled`, `text_accent`,
+    `text_on_accent`, `success`, `warning`, `error`). `Custom` passes through
+    unchanged.

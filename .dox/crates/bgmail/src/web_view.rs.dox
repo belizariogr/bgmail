@@ -1,0 +1,462 @@
+# crates/bgmail/src/web_view.rs
+
+## Purpose
+
+HTML document build/sanitize and portable EmailWebView API.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/web_view.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `web_view.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **enum `WebviewMouseButton`** (pub, L25): Mouse button (Left, Right, Middle) forwarded from the reader; platform-independent of GPUI's `MouseButton`.
+- **enum `WebviewCursor`** (pub, L34): CSS-like cursor kind requested by the page; mapped to GPUI `CursorStyle` by the reader on OSR.
+- **const `WEBVIEW_SUPPORTED`** (pub, L53): Compile-time flag: `true` when the `cef-osr` feature is enabled.
+- **struct `ContextMenuLabels<'a>`** (pub, L69): Localized strings for custom image/link/selection context menus, embedded as `data-rm-*` attributes on `<body>`.
+- **struct `RenderedEmail`** (pub, L93): Output of document rendering: full HTML plus remote-image privacy metadata for the reader shield.
+- **struct `DocumentColors`** (pub, L110): Theme colors for page background/text/accent and separately for context-menu popup colors.
+- **enum `IpcMessage<'a>`** (pub(crate), L365): Parsed IPC tag from the injected content script (hover, open, download, copy, show-image, body-mousedown, palette).
+- **enum `HostEvent`** (pub, L406): Foreground actions the webview requests from GPUI (hover URL, clipboard, image shown, overlay dismiss, palette, cursor, redraw).
+- **const `COMMAND_PALETTE_SHORTCUT_SCRIPT`** (private, L428/L431): Inline keydown script for Ctrl/Cmd+P; empty string when `cef-osr` is disabled.
+- **const `CONTENT_SCRIPT`** (pub(crate), L450): Injected JS for hover reporting, custom context menus, copy/select-all shortcuts, and menu dismissal hook.
+- **const `DISALLOWED_ELEMENTS`** (private, L667): Comma-separated selector list of HTML elements stripped entirely (and their content) during sanitization.
+- **const `URL_ATTRIBUTES`** (private, L675): Attribute names vetted for dangerous URL schemes during sanitization.
+- **const `RESOURCE_ATTRIBUTES`** (private, L696): Subset of URL attributes that auto-fetch on render; blocked for remoteness when loading is off.
+- **const `COMPOSITES_IN_GPUI`** (pub, platform): Whether the backend paints into a GPUI texture (`true` for CEF OSR, `false` for stub).
+- **struct `EmailWebView`** (pub, platform): GPUI-facing webview wrapper; real OSR backend or no-op stub depending on `cef-osr` feature.
+- **const `INPUT_WARM_FRAMES`** (private, platform/cef-osr, L985): GPUI frames to keep redrawing after pointer input so late CEF paints land.
+- **const `LOAD_WARM_FRAMES`** (private, platform/cef-osr, L989): GPUI frames to keep redrawing after document reload/navigation.
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`pump_platform_events`** (pub, L57)
+  - Signature: `pub fn pump_platform_events()`
+  - Purpose: Advances CEF's external message pump from the app frame loop.
+  - Behavior: Calls `cef_osr::pump` when `cef-osr` feature is enabled; otherwise no-op.
+- **`email_document`** (pub, L118)
+  - Signature: `pub fn email_document(colors: DocumentColors, body: &MessageBody, labels: ContextMenuLabels, load_remote: bool, shown: &HashSet<String>) -> RenderedEmail`
+  - Purpose: Builds a complete themed HTML document for an e-mail body.
+  - Behavior: Sanitizes HTML or escapes plain text into inner markup. Wraps in DOCTYPE/html with theme CSS, localized `data-rm-*` menu labels, command-palette script, and returns `RenderedEmail` with `has_remote` and `blocked_images` counts.
+- **`document_css`** (private, L164)
+  - Signature: `fn document_css(colors: DocumentColors) -> String`
+  - Purpose: Generates the inline stylesheet for rendered message documents.
+  - Behavior: Sets CSS variables from theme colors, picks light/dark `color-scheme` from background luminance, styles typography/links/code/blockquote/scrollbar, and blocked-image placeholders.
+- **`css_color`** (private, L219)
+  - Signature: `fn css_color(color: Hsla) -> String`
+  - Purpose: Formats an opaque theme color as `rgb(r, g, b)`.
+  - Behavior: Converts `Hsla` to `Rgba` and rounds channels to 0–255.
+- **`css_color_alpha`** (private, L230)
+  - Signature: `fn css_color_alpha(color: Hsla, alpha: f32) -> String`
+  - Purpose: Formats a translucent theme color as `rgba(r, g, b, a)`.
+  - Behavior: Clamps alpha to [0, 1] and formats RGB channels like `css_color`.
+- **`channel`** (private, L241)
+  - Signature: `fn channel(value: f32) -> u8`
+  - Purpose: Converts a normalized 0–1 color channel to an 8-bit value.
+  - Behavior: Clamps to [0, 1], multiplies by 255, rounds to `u8`.
+- **`is_external_link`** (pub(crate), L249)
+  - Signature: `pub(crate) fn is_external_link(url: &str) -> bool`
+  - Purpose: Classifies URLs that should open in the system browser instead of the reader webview.
+  - Behavior: Trims and lowercases; returns `true` for `http://`, `https://`, and `mailto:` prefixes.
+- **`decode_data_uri`** (pub(crate), L261)
+  - Signature: `pub(crate) fn decode_data_uri(url: &str) -> Option<(&'static str, Vec<u8>)>`
+  - Purpose: Parses base64-encoded `data:` URIs into MIME-derived extension and raw bytes.
+  - Behavior: Requires `data:` prefix (case-insensitive), comma-separated metadata with `base64`, non-empty decoded payload. Returns `None` for plain URLs, text `data:` URIs, or decode failures.
+- **`extension_for_mime`** (private, L284)
+  - Signature: `fn extension_for_mime(mime: &str) -> &'static str`
+  - Purpose: Maps a MIME type to a file extension for materialized temp/download files.
+  - Behavior: Matches common image and PDF types; returns `"bin"` for unknown MIME.
+- **`downloads_dir`** (pub(crate), L302)
+  - Signature: `pub(crate) fn downloads_dir() -> Option<std::path::PathBuf>`
+  - Purpose: Resolves the user's Downloads folder from environment.
+  - Behavior: Uses `$HOME/Downloads` or `%USERPROFILE%\Downloads`; returns `None` when home is missing or empty.
+- **`unique_download_path`** (pub(crate), L314)
+  - Signature: `pub(crate) fn unique_download_path(dir: &Path, stem: &str, extension: &str, exists: impl Fn(&Path) -> bool) -> std::path::PathBuf`
+  - Purpose: Picks a non-colliding download path like browsers (`stem (n).ext`).
+  - Behavior: Tries `stem.ext`, then increments `n` until `exists` returns false for the candidate.
+- **`base64_decode`** (private, L332)
+  - Signature: `fn base64_decode(input: &str) -> Option<Vec<u8>>`
+  - Purpose: Decodes standard RFC 4648 base64 without external dependencies.
+  - Behavior: Skips whitespace and `=` padding; returns `None` on invalid alphabet bytes. Delegates 6-bit values to nested `sextet`.
+- **`sextet`** (private, nested in L333)
+  - Signature: `fn sextet(byte: u8) -> Option<u32>`
+  - Purpose: Maps one base64 character to its 6-bit value.
+  - Behavior: Handles A–Z, a–z, 0–9, `+`, `/`; returns `None` for other bytes.
+- **`parse_ipc_message`** (pub(crate), L388)
+  - Signature: `pub(crate) fn parse_ipc_message(message: &str) -> Option<IpcMessage<'_>>`
+  - Purpose: Parses `"tag\npayload"` IPC strings from the content script.
+  - Behavior: Maps tags H/O/D/C/S/B/P to enum variants; unknown tags or missing newline return `None`. Body-mousedown and palette ignore payload.
+- **`applescript_string`** (private, L628, macOS only)
+  - Signature: `fn applescript_string(input: &str) -> String`
+  - Purpose: Escapes a string for safe embedding in AppleScript literals.
+  - Behavior: Wraps in double quotes; backslash-escapes `\` and `"` characters.
+- **`sanitize_html`** (private, L717, `#[cfg(test)]`)
+  - Signature: `fn sanitize_html(html: &str, load_remote: bool) -> String`
+  - Purpose: Test helper returning only the sanitized HTML string.
+  - Behavior: Calls `sanitize_html_inner` with empty `shown` set and discards metadata tuple.
+- **`sanitize_html_inner`** (private, L726)
+  - Signature: `fn sanitize_html_inner(html: &str, load_remote: bool, shown: &HashSet<String>) -> (String, bool, usize)`
+  - Purpose: Sanitizes HTML and reports remote-image presence and blocked count.
+  - Behavior: Uses `lol_html` to remove disallowed elements and neutralize attributes on survivors. When `load_remote` is false, also blanks CSS `url(...)` via `strip_css_urls`. On rewrite failure returns empty string. Updates `has_remote` and `blocked` counters from `neutralize_attributes`.
+- **`strip_css_urls`** (private, L768)
+  - Signature: `fn strip_css_urls(css: &str) -> String`
+  - Purpose: Neutralizes remote fetches from inline CSS by emptying every `url(...)`.
+  - Behavior: Scans case-insensitively for `url(`; replaces each with `url()`. Unterminated `url(` drops remainder of input.
+- **`find_url_open`** (private, L793)
+  - Signature: `fn find_url_open(s: &str) -> Option<usize>`
+  - Purpose: Finds the byte index of the next case-insensitive `url(` substring.
+  - Behavior: Scans ASCII windows of four bytes; returns start index or `None`.
+- **`neutralize_attributes`** (private, L822)
+  - Signature: `fn neutralize_attributes(el: &mut Element, load_remote: bool, shown: &HashSet<String>) -> Option<bool>`
+  - Purpose: Strips dangerous or remote-loading attributes from a surviving element.
+  - Behavior: Collects doomed attribute names first, then removes them. Drops `on*`, `contenteditable`, dangerous URLs, script-vector styles, and remote resource attrs when blocking. Blocked remote `<img src>` stashes URL in `data-rm-blocked-src`. Returns `Some(blocked)` for remote images, else `None`.
+- **`is_dangerous_url`** (private, L879)
+  - Signature: `fn is_dangerous_url(value: &str) -> bool`
+  - Purpose: Detects URL schemes that execute or load active content.
+  - Behavior: Normalizes scheme by stripping whitespace/control chars. `javascript:`/`vbscript:` are dangerous; `data:` is dangerous except raster images (not SVG). Relative URLs without scheme are safe.
+- **`is_remote_url`** (private, L911)
+  - Signature: `fn is_remote_url(value: &str) -> bool`
+  - Purpose: Detects URLs that fetch from the network on render.
+  - Behavior: True for `http`/`https` schemes and protocol-relative `//` URLs; false for `data:`, `cid:`, fragments, and relative paths.
+- **`style_has_script_vector`** (private, L930)
+  - Signature: `fn style_has_script_vector(style: &str) -> bool`
+  - Purpose: Detects legacy CSS expressions that could carry script vectors.
+  - Behavior: Case-insensitive substring search for `javascript:`, `expression(`, `-moz-binding`, `behavior:`.
+- **`escape_html`** (private, L938)
+  - Signature: `fn escape_html(input: &str) -> String`
+  - Purpose: Escapes HTML-significant characters in plain text.
+  - Behavior: Replaces `& < > " '` with entity references; passes other chars through.
+
+##### Context: `platform` (`feature = "cef-osr"`)
+
+- **`map_button`** (private, L1239)
+  - Signature: `fn map_button(button: WebviewMouseButton) -> MouseButton`
+  - Purpose: Maps portable webview mouse buttons to CEF OSR `MouseButton`.
+  - Behavior: One-to-one enum match for Left, Right, Middle.
+
+##### Context: `EmailWebView` (`feature = "cef-osr"`)
+
+- **`new`** (pub, L994)
+  - Signature: `pub fn new(_window: &Window, html: &str, to_host: Sender<HostEvent>, notify_body: String) -> Option<Self>`
+  - Purpose: Creates the CEF OSR webview wrapper for the reader pane.
+  - Behavior: Returns `None` when `OsrBrowser::new` fails. Initializes visibility, load warm-frame budget, and `awaiting_paint` for first navigation.
+- **`set_html`** (pub, L1010)
+  - Signature: `pub fn set_html(&mut self, html: &str) -> Option<Arc<gpui::RenderImage>>`
+  - Purpose: Reloads the document when HTML changed and returns the previous GPUI texture to drop.
+  - Behavior: Delegates to inner browser; on navigation sets `awaiting_paint`, resets warm frames to `LOAD_WARM_FRAMES`, and calls `pump_hard`. Returns previous image from inner `set_html`.
+- **`set_notify_text`** (pub, L1021)
+  - Signature: `pub fn set_notify_text(&self, body: String)`
+  - Purpose: Updates localized download-notification text on the live browser.
+  - Behavior: Forwards to `OsrBrowser::set_notify_text`.
+- **`on_window_activated`** (pub, L1027)
+  - Signature: `pub fn on_window_activated(&mut self)`
+  - Purpose: Resumes OSR rendering when the GPUI window regains focus.
+  - Behavior: Marks visible, sets inner visible/focused, pumps hard, extends warm frames, and re-enters `awaiting_paint` if no current frame.
+- **`on_osr_tick`** (pub, L1041)
+  - Signature: `pub fn on_osr_tick(&mut self) -> bool`
+  - Purpose: Keeps CEF pumping between GPUI paints when the window may be inactive.
+  - Behavior: Returns `false` when hidden. Otherwise pumps hard when awaiting paint, warm frames remain, or a pending frame exists; returns `true` to request GPUI `notify`.
+- **`note_load_progress`** (pub, L1055)
+  - Signature: `pub fn note_load_progress(&mut self)`
+  - Purpose: Extends redraw loop after main-document load-end from CEF.
+  - Behavior: Sets `awaiting_paint`, bumps warm frames to at least `LOAD_WARM_FRAMES`, calls `pump_hard`.
+- **`position`** (pub, L1064)
+  - Signature: `pub fn position(&mut self, _bounds: Bounds<Pixels>)`
+  - Purpose: Marks the webview visible; actual sizing happens in `paint`.
+  - Behavior: Sets visible flag and inner `set_visible(true)`.
+- **`hide`** (pub, L1070)
+  - Signature: `pub fn hide(&mut self)`
+  - Purpose: Hides the webview when no message is shown or overlays cover it.
+  - Behavior: Clears visible, warm frames, and awaiting-paint; hides inner browser.
+- **`paint`** (pub, L1089)
+  - Signature: `pub fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, _cx: &mut gpui::App) -> bool`
+  - Purpose: Syncs size, flushes input, uploads CEF frame, and composites into the reader.
+  - Behavior: No-op when hidden. Updates inner size/scale; on resize extends warm frames. Pumps hard while awaiting paint else flushes input. Takes new frame and drops previous GPUI texture. Paints 1:1 at top-left when buffer size mismatches view (avoids stretch distortion). Returns `true` when another GPUI frame should be scheduled (warm frames, pending frame, or size mismatch).
+- **`handle_mouse_move`** (pub, L1169)
+  - Signature: `pub fn handle_mouse_move(&self, x: f32, y: f32, shift: bool, control: bool, alt: bool, meta: bool)`
+  - Purpose: Forwards mouse move with modifier flags to CEF.
+  - Behavior: Calls inner `mouse_move` with `modifier_flags`.
+- **`handle_mouse_button`** (pub, L1183)
+  - Signature: `pub fn handle_mouse_button(&mut self, x: f32, y: f32, button: WebviewMouseButton, pressed: bool, click_count: i32)`
+  - Purpose: Forwards mouse press/release to CEF.
+  - Behavior: Maps button, forwards click, sets `INPUT_WARM_FRAMES` warm budget.
+- **`handle_scroll`** (pub, L1197)
+  - Signature: `pub fn handle_scroll(&mut self, x: f32, y: f32, delta_x: f32, delta_y: f32)`
+  - Purpose: Queues coalesced scroll-wheel input until next paint.
+  - Behavior: Forwards to inner `mouse_wheel`; sets warm frames.
+- **`handle_key`** (pub, L1204)
+  - Signature: `pub fn handle_key(&mut self, pressed: bool, key: &str, key_char: Option<&str>, shift: bool, control: bool, alt: bool, meta: bool)`
+  - Purpose: Forwards keyboard events to CEF with modifiers.
+  - Behavior: Calls inner `key_event`; sets warm frames.
+- **`set_focused`** (pub, L1224)
+  - Signature: `pub fn set_focused(&self, focused: bool)`
+  - Purpose: Sets OSR keyboard focus for shortcuts inside the document.
+  - Behavior: Delegates to inner `set_focus`.
+- **`dismiss_context_menu`** (pub, L1229)
+  - Signature: `pub fn dismiss_context_menu(&self)`
+  - Purpose: Closes the HTML context menu from GPUI outside-click handling.
+  - Behavior: Delegates to inner `dismiss_context_menu`.
+- **`has_mouse_capture`** (pub, L1234)
+  - Signature: `pub fn has_mouse_capture(&self) -> bool`
+  - Purpose: Reports held mouse buttons for drag-selection redraw scheduling.
+  - Behavior: Delegates to inner `has_mouse_capture`.
+
+##### Context: `EmailWebView` (`not(feature = "cef-osr")` stub)
+
+- **`new`** (pub, L1261)
+  - Signature: `pub fn new(...) -> Option<Self>`
+  - Purpose: Stub constructor when no webview backend is available.
+  - Behavior: Always returns `None` so the reader falls back to plain text.
+- **`set_html`** (pub, L1269)
+  - Signature: `pub fn set_html(&mut self, _html: &str) -> Option<Arc<gpui::RenderImage>>`
+  - Purpose: Stub no-op document reload.
+  - Behavior: Always returns `None`.
+- **`on_window_activated`** (pub, L1272)
+  - Signature: `pub fn on_window_activated(&mut self)`
+  - Purpose: Stub activation handler.
+  - Behavior: Empty body.
+- **`on_osr_tick`** (pub, L1273)
+  - Signature: `pub fn on_osr_tick(&mut self) -> bool`
+  - Purpose: Stub OSR tick.
+  - Behavior: Always returns `false`.
+- **`note_load_progress`** (pub, L1276)
+  - Signature: `pub fn note_load_progress(&mut self)`
+  - Purpose: Stub load-progress hook.
+  - Behavior: Empty body.
+- **`set_notify_text`** (pub, L1277)
+  - Signature: `pub fn set_notify_text(&self, _body: String)`
+  - Purpose: Stub notification text update.
+  - Behavior: Empty body.
+- **`position`** (pub, L1278)
+  - Signature: `pub fn position(&mut self, _bounds: Bounds<Pixels>)`
+  - Purpose: Stub visibility/position hook.
+  - Behavior: Empty body.
+- **`dismiss_context_menu`** (pub, L1279)
+  - Signature: `pub fn dismiss_context_menu(&self)`
+  - Purpose: Stub context-menu dismiss.
+  - Behavior: Empty body.
+- **`hide`** (pub, L1280)
+  - Signature: `pub fn hide(&mut self)`
+  - Purpose: Stub hide hook.
+  - Behavior: Empty body.
+- **`paint`** (pub, L1281)
+  - Signature: `pub fn paint(...) -> bool`
+  - Purpose: Stub paint/composite hook.
+  - Behavior: Always returns `false`.
+- **`handle_mouse_move`** (pub, L1289)
+  - Signature: `pub fn handle_mouse_move(...)`
+  - Purpose: Stub mouse-move forwarder.
+  - Behavior: Empty body.
+- **`handle_mouse_button`** (pub, L1299)
+  - Signature: `pub fn handle_mouse_button(...)`
+  - Purpose: Stub mouse-button forwarder.
+  - Behavior: Empty body.
+- **`handle_scroll`** (pub, L1308)
+  - Signature: `pub fn handle_scroll(&self, ...)`
+  - Purpose: Stub scroll forwarder.
+  - Behavior: Empty body.
+- **`handle_key`** (pub, L1309)
+  - Signature: `pub fn handle_key(...)`
+  - Purpose: Stub keyboard forwarder.
+  - Behavior: Empty body.
+- **`set_focused`** (pub, L1320)
+  - Signature: `pub fn set_focused(&self, _focused: bool)`
+  - Purpose: Stub focus hook.
+  - Behavior: Empty body.
+- **`has_mouse_capture`** (pub, L1321)
+  - Signature: `pub fn has_mouse_capture(&self) -> bool`
+  - Purpose: Stub mouse-capture query.
+  - Behavior: Always returns `false`.
+
+##### Context: `tests`
+
+- **`body_html`** (private, L1332)
+  - Signature: `fn body_html() -> MessageBody`
+  - Purpose: Returns sample HTML message body for document tests.
+  - Behavior: Static `"Hello world"` paragraph HTML.
+- **`doc_colors`** (private, L1338)
+  - Signature: `fn doc_colors(background: Hsla, text: Hsla, accent: Hsla) -> DocumentColors`
+  - Purpose: Builds test `DocumentColors` with menu colors matching page colors.
+  - Behavior: Sets `menu_bg`/`menu_text` from background/text.
+- **`labels`** (private, L1348)
+  - Signature: `fn labels() -> ContextMenuLabels<'static>`
+  - Purpose: Returns default English context-menu labels for tests.
+  - Behavior: Static string literals including ⌘C copy shortcut.
+- **`escapes_html_special_characters`** (private, L1361)
+  - Signature: `fn escapes_html_special_characters()`
+  - Purpose: Verifies `escape_html` entity encoding.
+  - Behavior: Asserts all significant characters are escaped.
+- **`external_links_route_to_the_browser`** (private, L1369)
+  - Signature: `fn external_links_route_to_the_browser()`
+  - Purpose: Verifies http/https/mailto are external.
+  - Behavior: Asserts true for common external URL forms including trimmed/case variants.
+- **`in_document_navigations_stay_in_place`** (private, L1377)
+  - Signature: `fn in_document_navigations_stay_in_place()`
+  - Purpose: Verifies in-document URLs are not external.
+  - Behavior: Asserts false for about/data/fragment/empty URLs.
+- **`base64_decode_reverses_known_vectors`** (private, L1385)
+  - Signature: `fn base64_decode_reverses_known_vectors()`
+  - Purpose: Verifies RFC 4648 decode vectors and whitespace tolerance.
+  - Behavior: Asserts known encodings decode to expected byte strings.
+- **`base64_decode_rejects_out_of_alphabet_bytes`** (private, L1398)
+  - Signature: `fn base64_decode_rejects_out_of_alphabet_bytes()`
+  - Purpose: Verifies invalid base64 returns `None`.
+  - Behavior: Asserts `not*valid` fails decode.
+- **`decode_data_uri_extracts_image_bytes`** (private, L1403)
+  - Signature: `fn decode_data_uri_extracts_image_bytes()`
+  - Purpose: Verifies PNG data URI decoding.
+  - Behavior: Asserts extension `png` and bytes `foo` for known URI.
+- **`decode_data_uri_is_case_insensitive_on_the_scheme`** (private, L1412)
+  - Signature: `fn decode_data_uri_is_case_insensitive_on_the_scheme()`
+  - Purpose: Verifies `DATA:` scheme prefix works.
+  - Behavior: Asserts JPEG extension on uppercase scheme URI.
+- **`decode_data_uri_rejects_non_data_and_non_base64`** (private, L1419)
+  - Signature: `fn decode_data_uri_rejects_non_data_and_non_base64()`
+  - Purpose: Verifies rejection of HTTP URLs, text data URIs, and empty payloads.
+  - Behavior: Asserts all return `None`.
+- **`extension_for_mime_maps_known_image_types`** (private, L1428)
+  - Signature: `fn extension_for_mime_maps_known_image_types()`
+  - Purpose: Verifies MIME→extension mapping table.
+  - Behavior: Asserts png/jpg/gif/svg and unknown→bin.
+- **`parse_ipc_message_routes_known_tags`** (private, L1437)
+  - Signature: `fn parse_ipc_message_routes_known_tags()`
+  - Purpose: Verifies all IPC tags parse to expected variants.
+  - Behavior: Asserts H/O/D/C/S/P including empty hover payload.
+- **`parse_ipc_message_rejects_unknown_or_malformed`** (private, L1464)
+  - Signature: `fn parse_ipc_message_rejects_unknown_or_malformed()`
+  - Purpose: Verifies unknown tags and missing newline fail.
+  - Behavior: Asserts `None` for bad tag and missing separator.
+- **`unique_download_path_appends_counter_when_taken`** (private, L1471)
+  - Signature: `fn unique_download_path_appends_counter_when_taken()`
+  - Purpose: Verifies browser-style numbered suffix when paths exist.
+  - Behavior: Uses injectable `exists` closure; asserts `(3)` suffix when lower numbers taken.
+- **`applescript_string_quotes_and_escapes`** (private, L1486, macOS)
+  - Signature: `fn applescript_string_quotes_and_escapes()`
+  - Purpose: Verifies AppleScript literal escaping.
+  - Behavior: Asserts quoting and backslash escapes for `"` and `\`.
+- **`channels_clamp_and_round`** (private, L1493)
+  - Signature: `fn channels_clamp_and_round()`
+  - Purpose: Verifies color channel clamping and rounding.
+  - Behavior: Asserts 0, 255, and clamp behavior for out-of-range inputs.
+- **`css_color_is_opaque_rgb`** (private, L1501)
+  - Signature: `fn css_color_is_opaque_rgb()`
+  - Purpose: Verifies opaque RGB formatting from HSLA.
+  - Behavior: Asserts black and white extremes.
+- **`document_wraps_html_body_verbatim`** (private, L1507)
+  - Signature: `fn document_wraps_html_body_verbatim()`
+  - Purpose: Verifies HTML body passes through document wrapper with theme CSS.
+  - Behavior: Asserts DOCTYPE, body content, dark scheme, and scrollbar CSS present.
+- **`document_escapes_and_wraps_plain_text`** (private, L1531)
+  - Signature: `fn document_escapes_and_wraps_plain_text()`
+  - Purpose: Verifies plain-text bodies become escaped `<pre class="plain">`.
+  - Behavior: Asserts escaping and light color scheme.
+- **`sanitize_strips_disallowed_elements_and_their_content`** (private, L1551)
+  - Signature: `fn sanitize_strips_disallowed_elements_and_their_content()`
+  - Purpose: Verifies dangerous/embed elements and content are removed.
+  - Behavior: Asserts safe paragraphs remain; script/iframe/form/etc. absent.
+- **`sanitize_keeps_svg_but_removes_its_scriptable_parts`** (private, L1597)
+  - Signature: `fn sanitize_keeps_svg_but_removes_its_scriptable_parts()`
+  - Purpose: Verifies inline SVG art survives but script/SMIL/foreignObject do not.
+  - Behavior: Asserts `<svg>`/`<rect>` remain; scriptable parts stripped.
+- **`sanitize_strips_event_handlers_and_contenteditable`** (private, L1618)
+  - Signature: `fn sanitize_strips_event_handlers_and_contenteditable()`
+  - Purpose: Verifies inline handlers and contenteditable removed.
+  - Behavior: Asserts div/text remain; handler attrs absent.
+- **`sanitize_neutralizes_dangerous_url_schemes`** (private, L1632)
+  - Signature: `fn sanitize_neutralizes_dangerous_url_schemes()`
+  - Purpose: Verifies javascript/vbscript/SVG data URLs stripped from attrs.
+  - Behavior: Asserts elements remain but dangerous `href`/`src` values removed.
+- **`is_dangerous_url_classifies_schemes`** (private, L1649)
+  - Signature: `fn is_dangerous_url_classifies_schemes()`
+  - Purpose: Verifies scheme classifier edge cases.
+  - Behavior: Asserts dangerous script/data cases and safe relative/raster data cases.
+- **`sanitize_drops_style_with_legacy_script_vectors`** (private, L1665)
+  - Signature: `fn sanitize_drops_style_with_legacy_script_vectors()`
+  - Purpose: Verifies legacy CSS script vectors cause style attr removal.
+  - Behavior: Asserts expression/javascript substrings absent after sanitize.
+- **`sanitize_preserves_safe_markup_and_inline_styles`** (private, L1677)
+  - Signature: `fn sanitize_preserves_safe_markup_and_inline_styles()`
+  - Purpose: Verifies benign markup, links, and inline data images kept when remote allowed.
+  - Behavior: Asserts style, https link, and data image survive.
+- **`is_remote_url_detects_network_resources`** (private, L1687)
+  - Signature: `fn is_remote_url_detects_network_resources()`
+  - Purpose: Verifies remote URL detector for http(s) and protocol-relative URLs.
+  - Behavior: Asserts network URLs true; data/cid/relative/fragment false.
+- **`sanitize_blocks_remote_resources_when_disabled`** (private, L1701)
+  - Signature: `fn sanitize_blocks_remote_resources_when_disabled()`
+  - Purpose: Verifies remote images blocked with stash in `data-rm-blocked-src`.
+  - Behavior: Asserts tracker URL appears once in blocked-src; srcset removed; data image kept.
+- **`sanitize_keeps_remote_link_href_when_blocking`** (private, L1719)
+  - Signature: `fn sanitize_keeps_remote_link_href_when_blocking()`
+  - Purpose: Verifies link hrefs survive remote blocking (click-time navigation).
+  - Behavior: Asserts href kept; image src blocked to data attribute only.
+- **`sanitize_does_not_stash_blocked_src_when_remote_enabled`** (private, L1733)
+  - Signature: `fn sanitize_does_not_stash_blocked_src_when_remote_enabled()`
+  - Purpose: Verifies remote-enabled mode keeps live image src.
+  - Behavior: Asserts src present; no blocked-src attribute.
+- **`sanitize_keeps_remote_resources_when_enabled`** (private, L1741)
+  - Signature: `fn sanitize_keeps_remote_resources_when_enabled()`
+  - Purpose: Verifies remote pixel URL retained when loading enabled.
+  - Behavior: Asserts https src in output.
+- **`strip_css_urls_empties_every_url`** (private, L1748)
+  - Signature: `fn strip_css_urls_empties_every_url()`
+  - Purpose: Verifies CSS url blanking including case, multiples, and unterminated input.
+  - Behavior: Asserts `url()` replacements; unterminated drops tail; plain CSS unchanged.
+- **`sanitize_blocks_css_url_resources_when_disabled`** (private, L1765)
+  - Signature: `fn sanitize_blocks_css_url_resources_when_disabled()`
+  - Purpose: Verifies style-block and inline CSS urls blanked when remote off.
+  - Behavior: Asserts tracker host absent; two `url()` placeholders remain.
+- **`sanitize_keeps_css_url_resources_when_enabled`** (private, L1774)
+  - Signature: `fn sanitize_keeps_css_url_resources_when_enabled()`
+  - Purpose: Verifies CSS background URLs kept when remote loading on.
+  - Behavior: Asserts CDN URL present in sanitized output.
+- **`document_strips_disallowed_elements_from_html_body`** (private, L1781)
+  - Signature: `fn document_strips_disallowed_elements_from_html_body()`
+  - Purpose: Verifies full document pipeline strips disallowed tags from HTML bodies.
+  - Behavior: Asserts safe paragraph kept; iframe/input/video absent in final HTML.
+- **`document_reports_remote_image_state`** (private, L1804)
+  - Signature: `fn document_reports_remote_image_state()`
+  - Purpose: Verifies `RenderedEmail` remote/blocked counts across load and shown settings.
+  - Behavior: Asserts blocked=1 when off, 0 when on or individually shown; local body has no remote.
+- **`document_embeds_escaped_menu_labels`** (private, L1834)
+  - Signature: `fn document_embeds_escaped_menu_labels()`
+  - Purpose: Verifies menu labels appear HTML-escaped in data attributes.
+  - Behavior: Asserts all `data-rm-*` keys present with escaped quotes.
+- **`document_embeds_command_palette_shortcut_script`** (private, L1867, cef-osr)
+  - Signature: `fn document_embeds_command_palette_shortcut_script()`
+  - Purpose: Verifies command-palette IPC script is embedded in rendered documents.
+  - Behavior: Asserts `window.ipc.postMessage('P\n')` substring in HTML.
+- **`content_script_runs_menu_actions_on_mousedown`** (private, L1885, cef-osr)
+  - Signature: `fn content_script_runs_menu_actions_on_mousedown()`
+  - Purpose: Verifies content script uses mousedown (not click) and blocked-image menu ordering.
+  - Behavior: Asserts mousedown handler, menu.contains guard, and blocked-src branch precedes getAttribute src branch.

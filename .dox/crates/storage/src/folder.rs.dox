@@ -1,0 +1,94 @@
+# crates/storage/src/folder.rs
+
+## Purpose
+
+Folder path conventions and membership CSV helpers.
+
+## Ownership
+
+- Owns: API surface of `crates/storage/src/folder.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/storage/src/AGENTS.md` and `.dox/crates/storage/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `folder.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `storage/` / `src/`.
+
+## Verification
+
+- `cargo test -p storage`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **const `SYSTEM_PREFIX`**: `"sys:"` — prefix for built-in folders that cannot be renamed or deleted.
+- **const `USER_PREFIX`**: `"user:"` — prefix for user-created custom folders.
+- **mod `system` constants**: Canonical storage paths — `INBOX`, `DRAFTS`, `SENT`, `JUNK`, `TRASH`, `ARCHIVE`, `FLAGGED` (each `sys:…`).
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`folders_csv`** (pub, L24)
+  - Signature: `pub fn folders_csv<'a>(paths: impl IntoIterator<Item = &'a str>) -> String`
+  - Purpose: Serializes folder paths into the comma-wrapped DB format.
+  - Behavior: Joins paths with commas and wraps as `,{path1},{path2},` so SQL `LIKE '%,path,%'` matches unambiguously. Empty iterator yields `,,`.
+
+- **`folder_like_pattern`** (pub, L30)
+  - Signature: `pub fn folder_like_pattern(folder_path: &str) -> String`
+  - Purpose: Builds a SQL LIKE pattern for membership in `folders_csv`.
+  - Behavior: Returns `format!("%,{folder_path},%")`. No escaping beyond the stored path string.
+
+- **`user_folder_path`** (pub, L35)
+  - Signature: `pub fn user_folder_path(display_name: &str) -> String`
+  - Purpose: Derives the storage path for a custom folder from its display name.
+  - Behavior: Returns `user:{display_name}`. Does not validate uniqueness.
+
+- **`is_system_path`** (pub, L40)
+  - Signature: `pub fn is_system_path(path: &str) -> bool`
+  - Purpose: Detects built-in folder paths.
+  - Behavior: True when `path.starts_with(SYSTEM_PREFIX)`.
+
+- **`is_manual_move_destination_forbidden`** (pub, L45)
+  - Signature: `pub fn is_manual_move_destination_forbidden(path: &str) -> bool`
+  - Purpose: Blocks user-initiated moves into virtual or send/draft mailboxes.
+  - Behavior: True for `sys:flagged`, `sys:drafts`, and `sys:sent`; false for inbox, trash, archive, junk, and user folders.
+
+##### Context: `tests` (`#[cfg(test)]`)
+
+- **`folders_csv_wraps_with_commas`** (private, L54)
+  - Signature: `fn folders_csv_wraps_with_commas()`
+  - Purpose: Verifies CSV wrapping format.
+  - Behavior: Asserts inbox+flagged paths serialize to `,sys:inbox,sys:flagged,`.
+
+- **`folder_like_pattern_matches_inside_csv`** (private, L62)
+  - Signature: `fn folder_like_pattern_matches_inside_csv()`
+  - Purpose: Verifies LIKE pattern shape and substring containment.
+  - Behavior: Asserts pattern for inbox is `%,sys:inbox,%` and sample CSV contains `sys:inbox,`.
+
+- **`user_folder_path_uses_prefix`** (private, L68)
+  - Signature: `fn user_folder_path_uses_prefix()`
+  - Purpose: Verifies custom folder path prefix.
+  - Behavior: Asserts `"Clients"` → `user:Clients`.
+
+- **`manual_move_forbidden_for_sent_drafts_and_flagged`** (private, L73)
+  - Signature: `fn manual_move_forbidden_for_sent_drafts_and_flagged()`
+  - Purpose: Verifies forbidden vs allowed move destinations.
+  - Behavior: Asserts sent/drafts/flagged forbidden; inbox and user folder allowed.

@@ -1,0 +1,47 @@
+# crates/ui/src/ui.rs
+
+## Purpose
+
+Crate root: submodule declarations and public re-exports.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/ui.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `ui.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **module `ui`**: Crate root. Declares private submodules, re-exports their
+  public API, re-exports `prelude::{h_flex, v_flex}`, and re-exports
+  `theme::{ActiveTheme, Appearance, Theme, ThemeColors}` for consumer convenience.
+
+#### Functions / methods
+
+_(No functions — re-exports only.)_

@@ -1,0 +1,79 @@
+# crates/bgmail/src/shortcuts.rs
+
+## Purpose
+
+Key binding registration and display formatting.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/shortcuts.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `shortcuts.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **const `COMPOSE_MAC` / `COMPOSE_OTHER`**: GPUI binding strings for New Message (Cmd+N / Ctrl+N).
+- **const `SETTINGS_MAC` / `SETTINGS_OTHER`**: Binding strings for Settings (Cmd+, / Ctrl+,).
+- **const `TOGGLE_SIDEBAR_MAC` / `TOGGLE_SIDEBAR_OTHER`**: Binding strings for sidebar toggle.
+- **const `COMMAND_PALETTE_MAC` / `COMMAND_PALETTE_OTHER`**: Binding strings for command palette.
+- **const `DELETE_MESSAGE_MAC` / `DELETE_MESSAGE_OTHER`**: Binding strings for move-to-trash.
+- **const `ARCHIVE_MAC` / `ARCHIVE_OTHER`**: Binding strings for archive.
+- **const `MARK_JUNK_MAC` / `MARK_JUNK_OTHER`**: Binding strings for mark junk.
+- **const `TOGGLE_FLAG_MAC` / `TOGGLE_FLAG_OTHER`**: Binding strings for flag/unflag.
+- **const `COMPOSE_CLOSE_MAC` / `COMPOSE_CLOSE_OTHER`**: Binding strings for closing compose window.
+
+#### Functions / methods
+
+- **`primary_binding`** (pub, L43)
+  - Signature: `pub fn primary_binding<'a>(mac: &'a str, other: &'a str) -> &'a str`
+  - Purpose: Returns the platform-appropriate binding string for tooltips.
+  - Behavior: Returns `mac` on macOS and `other` elsewhere.
+- **`format_binding`** (pub, L52)
+  - Signature: `pub fn format_binding(source: &str) -> String`
+  - Purpose: Formats a GPUI keystroke string for display.
+  - Behavior: Parses `source` as a `Keystroke` and renders platform glyphs (e.g. `cmd-n` → `⌘N`). Falls back to the raw string on parse failure.
+- **`bind_app_shortcuts`** (pub, L60)
+  - Signature: `pub fn bind_app_shortcuts(cx: &mut App)`
+  - Purpose: Registers global key bindings for menu-driven actions.
+  - Behavior: Binds both macOS and Windows/Linux chords for each action. Command palette bindings also register under the `TextInput` context so they work while typing in search fields.
+
+- **`format_binding_parses_compose_shortcut`** (private, L95)
+  - Signature: `fn format_binding_parses_compose_shortcut()`
+  - Purpose: Test: compose shortcut formats to a non-empty display string.
+  - Behavior: Formats the platform compose binding and asserts it is non-empty (and contains N on macOS).
+
+- **`settings_comma_binding_parses`** (private, L103)
+  - Signature: `fn settings_comma_binding_parses()`
+  - Purpose: Test: settings comma bindings parse as valid keystrokes.
+  - Behavior: Asserts both macOS and non-macOS settings bindings parse successfully.
+
+- **`primary_binding_follows_platform`** (private, L109)
+  - Signature: `fn primary_binding_follows_platform()`
+  - Purpose: Test: `primary_binding` selects the correct platform string.
+  - Behavior: Asserts macOS returns the Mac variant and other platforms return the other variant.

@@ -1,0 +1,411 @@
+# crates/bgmail/src/cef_osr.rs
+
+## Purpose
+
+Chromium Embedded Framework off-screen rendering backend for the HTML reader.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/cef_osr.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `cef_osr.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **const `EVENTFLAG_SHIFT_DOWN`** (private, L46): CEF `cef_event_flags_t` bit for Shift held during mouse/keyboard events.
+- **const `EVENTFLAG_CONTROL_DOWN`** (private, L47): CEF event flag for Control held.
+- **const `EVENTFLAG_ALT_DOWN`** (private, L48): CEF event flag for Alt held.
+- **const `EVENTFLAG_LEFT_MOUSE_BUTTON`** (private, L49): CEF event flag OR'd into move/wheel events while the left button is down.
+- **const `EVENTFLAG_MIDDLE_MOUSE_BUTTON`** (private, L50): CEF event flag for middle button held.
+- **const `EVENTFLAG_RIGHT_MOUSE_BUTTON`** (private, L51): CEF event flag for right button held.
+- **const `EVENTFLAG_COMMAND_DOWN`** (private, L52): CEF event flag for Meta/Command held.
+- **const `VK_BACK`** (private, L55): Windows virtual-key code for Backspace, used in CEF `KeyEvent::windows_key_code`.
+- **const `VK_TAB`** (private, L56): Virtual-key code for Tab.
+- **const `VK_RETURN`** (private, L57): Virtual-key code for Enter/Return.
+- **const `VK_ESCAPE`** (private, L58): Virtual-key code for Escape.
+- **const `VK_SPACE`** (private, L59): Virtual-key code for Space.
+- **const `VK_PRIOR`** (private, L60): Virtual-key code for Page Up.
+- **const `VK_NEXT`** (private, L61): Virtual-key code for Page Down.
+- **const `VK_END`** (private, L62): Virtual-key code for End.
+- **const `VK_HOME`** (private, L63): Virtual-key code for Home.
+- **const `VK_LEFT`** (private, L64): Virtual-key code for Left arrow.
+- **const `VK_UP`** (private, L65): Virtual-key code for Up arrow.
+- **const `VK_RIGHT`** (private, L66): Virtual-key code for Right arrow.
+- **const `VK_DOWN`** (private, L67): Virtual-key code for Down arrow.
+- **const `VK_DELETE`** (private, L68): Virtual-key code for Delete.
+- **enum `MouseButton`** (pub, L74): Logical mouse button (Left, Right, Middle) forwarded to CEF; independent of GPUI's `MouseButton`.
+- **static `BROWSER_CREATE_COUNT`** (private, L91): Atomic counter of successful windowless browser creations; used to detect accidental re-creation.
+- **struct `CefRuntime`** (private, L103): Owns the CEF `App`, process `Args`, and a `ready` cell that must outlive `cef::initialize`.
+- **struct `BgApp`** (private, L212): CEF app state; holds the `ready` cell passed to the browser-process handler.
+- **struct `BgBrowserProcess`** (private, L267): Browser-process handler state; sets `ready` when CEF context initializes.
+- **type `FrameBuffer`** (private, L287): Tuple `(width, height, Vec<u8>)` of a BGRA paint buffer from CEF `on_paint`.
+- **struct `BgRender`** (private, L290): Render-handler state: shared frame mutex, logical view size, and device scale factor.
+- **struct `BgDisplay`** (private, L389): Display-handler state: host event channel and localized download-notification text.
+- **struct `BgContextMenu`** (private, L483): Marker type for the context-menu handler that suppresses native Chromium menus.
+- **struct `BgLoad`** (private, L526): Load-handler state: host channel for redraw requests after main-frame load.
+- **struct `BgRequest`** (private, L563): Marker type for the request handler that opens external URLs in the system browser.
+- **const `IPC_CONSOLE_PREFIX`** (private, L632): Prefix (`__BGMAIL_IPC__`) prepended to bridged IPC messages logged via `console.log`.
+- **struct `OsrBrowser`** (pub, L750): Windowless CEF browser rendering one e-mail body off-screen; owns paint buffer and GPUI texture state.
+
+#### Functions / methods
+
+
+- **`browser_create_count`** (pub, L96)
+  - Signature: `pub fn browser_create_count() -> u64`
+  - Purpose: Returns how many [`OsrBrowser`] instances have been created since process start.
+  - Behavior: Loads `BROWSER_CREATE_COUNT` with relaxed ordering. Intended for leak diagnostics and tests; message switches must not increment it.
+- **`build_app`** (private, L111)
+  - Signature: `fn build_app(ready: Rc<Cell<bool>>) -> App`
+  - Purpose: Builds the CEF `App` with command-line tweaks and a browser-process handler wired to `ready`.
+  - Behavior: Wraps `BgApp { ready }` in `AppBuilder::new`. Does not initialize CEF.
+- **`run_if_subprocess`** (pub, L123)
+  - Signature: `pub fn run_if_subprocess() -> bool`
+  - Purpose: Detects and runs CEF sub-processes so `main` can exit early without starting GPUI.
+  - Behavior: Calls `execute_process`; returns `true` when `--type=` is present (sub-process ran to completion). Returns `false` in the browser process (`execute_process` returns -1) so boot continues.
+- **`initialize`** (pub, L152)
+  - Signature: `pub fn initialize() -> bool`
+  - Purpose: Initializes CEF for windowless OSR with an external message pump.
+  - Behavior: Idempotent: returns `true` immediately if already initialized. On success stores `CefRuntime` in thread-local `CEF` and enables windowless rendering, external pump, and no-sandbox. Returns `false` if `cef::initialize` fails.
+- **`pump`** (pub, L189)
+  - Signature: `pub fn pump()`
+  - Purpose: Advances CEF's message loop one tick.
+  - Behavior: Calls `do_message_loop_work` only when CEF is initialized; otherwise no-op.
+- **`shutdown_cef`** (pub, L196)
+  - Signature: `pub fn shutdown_cef()`
+  - Purpose: Shuts down CEF on app quit.
+  - Behavior: Takes and drops `CefRuntime` from thread-local storage, then calls `cef::shutdown`. No-op if never initialized.
+- **`is_ready`** (pub, L205)
+  - Signature: `pub fn is_ready() -> bool`
+  - Purpose: Reports whether CEF context initialization finished and browsers can be created.
+  - Behavior: Returns `true` when thread-local `CEF` exists and its `ready` cell is set by `on_context_initialized`.
+- **`expected_physical_size`** (private, L360)
+  - Signature: `fn expected_physical_size(width: i32, height: i32, scale: f32) -> (u32, u32)`
+  - Purpose: Computes the physical pixel dimensions CEF should paint for a logical view size and scale factor.
+  - Behavior: Clamps scale to ≥0.01, rounds `width×scale` and `height×scale` to `u32`. Used to detect stale frames after resize.
+- **`frame_matches_view`** (private, L370)
+  - Signature: `fn frame_matches_view(frame_w: u32, frame_h: u32, expected_w: u32, expected_h: u32) -> bool`
+  - Purpose: Checks whether a painted buffer matches the expected view size within rounding tolerance.
+  - Behavior: Returns `true` when width and height each differ by at most 1 pixel from expected.
+- **`store_paint_buffer`** (private, L377)
+  - Signature: `fn store_paint_buffer(slot: &mut Option<FrameBuffer>, width: u32, height: u32, src: &[u8])`
+  - Purpose: Stores a CEF `on_paint` buffer, reusing allocation when dimensions unchanged.
+  - Behavior: Copies into existing `Vec` when `(w,h,len)` match; otherwise allocates a new `(width, height, src.to_vec())` tuple.
+- **`map_cef_cursor`** (private, L439)
+  - Signature: `fn map_cef_cursor(type_: CursorType) -> WebviewCursor`
+  - Purpose: Maps CEF cursor types to portable [`WebviewCursor`] for GPUI.
+  - Behavior: Compares raw cursor enum values; maps I-beam, hand, resize variants, etc. Falls back to `Arrow` for unmapped types (including default pointer).
+- **`handle_ipc`** (private, L637)
+  - Signature: `fn handle_ipc(message: &str, to_host: &Sender<HostEvent>, notify_body: &str)`
+  - Purpose: Routes bridged document IPC from the console bridge to host events or local actions.
+  - Behavior: Parses via [`parse_ipc_message`]. Hover, copy, image-shown, body-mousedown, and palette go to `to_host` via `try_send`. Open-external and download-image run on the main thread (`open_in_new_window`, `download_image`). Unknown messages are ignored.
+- **`open_in_new_window`** (private, L663)
+  - Signature: `fn open_in_new_window(url: &str)`
+  - Purpose: Opens a link or image outside the reader webview.
+  - Behavior: External `http`/`https`/`mailto` URLs open via `open::that_detached`. Base64 `data:` images are written to a temp file and opened by the OS default app. Other URLs are no-op.
+- **`download_image`** (private, L677)
+  - Signature: `fn download_image(url: &str, _notify_body: &str)`
+  - Purpose: Saves an image to Downloads without a file dialog.
+  - Behavior: Decodes base64 `data:` URIs and writes to a unique path under [`downloads_dir`]. Non-data remote URLs fall back to opening in the browser. Silently returns on missing home dir or I/O failure.
+- **`persist_temp_file`** (private, L696)
+  - Signature: `fn persist_temp_file(extension: &str, bytes: &[u8]) -> Option<std::path::PathBuf>`
+  - Purpose: Materializes inline image bytes to a uniquely named temp file for OS viewing.
+  - Behavior: Builds `bgmail-image-{nanos}.{extension}` in the system temp dir, writes bytes, returns path on success; `None` on clock or I/O failure.
+- **`ipc_shim_script`** (private, L713)
+  - Signature: `fn ipc_shim_script() -> String`
+  - Purpose: Builds the inline script that defines `window.ipc.postMessage` via prefixed `console.log`.
+  - Behavior: Returns an HTML `<script>` tag embedding `IPC_CONSOLE_PREFIX` so [`DisplayHandler::on_console_message`] can intercept messages.
+- **`compose_document`** (private, L723)
+  - Signature: `fn compose_document(html: &str) -> String`
+  - Purpose: Injects IPC shim and content script into a rendered e-mail HTML document.
+  - Behavior: Inserts shim immediately after `<head>` (or prepends if no head). Inserts [`CONTENT_SCRIPT`] immediately before `</body>` (or appends). Returns the augmented document unchanged if markers are absent.
+- **`data_url`** (private, L740)
+  - Signature: `fn data_url(html: &str) -> String`
+  - Purpose: Encodes a composed HTML document as a `data:text/html` URL for CEF navigation.
+  - Behavior: Calls `compose_document`, then percent-encodes the result with `urlencoding::encode`.
+- **`modifier_flags`** (pub, L1133)
+  - Signature: `pub fn modifier_flags(shift: bool, control: bool, alt: bool, meta: bool) -> u32`
+  - Purpose: Converts GPUI modifier booleans to CEF `event_flags` bitmask.
+  - Behavior: ORs `EVENTFLAG_*_DOWN` bits for each true modifier; returns 0 when none are set.
+- **`windows_virtual_key`** (private, L1152)
+  - Signature: `fn windows_virtual_key(key: &str) -> Option<i32>`
+  - Purpose: Maps GPUI key names to Windows virtual-key codes for CEF key events.
+  - Behavior: Handles named keys (backspace, arrows, etc.) and single ASCII letters/digits/symbols. Returns `None` for unknown multi-char keys or non-ASCII single chars.
+- **`key_characters`** (private, L1186)
+  - Signature: `fn key_characters(key: &str, key_char: Option<&str>, modifiers: u32) -> (u16, u16)`
+  - Purpose: Builds CEF character and unmodified-character fields for key events.
+  - Behavior: Unmodified comes from `key_char`, else first char of `key`. When Control or Command is down and the char is A–Z/a–z, character becomes ASCII control code (Ctrl+C → 3); otherwise character equals unmodified.
+
+##### Context: `App` (CEF handler)
+
+- **`on_before_command_line_processing`** (private, L222)
+  - Signature: `fn on_before_command_line_processing(&self, _process_type: Option<&CefString>, command_line: Option<&mut CommandLine>)`
+  - Purpose: Applies reader-specific Chromium command-line switches before process launch.
+  - Behavior: Disables extensions, background networking, smooth scrolling, background throttling/occlusion, and on-device ML features. No-op when `command_line` is `None`.
+- **`browser_process_handler`** (private, L258)
+  - Signature: `fn browser_process_handler(&self) -> Option<BrowserProcessHandler>`
+  - Purpose: Supplies the browser-process handler that signals CEF readiness.
+  - Behavior: Returns `BrowserProcessHandlerBuilder` wrapping `BgBrowserProcess` with a clone of `ready`.
+
+##### Context: `BrowserProcessHandler` (CEF handler)
+
+- **`on_context_initialized`** (private, L277)
+  - Signature: `fn on_context_initialized(&self)`
+  - Purpose: Marks CEF as ready to create browsers after context init.
+  - Behavior: Sets `self.handler.ready` to `true`.
+
+##### Context: `RenderHandler` (CEF handler)
+
+- **`view_rect`** (private, L307)
+  - Signature: `fn view_rect(&self, _browser: Option<&mut Browser>, rect: Option<&mut Rect>)`
+  - Purpose: Reports the logical pixel size CEF should render into.
+  - Behavior: When `rect` is present and stored size is non-zero, sets origin (0,0) and width/height from shared `BgRender.size`. Leaves rect unchanged if size is zero.
+- **`screen_info`** (private, L320)
+  - Signature: `fn screen_info(&self, _browser: Option<&mut Browser>, screen_info: Option<&mut ScreenInfo>) -> c_int`
+  - Purpose: Reports device scale factor for HiDPI OSR rendering.
+  - Behavior: Sets `device_scale_factor` from `BgRender.scale` and returns 1 when `screen_info` is present; returns 0 otherwise.
+- **`on_paint`** (private, L332)
+  - Signature: `fn on_paint(&self, _browser: Option<&mut Browser>, type_: PaintElementType, _dirty_rects: Option<&[Rect]>, buffer: *const u8, width: c_int, height: c_int)`
+  - Purpose: Captures main-view BGRA paint buffers from CEF OSR.
+  - Behavior: Ignores non-default paint types, null buffers, and non-positive dimensions. Copies `width×height×4` bytes from the CEF buffer into the shared frame mutex via `store_paint_buffer`. Uses `unsafe` slice over CEF-owned memory for the duration of the callback only.
+
+##### Context: `DisplayHandler` (CEF handler)
+
+- **`on_console_message`** (private, L400)
+  - Signature: `fn on_console_message(&self, _browser: Option<&mut Browser>, _level: LogSeverity, message: Option<&CefString>, _source: Option<&CefString>, _line: c_int) -> c_int`
+  - Purpose: Intercepts IPC bridge messages logged by the injected shim.
+  - Behavior: Strips `IPC_CONSOLE_PREFIX` and routes payload through `handle_ipc`. Returns 1 (handled) for bridge messages; returns 0 for ordinary console output.
+- **`on_cursor_change`** (private, L419)
+  - Signature: `fn on_cursor_change(&self, _browser: Option<&mut Browser>, _cursor: c_ulong, type_: CursorType, _custom_cursor_info: Option<&CursorInfo>) -> c_int`
+  - Purpose: Forwards page-requested cursor changes to the GPUI host.
+  - Behavior: Maps CEF cursor via `map_cef_cursor`, sends `HostEvent::CursorChanged` over `try_send`, returns 1 so CEF does not set the OS cursor.
+
+##### Context: `ContextMenuHandler` (CEF handler)
+
+- **`on_before_context_menu`** (private, L491)
+  - Signature: `fn on_before_context_menu(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _params: Option<&mut ContextMenuParams>, model: Option<&mut MenuModel>)`
+  - Purpose: Clears Chromium's native context menu before display.
+  - Behavior: Calls `model.clear()` when present so only the HTML [`CONTENT_SCRIPT`] menu appears.
+- **`run_context_menu`** (private, L505)
+  - Signature: `fn run_context_menu(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _params: Option<&mut ContextMenuParams>, _model: Option<&mut MenuModel>, callback: Option<&mut RunContextMenuCallback>) -> c_int`
+  - Purpose: Cancels platform context-menu display under windowless OSR.
+  - Behavior: Calls `callback.cancel()` when present; returns 1 to indicate custom handling.
+
+##### Context: `LoadHandler` (CEF handler)
+
+- **`on_load_end`** (private, L536)
+  - Signature: `fn on_load_end(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, _http_status_code: c_int)`
+  - Purpose: Wakes rendering after the main document finishes loading.
+  - Behavior: Ignores subframe loads. On main frame: unhides browser, sets focus, invalidates paint, sends `HostEvent::OsrNeedsRedraw` to GPUI.
+
+##### Context: `RequestHandler` (CEF handler)
+
+- **`on_before_browse`** (private, L571)
+  - Signature: `fn on_before_browse(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, request: Option<&mut Request>, _user_gesture: c_int, _is_redirect: c_int) -> c_int`
+  - Purpose: Blocks in-webview navigation to external URLs.
+  - Behavior: When request URL is external per [`is_external_link`], opens it with `open::that_detached` and returns 1 (cancel navigation). Returns 0 for in-document `data:` loads and fragments.
+
+##### Context: `Client` (CEF handler)
+
+- **`render_handler`** (private, L605)
+  - Signature: `fn render_handler(&self) -> Option<RenderHandler>`
+  - Purpose: Exposes the OSR render handler to CEF.
+  - Behavior: Clones and returns the stored `RenderHandler`.
+- **`display_handler`** (private, L609)
+  - Signature: `fn display_handler(&self) -> Option<DisplayHandler>`
+  - Purpose: Exposes the display handler (console IPC bridge and cursor).
+  - Behavior: Clones and returns the stored `DisplayHandler`.
+- **`request_handler`** (private, L613)
+  - Signature: `fn request_handler(&self) -> Option<RequestHandler>`
+  - Purpose: Exposes external-link navigation handler.
+  - Behavior: Clones and returns the stored `RequestHandler`.
+- **`context_menu_handler`** (private, L617)
+  - Signature: `fn context_menu_handler(&self) -> Option<ContextMenuHandler>`
+  - Purpose: Exposes the native menu suppression handler.
+  - Behavior: Clones and returns the stored `ContextMenuHandler`.
+- **`load_handler`** (private, L621)
+  - Signature: `fn load_handler(&self) -> Option<LoadHandler>`
+  - Purpose: Exposes the main-frame load-end handler.
+  - Behavior: Clones and returns the stored `LoadHandler`.
+
+##### Context: `OsrBrowser`
+
+- **`new`** (pub, L779)
+  - Signature: `pub fn new(html: &str, to_host: Sender<HostEvent>, notify_body: String) -> Option<Self>`
+  - Purpose: Creates a windowless CEF browser loading the given HTML via a `data:` URL.
+  - Behavior: Returns `None` when [`is_ready`] is false or `browser_host_create_browser_sync` fails. Wires render, display, load, request, and context-menu handlers; increments `BROWSER_CREATE_COUNT`. Initial size 800×600, scale 1.0.
+- **`set_html`** (pub, L848)
+  - Signature: `pub fn set_html(&mut self, html: &str) -> (bool, Option<Arc<RenderImage>>)`
+  - Purpose: Navigates to new HTML when the document changed (message or theme).
+  - Behavior: No-op returning `(false, None)` when HTML unchanged. Otherwise `load_url` on main frame, clears pending paint buffer, takes previous GPUI texture, wakes/unfocuses host and invalidates. Returns `(true, previous_texture)`.
+- **`pump_hard`** (pub, L874)
+  - Signature: `pub fn pump_hard(&self)`
+  - Purpose: Runs several message-loop ticks after navigation or activation.
+  - Behavior: Calls [`pump`] eight times in a loop.
+- **`set_notify_text`** (pub, L881)
+  - Signature: `pub fn set_notify_text(&self, body: String)`
+  - Purpose: Updates localized download-notification text without rebuilding the browser.
+  - Behavior: Replaces the string in shared `notify_body` `RefCell`.
+- **`set_size`** (pub, L888)
+  - Signature: `pub fn set_size(&mut self, width: f32, height: f32, scale_factor: f32) -> bool`
+  - Purpose: Updates logical view size and device scale for OSR rendering.
+  - Behavior: Clamps dimensions to ≥1 logical pixel. Returns `false` when unchanged. On change notifies screen info (if scale changed), calls `was_resized`, and invalidates paint to force a new buffer.
+- **`set_visible`** (pub, L911)
+  - Signature: `pub fn set_visible(&mut self, visible: bool)`
+  - Purpose: Shows or hides the OSR browser to pause background painting.
+  - Behavior: Early return when visibility unchanged. Calls `host.was_hidden(0|1)` and updates `visible` flag.
+- **`take_frame`** (pub, L925)
+  - Signature: `pub fn take_frame(&mut self) -> Option<(Arc<RenderImage>, Option<Arc<RenderImage>>)>`
+  - Purpose: Consumes the latest CEF paint as a GPUI texture.
+  - Behavior: Takes pending `(w,h,bytes)` from frame mutex; builds BGRA `RenderImage`. Returns `(new, previous)` where `previous` is the last displayed texture for disposal. Returns `None` when no new frame pending or image build fails.
+- **`has_pending_frame`** (pub, L943)
+  - Signature: `pub fn has_pending_frame(&self) -> bool`
+  - Purpose: Reports unconsumed paint buffers waiting in the shared mutex.
+  - Behavior: Returns whether frame mutex holds `Some(_)`.
+- **`current_frame`** (pub, L948)
+  - Signature: `pub fn current_frame(&self) -> Option<Arc<RenderImage>>`
+  - Purpose: Returns the last uploaded GPUI texture for repaint without consuming a new buffer.
+  - Behavior: Clones `self.current`.
+- **`current_frame_px`** (pub, L953)
+  - Signature: `pub fn current_frame_px(&self) -> Option<(u32, u32)>`
+  - Purpose: Returns physical pixel dimensions of the current displayed frame.
+  - Behavior: Returns `self.current_px` copy.
+- **`current_frame_fits_view`** (pub, L959)
+  - Signature: `pub fn current_frame_fits_view(&self) -> bool`
+  - Purpose: Checks whether the displayed buffer matches the current view geometry.
+  - Behavior: Compares `current_px` to `expected_physical_size` of stored logical size and scale via `frame_matches_view`. Returns `false` when no current frame.
+- **`flush_input`** (pub, L970)
+  - Signature: `pub fn flush_input(&self)`
+  - Purpose: Delivers coalesced wheel input and advances the message loop before sampling frames.
+  - Behavior: Sends pending wheel via `send_wheel` if any, then calls [`pump`].
+- **`mouse_move`** (pub, L978)
+  - Signature: `pub fn mouse_move(&self, x: f32, y: f32, modifiers: u32)`
+  - Purpose: Forwards mouse movement at logical view coordinates to CEF.
+  - Behavior: Flushes pending wheel first. Sends `MouseEvent` with OR'd held-button flags via `send_mouse_move_event`.
+- **`mouse_click`** (pub, L993)
+  - Signature: `pub fn mouse_click(&self, x: f32, y: f32, button: MouseButton, pressed: bool, click_count: i32)`
+  - Purpose: Forwards mouse press/release and tracks held-button flags for drag selection.
+  - Behavior: Flushes pending wheel. Updates `buttons` cell on press/release. Sends click event with mouse-up flag inverted (0=down, 1=up).
+- **`has_mouse_capture`** (pub, L1028)
+  - Signature: `pub fn has_mouse_capture(&self) -> bool`
+  - Purpose: Reports whether any mouse button is currently held in the OSR view.
+  - Behavior: Returns `buttons != 0`.
+- **`mouse_wheel`** (pub, L1034)
+  - Signature: `pub fn mouse_wheel(&self, x: f32, y: f32, delta_x: f32, delta_y: f32)`
+  - Purpose: Coalesces scroll-wheel deltas until the next flush or paint.
+  - Behavior: Sums deltas into `pending_wheel`, keeping the latest pointer position. Does not send to CEF immediately.
+- **`flush_pending_wheel`** (private, L1043)
+  - Signature: `fn flush_pending_wheel(&self)`
+  - Purpose: Sends accumulated wheel delta if one is queued.
+  - Behavior: Takes `pending_wheel` and calls `send_wheel` when present.
+- **`send_wheel`** (private, L1049)
+  - Signature: `fn send_wheel(&self, x: f32, y: f32, delta_x: f32, delta_y: f32)`
+  - Purpose: Forwards a scroll-wheel event to CEF.
+  - Behavior: No-op when both deltas round to zero integers. Otherwise sends `send_mouse_wheel_event` with held-button modifiers.
+- **`set_focus`** (pub, L1066)
+  - Signature: `pub fn set_focus(&self, focused: bool)`
+  - Purpose: Sets OSR browser keyboard focus for shortcuts and caret behavior.
+  - Behavior: Calls `host.set_focus(1|0)` when host is available.
+- **`key_event`** (pub, L1074)
+  - Signature: `pub fn key_event(&self, pressed: bool, key: &str, key_char: Option<&str>, modifiers: u32)`
+  - Purpose: Forwards keyboard press/release to CEF.
+  - Behavior: No-op when `windows_virtual_key` returns `None` or host missing. On press sends RAWKEYDOWN then CHAR event; on release sends KEYUP. Character fields from `key_characters`.
+- **`dismiss_context_menu`** (pub, L1113)
+  - Signature: `pub fn dismiss_context_menu(&self)`
+  - Purpose: Closes the HTML context menu from the host on outside clicks.
+  - Behavior: Executes `window.__rmCloseMenu&&window.__rmCloseMenu()` on the main frame when available.
+
+##### Context: `Drop for OsrBrowser`
+
+- **`drop`** (private, L1122)
+  - Signature: `fn drop(&mut self)`
+  - Purpose: Force-closes the CEF browser when the GPUI wrapper is dropped.
+  - Behavior: Calls `host.close_browser(1)` to prevent orphaned windowless browsers.
+
+##### Context: `tests`
+
+- **`data_url_percent_encodes_the_document`** (private, L1208)
+  - Signature: `fn data_url_percent_encodes_the_document()`
+  - Purpose: Asserts `data_url` percent-encodes spaces and ampersands in HTML.
+  - Behavior: Checks prefix and absence of raw special characters in the URL string.
+- **`compose_document_injects_shim_first_and_content_last`** (private, L1218)
+  - Signature: `fn compose_document_injects_shim_first_and_content_last()`
+  - Purpose: Verifies injection order of IPC shim and content script.
+  - Behavior: Asserts shim prefix appears before content script markers and before `<title>`.
+- **`compose_document_falls_back_without_head_or_body`** (private, L1231)
+  - Signature: `fn compose_document_falls_back_without_head_or_body()`
+  - Purpose: Verifies document composition works on minimal HTML fragments.
+  - Behavior: Asserts both scripts are present alongside bare markup.
+- **`modifier_flags_map_expected_bits`** (private, L1239)
+  - Signature: `fn modifier_flags_map_expected_bits()`
+  - Purpose: Verifies modifier bitmask mapping.
+  - Behavior: Asserts individual and combined flag values match CEF constants.
+- **`windows_virtual_key_maps_letters_and_named_keys`** (private, L1255)
+  - Signature: `fn windows_virtual_key_maps_letters_and_named_keys()`
+  - Purpose: Verifies GPUI key name to VK mapping.
+  - Behavior: Asserts letter case insensitivity, named keys, and unknown key rejection.
+- **`key_characters_use_control_codes_for_shortcuts`** (private, L1264)
+  - Signature: `fn key_characters_use_control_codes_for_shortcuts()`
+  - Purpose: Verifies Ctrl/Cmd produces ASCII control codes in character field.
+  - Behavior: Asserts Ctrl+C → (3, 'c') and plain typing leaves character unchanged.
+- **`map_cef_cursor_hand_and_ibeam`** (private, L1274)
+  - Signature: `fn map_cef_cursor_hand_and_ibeam()`
+  - Purpose: Verifies common CEF cursor mappings.
+  - Behavior: Asserts HAND→Hand, IBEAM→IBeam, POINTER→Arrow.
+- **`store_paint_buffer_reuses_allocation_for_same_size`** (private, L1281)
+  - Signature: `fn store_paint_buffer_reuses_allocation_for_same_size()`
+  - Purpose: Verifies in-place buffer reuse when dimensions match.
+  - Behavior: Asserts pointer stability and updated bytes after second paint of same size.
+- **`store_paint_buffer_reallocates_when_size_changes`** (private, L1293)
+  - Signature: `fn store_paint_buffer_reallocates_when_size_changes()`
+  - Purpose: Verifies reallocation when paint dimensions change.
+  - Behavior: Asserts new width and byte length after size change.
+- **`coalesce_wheel_deltas_sums_offsets`** (private, L1302)
+  - Signature: `fn coalesce_wheel_deltas_sums_offsets()`
+  - Purpose: Verifies wheel coalescing logic mirrors `mouse_wheel` accumulation.
+  - Behavior: Uses local `coalesce` helper; asserts summed deltas and latest position.
+- **`coalesce`** (private, nested in L1304)
+  - Signature: `fn coalesce(pending: Option<(f32,f32,f32,f32)>, x: f32, y: f32, dx: f32, dy: f32) -> (f32, f32, f32, f32)`
+  - Purpose: Test helper mirroring pending wheel accumulation.
+  - Behavior: Sums deltas when pending exists; otherwise starts a new tuple with latest coordinates.
+- **`expected_physical_size_scales_logical_view`** (private, L1322)
+  - Signature: `fn expected_physical_size_scales_logical_view()`
+  - Purpose: Verifies logical-to-physical size scaling.
+  - Behavior: Asserts 1.0, 2.0, and 1.5 scale factors round correctly.
+- **`frame_matches_view_allows_one_pixel_slack`** (private, L1329)
+  - Signature: `fn frame_matches_view_allows_one_pixel_slack()`
+  - Purpose: Verifies ±1px tolerance in frame/view matching.
+  - Behavior: Asserts exact match and 1px off pass; 20px off fails.
+- **`browser_create_is_single_call_site_and_set_html_navigates`** (private, L1336)
+  - Signature: `fn browser_create_is_single_call_site_and_set_html_navigates()`
+  - Purpose: Static source check that only one CEF browser is ever created per process.
+  - Behavior: Parses production source (pre-`#[cfg(test)]`) and asserts one `browser_host_create_browser_sync`, presence of `load_url`, and `Drop for OsrBrowser`.
+- **`browser_create_count_is_zero_without_cef_init`** (private, L1362)
+  - Signature: `fn browser_create_count_is_zero_without_cef_init()`
+  - Purpose: Verifies counter stays zero when CEF is never initialized in unit tests.
+  - Behavior: Asserts `browser_create_count() == 0`.

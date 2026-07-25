@@ -1,0 +1,128 @@
+# crates/bgmail/src/app_menus.rs
+
+## Purpose
+
+Builds and syncs the global application menu bar for main and compose surfaces.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/app_menus.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `app_menus.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **`MenuSurface`** (pub, L25)
+  - Signature: `pub enum MenuSurface { Main, Compose }`
+  - Purpose: Identifies which window's command set should drive the global menu bar.
+  - Behavior: `Main` reflects the mail reader (File, Edit, View, Message menus). `Compose` replaces those with compose-specific File/Edit menus while a compose window is key.
+
+- **`ActiveMenuSurface`** (pub, L32)
+  - Signature: `pub struct ActiveMenuSurface(pub MenuSurface)`
+  - Purpose: GPUI global that records the menu layout last installed by a sync function.
+  - Behavior: Stored via `cx.set_global` when `sync_main_menus` or `sync_compose_menus` runs. Read by `active_menu_surface`, defaulting to `Main` when unset.
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`app_menu`** (private, L36)
+  - Signature: `fn app_menu() -> Menu`
+  - Purpose: Builds the application menu (macOS app menu / first menu slot).
+  - Behavior: Returns a menu named "BGMail" with About (no-op), Services OS submenu, separator, and Quit bound to `Quit`.
+
+- **`edit_menu`** (private, L49)
+  - Signature: `fn edit_menu() -> Menu`
+  - Purpose: Builds the standard Edit menu shared by main and compose surfaces.
+  - Behavior: Wires Undo, Redo, Cut, Copy, Paste, and Select All to GPUI OS actions (`OsAction::*`) with `NoAction` placeholders.
+
+- **`build_menus`** (pub, L65)
+  - Signature: `pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu>`
+  - Purpose: Builds the full menu tree for the main mail window.
+  - Behavior: Assembles App, File (compose + settings), Edit, View (sidebar toggle + command palette), and Message menus. Message actions are added only when `commands::command_enabled` allows them; move-to-folder items come from `ctx.move_targets()` filtered the same way. Flag label switches between flag/unflag based on `ctx.message_starred()`. Move targets appear in a submenu when non-empty.
+
+- **`build_compose_menus`** (pub, L158)
+  - Signature: `pub fn build_compose_menus(language: Language) -> Vec<Menu>`
+  - Purpose: Builds menus while a compose window is key.
+  - Behavior: Returns App, a File menu (Send, Attach, Close, Discard), and Edit. Omits View and Message menus entirely.
+
+- **`active_menu_surface`** (pub, L177)
+  - Signature: `pub fn active_menu_surface(cx: &App) -> MenuSurface`
+  - Purpose: Reads which menu surface is currently active.
+  - Behavior: Returns the inner `MenuSurface` from the `ActiveMenuSurface` global, or `MenuSurface::Main` if the global is missing.
+
+- **`push_if_enabled`** (private, L183)
+  - Signature: `fn push_if_enabled<A: gpui::Action>(items: &mut Vec<MenuItem>, label: &'static str, action: A, id: CommandId, ctx: &CommandContext)`
+  - Purpose: Conditionally appends a localized action item to a menu list.
+  - Behavior: Calls `commands::command_enabled(&id, ctx)`; when true, pushes `MenuItem::action(label, action)`.
+
+- **`sync_main_menus`** (pub, L196)
+  - Signature: `pub fn sync_main_menus(cx: &mut App, ctx: &CommandContext, language: Language)`
+  - Purpose: Refreshes the global menu bar for the main mail window.
+  - Behavior: Sets `ActiveMenuSurface(Main)` and replaces GPUI menus with `build_menus(ctx, language)`.
+
+- **`sync_compose_menus`** (pub, L202)
+  - Signature: `pub fn sync_compose_menus(cx: &mut App, language: Language)`
+  - Purpose: Refreshes the global menu bar for the compose window.
+  - Behavior: Sets `ActiveMenuSurface(Compose)` and installs `build_compose_menus(language)`.
+
+- **`sync_menus`** (pub, L208)
+  - Signature: `pub fn sync_menus(cx: &mut App, ctx: &CommandContext, language: Language)`
+  - Purpose: Convenience alias to refresh main-window menus from a command context.
+  - Behavior: Delegates to `sync_main_menus`.
+
+- **`menu_has_action_label`** (private, L214)
+  - Signature: `fn menu_has_action_label(menu: &Menu, label: &str) -> bool` (`#[cfg(test)]`)
+  - Purpose: Test helper that checks whether a menu tree contains an action with an exact label.
+  - Behavior: Recursively walks `MenuItem::Action` and `MenuItem::Submenu` entries, comparing action names to `label`.
+
+- **`ctx_with_inbox_message`** (private, L229)
+  - Signature: `fn ctx_with_inbox_message() -> CommandContext` (tests)
+  - Purpose: Builds a `CommandContext` with a selected inbox message and folder metadata.
+  - Behavior: Constructs a synthetic `MessageDetail` in INBOX and a single-folder map so message-menu tests have enabled delete/move actions.
+
+- **`message_menu_includes_delete_when_message_selected`** (private, L261)
+  - Signature: `fn message_menu_includes_delete_when_message_selected()` (test)
+  - Purpose: Asserts delete appears in the Message menu when a message is selected.
+  - Behavior: Builds menus from `ctx_with_inbox_message()` and checks the localized delete label via `menu_has_action_label`.
+
+- **`message_menu_omits_delete_without_selection`** (private, L274)
+  - Signature: `fn message_menu_omits_delete_without_selection()` (test)
+  - Purpose: Asserts delete is omitted when nothing is selected.
+  - Behavior: Builds menus from `CommandContext::default()` and expects delete label absent.
+
+- **`file_menu_always_includes_compose`** (private, L287)
+  - Signature: `fn file_menu_always_includes_compose()` (test)
+  - Purpose: Asserts compose is always available from File.
+  - Behavior: Finds the File menu and checks for the localized compose window title action.
+
+- **`compose_menus_include_send_attach_close_and_discard`** (private, L300)
+  - Signature: `fn compose_menus_include_send_attach_close_and_discard()` (test)
+  - Purpose: Validates compose surface File menu contents and absence of reader-only menus.
+  - Behavior: Checks Send, Attach, Close, and Discard labels exist; asserts Message and View menus are not present.

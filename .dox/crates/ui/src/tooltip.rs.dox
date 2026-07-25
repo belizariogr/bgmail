@@ -1,0 +1,73 @@
+# crates/ui/src/tooltip.rs
+
+## Purpose
+
+Hover Tooltip view factories.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/tooltip.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `tooltip.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **struct `Tooltip`**: Minimal hover tooltip view. Fields: `text`, optional
+  `shortcut`. Implements `Render` (not `RenderOnce`) because GPUI tooltip
+  builders instantiate it as an entity view.
+
+#### Functions / methods
+
+##### Context: `Tooltip`
+
+- **`text`** (pub, L19)
+  - Signature: `pub fn text(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView`
+  - Purpose: Factory for `Element::tooltip` closures showing text only.
+  - Behavior: Delegates to `build(text, None)`. Returned closure creates a new
+    `Tooltip` entity via `cx.new` and converts to `AnyView`.
+
+- **`with_shortcut`** (pub, L24)
+  - Signature: `pub fn with_shortcut(text: impl Into<SharedString>, shortcut: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView`
+  - Purpose: Factory for tooltips with a muted shortcut label on the right.
+  - Behavior: Calls `build(text, Some(shortcut))`.
+
+- **`build`** (private, L31)
+  - Signature: `fn build(text: impl Into<SharedString>, shortcut: Option<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView`
+  - Purpose: Shared closure builder capturing text and optional shortcut.
+  - Behavior: Captures strings; closure ignores window, spawns `Tooltip { text,
+    shortcut }` entity, returns `AnyView`.
+
+##### Context: `Render for Tooltip`
+
+- **`render`** (private, L47)
+  - Signature: `fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement`
+  - Purpose: Paints elevated tooltip panel with body text and optional shortcut.
+  - Behavior: Uses elevated surface background and border. Without shortcut,
+    single small `Label`. With shortcut, horizontal flex: primary label plus
+    muted shortcut label. Padding and rounded corners applied on outer `div`.

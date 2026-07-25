@@ -1,0 +1,46 @@
+# crates/bgmail/src/actions.rs
+
+## Purpose
+
+GPUI action types for menus, shortcuts, and command dispatch.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/actions.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `actions.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
+- **struct `MoveMessageToFolder`**: Parameterized action carrying a folder storage path (`path: SharedString`). Dispatched when the user picks a move target from menus or the command palette.
+
+#### Functions / methods
+
+_(No functions — only action types.)_

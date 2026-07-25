@@ -1,0 +1,70 @@
+# crates/bgmail/src/startup.rs
+
+## Purpose
+
+Debug startup timing milestones.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/startup.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `startup.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- _(None at module top-level.)_
+
+#### Functions / methods
+
+- **`mark_start`** (pub, L13)
+  - Signature: `pub fn mark_start()`
+  - Purpose: Records the process start instant for startup timing.
+  - Behavior: Stores `Instant::now()` in a `OnceLock`. Subsequent calls are ignored.
+- **`elapsed`** (pub, L18)
+  - Signature: `pub fn elapsed() -> Duration`
+  - Purpose: Returns elapsed time since `mark_start`.
+  - Behavior: Returns zero if `mark_start` was never called.
+- **`format_elapsed`** (pub, L23)
+  - Signature: `pub fn format_elapsed(duration: Duration) -> String`
+  - Purpose: Formats a duration for human-readable log output.
+  - Behavior: Renders milliseconds with one decimal place (e.g. `"42.0ms"`).
+- **`log_milestone`** (pub, L28)
+  - Signature: `pub fn log_milestone(label: &str)`
+  - Purpose: Logs a named startup milestone in debug builds.
+  - Behavior: Prints `[BGMail startup] {label}: {elapsed}` to stderr when `debug_assertions` is enabled.
+
+- **`format_elapsed_shows_milliseconds`** (private, L40)
+  - Signature: `fn format_elapsed_shows_milliseconds()`
+  - Purpose: Test: `format_elapsed` uses millisecond formatting.
+  - Behavior: Asserts `format_elapsed(42ms)` equals `"42.0ms"`.
+
+- **`elapsed_grows_after_mark_start`** (private, L45)
+  - Signature: `fn elapsed_grows_after_mark_start()`
+  - Purpose: Test: elapsed time increases after `mark_start`.
+  - Behavior: Calls `mark_start`, sleeps briefly, and asserts `elapsed()` does not decrease.

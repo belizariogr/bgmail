@@ -1,0 +1,49 @@
+# crates/storage/src/types.rs
+
+## Purpose
+
+UI-agnostic storage data types and list query enum.
+
+## Ownership
+
+- Owns: API surface of `crates/storage/src/types.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/storage/src/AGENTS.md` and `.dox/crates/storage/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `types.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `storage/` / `src/`.
+
+## Verification
+
+- `cargo test -p storage`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **struct `Account`**: Connected mail account row (`id`, `name`, `email`).
+- **struct `Folder`**: Per-account folder row (`id`, `account_id`, storage `path`, UI `display_name` — empty for system folders localized elsewhere).
+- **struct `MessageListItem`**: Middle-column list row without body fields (`preview` excerpt, flags, metadata).
+- **struct `MessageDetail`**: Reader-pane row with `plain_text`, `raw_content`, `raw_format`, and live `folders_csv`.
+- **enum `MailListQuery`**: List dispatcher — `GlobalSystemFolder(String)` (all accounts), `AccountFolder { account_id, folder_path }`, or `Search(String)`.
+
+#### Functions / methods
+
+_(No functions.)_

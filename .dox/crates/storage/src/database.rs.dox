@@ -1,0 +1,149 @@
+# crates/storage/src/database.rs
+
+## Purpose
+
+SQLite open/migrate and query API on `Database`.
+
+## Ownership
+
+- Owns: API surface of `crates/storage/src/database.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/storage/src/AGENTS.md` and `.dox/crates/storage/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `database.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `storage/` / `src/`.
+
+## Verification
+
+- `cargo test -p storage`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **struct `Database`**: Owns an open `rusqlite::Connection` to the local mail store; all query and mutation methods hang off this type.
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`database_path`** (pub, L16)
+  - Signature: `pub fn database_path() -> PathBuf`
+  - Purpose: Returns the default on-disk location for `mail.db`.
+  - Behavior: Joins `config_dir()` with `"mail.db"`. Typically `~/.config/BGMail/mail.db` when `HOME` or `USERPROFILE` is set. No I/O.
+
+- **`config_dir`** (private, L20)
+  - Signature: `fn config_dir() -> PathBuf`
+  - Purpose: Resolves the BGMail config directory across platforms.
+  - Behavior: Uses `$HOME/.config/BGMail` or `$USERPROFILE/.config/BGMail`; falls back to `.config/BGMail` relative path when neither env var exists. No directory creation.
+
+- **`global_folder_path`** (pub, L301)
+  - Signature: `pub fn global_folder_path(name: &str) -> Option<&'static str>`
+  - Purpose: Maps UI global-mailbox keys to canonical system folder paths.
+  - Behavior: `"inbox" → sys:inbox`, `"flagged" → sys:flagged`, `"drafts" → sys:drafts`, `"sent" → sys:sent`; any other name returns `None`. No I/O.
+
+##### Context: `Database`
+
+- **`open`** (pub, L38)
+  - Signature: `pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self>`
+  - Purpose: Opens or creates a SQLite database and brings schema to current version.
+  - Behavior: Creates parent directories (errors ignored), opens the file, enables `PRAGMA foreign_keys = ON`, runs `migrate()`, returns `Database`. Propagates SQLite errors; does not panic.
+
+- **`open_default`** (pub, L50)
+  - Signature: `pub fn open_default() -> rusqlite::Result<Self>`
+  - Purpose: Convenience opener for the standard user config path.
+  - Behavior: Delegates to `Self::open(database_path())`.
+
+- **`conn`** (pub, L54)
+  - Signature: `pub fn conn(&self) -> &Connection`
+  - Purpose: Exposes the underlying SQLite connection for seeding and low-level use.
+  - Behavior: Returns `&self.conn`. No side effects.
+
+- **`migrate`** (private, L58)
+  - Signature: `fn migrate(&self) -> rusqlite::Result<()>`
+  - Purpose: Applies DDL and one-time schema bookkeeping on open.
+  - Behavior: Executes `CREATE_META`, `CREATE_ACCOUNTS`, `CREATE_FOLDERS`, `CREATE_MESSAGES`, and index DDL from `schema`. Inserts `schema_version` into `meta` when missing. Calls `repair_starred_folder_membership()`. Propagates SQL errors.
+
+- **`repair_starred_folder_membership`** (private, L86)
+  - Signature: `fn repair_starred_folder_membership(&self) -> rusqlite::Result<()>`
+  - Purpose: Backfills flagged-folder membership for starred messages missing `sys:flagged` in `folders_csv`.
+  - Behavior: Selects starred rows whose `folders_csv` does not match the flagged LIKE pattern; parses paths, appends `sys:flagged` when absent, re-serializes via `folders_csv`, and updates each row. No-op when nothing to fix.
+
+- **`list_accounts`** (pub, L123)
+  - Signature: `pub fn list_accounts(&self) -> rusqlite::Result<Vec<Account>>`
+  - Purpose: Loads all accounts ordered by id.
+  - Behavior: `SELECT id, name, email FROM accounts ORDER BY id ASC`; maps rows to `Account`. Returns empty vec when none.
+
+- **`list_folders`** (pub, L137)
+  - Signature: `pub fn list_folders(&self, account_id: i64) -> rusqlite::Result<Vec<Folder>>`
+  - Purpose: Lists folders belonging to one account.
+  - Behavior: Filters `folders` by `account_id`, orders by id, maps to `Folder` (path + display_name).
+
+- **`unread_in_folder`** (pub, L153)
+  - Signature: `pub fn unread_in_folder(&self, account_id: Option<i64>, folder_path: &str) -> rusqlite::Result<usize>`
+  - Purpose: Counts unread messages in a folder, optionally scoped to one account.
+  - Behavior: Builds a `folders_csv` LIKE pattern via `folder_like_pattern`. With `Some(account_id)`, counts unread rows for that account and folder; with `None`, counts across all accounts. Returns `usize` count (cast from SQLite integer).
+
+- **`global_unread`** (pub, L176)
+  - Signature: `pub fn global_unread(&self, folder_path: &str) -> rusqlite::Result<usize>`
+  - Purpose: Unread count for a system folder aggregated over every account.
+  - Behavior: Calls `unread_in_folder(None, folder_path)`.
+
+- **`list_messages`** (pub, L180)
+  - Signature: `pub fn list_messages(&self, query: &MailListQuery) -> rusqlite::Result<Vec<MessageListItem>>`
+  - Purpose: Primary list-column query dispatcher.
+  - Behavior: `MailListQuery::Search` → `search_messages`; `GlobalSystemFolder(path)` → `messages_in_folder(None, path)`; `AccountFolder { account_id, folder_path }` → `messages_in_folder(Some(account_id), folder_path)`.
+
+- **`messages_in_folder`** (private, L191)
+  - Signature: `fn messages_in_folder(&self, account_id: Option<i64>, folder_path: &str) -> rusqlite::Result<Vec<MessageListItem>>`
+  - Purpose: Lists messages whose `folders_csv` contains the given folder path.
+  - Behavior: Uses LIKE pattern matching on comma-wrapped CSV. Optional account filter. Orders by `sort_order ASC, id ASC`. Maps SQLite integer flags to `bool` for unread/starred/has_attachment.
+
+- **`search_messages`** (private, L234)
+  - Signature: `fn search_messages(&self, query: &str) -> rusqlite::Result<Vec<MessageListItem>>`
+  - Purpose: Accent/case-insensitive search over precomputed `search_text`.
+  - Behavior: Returns empty vec immediately when `search_like_pattern` yields `None` (blank/whitespace query). Otherwise `WHERE search_text LIKE ?` with folded partial pattern, same ordering and row mapping as folder lists.
+
+- **`get_message`** (pub, L262)
+  - Signature: `pub fn get_message(&self, id: i64) -> rusqlite::Result<Option<MessageDetail>>`
+  - Purpose: Loads one message for the reader pane, including body and folder membership.
+  - Behavior: Selects full row by primary key. Returns `Ok(None)` when id absent; `Ok(Some(detail))` when found. Converts integer flags to bool.
+
+- **`message_count_for_query`** (pub, L289)
+  - Signature: `pub fn message_count_for_query(&self, query: &MailListQuery) -> rusqlite::Result<usize>`
+  - Purpose: Counts messages matching a list query (via full list fetch).
+  - Behavior: Returns `list_messages(query)?.len()`. Note: loads all matching rows — acceptable for mock/seed scale.
+
+- **`message_count_all`** (pub, L292)
+  - Signature: `pub fn message_count_all(&self) -> rusqlite::Result<usize>`
+  - Purpose: Total message row count in the database.
+  - Behavior: `SELECT COUNT(*) FROM messages`; returns as `usize`.
+
+##### Context: `tests` (`#[cfg(test)]`)
+
+- **`database_path_uses_dot_config_bgmail`** (private, L318)
+  - Signature: `fn database_path_uses_dot_config_bgmail()`
+  - Purpose: Smoke test for default path naming.
+  - Behavior: Asserts path contains `"BGMail"` and file name is `mail.db`. Panics on failure.
+
+- **`account_folder_lists_only_that_account`** (private, L325)
+  - Signature: `fn account_folder_lists_only_that_account()`
+  - Purpose: Ensures per-account folder queries do not leak cross-account messages.
+  - Behavior: Seeds two accounts with one inbox message each; lists inbox for account A and asserts exactly one message with subject `"A only"`. Uses `unwrap` on setup — panics if seed/open fails.

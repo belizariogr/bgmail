@@ -1,0 +1,90 @@
+# crates/ui/src/assets.rs
+
+## Purpose
+
+Embedded SVG icon AssetSource.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/assets.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `assets.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **macro `icon_assets!`**: Compile-time table generator. For each `(NAME, path)`
+  pair it emits a public `NAME` path constant and embeds bytes via
+  `include_bytes!` into the private `ICON_ASSETS` slice used by [`Assets`].
+- **pub const icon paths** (L34–L66): Asset path strings for every embedded SVG
+  — `CHEVRON_RIGHT`, `CHEVRON_DOWN`, `INBOX`, `SEND`, `FILE_PEN`, `TRASH`,
+  `TRIANGLE_EXCLAMATION`, `ARCHIVE`, `STAR`, `STAR_FILLED`, `PALETTE`, `FLAG`,
+  `REPLY`, `REPLY_ALL`, `FORWARD`, `PEN_TO_SQUARE`, `SEARCH`, `SETTINGS`,
+  `REFRESH`, `CIRCLE_USER`, `PAPERCLIP`, `ENVELOPE`, `SIDEBAR`, `FILTER`,
+  `ELLIPSIS`, `FOLDER`, `SHIELD_HALVED`, `SHIELD`, `CHECK`, `XMARK`,
+  `WINDOW_MINIMIZE`, `WINDOW_MAXIMIZE`, `WINDOW_RESTORE`. Each value is the
+  GPUI asset key (e.g. `"icons/inbox.svg"`).
+- **struct `Assets`**: Zero-sized [`AssetSource`] implementation. Register once
+  with `Application::new().with_assets(ui::Assets)` so `gpui::svg()` can load
+  embedded icon bytes by path.
+
+#### Functions / methods
+
+##### Context: `AssetSource for Assets`
+
+- **`load`** (private, L74)
+  - Signature: `fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>>`
+  - Purpose: Resolves an asset path to embedded SVG bytes.
+  - Behavior: Linear search in `ICON_ASSETS` for a matching path. Returns
+    `Ok(Some(Cow::Borrowed(bytes)))` on hit, `Ok(None)` when unknown. Never
+    errors for a missing path.
+
+- **`list`** (private, L81)
+  - Signature: `fn list(&self, _path: &str) -> Result<Vec<SharedString>>`
+  - Purpose: Lists every embedded icon asset path.
+  - Behavior: Ignores the `_path` argument. Returns all keys from `ICON_ASSETS`
+    as `SharedString` values.
+
+##### Context: `module` (tests)
+
+- **`loads_every_embedded_icon`** (private, L94)
+  - Signature: `fn loads_every_embedded_icon()`
+  - Purpose: Regression test that every embedded asset loads as non-empty SVG.
+  - Behavior: Iterates `ICON_ASSETS`, calls `Assets::load` for each path,
+    asserts bytes exist, start with `<svg`, and are non-empty. Panics on failure.
+
+- **`unknown_path_is_none`** (private, L106)
+  - Signature: `fn unknown_path_is_none()`
+  - Purpose: Regression test for missing asset lookup.
+  - Behavior: Asserts `Assets.load("icons/does-not-exist.svg")` returns
+    `Ok(None)`.
+
+- **`list_reports_every_icon`** (private, L111)
+  - Signature: `fn list_reports_every_icon()`
+  - Purpose: Regression test that `list` covers the full embed table.
+  - Behavior: Asserts `Assets.list("")` length equals `ICON_ASSETS.len()`.

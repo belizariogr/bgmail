@@ -1,0 +1,149 @@
+# crates/bgmail/src/commands.rs
+
+## Purpose
+
+Command ids, enablement rules, labels, and palette entry construction.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/commands.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `commands.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **enum `CommandId`**: Identifies a command in menus and the palette (compose, settings, message actions, move-to-folder with path).
+- **struct `CommandContext`**: Snapshot of UI state (selected message, detail, folders) used to decide command availability and labels.
+- **struct `CommandEntry`**: One palette row: `id` plus localized `label`.
+
+#### Functions / methods
+
+##### Context: `CommandContext`
+
+- **`message_in_trash`** (pub, L35)
+  - Signature: `pub fn message_in_trash(&self) -> bool`
+  - Purpose: Whether the selected message is in Trash.
+  - Behavior: True when `message_detail.folders_csv` contains the system trash path.
+
+- **`message_in_junk`** (pub, L41)
+  - Signature: `pub fn message_in_junk(&self) -> bool`
+  - Purpose: Whether the selected message is in Junk.
+  - Behavior: True when folders CSV contains the system junk path.
+
+- **`message_in_archive`** (pub, L47)
+  - Signature: `pub fn message_in_archive(&self) -> bool`
+  - Purpose: Whether the selected message is in Archive.
+  - Behavior: True when folders CSV contains the system archive path.
+
+- **`message_starred`** (pub, L53)
+  - Signature: `pub fn message_starred(&self) -> bool`
+  - Purpose: Whether the selected message is flagged/starred.
+  - Behavior: Reads `starred` from `message_detail` when present.
+
+- **`move_targets`** (pub, L59)
+  - Signature: `pub fn move_targets(&self) -> Vec<(SharedString, SharedString)>`
+  - Purpose: Eligible move destinations for the selected message.
+  - Behavior: Returns `(display_name, path)` pairs for folders in the message's account, excluding forbidden manual-move destinations (sent, drafts, flagged, etc.).
+
+##### Context: `module`
+
+- **`message_has_folder`** (private, L85)
+  - Signature: `fn message_has_folder(csv: &str, folder_path: &str) -> bool`
+  - Purpose: Checks whether a comma-separated folder list contains a path.
+  - Behavior: Splits on commas, ignores empty segments, compares paths exactly.
+- **`folder_display_name`** (pub, L92)
+  - Signature: `pub fn folder_display_name(folder: &Folder, language: Language) -> String`
+  - Purpose: Localized display name for a storage folder.
+  - Behavior: Uses `folder.display_name` when set; otherwise maps system paths to localized mailbox names via `MailboxKind`, falling back to the raw path.
+- **`system_folder_label`** (private, L99)
+  - Signature: `fn system_folder_label(path: &str, language: Language) -> String`
+  - Purpose: Maps a system folder path to a localized label.
+  - Behavior: Matches known system paths to `MailboxKind` display names; unknown paths pass through unchanged.
+- **`label_for`** (private, L113)
+  - Signature: `fn label_for(id: &CommandId, language: Language, ctx: &CommandContext) -> SharedString`
+  - Purpose: Localized label for a command id.
+  - Behavior: Uses locale keys for standard commands; flag toggles between Flag/Unflag based on starred state; move commands use folder display names.
+- **`command_enabled`** (pub, L141)
+  - Signature: `pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool`
+  - Purpose: Whether a command can run in the current context.
+  - Behavior: Always enables compose/settings/sidebar. Message commands require a selection and apply folder-state rules (e.g. delete disabled in trash, restore only in trash, archive disabled when already archived or in trash).
+- **`palette_commands`** (pub, L163)
+  - Signature: `pub fn palette_commands(language: Language, ctx: &CommandContext) -> Vec<CommandEntry>`
+  - Purpose: Builds the filtered command palette list.
+  - Behavior: Starts with global commands; adds message actions and move targets when a message is selected; filters through `command_enabled` and attaches localized labels.
+- **`command_matches_query`** (pub, L194)
+  - Signature: `pub fn command_matches_query(label: &str, query: &str) -> bool`
+  - Purpose: Case-insensitive substring filter for the palette.
+  - Behavior: Empty or whitespace-only queries match everything; otherwise compares ASCII-lowercased label against query.
+##### Context: `module (tests)`
+
+- **`ctx_with_message`** (private, L208)
+  - Signature: `fn ctx_with_message()`
+  - Purpose: Builds a test `CommandContext` with inbox or trash message.
+  - Behavior: Constructs message detail and folder map for unit tests.
+
+- **`delete_disabled_in_trash_restore_enabled`** (private, L257)
+  - Signature: `fn delete_disabled_in_trash_restore_enabled()`
+  - Purpose: Test: trash enables restore/permanent delete, disables normal delete.
+  - Behavior: Uses trash context and asserts enabled/disabled flags.
+
+- **`inbox_message_can_delete_not_restore`** (private, L265)
+  - Signature: `fn inbox_message_can_delete_not_restore()`
+  - Purpose: Test: inbox message allows delete, not restore.
+  - Behavior: Asserts delete enabled and restore disabled for inbox message.
+
+- **`palette_never_lists_command_palette_action`** (private, L272)
+  - Signature: `fn palette_never_lists_command_palette_action()`
+  - Purpose: Test: palette does not list itself.
+  - Behavior: Ensures no palette entry mentions command palette in EN/PT.
+
+- **`palette_without_message_omits_message_actions`** (private, L283)
+  - Signature: `fn palette_without_message_omits_message_actions()`
+  - Purpose: Test: no message commands without selection.
+  - Behavior: Default context omits delete/archive/move entries but includes compose.
+
+- **`palette_with_message_includes_move_targets`** (private, L296)
+  - Signature: `fn palette_with_message_includes_move_targets()`
+  - Purpose: Test: selection adds move-to-folder entries.
+  - Behavior: Inbox message context includes at least one `MoveToFolder` command.
+
+- **`flag_label_reflects_starred_state`** (private, L305)
+  - Signature: `fn flag_label_reflects_starred_state()`
+  - Purpose: Test: flag label becomes Unflag when starred.
+  - Behavior: Starred message yields Unflag label for toggle-flag command.
+
+- **`command_filter_is_case_insensitive`** (private, L312)
+  - Signature: `fn command_filter_is_case_insensitive()`
+  - Purpose: Test: query matching is case-insensitive.
+  - Behavior: ARCH matches Archive Message; junk does not.
+
+- **`move_targets_exclude_sent_drafts_and_flagged`** (private, L318)
+  - Signature: `fn move_targets_exclude_sent_drafts_and_flagged()`
+  - Purpose: Test: forbidden folders excluded from move list.
+  - Behavior: Sent, drafts, and flagged paths absent; user folder present.

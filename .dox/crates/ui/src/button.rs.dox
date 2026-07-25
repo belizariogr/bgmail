@@ -1,0 +1,130 @@
+# crates/ui/src/button.rs
+
+## Purpose
+
+Button and IconButton components.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/button.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `button.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **enum `ButtonStyle`**: Visual variants — `Subtle` (default, secondary),
+  `Filled` (primary accent), `Ghost` (transparent until hover).
+- **type `ClickHandler`**: `Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>`.
+- **struct `Button`**: Text button with optional leading icon. Fields: `id`,
+  `label`, `icon`, `style`, `full_width`, `on_click`.
+- **struct `IconButton`**: Square icon-only toolbar button. Fields: `id`, `icon`,
+  `size`, `color`, `selected`, `on_click`.
+
+#### Functions / methods
+
+##### Context: `Button`
+
+- **`new`** (pub, L32)
+  - Signature: `pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self`
+  - Purpose: Creates a subtle-style text button without icon or handler.
+  - Behavior: Stores `id` and `label`; defaults `icon` to `None`, `style` to
+    `Subtle`, `full_width` to `false`, `on_click` to `None`.
+
+- **`icon`** (pub, L44)
+  - Signature: `pub fn icon(mut self, icon: IconName) -> Self`
+  - Purpose: Prepends an icon before the label (e.g. Send button).
+  - Behavior: Sets `self.icon = Some(icon)`; returns `self`.
+
+- **`style`** (pub, L50)
+  - Signature: `pub fn style(mut self, style: ButtonStyle) -> Self`
+  - Purpose: Chooses background/hover treatment.
+  - Behavior: Assigns `style`; returns `self`.
+
+- **`full_width`** (pub, L56)
+  - Signature: `pub fn full_width(mut self) -> Self`
+  - Purpose: Makes the button expand to container width.
+  - Behavior: Sets `full_width = true`; at render adds `.w_full()`.
+
+- **`on_click`** (pub, L62)
+  - Signature: `pub fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self`
+  - Purpose: Registers a left-click handler.
+  - Behavior: Boxes handler into `on_click`. Render adds pointer cursor,
+    swallows left mouse-down (prevents title-bar drag stealing clicks), and
+    forwards `ClickEvent` to the handler.
+
+##### Context: `RenderOnce for Button`
+
+- **`render`** (private, L72)
+  - Signature: `fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement`
+  - Purpose: Paints the button row with theme-aware colors and optional icon.
+  - Behavior: Reads theme colors; maps `ButtonStyle` to `(bg, text_color,
+    hover_bg)` — subtle uses element background, filled uses accent/on-accent,
+    ghost is transparent with hover fill. Builds centered horizontal flex with
+    padding, rounded corners, 13px text. Optional icon uses `OnAccent` tint
+    when filled, else `Default`. Applies hover background swap. Wires click
+    handling when `on_click` is set.
+
+##### Context: `IconButton`
+
+- **`new`** (pub, L126)
+  - Signature: `pub fn new(id: impl Into<ElementId>, icon: IconName) -> Self`
+  - Purpose: Creates a 28px square icon button.
+  - Behavior: Defaults `size` to `IconSize::default()`, `color` to `Default`,
+    `selected` to `false`, `on_click` to `None`.
+
+- **`size`** (pub, L138)
+  - Signature: `pub fn size(mut self, size: IconSize) -> Self`
+  - Purpose: Sets the inner icon size.
+  - Behavior: Assigns `size`; returns `self`.
+
+- **`color`** (pub, L144)
+  - Signature: `pub fn color(mut self, color: Color) -> Self`
+  - Purpose: Sets icon color when not selected.
+  - Behavior: Assigns `color`; returns `self`. Render overrides with `Accent`
+    when `selected`.
+
+- **`selected`** (pub, L150)
+  - Signature: `pub fn selected(mut self, selected: bool) -> Self`
+  - Purpose: Marks active/toolbar-selected state.
+  - Behavior: Sets `selected`; render applies `element_active` background and
+    accent icon color.
+
+- **`on_click`** (pub, L156)
+  - Signature: `pub fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self`
+  - Purpose: Registers click handler with drag-safe mouse-down swallow.
+  - Behavior: Same propagation pattern as `Button::on_click`.
+
+##### Context: `RenderOnce for IconButton`
+
+- **`render`** (private, L166)
+  - Signature: `fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement`
+  - Purpose: Paints square icon button with hover/selected chrome.
+  - Behavior: 28px rounded flex container. Selected state gets active
+    background; all states get hover background. Renders `Icon` at configured
+    size/color (accent when selected). Optional click wiring mirrors `Button`.

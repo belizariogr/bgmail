@@ -1,0 +1,125 @@
+# crates/ui/src/icon.rs
+
+## Purpose
+
+IconName enum and tinted Icon component.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/icon.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `icon.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **enum `IconSize`**: Square footprint presets — `XXSmall` (10px), `XSmall`
+  (12px), `Small` (14px, default), `Medium` (16px).
+- **enum `IconName`**: Stable icon identifiers for BGMail UI. Variants map to
+  embedded SVG paths via `path()` — mailbox/actions (`Inbox`, `Sent`, `Drafts`,
+  `Trash`, `Junk`, `Archive`, `Star`, `StarFilled`, …), compose/navigation
+  (`Compose`, `Send`, `Search`, `ChevronRight`, `ChevronDown`, …), chrome
+  (`Sidebar`, `Settings`, `WindowMinimize`, `WindowMaximize`, `WindowRestore`,
+  …). `Sent` and `Send` share the paper-plane artwork but are distinct enum
+  values.
+- **struct `Icon`**: Themed SVG icon element (`IntoElement` + `RenderOnce`).
+  Fields: `name`, `size`, `color`.
+
+#### Functions / methods
+
+##### Context: `IconSize`
+
+- **`px`** (private, L20)
+  - Signature: `fn px(self) -> Pixels`
+  - Purpose: Converts an icon size preset to its square pixel dimension.
+  - Behavior: Maps each variant to `px(10|12|14|16)`.
+
+##### Context: `IconName`
+
+- **`path`** (pub, L83)
+  - Signature: `pub fn path(self) -> &'static str`
+  - Purpose: Returns the GPUI asset path for this icon's embedded SVG.
+  - Behavior: `match`es each variant to the corresponding `crate::…` path
+    constant from `assets.rs`. Used by `Icon::render` and asset tests.
+
+##### Context: `Icon`
+
+- **`new`** (pub, L133)
+  - Signature: `pub fn new(name: IconName) -> Self`
+  - Purpose: Creates an icon with default size (`Small`) and color (`Default`).
+  - Behavior: Stores `name`; initializes `size` and `color` to defaults.
+
+- **`size`** (pub, L142)
+  - Signature: `pub fn size(mut self, size: IconSize) -> Self`
+  - Purpose: Sets the rendered square footprint.
+  - Behavior: Builder method; updates `self.size` and returns `self`.
+
+- **`color`** (pub, L148)
+  - Signature: `pub fn color(mut self, color: Color) -> Self`
+  - Purpose: Sets the semantic tint applied to the SVG.
+  - Behavior: Builder method; updates `self.color` and returns `self`.
+
+##### Context: `RenderOnce for Icon`
+
+- **`render`** (private, L155)
+  - Signature: `fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement`
+  - Purpose: Paints the icon as a tinted GPUI SVG element.
+  - Behavior: Resolves `self.color` via `hsla(cx)`, converts `self.size` to
+    pixels, builds `svg()` with fixed width/height, `path(self.name.path())`,
+    and `text_color`. SVG fill comes from alpha coverage; color is applied as
+    tint.
+
+##### Context: `module` (tests)
+
+- **`every_icon_points_to_an_svg_asset`** (private, L212)
+  - Signature: `fn every_icon_points_to_an_svg_asset()`
+  - Purpose: Ensures every `IconName` maps to an `.svg` path string.
+  - Behavior: Iterates the `ALL` constant array; asserts each `path()` ends with
+    `.svg`.
+
+- **`every_icon_resolves_to_embedded_bytes`** (private, L226)
+  - Signature: `fn every_icon_resolves_to_embedded_bytes()`
+  - Purpose: Ensures font-free icons never regress to missing/tofu rendering.
+  - Behavior: For each `IconName`, loads bytes via `Assets::load(path())`,
+    asserts load succeeds, bytes exist, and start with `<svg`.
+
+- **`star_variants_use_distinct_assets`** (private, L240)
+  - Signature: `fn star_variants_use_distinct_assets()`
+  - Purpose: Guards against accidental asset sharing between star states.
+  - Behavior: Asserts `Star` and `StarFilled` resolve to different paths.
+
+- **`shield_variants_use_distinct_assets`** (private, L245)
+  - Signature: `fn shield_variants_use_distinct_assets()`
+  - Purpose: Guards against accidental asset sharing between shield states.
+  - Behavior: Asserts `Shield` and `ShieldSolid` resolve to different paths.
+
+- **`sizes_are_distinct_and_ascending`** (private, L250)
+  - Signature: `fn sizes_are_distinct_and_ascending()`
+  - Purpose: Validates icon size ordering for layout consistency.
+  - Behavior: Asserts strict ascending order of `px()` across all four
+    `IconSize` variants.

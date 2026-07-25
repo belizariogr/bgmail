@@ -1,0 +1,102 @@
+# crates/ui/src/label.rs
+
+## Purpose
+
+Themed Label text component.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/label.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `label.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **enum `LabelSize`**: Text size presets — `XSmall` (11px), `Small` (12px),
+  `Default` (14px), `Large` (16px). Default variant is `Default`.
+- **struct `Label`**: Themed single-line or multi-line text (`IntoElement`).
+  Fields: `text`, `size`, `color`, `weight`, `single_line`.
+
+#### Functions / methods
+
+##### Context: `LabelSize`
+
+- **`px`** (private, L20)
+  - Signature: `fn px(self) -> Pixels`
+  - Purpose: Converts a label size preset to pixel `text_size`.
+  - Behavior: Maps each variant to `px(11|12|14|16)`.
+
+##### Context: `Label`
+
+- **`new`** (pub, L46)
+  - Signature: `pub fn new(text: impl Into<SharedString>) -> Self`
+  - Purpose: Creates a label with default size, color, and normal weight.
+  - Behavior: Converts `text` to `SharedString`; sets `size` to default,
+    `color` to `Default`, `weight` to `FontWeight::NORMAL`, `single_line`
+    to `false`.
+
+- **`size`** (pub, L57)
+  - Signature: `pub fn size(mut self, size: LabelSize) -> Self`
+  - Purpose: Sets the rendered text size.
+  - Behavior: Builder; assigns `size` and returns `self`.
+
+- **`color`** (pub, L63)
+  - Signature: `pub fn color(mut self, color: Color) -> Self`
+  - Purpose: Sets the semantic text color.
+  - Behavior: Builder; assigns `color` and returns `self`.
+
+- **`weight`** (pub, L69)
+  - Signature: `pub fn weight(mut self, weight: FontWeight) -> Self`
+  - Purpose: Sets the GPUI font weight.
+  - Behavior: Builder; assigns `weight` and returns `self`.
+
+- **`bold`** (pub, L75)
+  - Signature: `pub fn bold(mut self) -> Self`
+  - Purpose: Shortcut for bold weight.
+  - Behavior: Sets `weight` to `FontWeight::BOLD` and returns `self`.
+
+- **`semibold`** (pub, L81)
+  - Signature: `pub fn semibold(mut self) -> Self`
+  - Purpose: Shortcut for semibold weight.
+  - Behavior: Sets `weight` to `FontWeight::SEMIBOLD` and returns `self`.
+
+- **`single_line`** (pub, L87)
+  - Signature: `pub fn single_line(mut self) -> Self`
+  - Purpose: Enables single-line truncation with ellipsis.
+  - Behavior: Sets `single_line` to `true`. At render time applies
+    `overflow_hidden`, `whitespace_nowrap`, and `text_ellipsis`.
+
+##### Context: `RenderOnce for Label`
+
+- **`render`** (private, L94)
+  - Signature: `fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement`
+  - Purpose: Renders themed label text inside a `div`.
+  - Behavior: Resolves color via `hsla(cx)`, applies `text_size`, `text_color`,
+    and `font_weight`. When `single_line`, adds overflow/ellipsis modifiers.
+    Child is the label string.

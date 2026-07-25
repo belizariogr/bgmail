@@ -1,0 +1,53 @@
+# crates/bgmail/src/command_palette_overlay.rs
+
+## Purpose
+
+Renders the dimmed command palette overlay UI.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/command_palette_overlay.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `command_palette_overlay.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- _(None at module top-level.)_
+
+#### Functions / methods
+
+- **`render_command_palette`** (pub(crate), L17)
+  - Signature: `pub(crate) fn render_command_palette(cx: &mut Context<RootView>, entries: Vec<CommandEntry>, selected_ix: usize, input: Entity<TextInput>) -> gpui::AnyElement`
+  - Purpose: Builds the dimmed in-window command palette overlay.
+  - Behavior: Renders a semi-transparent backdrop (click/Escape dismisses), centered panel with search input and scrollable command list. List items highlight selection and execute on click. Key events delegate to `RootView::handle_command_palette_key`. Panel clicks stop propagation so backdrop dismiss does not fire.
+
+- **`palette_module_exports_in_window_renderer`** (private, L99)
+  - Signature: `fn palette_module_exports_in_window_renderer()`
+  - Purpose: Test: overlay stays an in-window RootView helper.
+  - Behavior: Source guard asserting module doc and `pub(crate) fn render_command_palette` exist.

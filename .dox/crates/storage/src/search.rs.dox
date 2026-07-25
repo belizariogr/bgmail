@@ -1,0 +1,72 @@
+# crates/storage/src/search.rs
+
+## Purpose
+
+Accent-insensitive search text folding and LIKE patterns.
+
+## Ownership
+
+- Owns: API surface of `crates/storage/src/search.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/storage/src/AGENTS.md` and `.dox/crates/storage/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `search.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `storage/` / `src/`.
+
+## Verification
+
+- `cargo test -p storage`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- _(None at module top-level.)_
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`fold_for_search`** (pub, L6)
+  - Signature: `pub fn fold_for_search(text: &str) -> String`
+  - Purpose: Normalizes text for accent-insensitive, case-insensitive matching.
+  - Behavior: NFD-decomposes, strips combining marks, lowercases. E.g. `"São Paulo"` → `"sao paulo"`. Allocates new string.
+
+- **`search_like_pattern`** (pub, L14)
+  - Signature: `pub fn search_like_pattern(query: &str) -> Option<String>`
+  - Purpose: Builds a partial-match SQL LIKE pattern from user search input.
+  - Behavior: Trims query, folds via `fold_for_search`. Returns `None` when folded string empty; otherwise `Some("%{folded}%")`.
+
+- **`build_search_text`** (pub, L24)
+  - Signature: `pub fn build_search_text(sender: &str, sender_email: &str, subject: &str, plain_text: &str) -> String`
+  - Purpose: Composes the persisted search blob for a message row.
+  - Behavior: Joins all four fields with spaces, then applies `fold_for_search`. Stored in `messages.search_text` at seed/insert time.
+
+##### Context: `tests` (`#[cfg(test)]`)
+
+- **`fold_strips_accents_and_lowercases`** (private, L38)
+  - Signature: `fn fold_strips_accents_and_lowercases()`
+  - Purpose: Regression test for accent folding.
+  - Behavior: Asserts Portuguese and accented Latin samples fold to ASCII lowercase.
+
+- **`search_pattern_is_partial`** (private, L44)
+  - Signature: `fn search_pattern_is_partial()`
+  - Purpose: Regression test for pattern trimming and emptiness.
+  - Behavior: Whitespace-padded `"Git"` → `Some("%git%")`; whitespace-only → `None`.

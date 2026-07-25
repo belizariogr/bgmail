@@ -1,0 +1,400 @@
+# crates/ui/src/text_input.rs
+
+## Purpose
+
+Single-line TextInput with platform IME integration.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/text_input.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `text_input.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **actions `text_input`**: GPUI actions — `Backspace`, `Delete`, `Left`, `Right`,
+  `WordLeft`, `WordRight`, `SelectLeft`, `SelectRight`, `SelectWordLeft`,
+  `SelectWordRight`, `SelectAll`, `Home`, `End`, `SelectHome`, `SelectEnd`,
+  `Paste`, `Cut`, `Copy`. Bound via `bind_keys`.
+- **struct `TextInput`**: Single-line editable field (`Render` + `Focusable` +
+  `EntityInputHandler`). Tracks content, placeholder, UTF-8 selection/marked
+  ranges, shaped line layout, bounds, focus, and mouse selection state.
+- **struct `TextInputElement`** (private): GPUI `Element` wrapper painting the
+  field and wiring platform input.
+- **struct `PrepaintState`** (private): Frame prepaint output — shaped `line`,
+  optional `cursor` quad, optional `selection` quad.
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`set_native_text_focus`** (pub, L21 — Windows)
+  - Signature: `pub fn set_native_text_focus(window: &Window)`
+  - Purpose: Forces OS keyboard focus to the GPUI window on Windows.
+  - Behavior: Resolves Win32 `HWND` from the window handle and calls
+    `SetFocus`. No-op return paths when handle missing or non-Win32. Uses
+    isolated `unsafe` with documented safety rationale.
+
+- **`set_native_text_focus`** (pub, L44 — non-Windows)
+  - Signature: `pub fn set_native_text_focus(_window: &Window)`
+  - Purpose: Cross-platform stub for native focus helper.
+  - Behavior: Empty body; Windows-specific focus transfer is unnecessary on
+    other platforms.
+
+- **`previous_word_start`** (private, L71)
+  - Signature: `fn previous_word_start(content: &str, offset: usize) -> usize`
+  - Purpose: Windows-style previous-word boundary for Ctrl+Left navigation.
+  - Behavior: Returns `0` at start or when only whitespace precedes cursor.
+    Trims trailing whitespace before cursor, finds preceding whitespace run,
+    then first non-whitespace after it. Falls back to `0` if already at first
+    word.
+
+- **`next_word_start`** (private, L98)
+  - Signature: `fn next_word_start(content: &str, offset: usize) -> usize`
+  - Purpose: Windows-style next-word boundary for Ctrl+Right navigation.
+  - Behavior: Returns `len` when at/ past end. Skips current word chars, then
+    skips whitespace to next non-whitespace byte index (or `len`).
+
+- **`bind_keys`** (pub, L119)
+  - Signature: `pub fn bind_keys(cx: &mut App)`
+  - Purpose: Registers all keyboard shortcuts for `TextInput` focus context.
+  - Behavior: Binds editing/navigation keys under context `"TextInput"`. Includes
+    platform-specific word and document navigation — Ctrl on Windows/Linux,
+    Option/Command variants on macOS. Call once at app startup before views use
+    `TextInput`.
+
+##### Context: `TextInput`
+
+- **`new`** (pub, L196)
+  - Signature: `pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self`
+  - Purpose: Creates an empty focused-capable text field.
+  - Behavior: Allocates focus handle from context; empty content; placeholder
+    stored; collapsed selection at 0; no marked text, layout, or selection drag.
+
+- **`content`** (pub, L211)
+  - Signature: `pub fn content(&self) -> SharedString`
+  - Purpose: Reads current field text.
+  - Behavior: Clones internal `content` string.
+
+- **`clear`** (pub, L216)
+  - Signature: `pub fn clear(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Empties content and resets selection/mark state.
+  - Behavior: Sets content to default, selection to `0..0`, clears marked range,
+    notifies subscribers.
+
+- **`set_placeholder`** (pub, L224)
+  - Signature: `pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>)`
+  - Purpose: Updates empty-state hint text.
+  - Behavior: Replaces `placeholder` without notifying (visual update on next
+    frame).
+
+- **`left`** (private, L228)
+  - Signature: `fn left(&mut self, _: &Left, …, cx: &mut Context<Self>)`
+  - Purpose: Moves caret one grapheme left, or collapses selection to start.
+  - Behavior: Empty selection: move to previous grapheme boundary. Non-empty:
+    collapse to range start.
+
+- **`right`** (private, L236)
+  - Signature: `fn right(&mut self, _: &Right, …, cx: &mut Context<Self>)`
+  - Purpose: Moves caret one grapheme right, or collapses to end.
+  - Behavior: Empty selection: advance to next grapheme boundary. Non-empty:
+    collapse to range end.
+
+- **`word_left`** (private, L244)
+  - Signature: `fn word_left(&mut self, _: &WordLeft, …, cx: &mut Context<Self>)`
+  - Purpose: Moves caret to previous word start (or collapses selection).
+  - Behavior: Uses `previous_word_start` when selection empty; else collapse to
+    start.
+
+- **`word_right`** (private, L255)
+  - Signature: `fn word_right(&mut self, _: &WordRight, …, cx: &mut Context<Self>)`
+  - Purpose: Moves caret to next word start (or collapses selection).
+  - Behavior: Uses `next_word_start` when selection empty; else collapse to end.
+
+- **`select_left`** (private, L266)
+  - Signature: `fn select_left(&mut self, _: &SelectLeft, …, cx: &mut Context<Self>)`
+  - Purpose: Extends selection one grapheme left.
+  - Behavior: Calls `select_to(previous_boundary(cursor))`.
+
+- **`select_right`** (private, L270)
+  - Signature: `fn select_right(&mut self, _: &SelectRight, …, cx: &mut Context<Self>)`
+  - Purpose: Extends selection one grapheme right.
+  - Behavior: Calls `select_to(next_boundary(cursor))`.
+
+- **`select_word_left`** (private, L274)
+  - Signature: `fn select_word_left(&mut self, _: &SelectWordLeft, …, cx: &mut Context<Self>)`
+  - Purpose: Extends selection to previous word boundary.
+  - Behavior: `select_to(previous_word_start(...))`.
+
+- **`select_word_right`** (private, L281)
+  - Signature: `fn select_word_right(&mut self, _: &SelectWordRight, …, cx: &mut Context<Self>)`
+  - Purpose: Extends selection to next word boundary.
+  - Behavior: `select_to(next_word_start(...))`.
+
+- **`select_home`** (private, L288)
+  - Signature: `fn select_home(&mut self, _: &SelectHome, …, cx: &mut Context<Self>)`
+  - Purpose: Extends selection to start of field.
+  - Behavior: `select_to(0)`.
+
+- **`select_end`** (private, L292)
+  - Signature: `fn select_end(&mut self, _: &SelectEnd, …, cx: &mut Context<Self>)`
+  - Purpose: Extends selection to end of field.
+  - Behavior: `select_to(content.len())`.
+
+- **`select_all`** (private, L296)
+  - Signature: `fn select_all(&mut self, _: &SelectAll, …, cx: &mut Context<Self>)`
+  - Purpose: Selects entire content.
+  - Behavior: Moves caret to 0 then selects through `content.len()`.
+
+- **`home`** (private, L301)
+  - Signature: `fn home(&mut self, _: &Home, …, cx: &mut Context<Self>)`
+  - Purpose: Moves caret to start without extending selection.
+  - Behavior: `move_to(0)`.
+
+- **`end`** (private, L305)
+  - Signature: `fn end(&mut self, _: &End, …, cx: &mut Context<Self>)`
+  - Purpose: Moves caret to end without extending selection.
+  - Behavior: `move_to(content.len())`.
+
+- **`backspace`** (private, L309)
+  - Signature: `fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>)`
+  - Purpose: Deletes selection or grapheme before caret.
+  - Behavior: Collapsed selection: extend selection backward one grapheme, then
+    replace selection with empty string via platform input path.
+
+- **`delete`** (private, L316)
+  - Signature: `fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>)`
+  - Purpose: Deletes selection or grapheme after caret.
+  - Behavior: Collapsed selection: extend forward one grapheme, then delete via
+    `replace_text_in_range`.
+
+- **`on_mouse_down`** (private, L323)
+  - Signature: `fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>)`
+  - Purpose: Focuses field and starts caret placement or selection drag.
+  - Behavior: Calls `set_native_text_focus`, focuses entity handle, stops
+    propagation. Sets `is_selecting`. Shift extends selection to click index;
+    otherwise moves caret to click index.
+
+- **`on_mouse_up`** (private, L340)
+  - Signature: `fn on_mouse_up(&mut self, …, _: &mut Context<Self>)`
+  - Purpose: Ends mouse-driven selection drag.
+  - Behavior: Clears `is_selecting`.
+
+- **`on_mouse_move`** (private, L344)
+  - Signature: `fn on_mouse_move(&mut self, event: &MouseMoveEvent, …, cx: &mut Context<Self>)`
+  - Purpose: Extends selection while dragging with button held.
+  - Behavior: When `is_selecting`, updates selection end to index under pointer.
+
+- **`paste`** (private, L350)
+  - Signature: `fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>)`
+  - Purpose: Inserts clipboard text at selection.
+  - Behavior: Reads clipboard text if any, replaces newlines with spaces (keeps
+    field single-line), inserts via `replace_text_in_range`.
+
+- **`copy`** (private, L356)
+  - Signature: `fn copy(&mut self, _: &Copy, …, cx: &mut Context<Self>)`
+  - Purpose: Copies selected text to clipboard.
+  - Behavior: No-op when selection empty; otherwise writes selected substring to
+    clipboard.
+
+- **`cut`** (private, L364)
+  - Signature: `fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>)`
+  - Purpose: Copies selection then deletes it.
+  - Behavior: When selection non-empty, copies to clipboard then replaces
+    selection with empty string.
+
+- **`move_to`** (private, L373)
+  - Signature: `fn move_to(&mut self, offset: usize, cx: &mut Context<Self>)`
+  - Purpose: Collapses caret to a UTF-8 byte offset.
+  - Behavior: Sets `selected_range` to `offset..offset`, notifies.
+
+- **`cursor_offset`** (private, L378)
+  - Signature: `fn cursor_offset(&self) -> usize`
+  - Purpose: Returns active caret byte index respecting selection direction.
+  - Behavior: Returns range start when `selection_reversed`, else range end.
+
+- **`index_for_mouse_position`** (private, L386)
+  - Signature: `fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize`
+  - Purpose: Maps pointer x/y to nearest text byte index.
+  - Behavior: Returns `0` for empty content or missing layout/bounds. Above top →
+    `0`; below bottom → `content.len()`. Otherwise uses shaped line
+    `closest_index_for_x` relative to bounds left edge.
+
+- **`select_to`** (private, L403)
+  - Signature: `fn select_to(&mut self, offset: usize, cx: &mut Context<Self>)`
+  - Purpose: Extends or shrinks selection toward `offset`.
+  - Behavior: Updates start or end depending on `selection_reversed`. Normalizes
+    inverted ranges by swapping endpoints and toggling reversed flag. Notifies.
+
+- **`offset_from_utf16`** (private, L416)
+  - Signature: `fn offset_from_utf16(&self, offset: usize) -> usize`
+  - Purpose: Converts UTF-16 code unit index to UTF-8 byte offset.
+  - Behavior: Iterates chars accumulating UTF-16 counts until reaching target.
+
+- **`offset_to_utf16`** (private, L429)
+  - Signature: `fn offset_to_utf16(&self, offset: usize) -> usize`
+  - Purpose: Converts UTF-8 byte offset to UTF-16 code unit index.
+  - Behavior: Iterates chars accumulating UTF-8 bytes until reaching target.
+
+- **`range_to_utf16`** (private, L442)
+  - Signature: `fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize>`
+  - Purpose: Converts a UTF-8 byte range to UTF-16 for platform APIs.
+  - Behavior: Maps start and end independently via `offset_to_utf16`.
+
+- **`range_from_utf16`** (private, L446)
+  - Signature: `fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize>`
+  - Purpose: Converts platform UTF-16 range to internal UTF-8 bytes.
+  - Behavior: Maps start and end via `offset_from_utf16`.
+
+- **`previous_boundary`** (private, L450)
+  - Signature: `fn previous_boundary(&self, offset: usize) -> usize`
+  - Purpose: Previous grapheme cluster start before `offset`.
+  - Behavior: Reverse scan of `grapheme_indices`; returns last index `< offset` or
+    `0`.
+
+- **`next_boundary`** (private, L458)
+  - Signature: `fn next_boundary(&self, offset: usize) -> usize`
+  - Purpose: Next grapheme cluster start after `offset`.
+  - Behavior: Forward scan; first index `> offset` or `content.len()`.
+
+##### Context: `EntityInputHandler for TextInput`
+
+- **`text_for_range`** (private, L467)
+  - Signature: `fn text_for_range(&mut self, range_utf16: Range<usize>, actual_range: &mut Option<Range<usize>>, …) -> Option<String>`
+  - Purpose: Supplies substring for IME/platform queries.
+  - Behavior: Converts UTF-16 range to UTF-8, stores actual UTF-16 range back,
+    returns owned substring (always `Some`).
+
+- **`selected_text_range`** (private, L479)
+  - Signature: `fn selected_text_range(&mut self, …) -> Option<UTF16Selection>`
+  - Purpose: Reports current selection to the platform.
+  - Behavior: Always returns `Some` with UTF-16 range and reversed flag.
+
+- **`marked_text_range`** (private, L491)
+  - Signature: `fn marked_text_range(&self, …) -> Option<Range<usize>>`
+  - Purpose: Reports IME marked (preedit) range in UTF-16.
+  - Behavior: Maps internal marked UTF-8 range when present.
+
+- **`unmark_text`** (private, L501)
+  - Signature: `fn unmark_text(&mut self, …)`
+  - Purpose: Clears IME marked text state.
+  - Behavior: Sets `marked_range` to `None`.
+
+- **`replace_text_in_range`** (private, L505)
+  - Signature: `fn replace_text_in_range(&mut self, range_utf16: Option<Range<usize>>, new_text: &str, …, cx: &mut Context<Self>)`
+  - Purpose: Applies platform text replacement (typing, delete, paste).
+  - Behavior: Target range is explicit UTF-16 range, else marked range, else
+    current selection. Splices `new_text` into content, collapses caret after
+    insertion, clears marked range, notifies.
+
+- **`replace_and_mark_text_in_range`** (private, L526)
+  - Signature: `fn replace_and_mark_text_in_range(&mut self, range_utf16: Option<Range<usize>>, new_text: &str, new_selected_range_utf16: Option<Range<usize>>, …, cx: &mut Context<Self>)`
+  - Purpose: IME composition insert with optional marked underline range.
+  - Behavior: Same splice as replace; sets marked range to inserted span when
+    non-empty. Adjusts selection from optional UTF-16 sub-range or collapses at
+    end of insertion. Notifies.
+
+- **`bounds_for_range`** (private, L556)
+  - Signature: `fn bounds_for_range(&mut self, range_utf16: Range<usize>, bounds: Bounds<Pixels>, …) -> Option<Bounds<Pixels>>`
+  - Purpose: Returns pixel rect for a UTF-16 text range (IME candidate window).
+  - Behavior: Requires cached shaped line. Converts range to UTF-8, builds
+    horizontal bounds from line x positions at field top/bottom.
+
+- **`character_index_for_point`** (private, L577)
+  - Signature: `fn character_index_for_point(&mut self, point: Point<Pixels>, …) -> Option<usize>`
+  - Purpose: Maps screen point to UTF-16 character index for platform hit-testing.
+  - Behavior: Localizes point against last bounds, uses line `index_for_x`, converts
+    resulting UTF-8 index to UTF-16. Returns `None` without layout.
+
+##### Context: `IntoElement for TextInputElement`
+
+- **`into_element`** (private, L603)
+  - Signature: `fn into_element(self) -> Self::Element`
+  - Purpose: Identity element conversion.
+  - Behavior: Returns `self`.
+
+##### Context: `Element for TextInputElement`
+
+- **`id`** (private, L612)
+  - Signature: `fn id(&self) -> Option<ElementId>`
+  - Purpose: Element identity hook.
+  - Behavior: Always `None`.
+
+- **`source_location`** (private, L616)
+  - Signature: `fn source_location(&self) -> Option<&'static Location<'static>>`
+  - Purpose: Inspector source hook.
+  - Behavior: Always `None`.
+
+- **`request_layout`** (private, L620)
+  - Signature: `fn request_layout(&mut self, …, window: &mut Window, cx: &mut App) -> (LayoutId, ())`
+  - Purpose: Sizes field to full width and one line height.
+  - Behavior: Style width `relative(1.)`, height `window.line_height()`.
+
+- **`prepaint`** (private, L633)
+  - Signature: `fn prepaint(&mut self, …, bounds: Bounds<Pixels>, …, window: &mut Window, cx: &mut App) -> PrepaintState`
+  - Purpose: Shapes display text and prepares selection/caret quads.
+  - Behavior: Reads input entity. Empty content shows placeholder in muted color;
+    else uses window text style. Builds `TextRun`(s) with optional wavy underline
+    on marked range. Shapes line. Collapsed selection → accent caret quad inset
+    vertically; non-empty → selected background quad spanning glyph bounds.
+
+- **`paint`** (private, L734)
+  - Signature: `fn paint(&mut self, …, bounds: Bounds<Pixels>, prepaint: &mut PrepaintState, window: &mut Window, cx: &mut App)`
+  - Purpose: Wires platform input handler and paints selection, text, caret.
+  - Behavior: Registers `ElementInputHandler` for focus handle. Paints selection
+    quad if any. Paints shaped line at bounds origin. When focused, paints caret
+    quad. Updates entity `last_layout` and `last_bounds` for hit-testing.
+
+##### Context: `Render for TextInput`
+
+- **`render`** (private, L771)
+  - Signature: `fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement`
+  - Purpose: Builds interactive wrapper around `TextInputElement`.
+  - Behavior: Flex child with `key_context("TextInput")`, focus tracking, I-beam
+    cursor, all action listeners (navigation, selection, clipboard, editing), and
+    mouse down/up/move handlers. Embeds `TextInputElement` with entity reference.
+
+##### Context: `Focusable for TextInput`
+
+- **`focus_handle`** (private, L806)
+  - Signature: `fn focus_handle(&self, _: &App) -> FocusHandle`
+  - Purpose: Exposes GPUI focus handle for tab/focus management.
+  - Behavior: Clones internal `focus_handle`.
+
+##### Context: `module` (tests)
+
+- **`previous_word_start_moves_to_prior_word`** (private, L816)
+  - Signature: `fn previous_word_start_moves_to_prior_word()`
+  - Purpose: Validates word-left helper on two-word string.
+  - Behavior: From end → index 6 (`"world"` start); from 6 or mid-first-word → 0.
+
+- **`next_word_start_moves_to_following_word`** (private, L824)
+  - Signature: `fn next_word_start_moves_to_following_word()`
+  - Purpose: Validates word-right helper on two-word string.
+  - Behavior: From 0 or 3 → 6; from 6 → string length.

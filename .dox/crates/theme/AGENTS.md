@@ -41,4 +41,4 @@ app-global active theme for consistent coloring across UI.
 
 | Scope | Doc | Owns |
 |---|---|---|
-| `crates/theme/src/` | [`.dox/crates/theme/src/AGENTS.md`](src/AGENTS.md) | Full API catalog (every fn/method) |
+| `crates/theme/src/` | [`.dox/crates/theme/src/AGENTS.md`](src/AGENTS.md) | Source tree index + per-file `.rs.dox` API catalogs |

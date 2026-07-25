@@ -1,0 +1,81 @@
+# crates/ui/src/switch.rs
+
+## Purpose
+
+Toggle Switch component.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/switch.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `switch.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **type `ClickHandler`**: `Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>`.
+- **struct `Switch`**: Pill-track toggle with sliding thumb (Zed-style). Optional
+  right label; entire row clickable when enabled. Fields: `id`, `checked`,
+  `disabled`, `label`, `on_click`.
+
+#### Functions / methods
+
+##### Context: `Switch`
+
+- **`new`** (pub, L22)
+  - Signature: `pub fn new(id: impl Into<ElementId>, checked: bool) -> Self`
+  - Purpose: Creates a switch in the given on/off state.
+  - Behavior: Stores `checked`; defaults `disabled` false, no label or handler.
+
+- **`label`** (pub, L33)
+  - Signature: `pub fn label(mut self, label: impl Into<SharedString>) -> Self`
+  - Purpose: Adds descriptive text to the right of the track.
+  - Behavior: Stores label; render shows small `Label` beside track.
+
+- **`disabled`** (pub, L39)
+  - Signature: `pub fn disabled(mut self, disabled: bool) -> Self`
+  - Purpose: Greys out the control and suppresses interaction.
+  - Behavior: When disabled, thumb opacity drops, label uses `Color::Disabled`,
+    hover styling is omitted, and `on_click` is not wired.
+
+- **`on_click`** (pub, L45)
+  - Signature: `pub fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self`
+  - Purpose: Registers toggle handler (caller flips `checked` state).
+  - Behavior: Handler only attached when not disabled. Swallows mouse-down to
+    avoid title-bar drag interference.
+
+##### Context: `RenderOnce for Switch`
+
+- **`render`** (private, L55)
+  - Signature: `fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement`
+  - Purpose: Paints track, thumb, optional label, and click target.
+  - Behavior: On-state track uses translucent accent fill/border; off-state uses
+    element background and border. Thumb is theme text color with opacity based
+    on disabled/checked. Track uses group hover brighten. Thumb aligns start/end
+    within 32×20 pill. Label renders when set. Click row when handler present
+    and enabled.

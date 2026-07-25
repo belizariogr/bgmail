@@ -47,4 +47,4 @@ an e-mail client, without Zed-scale bloat.
 
 | Scope | Doc | Owns |
 |---|---|---|
-| `crates/ui/src/` | [`.dox/crates/ui/src/AGENTS.md`](src/AGENTS.md) | Full API catalog (every fn/method) |
+| `crates/ui/src/` | [`.dox/crates/ui/src/AGENTS.md`](src/AGENTS.md) | Source tree index + per-file `.rs.dox` API catalogs |

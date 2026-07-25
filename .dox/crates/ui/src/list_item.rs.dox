@@ -1,0 +1,97 @@
+# crates/ui/src/list_item.rs
+
+## Purpose
+
+Clickable ListItem row component.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/list_item.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `list_item.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **type `ClickHandler`**: `Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>`.
+- **struct `ListItem`**: Full-width clickable row for sidebars and message lists.
+  Supports selection/hover chrome, content inset, start/end slots, and multiple
+  main children. Fields: `id`, `selected`, `inset`, `start_slot`, `end_slot`,
+  `children`, `on_click`.
+
+#### Functions / methods
+
+##### Context: `ListItem`
+
+- **`new`** (pub, L24)
+  - Signature: `pub fn new(id: impl Into<ElementId>) -> Self`
+  - Purpose: Creates an unselected row with no slots, children, or handler.
+  - Behavior: Defaults `selected` false, `inset` zero, slots/handler `None`,
+    empty `children` vector.
+
+- **`selected`** (pub, L37)
+  - Signature: `pub fn selected(mut self, selected: bool) -> Self`
+  - Purpose: Toggles selected background styling.
+  - Behavior: Assigns `selected`; render uses `element_selected` when true and
+    suppresses hover highlight.
+
+- **`inset`** (pub, L45)
+  - Signature: `pub fn inset(mut self, inset: Pixels) -> Self`
+  - Purpose: Indents row content without shrinking the full-width highlight.
+  - Behavior: Adds `inset` to left padding (`pl(8.0 + inset)`) while background
+    still spans full row width.
+
+- **`start_slot`** (pub, L51)
+  - Signature: `pub fn start_slot(mut self, element: impl IntoElement) -> Self`
+  - Purpose: Sets left slot (typically an icon).
+  - Behavior: Stores `element.into_any_element()` in `start_slot`.
+
+- **`end_slot`** (pub, L57)
+  - Signature: `pub fn end_slot(mut self, element: impl IntoElement) -> Self`
+  - Purpose: Sets right slot (badge, counter, etc.).
+  - Behavior: Stores element in `end_slot`.
+
+- **`child`** (pub, L63)
+  - Signature: `pub fn child(mut self, element: impl IntoElement) -> Self`
+  - Purpose: Appends to the flexible main content column.
+  - Behavior: Pushes `into_any_element()` onto `children`; returns `self`.
+
+- **`on_click`** (pub, L69)
+  - Signature: `pub fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self`
+  - Purpose: Makes the row clickable.
+  - Behavior: Boxes handler; render adds pointer cursor and `on_click` forward.
+
+##### Context: `RenderOnce for ListItem`
+
+- **`render`** (private, L79)
+  - Signature: `fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement`
+  - Purpose: Paints a full-width row with slots and selection/hover states.
+  - Behavior: Horizontal flex with gap, inset padding, rounded corners.
+    Selected rows get `element_selected` background; unselected rows get hover
+    `element_hover`. Start slot, flex-1 main column (`min_w_0` for truncation),
+    and end slot render in order. Click handler attached when present.

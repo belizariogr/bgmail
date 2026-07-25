@@ -1,0 +1,184 @@
+# crates/storage/src/message_ops.rs
+
+## Purpose
+
+Message move/star/trash/archive mutations.
+
+## Ownership
+
+- Owns: API surface of `crates/storage/src/message_ops.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/storage/src/AGENTS.md` and `.dox/crates/storage/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `message_ops.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `storage/` / `src/`.
+
+## Verification
+
+- `cargo test -p storage`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- _(None at module top-level.)_
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`parse_folders_csv`** (pub, L11)
+  - Signature: `pub fn parse_folders_csv(csv: &str) -> Vec<String>`
+  - Purpose: Deserializes a `folders_csv` column into path segments.
+  - Behavior: Splits on commas, drops empty segments, collects owned strings. Order preserved from storage.
+
+- **`message_has_folder`** (pub, L19)
+  - Signature: `pub fn message_has_folder(csv: &str, folder_path: &str) -> bool`
+  - Purpose: Tests folder membership in a CSV value.
+  - Behavior: Parses CSV and returns true if any segment equals `folder_path` exactly.
+
+- **`is_virtual_flagged_folder`** (pub, L26)
+  - Signature: `pub fn is_virtual_flagged_folder(path: &str) -> bool`
+  - Purpose: Identifies the starred/flagged virtual mailbox path.
+  - Behavior: True only when `path == sys:flagged`. Flagged membership is also driven by the `starred` column.
+
+- **`replace_primary_folder`** (pub, L31)
+  - Signature: `pub fn replace_primary_folder(paths: &[String], primary: &str) -> Vec<String>`
+  - Purpose: Swaps the message's primary mailbox while preserving flagged membership.
+  - Behavior: Keeps only virtual flagged paths from input, appends `primary` if not already present, sorts and deduplicates. Non-flagged primaries (inbox, trash, etc.) are dropped from the kept set.
+
+- **`folders_csv_from_paths`** (pub, L46)
+  - Signature: `pub fn folders_csv_from_paths(paths: &[String]) -> String`
+  - Purpose: Convenience wrapper to serialize a path slice for DB storage.
+  - Behavior: Delegates to `folders_csv(paths.iter().map(String::as_str))`.
+
+##### Context: `Database` (`message_ops` impl block)
+
+- **`load_message_folders`** (private, L51)
+  - Signature: `fn load_message_folders(&self, id: i64) -> rusqlite::Result<Option<(Vec<String>, bool)>>`
+  - Purpose: Reads parsed folder paths and starred flag for one message.
+  - Behavior: `SELECT folders_csv, starred WHERE id = ?`. Returns `Ok(None)` when id missing; otherwise `Ok(Some((paths, starred)))` with parsed paths.
+
+- **`set_message_folders`** (private, L64)
+  - Signature: `fn set_message_folders(&self, id: i64, paths: &[String]) -> rusqlite::Result<()>`
+  - Purpose: Persists an updated folder membership list.
+  - Behavior: Serializes paths to CSV and `UPDATE messages SET folders_csv = ?`. Returns `Ok(())` on success.
+
+- **`set_primary_folder`** (private, L74)
+  - Signature: `fn set_primary_folder(&self, id: i64, primary: &str) -> rusqlite::Result<()>`
+  - Purpose: Changes primary mailbox while keeping flagged membership when present.
+  - Behavior: No-op (`Ok(())`) when message id not found. Otherwise applies `replace_primary_folder` and calls `set_message_folders`.
+
+- **`move_message_to_trash`** (pub, L83)
+  - Signature: `pub fn move_message_to_trash(&self, id: i64) -> rusqlite::Result<()>`
+  - Purpose: Moves a message to Trash.
+  - Behavior: Sets primary folder to `sys:trash`; retains `sys:flagged` when starred.
+
+- **`restore_message_from_trash`** (pub, L88)
+  - Signature: `pub fn restore_message_from_trash(&self, id: i64) -> rusqlite::Result<()>`
+  - Purpose: Undeletes a trashed message back to Inbox.
+  - Behavior: No-op when message missing or not currently in trash. Otherwise sets primary to `sys:inbox`.
+
+- **`delete_message_permanently`** (pub, L99)
+  - Signature: `pub fn delete_message_permanently(&self, id: i64) -> rusqlite::Result<bool>`
+  - Purpose: Hard-deletes a message from SQLite.
+  - Behavior: Returns `Ok(false)` when id missing or message is not in trash. When in trash, `DELETE FROM messages WHERE id = ?` and returns `Ok(true)` if a row was removed.
+
+- **`archive_message`** (pub, L113)
+  - Signature: `pub fn archive_message(&self, id: i64) -> rusqlite::Result<()>`
+  - Purpose: Archives a message.
+  - Behavior: Sets primary folder to `sys:archive` via `set_primary_folder`.
+
+- **`mark_message_junk`** (pub, L118)
+  - Signature: `pub fn mark_message_junk(&self, id: i64) -> rusqlite::Result<()>`
+  - Purpose: Marks a message as junk/spam.
+  - Behavior: Sets primary folder to `sys:junk` via `set_primary_folder`.
+
+- **`move_message_to_folder`** (pub, L123)
+  - Signature: `pub fn move_message_to_folder(&self, id: i64, folder_path: &str) -> rusqlite::Result<()>`
+  - Purpose: User-initiated move to an allowed folder path.
+  - Behavior: No-op (`Ok(())`) when destination is forbidden (flagged, drafts, sent). Otherwise updates primary folder to `folder_path`.
+
+- **`toggle_message_starred`** (pub, L131)
+  - Signature: `pub fn toggle_message_starred(&self, id: i64) -> rusqlite::Result<bool>`
+  - Purpose: Flips starred state and syncs flagged-folder membership.
+  - Behavior: Returns `Ok(false)` when message missing. Toggles `starred`, adds or removes `sys:flagged` in paths, sorts/dedups, updates both `starred` and `folders_csv` in one statement. Returns the new starred value.
+
+- **`message_is_in_trash`** (pub, L153)
+  - Signature: `pub fn message_is_in_trash(&self, id: i64) -> rusqlite::Result<bool>`
+  - Purpose: Checks whether a message's `folders_csv` includes trash.
+  - Behavior: Counts rows matching id and trash LIKE pattern; returns whether count > 0.
+
+##### Context: `tests` (`#[cfg(test)]`)
+
+- **`seeded_db`** (private, L170)
+  - Signature: `fn seeded_db() -> (NamedTempFile, Database)`
+  - Purpose: Test fixture with one account, custom folder, inbox+trashed messages.
+  - Behavior: Creates temp DB, seeds mailboxes and two messages (one starred inbox, one in trash). Panics on setup failure.
+
+- **`message_csv`** (private, L245)
+  - Signature: `fn message_csv(db: &Database, subject: &str) -> String`
+  - Purpose: Test helper to read `folders_csv` by subject.
+  - Behavior: Single-row query; panics if subject not found.
+
+- **`message_id`** (private, L255)
+  - Signature: `fn message_id(db: &Database, subject: &str) -> i64`
+  - Purpose: Test helper to resolve message id by subject.
+  - Behavior: Single-row query; panics if subject not found.
+
+- **`replace_primary_folder_keeps_flagged`** (private, L266)
+  - Signature: `fn replace_primary_folder_keeps_flagged()`
+  - Purpose: Unit test for primary-folder replacement logic.
+  - Behavior: Moving from inbox+flagged to trash yields `[flagged, trash]`.
+
+- **`move_to_trash_keeps_flagged_membership`** (private, L276)
+  - Signature: `fn move_to_trash_keeps_flagged_membership()`
+  - Purpose: Integration test for trash + starred coexistence.
+  - Behavior: After trashing starred inbox message, CSV contains trash and flagged, not inbox.
+
+- **`restore_from_trash_moves_to_inbox`** (private, L287)
+  - Signature: `fn restore_from_trash_moves_to_inbox()`
+  - Purpose: Integration test for restore from trash.
+  - Behavior: Restored message has inbox, not trash.
+
+- **`permanent_delete_only_from_trash`** (private, L297)
+  - Signature: `fn permanent_delete_only_from_trash()`
+  - Purpose: Ensures hard delete is trash-gated.
+  - Behavior: Inbox message delete returns false; trashed message delete returns true and leaves one row.
+
+- **`archive_and_junk_replace_primary`** (private, L312)
+  - Signature: `fn archive_and_junk_replace_primary()`
+  - Purpose: Verifies archive then junk primary transitions.
+  - Behavior: After archive, CSV has archive; after junk, CSV has junk.
+
+- **`toggle_starred_updates_flagged_folder`** (private, L326)
+  - Signature: `fn toggle_starred_updates_flagged_folder()`
+  - Purpose: Verifies star toggle syncs flagged folder.
+  - Behavior: Toggle off removes flagged; toggle on re-adds flagged.
+
+- **`move_to_custom_folder`** (private, L341)
+  - Signature: `fn move_to_custom_folder()`
+  - Purpose: Verifies move to user folder replaces inbox primary.
+  - Behavior: After move to `user:Clients`, CSV has custom path, not inbox.
+
+- **`move_to_sent_is_noop`** (private, L352)
+  - Signature: `fn move_to_sent_is_noop()`
+  - Purpose: Verifies manual move to sent is blocked.
+  - Behavior: After attempted move to sent, message remains in inbox only.

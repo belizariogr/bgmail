@@ -1,0 +1,928 @@
+# crates/bgmail/src/root.rs
+
+## Purpose
+
+Main three-column RootView, settings window, layout, and reader chrome.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/root.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `root.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **const `SIDEBAR_MIN_WIDTH`**: Minimum sidebar column width (150px).
+- **const `LIST_MIN_WIDTH`**: Minimum message-list column width (350px).
+- **const `READER_MIN_WIDTH`**: Minimum reading-pane width (550px).
+- **const `WINDOW_MIN_WIDTH` / `WINDOW_MIN_HEIGHT`**: Minimum main window size (950×480px); exported for startup clamping.
+- **const `NARROW_BREAKPOINT`**: Window width (1200px) below which sidebar auto-collapses and floats when reopened.
+- **const `RESIZE_HANDLE_WIDTH`**: Hit width of column resize dividers (6px).
+- **const `FOLD_ANIM_MS`**: Fixed sidebar account fold animation duration (90ms).
+- **const `SIDEBAR_ROW_HEIGHT`**: Fixed sidebar row height for fold math (32px).
+- **const `CHEVRON_BOX` / `CHEVRON_ICON`**: Chevron container and glyph sizes for account disclosure.
+- **const `ITEM_INDENT` / `ITEM_PADDING`**: Sidebar tree indentation and inner row padding.
+- **const `DRAG_THRESHOLD`**: Pixels before toolbar mouse-down becomes window drag (2px).
+- **const `SEARCH_FIELD_WIDTH` / `SEARCH_ICON_WIDTH`**: Expanded and collapsed search control widths.
+- **const `SEARCH_DEBOUNCE_MS`**: Delay before search query reloads the message list (150ms).
+- **const `READER_LIGHT_TEXT`**: Near-black body text when reader uses forced white background.
+- **const `READER_LINE_SCROLL`**: Pixels per wheel line forwarded to OSR browser (40px).
+- **const `SEARCH_COLLAPSE_WIDTH` / `TOOLBAR_FIXED_OVERHEAD` / `ACTIONS_*_WIDTH`**: Toolbar layout breakpoints for search collapse and action-group visibility.
+- **enum `ResizeHandle`**: Which column divider is being dragged (`Sidebar` or `List`).
+- **struct `ResizeDrag`**: GPUI drag payload wrapping `ResizeHandle`.
+- **enum `Selection`**: Sidebar selection — unified `Global` mailbox or account `Mailbox` with folder path.
+- **struct `FoldAnim`**: In-flight account fold animation token and direction.
+- **enum `SettingsSection`**: Settings window section (General, Accounts, Appearance, Notifications, Privacy).
+- **struct `WebviewSignature`**: Memo key for reader HTML (message id, colors, language, remote-load and white-bg prefs).
+- **struct `RootView`**: Main application view state (layout, selection, webview, search, palette, auxiliary windows, persistence).
+- **struct `SettingsView`**: Preferences window content with section navigation.
+
+#### Functions / methods
+
+- **`reader_mouse_button`** (private, L108)
+  - Signature: `fn reader_mouse_button(button: MouseButton) -> Option<WebviewMouseButton>`
+  - Purpose: Maps GPUI mouse buttons to webview buttons.
+  - Behavior: Maps left/right/middle; drops navigation buttons unused in email bodies.
+- **`webview_cursor_style`** (private, L118)
+  - Signature: `fn webview_cursor_style(cursor: WebviewCursor) -> CursorStyle`
+  - Purpose: Maps page cursor requests to GPUI cursor styles.
+  - Behavior: Translates WebviewCursor variants (IBeam, Hand, resize cursors, etc.) to GPUI equivalents.
+- **`mail_list_query`** (private, L179)
+  - Signature: `fn mail_list_query(selection: &Selection, search: &str) -> MailListQuery`
+  - Purpose: Builds SQLite list query for current sidebar selection or active search.
+  - Behavior: Non-empty search returns `Search`; otherwise maps global or account folder selection to the appropriate query variant.
+- **`mailbox_icon`** (private, L248)
+  - Signature: `fn mailbox_icon(kind: MailboxKind) -> IconName`
+  - Purpose: Icon for a mailbox kind in the sidebar.
+  - Behavior: Maps each MailboxKind to a semantic IconName.
+- **`global_mailbox_icon`** (private, L260)
+  - Signature: `fn global_mailbox_icon(kind: GlobalMailbox) -> IconName`
+  - Purpose: Icon for unified global mailboxes.
+  - Behavior: Maps inbox/flagged/drafts/sent global mailboxes to icons.
+- **`chevron_svg`** (private, L272)
+  - Signature: `fn chevron_svg(color: Hsla, angle: f32) -> Svg`
+  - Purpose: Rotatable chevron SVG for account disclosure.
+  - Behavior: Renders right-pointing chevron rotated by `angle` radians (0= collapsed, π/2= expanded).
+- **`ui_accounts`** (private, L461)
+  - Signature: `fn ui_accounts(accounts: &[storage::Account]) -> Vec<data::Account>`
+  - Purpose: Adapts storage accounts for legacy compose/settings UI types.
+  - Behavior: Maps name/email fields; leaves mailboxes empty.
+- **`settings_row`** (private, L3684)
+  - Signature: `fn settings_row(label: impl Into<SharedString>, value: impl Into<SharedString>) -> impl IntoElement`
+  - Purpose: Settings UI row with muted label and value.
+  - Behavior: Horizontal flex row with spaced labels.
+- **`should_dismiss_webview_context_menu`** (pub(crate), L3903)
+  - Signature: `pub(crate) fn should_dismiss_webview_context_menu(click: Point<Pixels>, webview_bounds: Option<Bounds<Pixels>>) -> bool`
+  - Purpose: Whether a host click should dismiss the in-page context menu.
+  - Behavior: Returns false when click is inside reader bounds (CEF handles it); true for chrome clicks or when bounds unknown.
+- **`can_open_command_palette`** (pub(crate), L3911)
+  - Signature: `pub(crate) fn can_open_command_palette(main_window_active: bool) -> bool`
+  - Purpose: Gate for opening the command palette.
+  - Behavior: Returns `main_window_active` — palette only opens when main window is key.
+##### Context: `SettingsSection`
+
+- **`title_key`** (private, L227)
+  - Signature: `fn title_key(self) -> Key`
+  - Purpose: Locale key for section title.
+  - Behavior: Maps each section to its Key variant.
+
+- **`icon`** (private, L237)
+  - Signature: `fn icon(self) -> IconName`
+  - Purpose: Icon for section nav.
+  - Behavior: Maps each section to Settings/Account/Palette/Flag/Shield icons.
+##### Context: `RootView`
+
+- **`new`** (pub, L473)
+  - Signature: `pub fn new(settings: Config) -> Self`
+  - Purpose: Constructs RootView with default database path.
+  - Behavior: Delegates to `new_with_database` using `storage::database_path()`.
+
+- **`new_with_database`** (private, L477)
+  - Signature: `fn new_with_database(settings: Config, db_path: impl AsRef<Path>) -> Self`
+  - Purpose: Constructs RootView with explicit DB path (tests).
+  - Behavior: Opens SQLite, seeds if empty, loads folders/messages, restores layout from settings, initializes selection to global inbox.
+
+- **`reload_message_list`** (private, L586)
+  - Signature: `fn reload_message_list(&mut self)`
+  - Purpose: Reloads list column from database.
+  - Behavior: Queries messages for current selection/search and updates `list_messages`.
+
+- **`clear_message_selection`** (private, L605)
+  - Signature: `fn clear_message_selection(&mut self)`
+  - Purpose: Clears selected message and reader state.
+  - Behavior: Resets selected id, detail, and webview signature.
+
+- **`reload_selected_detail`** (private, L611)
+  - Signature: `fn reload_selected_detail(&mut self)`
+  - Purpose: Reloads full body for selected message.
+  - Behavior: Fetches MessageDetail from DB when an id is selected.
+
+- **`on_message_selection_changed`** (private, L617)
+  - Signature: `fn on_message_selection_changed(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Handles message selection side effects.
+  - Behavior: Reloads detail, syncs menus, notifies GPUI.
+
+- **`command_context`** (pub(crate), L624)
+  - Signature: `pub(crate) fn command_context(&self) -> CommandContext`
+  - Purpose: Snapshot for menus and palette.
+  - Behavior: Packages selected message id, detail clone, and folders map.
+
+- **`sync_app_menus`** (pub(crate), L633)
+  - Signature: `pub(crate) fn sync_app_menus(&self, cx: &mut Context<Self>)`
+  - Purpose: Refreshes global menu bar from current state.
+  - Behavior: Skips when compose window is active; otherwise syncs main menus with command context.
+
+- **`on_compose_window_closed`** (pub(crate), L643)
+  - Signature: `pub(crate) fn on_compose_window_closed(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Cleanup when compose window closes.
+  - Behavior: Clears compose handle and restores main menu surface.
+
+- **`on_settings_window_closed`** (pub(crate), L650)
+  - Signature: `pub(crate) fn on_settings_window_closed(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Cleanup when settings window closes.
+  - Behavior: Clears settings handle and notifies.
+
+- **`close_focused_auxiliary_window`** (pub(crate), L657)
+  - Signature: `pub(crate) fn close_focused_auxiliary_window(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Closes focused compose or settings window.
+  - Behavior: Removes and closes whichever auxiliary window has focus.
+
+- **`close_settings_window`** (pub(crate), L672)
+  - Signature: `pub(crate) fn close_settings_window(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Closes settings window if open.
+  - Behavior: Used by global shortcut fallback.
+
+- **`compose_window_open_and_active`** (private, L680)
+  - Signature: `fn compose_window_open_and_active(&self, cx: &mut Context<Self>) -> bool`
+  - Purpose: Whether compose window exists and is active.
+  - Behavior: Checks compose handle active state.
+
+- **`with_compose_window`** (pub(crate), L686)
+  - Signature: `pub(crate) fn with_compose_window<R>(&self, cx, f) -> Option<R>`
+  - Purpose: Runs closure on compose view if open.
+  - Behavior: Updates compose entity and returns closure result or None.
+
+- **`refresh_after_message_action`** (private, L698)
+  - Signature: `fn refresh_after_message_action(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Post-action UI refresh.
+  - Behavior: Reloads list, syncs menus, invalidates webview signature, notifies.
+
+- **`ensure_command_palette`** (private, L705)
+  - Signature: `fn ensure_command_palette(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Lazily creates command palette state.
+  - Behavior: Creates TextInput, wires query observer to sync filter, stores CommandPaletteState.
+
+- **`sync_command_palette_query`** (private, L729)
+  - Signature: `fn sync_command_palette_query(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Syncs palette filter from input entity.
+  - Behavior: Reads input content, calls on_query_change when changed, notifies.
+
+- **`toggle_command_palette`** (pub(crate), L744)
+  - Signature: `pub(crate) fn toggle_command_palette(&mut self, window: &Window, cx: &mut Context<Self>)`
+  - Purpose: Public palette toggle entry.
+  - Behavior: Delegates to internal toggle.
+
+- **`toggle_command_palette_from_webview`** (private, L748)
+  - Signature: `fn toggle_command_palette_from_webview(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Schedules palette toggle from webview IPC.
+  - Behavior: Sets deferred flag handled next render frame.
+
+- **`toggle_command_palette_internal`** (private, L753)
+  - Signature: `fn toggle_command_palette_internal(&mut self, window: &Window, cx: &mut Context<Self>)`
+  - Purpose: Opens or closes the palette.
+  - Behavior: Closes if open; otherwise requires active main window, clears query/selection, marks focus pending.
+
+- **`dismiss_command_palette`** (pub(crate), L775)
+  - Signature: `pub(crate) fn dismiss_command_palette(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Closes palette overlay.
+  - Behavior: Sets open=false, clears focus pending, notifies.
+
+- **`close_command_palette`** (pub(crate), L783)
+  - Signature: `pub(crate) fn close_command_palette(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Alias for dismiss_command_palette.
+  - Behavior: Calls dismiss_command_palette.
+
+- **`command_palette_render_args`** (private, L788)
+  - Signature: `fn command_palette_render_args(&self, cx: &App) -> Option<(...)>`
+  - Purpose: Snapshot for palette overlay render.
+  - Behavior: When open, returns filtered entries, clamped selection index, and input entity.
+
+- **`execute_command`** (pub(crate), L805)
+  - Signature: `pub(crate) fn execute_command(&mut self, id: &CommandId, window, cx)`
+  - Purpose: Runs a command by id.
+  - Behavior: Dispatches to compose/settings/sidebar/message handlers, then closes palette.
+
+- **`delete_message_to_trash`** (pub(crate), L830)
+  - Signature: `pub(crate) fn delete_message_to_trash(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Moves selected message to trash.
+  - Behavior: No-op without selection; DB move then refresh_after_message_action.
+
+- **`delete_message_permanently`** (pub(crate), L838)
+  - Signature: `pub(crate) fn delete_message_permanently(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Permanently deletes selected message.
+  - Behavior: Clears selection on success, then refreshes.
+
+- **`restore_message`** (pub(crate), L848)
+  - Signature: `pub(crate) fn restore_message(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Restores message from trash.
+  - Behavior: DB restore then refresh.
+
+- **`archive_message`** (pub(crate), L856)
+  - Signature: `pub(crate) fn archive_message(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Archives selected message.
+  - Behavior: DB archive then refresh.
+
+- **`mark_message_junk`** (pub(crate), L864)
+  - Signature: `pub(crate) fn mark_message_junk(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Marks selected message as junk.
+  - Behavior: DB junk move then refresh.
+
+- **`toggle_message_flag`** (pub(crate), L872)
+  - Signature: `pub(crate) fn toggle_message_flag(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Toggles starred/flagged state.
+  - Behavior: DB toggle then refresh.
+
+- **`move_message_to_folder`** (pub(crate), L880)
+  - Signature: `pub(crate) fn move_message_to_folder(&mut self, folder_path: &str, cx: &mut Context<Self>)`
+  - Purpose: Moves message to folder path.
+  - Behavior: DB move then refresh.
+
+- **`handle_command_palette_key`** (pub(crate), L888)
+  - Signature: `pub(crate) fn handle_command_palette_key(&mut self, event, window, cx) -> bool`
+  - Purpose: Keyboard handling while palette open.
+  - Behavior: Handles Escape, Up/Down (move selection), Enter (execute); returns whether event was consumed.
+
+- **`persist_now`** (pub(crate), L953)
+  - Signature: `pub(crate) fn persist_now(&self)`
+  - Purpose: Immediate synchronous settings save.
+  - Behavior: No-op until persist_ready; writes current_config via config::save.
+
+- **`enable_persistence`** (pub(crate), L960)
+  - Signature: `pub(crate) fn enable_persistence(&mut self)`
+  - Purpose: Arms debounced persistence after startup.
+  - Behavior: Sets persist_ready true (~700ms after window open).
+
+- **`mark_content_ready`** (pub(crate), L968)
+  - Signature: `pub(crate) fn mark_content_ready(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Reveals UI after Windows layout settles.
+  - Behavior: Sets content_ready and notifies (Windows cloaked open path).
+
+- **`current_config`** (private, L976)
+  - Signature: `fn current_config(&self) -> Config`
+  - Purpose: Builds Config from live layout state.
+  - Behavior: Snapshots window/column bounds, maximize state, compose window geometry, and preferences.
+
+- **`sync_compose_window_bounds`** (pub(crate), L1006)
+  - Signature: `pub(crate) fn sync_compose_window_bounds(&mut self, origin, window_size, cx)`
+  - Purpose: Tracks compose window move/resize.
+  - Behavior: Updates stored compose origin/size and schedules debounced save.
+
+- **`request_save`** (private, L1026)
+  - Signature: `fn request_save(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Debounced settings persistence.
+  - Behavior: Increments save token, spawns timer; latest token wins, writes on background thread.
+
+- **`ensure_scrollbar_states`** (private, L1047)
+  - Signature: `fn ensure_scrollbar_states(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Lazily creates scrollbar state entities.
+  - Behavior: Creates list and sidebar ScrollbarState entities on first render.
+
+- **`ensure_search_input`** (private, L1054)
+  - Signature: `fn ensure_search_input(&mut self, language, window, cx)`
+  - Purpose: Lazily creates toolbar search TextInput.
+  - Behavior: Creates input with placeholder, blur/change handlers for debounced search sync.
+
+- **`sync_search_if_needed`** (private, L1090)
+  - Signature: `fn sync_search_if_needed(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Applies search query changes from render.
+  - Behavior: When query differs from last applied, reloads list, adjusts mailbox selection, syncs selection scroll.
+
+- **`next_search_debounce_token`** (private, L1112)
+  - Signature: `fn next_search_debounce_token(&mut self) -> u64`
+  - Purpose: Allocates next search debounce token.
+  - Behavior: Increments search_debounce_seq.
+
+- **`search_debounce_token_current`** (private, L1117)
+  - Signature: `fn search_debounce_token_current(&self, token: u64) -> bool`
+  - Purpose: Checks debounce token still current.
+  - Behavior: Compares token to latest search_debounce_seq.
+
+- **`schedule_search_sync`** (private, L1121)
+  - Signature: `fn schedule_search_sync(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Schedules debounced search list reload.
+  - Behavior: Spawns timer; stale tokens ignored; notifies on fire.
+
+- **`search_query`** (private, L1139)
+  - Signature: `fn search_query(&self, cx: &App) -> String`
+  - Purpose: Current search field text.
+  - Behavior: Reads search input entity or empty string.
+
+- **`search_is_active`** (private, L1147)
+  - Signature: `fn search_is_active(&self, _cx: &App) -> bool`
+  - Purpose: Whether search filter is applied.
+  - Behavior: True when last applied query is non-empty.
+
+- **`show_search_expanded`** (private, L1153)
+  - Signature: `fn show_search_expanded(&self) -> bool`
+  - Purpose: Whether toolbar shows expanded search.
+  - Behavior: True when not compact or force-expanded flag set.
+
+- **`prepare_search_focus`** (private, L1158)
+  - Signature: `fn prepare_search_focus(&mut self)`
+  - Purpose: Expands compact search before focus.
+  - Behavior: Sets search_force_expanded when compact.
+
+- **`show_search_clear_in_field`** (private, L1164)
+  - Signature: `fn show_search_clear_in_field(&self, cx: &App) -> bool`
+  - Purpose: Whether clear button shows in search field.
+  - Behavior: Delegates to query-based helper with live query.
+
+- **`show_search_clear_in_field_for_query`** (private, L1168)
+  - Signature: `fn show_search_clear_in_field_for_query(&self, query: &str) -> bool`
+  - Purpose: Clear button visibility rules.
+  - Behavior: Always when force-expanded compact; otherwise only when query non-empty on wide toolbar.
+
+- **`clear_search`** (private, L1177)
+  - Signature: `fn clear_search(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Clears search and restores pre-search mailbox.
+  - Behavior: Clears input, resets force-expanded, restores mailbox if searching, reloads list.
+
+- **`sync_search_selection`** (private, L1205)
+  - Signature: `fn sync_search_selection(&mut self)`
+  - Purpose: Keeps selection valid after search/filter.
+  - Behavior: Selects first message if current missing; scrolls list to top on query change.
+
+- **`focus_search_input`** (private, L1222)
+  - Signature: `fn focus_search_input(&mut self, window, cx)`
+  - Purpose: Focuses toolbar search field.
+  - Behavior: Ensures input exists, prepares expand, focuses handle.
+
+- **`search_input_focused`** (private, L1235)
+  - Signature: `fn search_input_focused(&self, window, cx) -> bool`
+  - Purpose: Whether search input has focus.
+  - Behavior: Checks focus handle on search entity.
+
+- **`blur_search_if_focused`** (private, L1242)
+  - Signature: `fn blur_search_if_focused(&mut self, window, cx)`
+  - Purpose: Blurs search when focused.
+  - Behavior: Clears focus on search input entity.
+
+- **`should_collapse_search_after_blur`** (private, L1249)
+  - Signature: `fn should_collapse_search_after_blur(&self, query: &str) -> bool`
+  - Purpose: Whether compact search should collapse on blur.
+  - Behavior: True when compact, force-expanded, and query empty.
+
+- **`on_search_blur`** (private, L1254)
+  - Signature: `fn on_search_blur(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Handles search field blur.
+  - Behavior: Collapses force-expanded compact search when appropriate.
+
+- **`on_main_window_activated`** (pub(crate), L1264)
+  - Signature: `pub(crate) fn on_main_window_activated(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Wakes OSR reader after window activation.
+  - Behavior: Pumps CEF hard and notifies webview when composited reader exists.
+
+- **`ensure_cef_osr_tick`** (private, L1277)
+  - Signature: `fn ensure_cef_osr_tick(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Starts background CEF pump loop.
+  - Behavior: Spawns periodic tick while OSR webview exists so Chromium keeps painting when window inactive.
+
+- **`sync_webview`** (private, L1316)
+  - Signature: `fn sync_webview(&mut self, window, cx: &mut Context<Self>)`
+  - Purpose: Creates/updates embedded email webview.
+  - Behavior: Builds HTML when signature changes, reuses browser instance on message switch, hides when no selection, handles host events.
+
+- **`handle_host_event`** (private, L1422)
+  - Signature: `fn handle_host_event(&mut self, event: HostEvent, cx: &mut Context<Self>)`
+  - Purpose: Handles webview IPC on foreground.
+  - Behavior: Routes hover, clipboard, image shown, palette toggle, cursor, context menu dismiss, etc.
+
+- **`reader_relative_position`** (private, L1457)
+  - Signature: `fn reader_relative_position(&self, position) -> Option<(f32, f32)>`
+  - Purpose: Window coords to reader-local coords.
+  - Behavior: Subtracts webview_bounds origin; None before first layout.
+
+- **`on_reader_mouse_move`** (private, L1467)
+  - Signature: `fn on_reader_mouse_move(&mut self, event, _window, cx)`
+  - Purpose: Forwards mouse move to OSR (Linux).
+  - Behavior: Translates coords, forwards to webview with modifiers; updates cursor style.
+
+- **`on_reader_mouse_down`** (private, L1497)
+  - Signature: `fn on_reader_mouse_down(&mut self, event, window, cx)`
+  - Purpose: Forwards mouse down to OSR.
+  - Behavior: Ensures reader focus, forwards press, tracks click count for double-click.
+
+- **`on_reader_mouse_up`** (private, L1523)
+  - Signature: `fn on_reader_mouse_up(&mut self, event, _window, cx)`
+  - Purpose: Forwards mouse up to OSR.
+  - Behavior: Translates coords and releases button in webview.
+
+- **`on_reader_scroll`** (private, L1544)
+  - Signature: `fn on_reader_scroll(&mut self, event, _window, cx)`
+  - Purpose: Forwards wheel scroll to OSR.
+  - Behavior: Converts scroll delta (lines vs pixels) and sends wheel event.
+
+- **`on_reader_key_down`** (private, L1568)
+  - Signature: `fn on_reader_key_down(&mut self, event, _window, cx)`
+  - Purpose: Forwards key down to OSR.
+  - Behavior: Maps modifiers and sends key press to webview.
+
+- **`on_reader_key_up`** (private, L1591)
+  - Signature: `fn on_reader_key_up(&mut self, event, _window, cx)`
+  - Purpose: Forwards key up to OSR.
+  - Behavior: Sends key release to webview.
+
+- **`ensure_reader_focus`** (private, L1614)
+  - Signature: `fn ensure_reader_focus(&mut self, cx) -> Option<&FocusHandle>`
+  - Purpose: Lazily creates reader focus handle.
+  - Behavior: Creates FocusHandle on first use for keyboard routing.
+
+- **`image_shown`** (private, L1629)
+  - Signature: `fn image_shown(&mut self, url: String, cx: &mut Context<Self>)`
+  - Purpose: Records user revealed a blocked remote image.
+  - Behavior: Adds URL to per-message shown set, decrements blocked count, notifies.
+
+- **`set_hovered_link`** (private, L1639)
+  - Signature: `fn set_hovered_link(&mut self, url: String, cx: &mut Context<Self>)`
+  - Purpose: Updates status bar hovered link.
+  - Behavior: Stores URL and notifies only when changed.
+
+- **`set_load_remote_images`** (private, L1648)
+  - Signature: `fn set_load_remote_images(&mut self, value: bool, cx: &mut Context<Self>)`
+  - Purpose: Toggles global remote image loading pref.
+  - Behavior: Persists, invalidates webview signature, notifies for re-sanitize.
+
+- **`set_reader_white_background`** (private, L1658)
+  - Signature: `fn set_reader_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
+  - Purpose: Toggles reader white background pref.
+  - Behavior: Persists and invalidates webview signature.
+
+- **`set_compose_white_background`** (private, L1668)
+  - Signature: `fn set_compose_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
+  - Purpose: Toggles compose white background pref.
+  - Behavior: Persists and updates open compose view if any.
+
+- **`open_settings`** (pub(crate), L1683)
+  - Signature: `pub(crate) fn open_settings(&mut self, _window, cx: &mut Context<Self>)`
+  - Purpose: Opens or focuses settings window.
+  - Behavior: Creates SettingsView window with persisted bounds or activates existing.
+
+- **`open_compose`** (pub(crate), L1729)
+  - Signature: `pub(crate) fn open_compose(&mut self, _window, cx: &mut Context<Self>)`
+  - Purpose: Opens or focuses compose window.
+  - Behavior: Creates ComposeView window or activates existing; syncs compose menus.
+
+- **`select_mailbox`** (private, L1780)
+  - Signature: `fn select_mailbox(&mut self, selection: Selection, cx: &mut Context<Self>)`
+  - Purpose: Selects sidebar mailbox with UI update.
+  - Behavior: Applies selection, reloads list, clears message selection, syncs menus, notifies.
+
+- **`apply_mailbox_selection`** (private, L1798)
+  - Signature: `fn apply_mailbox_selection(&mut self, selection: Selection)`
+  - Purpose: Core mailbox selection without notify.
+  - Behavior: Sets selected_mailbox; dismisses floating sidebar in narrow layout.
+
+- **`note_scroll`** (private, L1807)
+  - Signature: `fn note_scroll(states, cx: &mut Context<Self>)`
+  - Purpose: Marks scrollbars active after scroll.
+  - Behavior: Calls note_scroll on states and schedules fade-out re-render.
+
+- **`toggle_sidebar`** (pub(crate), L1829)
+  - Signature: `pub(crate) fn toggle_sidebar(&mut self)`
+  - Purpose: Shows/hides accounts sidebar.
+  - Behavior: Flips show_sidebar flag.
+
+- **`is_account_collapsed`** (private, L1834)
+  - Signature: `fn is_account_collapsed(&self, account_idx: usize) -> bool`
+  - Purpose: Whether account mailbox list is collapsed.
+  - Behavior: Checks collapsed_accounts set.
+
+- **`toggle_account`** (private, L1841)
+  - Signature: `fn toggle_account(&mut self, account_idx: usize) -> FoldAnim`
+  - Purpose: Toggles account expand/collapse with animation.
+  - Behavior: Updates collapsed set, assigns fold token, returns FoldAnim for timer.
+
+- **`clear_fold`** (private, L1860)
+  - Signature: `fn clear_fold(&mut self, account_idx: usize, token: u64) -> bool`
+  - Purpose: Finalizes fold animation.
+  - Behavior: Removes fold_anim if token matches; returns whether state changed.
+
+- **`account_list_visible`** (private, L1875)
+  - Signature: `fn account_list_visible(&self, account_idx: usize) -> bool`
+  - Purpose: Whether account rows should render.
+  - Behavior: Visible when expanded or mid-collapse animation.
+
+- **`sidebar_docked`** (private, L1886)
+  - Signature: `fn sidebar_docked(&self) -> bool`
+  - Purpose: Whether sidebar occupies a layout column.
+  - Behavior: True when sidebar shown and not narrow floating mode.
+
+- **`reader_segment_width`** (private, L1892)
+  - Signature: `fn reader_segment_width(&self) -> Pixels`
+  - Purpose: Toolbar width for reader segment.
+  - Behavior: Window width minus sidebar and list columns (and handles).
+
+- **`search_is_compact`** (private, L1913)
+  - Signature: `fn search_is_compact(&self) -> bool`
+  - Purpose: Whether search collapses to icon.
+  - Behavior: True when reader segment narrower than SEARCH_COLLAPSE_WIDTH.
+
+- **`visible_action_groups`** (private, L1920)
+  - Signature: `fn visible_action_groups(&self) -> usize`
+  - Purpose: Count of toolbar action groups that fit.
+  - Behavior: 0–3 based on reader segment width thresholds.
+
+- **`render_list_controls`** (private, L1941)
+  - Signature: `fn render_list_controls(&self, show_count: bool, cx) -> impl IntoElement`
+  - Purpose: Message list header controls.
+  - Behavior: Mailbox title, optional count, filter/more buttons; used in toolbar or list header.
+
+- **`sync_layout`** (private, L2007)
+  - Signature: `fn sync_layout(&mut self, total: Pixels)`
+  - Purpose: Reconciles column widths to window size.
+  - Behavior: Tracks narrow breakpoint, auto sidebar collapse/restore, clamps columns to minimums preserving reader floor.
+
+- **`resize`** (private, L2046)
+  - Signature: `fn resize(&mut self, handle: ResizeHandle, x: Pixels, total: Pixels)`
+  - Purpose: Applies column divider drag.
+  - Behavior: Sets sidebar or list width from cursor x, clamped so reader keeps READER_MIN_WIDTH.
+
+- **`render_toolbar`** (private, L2067)
+  - Signature: `fn render_toolbar(&mut self, window, cx) -> impl IntoElement`
+  - Purpose: Renders unified top toolbar.
+  - Behavior: Window drag region, list controls when docked, compose/actions/search, theme and sidebar toggles.
+
+- **`render_search_control`** (private, L2321)
+  - Signature: `fn render_search_control(&self, compact_search, search_bg, language, cx) -> AnyElement`
+  - Purpose: Renders compact or expanded search UI.
+  - Behavior: Icon button or TextInput with clear affordance based on layout state.
+
+- **`render_search_clear_button`** (private, L2377)
+  - Signature: `fn render_search_clear_button(language, cx) -> impl IntoElement`
+  - Purpose: Clear button inside search field.
+  - Behavior: Small icon button calling clear_search.
+
+- **`icon_button_with_tooltip`** (private, L2401)
+  - Signature: `fn icon_button_with_tooltip(id, label, shortcut, button) -> impl IntoElement`
+  - Purpose: IconButton wrapped with tooltip div.
+  - Behavior: Adds localized label and optional shortcut display.
+
+- **`render_toolbar_separator`** (private, L2419)
+  - Signature: `fn render_toolbar_separator(color: Hsla) -> impl IntoElement`
+  - Purpose: Vertical toolbar divider.
+  - Behavior: 1px × 20px colored bar.
+
+- **`render_sidebar`** (private, L2425)
+  - Signature: `fn render_sidebar(&self, floating: bool, cx) -> impl IntoElement`
+  - Purpose: Renders accounts/folders sidebar.
+  - Behavior: Global section, account groups with fold animations, scrollbars; floating adds shadow/overlay styling.
+
+- **`render_resize_handle`** (private, L2468)
+  - Signature: `fn render_resize_handle(&self, kind: ResizeHandle, _cx) -> impl IntoElement`
+  - Purpose: Draggable column resize strip.
+  - Behavior: Hit target on column edge; drag handled at row level.
+
+- **`global_unread`** (private, L2492)
+  - Signature: `fn global_unread(&self, global: GlobalMailbox) -> usize`
+  - Purpose: Aggregated unread for global mailbox.
+  - Behavior: Sums inbox unreads or counts flagged/starred depending on mailbox.
+
+- **`render_global_section`** (private, L2500)
+  - Signature: `fn render_global_section(&self, cx) -> impl IntoElement`
+  - Purpose: Unified mailboxes at sidebar top.
+  - Behavior: Inbox/Flagged/Drafts/Sent rows with icons, selection, unread badges.
+
+- **`render_account`** (private, L2541)
+  - Signature: `fn render_account(&self, account_idx, account, cx) -> impl IntoElement`
+  - Purpose: Renders one account group in sidebar.
+  - Behavior: Header with chevron toggle, animated mailbox rows, folder selection.
+
+- **`render_account_chevron`** (private, L2698)
+  - Signature: `fn render_account_chevron(&self, account_idx, color) -> AnyElement`
+  - Purpose: Animated disclosure chevron.
+  - Behavior: Rotates between collapsed/expanded based on fold animation state.
+
+- **`render_count_badge`** (private, L2731)
+  - Signature: `fn render_count_badge(&self, count, selected, cx) -> impl IntoElement`
+  - Purpose: Unread/count pill on sidebar rows.
+  - Behavior: Shows count when non-zero with selected/unselected styling.
+
+- **`render_message_list`** (private, L2766)
+  - Signature: `fn render_message_list(&mut self, cx) -> impl IntoElement`
+  - Purpose: Renders scrollable message list column.
+  - Behavior: Optional list header when sidebar undocked, message rows, scrollbar.
+
+- **`render_message_row`** (private, L2847)
+  - Signature: `fn render_message_row(&self, message, cx) -> impl IntoElement`
+  - Purpose: Single message list row.
+  - Behavior: Sender, subject preview, date, unread/flag/attachment indicators; click selects message.
+
+- **`shield_is_blocked`** (private, L2952)
+  - Signature: `fn shield_is_blocked(&self) -> bool`
+  - Purpose: Red privacy shield state.
+  - Behavior: Remote content present, blocking on, message not fully unblocked.
+
+- **`shield_is_loaded`** (private, L2959)
+  - Signature: `fn shield_is_loaded(&self) -> bool`
+  - Purpose: Green privacy shield state.
+  - Behavior: Had remote images and blocked count is zero.
+
+- **`render_privacy_shield`** (private, L2968)
+  - Signature: `fn render_privacy_shield(&self, cx) -> impl IntoElement`
+  - Purpose: Privacy shield on reader subject line.
+  - Behavior: Red clickable shield when blocked, green when loaded, empty slot otherwise for layout stability.
+
+- **`render_privacy_menu`** (private, L3038)
+  - Signature: `fn render_privacy_menu(&self, cx) -> impl IntoElement`
+  - Purpose: Dropdown from privacy shield.
+  - Behavior: Deferred anchored menu to load remote images for this message; hides webview while open.
+
+- **`render_reader`** (private, L3100)
+  - Signature: `fn render_reader(&mut self, cx) -> impl IntoElement`
+  - Purpose: Renders reading pane.
+  - Behavior: Empty state, header with subject/sender/actions, composited webview or text fallback, privacy UI.
+
+- **`render_text_fallback`** (private, L3274)
+  - Signature: `fn render_text_fallback(&self, message, cx) -> impl IntoElement`
+  - Purpose: Plain-text reader when webview unavailable.
+  - Behavior: Scrollable preformatted plain_text body.
+
+- **`render_status_bar`** (private, L3300)
+  - Signature: `fn render_status_bar(&self, cx) -> impl IntoElement`
+  - Purpose: Bottom status bar.
+  - Behavior: Shows hovered link URL centered when present.
+##### Context: `SettingsView`
+
+- **`new`** (private, L3379)
+  - Signature: `fn new(accounts: Vec<data::Account>, root: WeakEntity<RootView>) -> Self`
+  - Purpose: Constructs settings view.
+  - Behavior: Stores accounts, default General section, weak root link.
+
+- **`close_window`** (private, L3387)
+  - Signature: `fn close_window(&mut self, window, cx: &mut Context<Self>)`
+  - Purpose: Closes settings window.
+  - Behavior: Notifies root and removes window.
+
+- **`render_nav`** (private, L3399)
+  - Signature: `fn render_nav(&self, cx) -> impl IntoElement`
+  - Purpose: Settings section sidebar nav.
+  - Behavior: Lists sections with icons; click switches section.
+
+- **`render_content`** (private, L3443)
+  - Signature: `fn render_content(&self, cx) -> impl IntoElement`
+  - Purpose: Active settings section body.
+  - Behavior: Renders General/Accounts/Appearance/Notifications/Privacy content.
+
+- **`render_language_picker`** (private, L3609)
+  - Signature: `fn render_language_picker(&self, language, cx) -> impl IntoElement`
+  - Purpose: Language selector control.
+  - Behavior: Buttons for EN/PT; updates locale global and refreshes app.
+
+- **`remote_images_button`** (private, L3636)
+  - Signature: `fn remote_images_button(&self, id, label, selected, value, cx) -> impl IntoElement`
+  - Purpose: Segmented remote-images toggle button.
+  - Behavior: Styled button; click sets load_remote_images on root.
+##### Context: `Render for SettingsView`
+
+- **`render`** (private, L3660)
+  - Signature: `fn render(&mut self, _window, cx: &mut Context<Self>) -> impl IntoElement`
+  - Purpose: Settings window layout.
+  - Behavior: Split nav + content with titlebar close handling.
+##### Context: `Render for RootView`
+
+- **`render`** (private, L3697)
+  - Signature: `fn render(&mut self, window, cx: &mut Context<Self>) -> impl IntoElement`
+  - Purpose: Main RootView render.
+  - Behavior: Full three-column layout, toolbar, deferred palette/search/webview sync, content_ready gate, window frame wrap.
+##### Context: `module (tests)`
+
+- **`test_view`** (private, L3921)
+  - Signature: `fn test_view()`
+  - Purpose: Creates temp DB and RootView for unit tests.
+  - Behavior: TempDir + new_with_database with default config.
+
+- **`sidebar_starts_visible`** (private, L3929)
+  - Signature: `fn sidebar_starts_visible()`
+  - Purpose: Test: sidebar visible by default.
+  - Behavior: Asserts show_sidebar true on new view.
+
+- **`sync_webview_reuses_osr_browser_on_message_switch`** (private, L3935)
+  - Signature: `fn sync_webview_reuses_osr_browser_on_message_switch()`
+  - Purpose: Test: structural OSR reuse guard.
+  - Behavior: Source contains navigate-only and retry-without-signature comments.
+
+- **`command_palette_only_opens_when_main_window_is_focused`** (private, L3947)
+  - Signature: `fn command_palette_only_opens_when_main_window_is_focused()`
+  - Purpose: Test: can_open_command_palette gate.
+  - Behavior: True when active, false when not.
+
+- **`webview_context_menu_dismiss_skips_clicks_inside_reader`** (private, L3953)
+  - Signature: `fn webview_context_menu_dismiss_skips_clicks_inside_reader()`
+  - Purpose: Test: context menu dismiss bounds.
+  - Behavior: Inside reader=false dismiss; outside=true; no bounds=true.
+
+- **`command_palette_starts_closed`** (private, L3976)
+  - Signature: `fn command_palette_starts_closed()`
+  - Purpose: Test: palette closed initially.
+  - Behavior: command_palette none or open=false.
+
+- **`toggle_sidebar_flips_visibility`** (private, L3985)
+  - Signature: `fn toggle_sidebar_flips_visibility()`
+  - Purpose: Test: toggle_sidebar inverts flag.
+  - Behavior: Toggle twice restores visibility.
+
+- **`selecting_in_narrow_layout_dismisses_floating_sidebar`** (private, L3994)
+  - Signature: `fn selecting_in_narrow_layout_dismisses_floating_sidebar()`
+  - Purpose: Test: narrow select hides sidebar.
+  - Behavior: Narrow layout + select closes floating sidebar.
+
+- **`selecting_in_wide_layout_keeps_sidebar_open`** (private, L4010)
+  - Signature: `fn selecting_in_wide_layout_keeps_sidebar_open()`
+  - Purpose: Test: wide select keeps sidebar.
+  - Behavior: Wide layout selection leaves sidebar visible.
+
+- **`mailbox_change_clears_reader_selection`** (private, L4031)
+  - Signature: `fn mailbox_change_clears_reader_selection()`
+  - Purpose: Test: mailbox change clears message.
+  - Behavior: Selecting different mailbox clears selected message.
+
+- **`default_selection_is_global_inbox`** (private, L4042)
+  - Signature: `fn default_selection_is_global_inbox()`
+  - Purpose: Test: initial selection is global inbox.
+  - Behavior: selected_mailbox is Global(Inbox).
+
+- **`global_inbox_has_unread`** (private, L4051)
+  - Signature: `fn global_inbox_has_unread()`
+  - Purpose: Test: seeded inbox has unread.
+  - Behavior: global_unread(Inbox) > 0.
+
+- **`global_flagged_counts_flagged_folder`** (private, L4057)
+  - Signature: `fn global_flagged_counts_flagged_folder()`
+  - Purpose: Test: flagged global counts starred.
+  - Behavior: Uses DB count for flagged folder.
+
+- **`global_drafts_and_sent_have_no_unread`** (private, L4065)
+  - Signature: `fn global_drafts_and_sent_have_no_unread()`
+  - Purpose: Test: drafts/sent unread zero.
+  - Behavior: Both global_unread return 0.
+
+- **`accounts_start_expanded`** (private, L4072)
+  - Signature: `fn accounts_start_expanded()`
+  - Purpose: Test: all accounts start expanded.
+  - Behavior: No account in collapsed set initially.
+
+- **`toggle_account_collapses_and_expands`** (private, L4080)
+  - Signature: `fn toggle_account_collapses_and_expands()`
+  - Purpose: Test: account toggle changes collapsed state.
+  - Behavior: Toggle adds/removes from collapsed_accounts.
+
+- **`toggle_account_hands_out_unique_tokens`** (private, L4093)
+  - Signature: `fn toggle_account_hands_out_unique_tokens()`
+  - Purpose: Test: fold tokens unique per toggle.
+  - Behavior: Two toggles yield different FoldAnim tokens.
+
+- **`collapsing_account_stays_visible_until_finalized`** (private, L4101)
+  - Signature: `fn collapsing_account_stays_visible_until_finalized()`
+  - Purpose: Test: collapse animation keeps rows visible.
+  - Behavior: account_list_visible true during collapse anim.
+
+- **`clear_fold_ignores_stale_token`** (private, L4113)
+  - Signature: `fn clear_fold_ignores_stale_token()`
+  - Purpose: Test: stale fold timer ignored.
+  - Behavior: clear_fold with old token returns false.
+
+- **`expanded_account_is_visible_without_animation`** (private, L4124)
+  - Signature: `fn expanded_account_is_visible_without_animation()`
+  - Purpose: Test: expanded account list visible.
+  - Behavior: account_list_visible(0) true initially.
+
+- **`narrow_window_auto_collapses_sidebar`** (private, L4130)
+  - Signature: `fn narrow_window_auto_collapses_sidebar()`
+  - Purpose: Test: narrow sync_layout hides sidebar.
+  - Behavior: 800px width sets narrow and hides sidebar.
+
+- **`resizing_while_narrow_recollapses_floating_sidebar`** (private, L4138)
+  - Signature: `fn resizing_while_narrow_recollapses_floating_sidebar()`
+  - Purpose: Test: resize in narrow re-collapses sidebar.
+  - Behavior: Opening sidebar then sync_layout collapses again.
+
+- **`floating_sidebar_stays_open_without_resize`** (private, L4150)
+  - Signature: `fn floating_sidebar_stays_open_without_resize()`
+  - Purpose: Test: sidebar stays open if no layout sync.
+  - Behavior: Manual toggle without sync keeps open.
+
+- **`widening_window_restores_sidebar`** (private, L4160)
+  - Signature: `fn widening_window_restores_sidebar()`
+  - Purpose: Test: leaving narrow restores sidebar.
+  - Behavior: Wide sync_layout sets show_sidebar true.
+
+- **`resize_respects_sidebar_minimum`** (private, L4170)
+  - Signature: `fn resize_respects_sidebar_minimum()`
+  - Purpose: Test: sidebar drag respects SIDEBAR_MIN_WIDTH.
+  - Behavior: Drag below min clamps to minimum.
+
+- **`resize_respects_list_minimum`** (private, L4178)
+  - Signature: `fn resize_respects_list_minimum()`
+  - Purpose: Test: list drag respects LIST_MIN_WIDTH.
+  - Behavior: List divider drag clamped to minimum.
+
+- **`resize_keeps_reader_minimum`** (private, L4191)
+  - Signature: `fn resize_keeps_reader_minimum()`
+  - Purpose: Test: reader width floor enforced.
+  - Behavior: Extreme drags leave reader at READER_MIN_WIDTH.
+
+- **`resize_locks_panels_once_reader_minimum_is_reached`** (private, L4206)
+  - Signature: `fn resize_locks_panels_once_reader_minimum_is_reached()`
+  - Purpose: Test: divider locks at reader minimum.
+  - Behavior: Further drag does not shrink reader below floor.
+
+- **`search_collapses_when_reader_segment_is_narrow`** (private, L4226)
+  - Signature: `fn search_collapses_when_reader_segment_is_narrow()`
+  - Purpose: Test: narrow reader segment compacts search.
+  - Behavior: search_is_compact true on narrow layout.
+
+- **`search_expands_on_wide_reader_segment`** (private, L4237)
+  - Signature: `fn search_expands_on_wide_reader_segment()`
+  - Purpose: Test: wide layout expands search.
+  - Behavior: 1600px layout search_is_compact false.
+
+- **`all_action_groups_show_on_wide_window`** (private, L4245)
+  - Signature: `fn all_action_groups_show_on_wide_window()`
+  - Purpose: Test: wide window shows 3 action groups.
+  - Behavior: visible_action_groups equals 3.
+
+- **`action_groups_drop_as_reader_segment_shrinks`** (private, L4252)
+  - Signature: `fn action_groups_drop_as_reader_segment_shrinks()`
+  - Purpose: Test: action groups drop with width.
+  - Behavior: Shrinking reader segment reduces visible groups.
+
+- **`action_groups_vanish_but_search_survives_when_tiny`** (private, L4269)
+  - Signature: `fn action_groups_vanish_but_search_survives_when_tiny()`
+  - Purpose: Test: tiny segment hides actions, keeps search.
+  - Behavior: Minimum layout still allows search affordance.
+
+- **`sync_layout_shrinks_columns_to_fit`** (private, L4281)
+  - Signature: `fn sync_layout_shrinks_columns_to_fit()`
+  - Purpose: Test: sync_layout reduces column widths.
+  - Behavior: Small window clamps sidebar/list widths.
+
+- **`search_force_expanded_overrides_compact_layout`** (private, L4293)
+  - Signature: `fn search_force_expanded_overrides_compact_layout()`
+  - Purpose: Test: force-expanded overrides compact.
+  - Behavior: show_search_expanded true when flag set.
+
+- **`search_debounce_token_invalidates_previous_timer`** (private, L4303)
+  - Signature: `fn search_debounce_token_invalidates_previous_timer()`
+  - Purpose: Test: debounce token invalidates stale timers.
+  - Behavior: New token makes old token not current.
+
+- **`search_clear_shows_in_expanded_field_only_with_text_on_wide_toolbar`** (private, L4314)
+  - Signature: `fn search_clear_shows_in_expanded_field_only_with_text_on_wide_toolbar()`
+  - Purpose: Test: clear button rules on wide toolbar.
+  - Behavior: Clear visible only with non-empty query unless force-expanded.
+
+- **`search_clear_always_shows_in_force_expanded_compact_field`** (private, L4322)
+  - Signature: `fn search_clear_always_shows_in_force_expanded_compact_field()`
+  - Purpose: Test: force-expanded shows clear even empty.
+  - Behavior: Empty query still shows clear when force-expanded.
+
+- **`search_collapses_after_blur_only_when_compact_expanded_and_empty`** (private, L4330)
+  - Signature: `fn search_collapses_after_blur_only_when_compact_expanded_and_empty()`
+  - Purpose: Test: blur collapse conditions.
+  - Behavior: should_collapse_search_after_blur matches compact+empty rules.
+
+- **`move_to_trash_updates_folder_membership`** (private, L4343)
+  - Signature: `fn move_to_trash_updates_folder_membership()`
+  - Purpose: Test: delete moves message to trash in DB.
+  - Behavior: After delete_message_to_trash, detail shows trash folder.
+
+- **`command_context_reflects_trash_state`** (private, L4358)
+  - Signature: `fn command_context_reflects_trash_state()`
+  - Purpose: Test: command_context trash detection.
+  - Behavior: After trash move, message_in_trash true in context.

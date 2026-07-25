@@ -1,0 +1,105 @@
+# crates/bgmail/src/db_seed.rs
+
+## Purpose
+
+Adapts mock data into `storage` seed records and folder display helpers.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/db_seed.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `db_seed.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+_(None at module top level — conversion helpers only.)_
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`seed_accounts`** (pub, L12)
+  - Signature: `pub fn seed_accounts() -> Vec<SeedAccount>`
+  - Purpose: Builds account and folder seed records for initial SQLite population.
+  - Behavior: Maps `data::sample_accounts()` into `SeedAccount` values, converting each mailbox via `seed_mailbox`.
+
+- **`seed_mailbox`** (private, L23)
+  - Signature: `fn seed_mailbox(mailbox: &Mailbox) -> SeedMailbox`
+  - Purpose: Converts one mock mailbox into a storage seed record.
+  - Behavior: Standard kinds map to `system::*` paths via `seed_system`; custom folders set `custom_name` from `mailbox.label` and leave `system_path` unset.
+
+- **`seed_system`** (private, L39)
+  - Signature: `fn seed_system(path: &'static str, unread: usize) -> SeedMailbox`
+  - Purpose: Builds a seed record for a known system folder path.
+  - Behavior: Sets `system_path: Some(path)`, no custom name, and copies unread count.
+
+- **`seed_messages`** (pub, L48)
+  - Signature: `pub fn seed_messages() -> Vec<SeedMessage>`
+  - Purpose: Builds message seed records from mock sample messages.
+  - Behavior: Assigns all messages to the first sample account email (fallback `you@gmail.com`), preserving sample order as `sort_order`.
+
+- **`seed_message`** (private, L61)
+  - Signature: `fn seed_message(account_email: &str, sort_order: i64, message: &Message) -> SeedMessage`
+  - Purpose: Converts one mock `Message` into a storage seed row.
+  - Behavior: Copies HTML/text raw content and format; derives `plain_text` via `plain_text_from_raw`; uses mock preview or `preview_from_plain` when preview empty; copies metadata flags and leaves `extra_folders` empty.
+
+- **`global_folder_path`** (pub, L92)
+  - Signature: `pub fn global_folder_path(global: GlobalMailbox) -> &'static str`
+  - Purpose: Maps unified sidebar mailboxes to storage system folder paths.
+  - Behavior: Returns `system::INBOX`, `FLAGGED`, `DRAFTS`, or `SENT` for the corresponding `GlobalMailbox` variant.
+
+- **`folder_kind_from_path`** (pub, L102)
+  - Signature: `pub fn folder_kind_from_path(path: &str) -> MailboxKind`
+  - Purpose: Maps stored folder paths back to UI mailbox kinds for icons and localization.
+  - Behavior: Matches known system paths; any other path becomes `MailboxKind::Custom`.
+
+- **`folder_display_name`** (pub, L115)
+  - Signature: `pub fn folder_display_name(path: &str, display_name: &str, language: crate::locale::Language) -> gpui::SharedString`
+  - Purpose: Resolves sidebar folder row labels from storage metadata.
+  - Behavior: Returns non-empty `display_name` when provided; otherwise localized name from `folder_kind_from_path(path)`.
+
+- **`message_body_from_detail`** (pub, L127)
+  - Signature: `pub fn message_body_from_detail(detail: &storage::MessageDetail) -> MessageBody`
+  - Purpose: Converts stored message detail into the UI reader body enum.
+  - Behavior: Wraps `raw_content` as `MessageBody::Html` when `raw_format == "html"`, otherwise `MessageBody::Text`.
+
+- **`seed_messages_match_sample_count`** (private, L140)
+  - Signature: `fn seed_messages_match_sample_count()` (test)
+  - Purpose: Ensures seed message count tracks mock catalog size.
+  - Behavior: Asserts `seed_messages().len()` equals `sample_messages().len()`.
+
+- **`seed_accounts_include_custom_folders`** (private, L145)
+  - Signature: `fn seed_accounts_include_custom_folders()` (test)
+  - Purpose: Verifies custom folders survive account seeding.
+  - Behavior: Finds Work account and asserts a mailbox with custom name "Clients" exists.
+
+- **`plain_text_is_derived_from_html_bodies`** (private, L155)
+  - Signature: `fn plain_text_is_derived_from_html_bodies()` (test)
+  - Purpose: Sanity-checks HTML-to-plain derivation used during seeding.
+  - Behavior: Strips tags from sample HTML and retains visible text content.

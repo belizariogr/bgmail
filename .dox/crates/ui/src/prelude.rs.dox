@@ -1,0 +1,58 @@
+# crates/ui/src/prelude.rs
+
+## Purpose
+
+Convenience re-exports and flex layout helpers.
+
+## Ownership
+
+- Owns: API surface of `crates/ui/src/prelude.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/ui/src/AGENTS.md` and `.dox/crates/ui/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `prelude.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `ui/` / `src/`.
+
+## Verification
+
+- `cargo test -p ui`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **module `prelude`**: Convenience re-exports of GPUI prelude/types,
+  `theme::ActiveTheme`, and core `ui` components (`Button`, `Color`, `Icon`,
+  `IconButton`, `IconName`, `IconSize`, `Label`, `LabelSize`, `ListItem`).
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`h_flex`** (pub, L16)
+  - Signature: `pub fn h_flex() -> Div`
+  - Purpose: Returns a horizontal flex row with vertically centered children.
+  - Behavior: Builds `div().flex().flex_row().items_center()`. Mirrors Zed's
+    `h_flex()` helper.
+
+- **`v_flex`** (pub, L23)
+  - Signature: `pub fn v_flex() -> Div`
+  - Purpose: Returns a vertical flex column container.
+  - Behavior: Builds `div().flex().flex_col()`. Mirrors Zed's `v_flex()` helper.

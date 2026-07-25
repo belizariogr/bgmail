@@ -1,0 +1,84 @@
+# crates/storage/src/seed.rs
+
+## Purpose
+
+First-run seed import helpers.
+
+## Ownership
+
+- Owns: API surface of `crates/storage/src/seed.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/storage/src/AGENTS.md` and `.dox/crates/storage/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `seed.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `storage/` / `src/`.
+
+## Verification
+
+- `cargo test -p storage`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **struct `SeedMailbox`**: Seed input for one folder row — optional system path or custom name, plus unread count hint (stored only in seed metadata, not enforced as live unread totals).
+- **struct `SeedAccount`**: Seed input for one account (name, email, mailbox list).
+- **struct `SeedMessage`**: Seed input for one message row — links to account by email, carries list/reader fields, flags, and optional extra folder paths.
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`seed_if_empty`** (pub, L44)
+  - Signature: `pub fn seed_if_empty(conn: &Connection, accounts: &[SeedAccount], messages: &[SeedMessage]) -> rusqlite::Result<bool>`
+  - Purpose: Idempotent seed entry point for first-run population.
+  - Behavior: Counts accounts; returns `Ok(false)` without writing when count > 0. Otherwise calls `seed` and returns `Ok(true)`.
+
+- **`seed`** (pub, L58)
+  - Signature: `pub fn seed(conn: &Connection, accounts: &[SeedAccount], messages: &[SeedMessage]) -> rusqlite::Result<()>`
+  - Purpose: Bulk-inserts accounts, folders, and messages into an empty database.
+  - Behavior: Runs in one unchecked transaction. Inserts each account and its mailboxes (skips mailboxes with neither system path nor custom name). For each message, resolves account id by email (returns `InvalidParameterName` error if email unknown), builds default inbox + optional flagged + extra folders CSV, computes `search_text`, inserts full message row. Commits on success; rolls back on error.
+
+- **`preview_from_plain`** (pub, L143)
+  - Signature: `pub fn preview_from_plain(plain: &str, max_chars: usize) -> String`
+  - Purpose: Derives a single-line list preview from plain body text.
+  - Behavior: Takes first non-empty line (or whole text if all blank). Trims; returns full line when char count ≤ `max_chars`, otherwise truncates at char boundary and appends `…`.
+
+- **`plain_text_from_raw`** (pub, L162)
+  - Signature: `pub fn plain_text_from_raw(raw: &str, raw_format: &str) -> String`
+  - Purpose: Extracts searchable plain text from stored raw content.
+  - Behavior: When `raw_format == "text"`, returns `raw` unchanged. For HTML, strips tags with a simple state machine (drops chars inside `<…>`), then collapses whitespace to single spaces. Not a full HTML parser.
+
+##### Context: `tests` (`#[cfg(test)]`)
+
+- **`sample_seed`** (private, L187)
+  - Signature: `fn sample_seed() -> (Vec<SeedAccount>, Vec<SeedMessage>)`
+  - Purpose: Builds minimal bilingual/accented seed data for tests.
+  - Behavior: One account with inbox+drafts; two messages (Portuguese HTML body, starred text message). No I/O.
+
+- **`seed_if_empty_populates_database`** (private, L242)
+  - Signature: `fn seed_if_empty_populates_database()`
+  - Purpose: Integration test for idempotent seeding.
+  - Behavior: First `seed_if_empty` returns true and creates 1 account + 2 inbox messages; second call returns false without duplicating.
+
+- **`search_finds_accent_insensitive_match`** (private, L260)
+  - Signature: `fn search_finds_accent_insensitive_match()`
+  - Purpose: End-to-end test linking seed search blobs to list search.
+  - Behavior: Seeds sample data, searches `"portugues"`, expects one hit whose folded subject contains `"ola"`.

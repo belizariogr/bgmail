@@ -1,0 +1,76 @@
+# crates/bgmail/src/command_palette.rs
+
+## Purpose
+
+In-window command palette filter/selection state.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/command_palette.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `command_palette.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **struct `CommandPaletteState`**: Mutable state for the in-window command palette overlay (open flag, query, selection index, search input entity).
+
+#### Functions / methods
+
+##### Context: `CommandPaletteState`
+
+- **`filtered_entries`** (pub, L17)
+  - Signature: `pub fn filtered_entries(&self, language: Language, ctx: &CommandContext) -> Vec<CommandEntry>`
+  - Purpose: Returns palette commands filtered by the current query.
+  - Behavior: Calls `palette_commands` then keeps entries whose label matches `self.query` via `command_matches_query`.
+
+- **`clamp_selection`** (pub, L28)
+  - Signature: `pub fn clamp_selection(&mut self, count: usize)`
+  - Purpose: Keeps `selected_ix` within `[0, count-1]`.
+  - Behavior: Resets to 0 when count is zero; clamps down when index exceeds last entry.
+
+- **`on_query_change`** (pub, L36)
+  - Signature: `pub fn on_query_change(&mut self, query: String)`
+  - Purpose: Updates the filter query and resets selection.
+  - Behavior: Stores query and sets `selected_ix` to 0 so filtering starts from the top.
+
+- **`move_selection`** (pub, L41)
+  - Signature: `pub fn move_selection(&mut self, delta: isize, entry_count: usize) -> bool`
+  - Purpose: Moves highlight up/down by `delta`.
+  - Behavior: Returns false when there are no entries or selection unchanged; otherwise clamps and returns true.
+
+- **`selected_command`** (pub, L55)
+  - Signature: `pub fn selected_command<'a>(&self, entries: &'a [CommandEntry]) -> Option<&'a CommandId>`
+  - Purpose: Returns the command id at the current selection index.
+  - Behavior: Indexes into `entries` at `selected_ix`; None when out of range.
+##### Context: `module (tests)`
+
+- **`selection_clamps_to_last_entry`** (private, L65)
+  - Signature: `fn selection_clamps_to_last_entry()`
+  - Purpose: Test: selection clamps when entry count shrinks.
+  - Behavior: Sets index past end, clamps to 3 entries, expects index 2.

@@ -1,0 +1,106 @@
+# crates/bgmail/src/main.rs
+
+## Purpose
+
+Application entry point, CEF lifecycle, and global action wiring.
+
+## Ownership
+
+- Owns: API surface of `crates/bgmail/src/main.rs`.
+- Does not own: sibling modules or crate-level policy (parent
+  `.dox/crates/bgmail/src/AGENTS.md` and `.dox/crates/bgmail/AGENTS.md`).
+
+## Local Contracts
+
+- Every function/method (and top-level types when they encode contracts) in this
+  file is listed under **API Catalog** with purpose and behavior.
+- Update the matching entry in this `.rs.dox` when changing signatures or
+  semantics. Prefer rustdoc alignment on public items.
+- Visibility in entries (`pub` / `private`) reflects the source item.
+- `#[cfg(test)]` items are included when they encode behavioral contracts.
+
+## Work Guidance
+
+- After adding/removing/renaming a function or type in `main.rs`, update this
+  file in the same change.
+- Do not weaken parent DOX contracts from root / `crates/` / `bgmail/` / `src/`.
+
+## Verification
+
+- `cargo test -p bgmail`
+- Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
+
+## Child DOX Index
+
+_(none)_
+
+## API Catalog
+
+#### Types / constants
+
+- **struct `MainWindow`**: GPUI global holding the `WindowHandle<RootView>` for routing app-wide shortcuts and deferred menu actions.
+- **struct `CommandPaletteShortcut`**: GPUI global keeping the keystroke interceptor subscription alive for the app lifetime.
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`is_command_palette_keystroke`** (private, L56)
+  - Signature: `fn is_command_palette_keystroke(keystroke: &Keystroke) -> bool`
+  - Purpose: Detects Ctrl+P / Cmd+P command-palette shortcut.
+  - Behavior: Matches key P (case-insensitive) without Shift when Control or platform (Cmd) modifier is held.
+
+- **`toggle_command_palette`** (private, L62)
+  - Signature: `fn toggle_command_palette(cx: &mut App)`
+  - Purpose: Defers palette toggle to the main RootView.
+  - Behavior: Reads `MainWindow` global and schedules `RootView::toggle_command_palette` on the next frame.
+
+- **`schedule_menu_command`** (private, L71)
+  - Signature: `fn schedule_menu_command(id: CommandId, cx: &mut App)`
+  - Purpose: Defers a menu command to RootView if enabled.
+  - Behavior: Builds command context, checks `command_enabled`, then calls `execute_command` when allowed.
+
+- **`schedule_compose_action`** (private, L83)
+  - Signature: `fn schedule_compose_action(cx: &mut App, action: impl FnOnce(...) + 'static)`
+  - Purpose: Defers an action on the compose window.
+  - Behavior: Routes closure through `RootView::with_compose_window` when compose is open.
+
+- **`schedule_compose_close`** (private, L95)
+  - Signature: `fn schedule_compose_close(cx: &mut App)`
+  - Purpose: Defers closing the focused auxiliary window.
+  - Behavior: Calls `RootView::close_focused_auxiliary_window` (compose or settings).
+
+- **`register_global_menu_actions`** (private, L105)
+  - Signature: `fn register_global_menu_actions(cx: &mut App)`
+  - Purpose: Registers app-wide action handlers for macOS menu bar.
+  - Behavior: Maps each GPUI action to deferred menu/compose handlers so items stay enabled when webview holds focus.
+
+- **`init_cef_osr`** (private, L140)
+  - Signature: `fn init_cef_osr()`
+  - Purpose: Initializes CEF OSR when feature enabled.
+  - Behavior: With `cef-osr`: calls `cef_osr::initialize` and logs failure. Without feature: no-op.
+
+- **`shutdown_cef_osr`** (private, L151)
+  - Signature: `fn shutdown_cef_osr()`
+  - Purpose: Shuts down CEF after app exit.
+  - Behavior: With `cef-osr`: calls `cef_osr::shutdown_cef`. Without feature: no-op.
+
+- **`app_menus`** (private, L161)
+  - Signature: `fn app_menus() -> Vec<Menu>`
+  - Purpose: Builds initial macOS application menus at startup.
+  - Behavior: Uses default command context and language; full menus refresh from RootView as state changes.
+
+- **`register_command_palette_shortcuts`** (private, L168)
+  - Signature: `fn register_command_palette_shortcuts(cx: &mut App)`
+  - Purpose: Wires command palette toggle action and keystroke interceptor.
+  - Behavior: Registers `ToggleCommandPalette` handler and intercepts Ctrl/Cmd+P globally, stopping propagation.
+
+- **`main`** (private, L181)
+  - Signature: `fn main()`
+  - Purpose: Application entry point.
+  - Behavior: Handles CEF sub-process re-exec, startup milestones, theme/locale init, window open with persisted bounds, Windows cloaked maximize sequence, persistence hooks, globals, and CEF shutdown after `Application::run` returns.
+
+- **`command_palette_shortcut_matches_ctrl_p_and_cmd_p`** (private, L391)
+  - Signature: `fn command_palette_shortcut_matches_ctrl_p_and_cmd_p()`
+  - Purpose: Test: palette shortcut detection.
+  - Behavior: Asserts Ctrl+P, Cmd+P, and uppercase P match; plain P does not.
