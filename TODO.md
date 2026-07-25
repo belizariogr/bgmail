@@ -9,6 +9,10 @@
 - ✅ Create this `TODO.md`
 - ✅ Set up the Cargo workspace + pinned toolchain (`rust-toolchain.toml`)
 - ✅ `.gitignore`
+- ✅ DOX hierarchy: root Child DOX Index + `.dox/` mirrors for `crates/`
+      (theme, ui, storage, rmail), `docs/`, `assets/` (+ icons), `.cargo/`
+- ✅ DOX full source API catalogs under `.dox/crates/*/src/AGENTS.md` (every
+      function/method: purpose + behavior)
 
 ## Stage 1 — Visual mock (current)
 - ✅ `theme` crate: `ThemeColors`, dark theme (VSCode Dark Modern) and light

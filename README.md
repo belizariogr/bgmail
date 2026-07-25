@@ -78,14 +78,16 @@ so GPUI's `xcrun -sdk macosx metal` build step finds the installed toolchain.
 crates/
 ├── theme/   # themes and colors (light/dark)
 ├── ui/      # reusable visual components (Label, Icon, Button, ListItem…)
-└── rmail/   # binary: window, layout (mock), UI state and localization
+├── storage/ # SQLite persistence (mail.db under ~/.config/BGMail/)
+└── rmail/   # binary: window, layout, UI state and localization
 ```
 
 ## Project documentation
 
 - [`docs/PLANEJAMENTO.md`](docs/PLANEJAMENTO.md) — vision, architecture, scope and
   planned features.
-- [`AGENTS.md`](AGENTS.md) — development rules for AI agents and humans.
+- [`AGENTS.md`](AGENTS.md) — development rules and DOX rail for AI agents and humans.
+- [`.dox/`](.dox/) — child DOX contracts per subtree (`crates/`, `docs/`, `assets/`, …).
 - [`TODO.md`](TODO.md) — living implementation progress.
 
 ## License

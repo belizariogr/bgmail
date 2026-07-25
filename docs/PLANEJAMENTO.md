@@ -23,11 +23,10 @@ and lightweight interface.
 
 ## 2. Execution strategy (in parts)
 
-1. **Visual mock (current stage).** Build the full interface with static data to
-   validate the layout and — most importantly — the **startup speed**. No
-   networking, no persistence, no e-mail logic.
-2. **Domain layer.** Models (`Account`, `Mailbox`, `Message`, `Thread`), local
-   storage and a synchronization state machine.
+1. **Visual mock.** Build the full interface with static data to validate the
+   layout and — most importantly — the **startup speed**. Largely complete.
+2. **Domain layer (current).** Models, local storage (`crates/storage`, SQLite)
+   and a synchronization state machine. No networking yet.
 3. **Connectivity.** Generic IMAP/POP3 + SMTP and then **Gmail** (OAuth2).
 4. **E-mail client features.** Read, compose, reply, forward, move, mark, search,
    attachments (full list in section 6).
@@ -56,9 +55,9 @@ testing and shorter incremental compile times.
 | ---------------- | --------------------------------------------------------------------- | ------ |
 | `crates/theme`   | Theme and color definitions (light/dark). Mirrors Zed's `theme`.      | ✅ mock |
 | `crates/ui`      | Component library (`Label`, `Icon`, `Button`, `ListItem`…).           | ✅ mock |
-| `crates/rmail`   | Binary: window, layout, UI state and localization (currently the mock). | ✅ mock |
+| `crates/rmail`   | Binary: window, layout, UI state and localization.       | ✅ mock + SQLite wired |
+| `crates/storage` | Local persistence (SQLite via `rusqlite`, `mail.db`).    | ✅ Stage 2 |
 | `crates/mail_core` *(future)* | Domain models and business rules, no UI dependency.      | ⬜ |
-| `crates/storage` *(future)*   | Local persistence (SQLite via `sqlez`/`rusqlite`).       | ⬜ |
 | `crates/protocols` *(future)* | IMAP/POP3/SMTP/Gmail abstractions behind *traits*.       | ⬜ |
 | `crates/accounts` *(future)*  | Account and credential management (per-platform keychain). | ⬜ |
 

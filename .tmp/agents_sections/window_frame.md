@@ -1,0 +1,345 @@
+### `src/window_frame.rs`
+
+#### Types / constants
+
+- **`MAC_TRAFFIC_LIGHT_CLEARANCE`** (private, L19)
+  - Signature: `const MAC_TRAFFIC_LIGHT_CLEARANCE: f32 = 90.0`
+  - Purpose: Left toolbar inset reserving space for macOS traffic lights.
+  - Behavior: Used by `toolbar_left_padding` on macOS only.
+
+- **`DEFAULT_LEFT_PADDING`** (private, L20)
+  - Signature: `const DEFAULT_LEFT_PADDING: f32 = 12.0`
+  - Purpose: Baseline left toolbar padding on non-macOS platforms.
+  - Behavior: Minimum left padding when no GNOME left-side caption buttons are cached.
+
+- **`WIN_CAPTION_BUTTON_WIDTH`** (private, L22)
+  - Signature: `const WIN_CAPTION_BUTTON_WIDTH: f32 = 46.0`
+  - Purpose: Hit width of each Windows Fluent caption button.
+  - Behavior: Three buttons reserved in `right_controls_reserved_width`.
+
+- **`GTK_CAPTION_SLOT`** (private, L24)
+  - Signature: `const GTK_CAPTION_SLOT: f32 = 36.0`
+  - Purpose: Adwaita/GTK circular caption button slot width.
+  - Behavior: Used in Linux CSD button layout and width calculations.
+
+- **`GTK_CAPTION_GAP`** (private, L25)
+  - Signature: `const GTK_CAPTION_GAP: f32 = 4.0`
+  - Purpose: Spacing between Linux CSD caption buttons.
+  - Behavior: Applied in `caption_side_width` and GTK-style control row gap.
+
+- **`CLIENT_SIDE_SHADOW`** (private, L26)
+  - Signature: `const CLIENT_SIDE_SHADOW: f32 = 10.0`
+  - Purpose: CSD outer shadow/inset and resize hit margin in pixels.
+  - Behavior: Drives client inset, resize edge detection, and shadow padding in `wrap_client_decorations`.
+
+- **`CLIENT_SIDE_ROUNDING`** (private, L27)
+  - Signature: `const CLIENT_SIDE_ROUNDING: f32 = 10.0`
+  - Purpose: Corner radius for client-side decorated windows.
+  - Behavior: Applied to outer/backdrop and inner content unless edge is tiled flush.
+
+- **`CLIENT_SIDE_BORDER`** (private, L28)
+  - Signature: `const CLIENT_SIDE_BORDER: f32 = 1.0`
+  - Purpose: Border thickness for CSD inner frame.
+  - Behavior: Drawn per non-tiled edge inside `wrap_client_decorations`.
+
+- **`CaptionLayout`** (private, L32)
+  - Signature: `struct CaptionLayout { left: Vec<CaptionKind>, right: Vec<CaptionKind> }`
+  - Purpose: Which caption buttons appear on each titlebar side.
+  - Behavior: Parsed from GNOME `button-layout`; cached in `CAPTION_LAYOUT`.
+
+- **`CaptionKind`** (private, L38)
+  - Signature: `enum CaptionKind { Minimize, Maximize, Close }`
+  - Purpose: Logical caption button kinds for layout and rendering.
+  - Behavior: Mapped from gsettings tokens and to UI buttons/actions.
+
+- **`CAPTION_LAYOUT`** (private, L45)
+  - Signature: `static CAPTION_LAYOUT: RwLock<Option<CaptionLayout>>`
+  - Purpose: Process-wide cache of desktop button layout.
+  - Behavior: Populated lazily by `cached_caption_layout` and refreshed via `refresh_caption_layout`.
+
+- **`CaptionWindowControls`** (private, L413)
+  - Signature: `struct CaptionWindowControls { buttons, maximized, gtk_style }`
+  - Purpose: Renders a row of caption buttons for Windows or Linux CSD.
+  - Behavior: Built by `windows()` or `linux()` factories; rendered via `RenderOnce`.
+
+- **`CaptionButton`** (private, L468)
+  - Signature: `struct CaptionButton { kind, gtk_style, index }`
+  - Purpose: Single minimize/maximize/restore/close caption control.
+  - Behavior: Maps to icons, GPUI `WindowControlArea`, and window actions.
+
+- **`CaptionButtonKind`** (private, L475)
+  - Signature: `enum CaptionButtonKind { Minimize, Restore, Maximize, Close }`
+  - Purpose: Concrete button variant including restore state when maximized.
+  - Behavior: Selected in `CaptionWindowControls::render` based on kind and `maximized`.
+
+- **`CaptionAction`** (private, L574)
+  - Signature: `enum CaptionAction { Minimize, Zoom, Close }`
+  - Purpose: Window action triggered by a caption button click.
+  - Behavior: Minimize/zoom/close map to GPUI window APIs and `cx.quit()` for close.
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`main_titlebar_options`** (pub, L47)
+  - Signature: `pub fn main_titlebar_options() -> TitlebarOptions`
+  - Purpose: GPUI titlebar configuration for the transparent main toolbar strip.
+  - Behavior: Sets title "BGMail", transparent appearance, and macOS traffic-light position when applicable.
+
+- **`main_window_decorations`** (pub, L57)
+  - Signature: `pub fn main_window_decorations() -> Option<WindowDecorations>`
+  - Purpose: Requests client-side decorations on Linux/FreeBSD.
+  - Behavior: Returns `Some(WindowDecorations::Client)` on Linux/FreeBSD; `None` elsewhere (native SSD/macOS traffic lights).
+
+- **`traffic_light_position`** (private, L66)
+  - Signature: `fn traffic_light_position() -> Option<gpui::Point<Pixels>>` (macOS)
+  - Purpose: Positions native traffic lights for transparent titlebar.
+  - Behavior: Returns point (12, 16) in pixels.
+
+- **`traffic_light_position`** (private, L71)
+  - Signature: `fn traffic_light_position() -> Option<gpui::Point<Pixels>>` (non-macOS)
+  - Purpose: Stub when native traffic lights are absent.
+  - Behavior: Returns `None`.
+
+- **`toolbar_left_padding`** (pub, L75)
+  - Signature: `pub fn toolbar_left_padding() -> Pixels`
+  - Purpose: Left inset for toolbar content clearing window controls.
+  - Behavior: macOS uses traffic-light clearance; other platforms use default padding (Linux may add left caption width separately via `left_controls_reserved_width`).
+
+- **`right_controls_reserved_width`** (pub, L84)
+  - Signature: `pub fn right_controls_reserved_width() -> Pixels`
+  - Purpose: Toolbar right inset reserving custom caption buttons.
+  - Behavior: Windows reserves three rectangular buttons; Linux/FreeBSD uses cached right-side GTK layout width; zero elsewhere.
+
+- **`left_controls_reserved_width`** (pub, L95)
+  - Signature: `pub fn left_controls_reserved_width() -> Pixels`
+  - Purpose: Toolbar left inset for GNOME-style left-side caption buttons.
+  - Behavior: Non-zero on Linux/FreeBSD from cached left layout; zero on other platforms.
+
+- **`caption_side_width`** (private, L103)
+  - Signature: `fn caption_side_width(buttons: &[CaptionKind]) -> Pixels`
+  - Purpose: Computes horizontal space for a caption button group.
+  - Behavior: Zero when empty; otherwise `n * GTK_CAPTION_SLOT + (n-1) * GTK_CAPTION_GAP`.
+
+- **`uses_custom_caption_buttons`** (private, L111)
+  - Signature: `fn uses_custom_caption_buttons(window: &Window) -> bool`
+  - Purpose: Whether this window draws custom caption controls.
+  - Behavior: True on Windows always; on Linux/FreeBSD when decorations are client-side.
+
+- **`refresh_caption_layout`** (pub, L123)
+  - Signature: `pub fn refresh_caption_layout()`
+  - Purpose: Re-reads GNOME button layout when the main window activates.
+  - Behavior: No-op off Linux/FreeBSD; otherwise shells `gsettings` and updates `CAPTION_LAYOUT` cache.
+
+- **`cached_caption_layout`** (private, L133)
+  - Signature: `fn cached_caption_layout() -> CaptionLayout`
+  - Purpose: Returns cached desktop caption layout, populating on first use.
+  - Behavior: Reads RwLock cache or computes via `linux_caption_layout_from_desktop(None)` and stores result.
+
+- **`linux_caption_layout_from_desktop`** (private, L148)
+  - Signature: `fn linux_caption_layout_from_desktop(controls: Option<WindowControls>) -> CaptionLayout`
+  - Purpose: Builds Linux CSD caption layout from gsettings and desktop heuristics.
+  - Behavior: Parses `button-layout` when available; GNOME-like fallback close-only; KDE-style full trio otherwise; optional compositor capability filtering.
+
+- **`filter_layout_by_controls`** (private, L174)
+  - Signature: `fn filter_layout_by_controls(layout: &mut CaptionLayout, controls: WindowControls)`
+  - Purpose: Removes caption buttons unsupported by the compositor.
+  - Behavior: Retains minimize/maximize only when reported available; close always kept.
+
+- **`parse_button_layout`** (private, L185)
+  - Signature: `fn parse_button_layout(raw: &str) -> CaptionLayout`
+  - Purpose: Parses GNOME `button-layout` string (`left:right`).
+  - Behavior: Trims quotes; splits on `:`; parses comma-separated sides via `parse_button_side`.
+
+- **`parse_button_side`** (private, L197)
+  - Signature: `fn parse_button_side(side: &str) -> Vec<CaptionKind>`
+  - Purpose: Parses one side of a button-layout string.
+  - Behavior: Maps `minimize`, `maximize`, `close` tokens; ignores unknown tokens like `appmenu`.
+
+- **`is_gnome_like_desktop`** (private, L208)
+  - Signature: `fn is_gnome_like_desktop() -> bool`
+  - Purpose: Detects GNOME/Unity/COSMIC desktops for layout defaults.
+  - Behavior: Checks `XDG_CURRENT_DESKTOP` colon-separated parts case-insensitively.
+
+- **`read_gnome_button_layout`** (private, L220)
+  - Signature: `fn read_gnome_button_layout() -> Option<String>`
+  - Purpose: Reads `org.gnome.desktop.wm.preferences button-layout` via gsettings.
+  - Behavior: Returns trimmed stdout on success; `None` on failure or empty output.
+
+- **`render_right_window_controls`** (pub, L237)
+  - Signature: `pub fn render_right_window_controls(window: &mut Window) -> Option<AnyElement>`
+  - Purpose: Builds right-side caption controls when needed.
+  - Behavior: Returns `None` when custom captions unused; Windows full trio; Linux right-side layout from `linux_layout_for_window`.
+
+- **`render_left_window_controls`** (pub, L252)
+  - Signature: `pub fn render_left_window_controls(window: &mut Window) -> Option<AnyElement>`
+  - Purpose: Builds left-side caption controls for GNOME layouts like `close:minimize,maximize`.
+  - Behavior: Linux/FreeBSD client-decorated windows only; `None` when left layout empty.
+
+- **`linux_layout_for_window`** (private, L266)
+  - Signature: `fn linux_layout_for_window(window: &Window) -> CaptionLayout`
+  - Purpose: Combines cached gsettings layout with live compositor restrictions.
+  - Behavior: Starts from cache; when Wayland reports min/max unavailable, filters via `filter_layout_by_controls`.
+
+- **`wrap_client_decorations`** (pub, L280)
+  - Signature: `pub fn wrap_client_decorations(content: AnyElement, window: &mut Window, border_color: Hsla) -> AnyElement`
+  - Purpose: Wraps main UI in Zed-style CSD chrome (shadow, border, resize handles).
+  - Behavior: No-op for server-side decorations. For client decorations, sets client inset, draws resize hit canvas with cursor changes, handles edge resize on mouse down, and nests bordered/shadowed rounded content respecting tiling flags.
+
+- **`resize_edge`** (private, L380)
+  - Signature: `fn resize_edge(pos: Point<Pixels>, shadow_size: Pixels, size: Size<Pixels>) -> Option<ResizeEdge>`
+  - Purpose: Hit-tests pointer position against CSD resize margins.
+  - Behavior: Checks corners first within `shadow_size` band, then edges; returns `None` in interior.
+
+- **`cursor_for_resize_edge`** (private, L403)
+  - Signature: `fn cursor_for_resize_edge(edge: ResizeEdge) -> CursorStyle`
+  - Purpose: Maps resize edge to GPUI cursor style.
+  - Behavior: Vertical, horizontal, or diagonal resize cursors per edge enum.
+
+- **`main_titlebar_keeps_macos_traffic_lights_only_on_macos`** (private, L638)
+  - Signature: `fn main_titlebar_keeps_macos_traffic_lights_only_on_macos()` (test)
+  - Purpose: Validates titlebar options per platform.
+  - Behavior: Asserts transparent title and BGMail title; traffic-light position only on macOS.
+
+- **`toolbar_padding_reserves_space_for_macos_traffic_lights_only`** (private, L652)
+  - Signature: `fn toolbar_padding_reserves_space_for_macos_traffic_lights_only()` (test)
+  - Purpose: Checks left padding platform behavior.
+  - Behavior: macOS equals clearance constant; elsewhere at least default padding.
+
+- **`main_window_requests_client_decorations_on_linux`** (private, L664)
+  - Signature: `fn main_window_requests_client_decorations_on_linux()` (test)
+  - Purpose: Ensures Linux/FreeBSD request client decorations.
+  - Behavior: Compares `main_window_decorations()` to `Some(Client)` on those targets.
+
+- **`right_controls_reserve_width_on_windows`** (private, L674)
+  - Signature: `fn right_controls_reserve_width_on_windows()` (test)
+  - Purpose: Validates reserved caption width on Windows/macOS.
+  - Behavior: Windows equals three button widths; macOS zero.
+
+- **`parse_button_layout_gnome_close_only`** (private, L685)
+  - Signature: `fn parse_button_layout_gnome_close_only()` (test)
+  - Purpose: Parses GNOME default close-only layout.
+  - Behavior: `:close` yields empty left and single Close on right.
+
+- **`parse_button_layout_full_right`** (private, L692)
+  - Signature: `fn parse_button_layout_full_right()` (test)
+  - Purpose: Parses standard right-side trio layout.
+  - Behavior: Expects minimize, maximize, close on right with empty left.
+
+- **`parse_button_layout_close_on_left`** (private, L706)
+  - Signature: `fn parse_button_layout_close_on_left()` (test)
+  - Purpose: Parses split left/right caption layout.
+  - Behavior: Close on left; minimize and maximize on right.
+
+- **`parse_button_layout_ignores_menu_and_appmenu`** (private, L716)
+  - Signature: `fn parse_button_layout_ignores_menu_and_appmenu()` (test)
+  - Purpose: Ensures unknown layout tokens are ignored.
+  - Behavior: `appmenu:minimize,maximize,close` yields three right buttons and empty left.
+
+- **`filter_layout_hides_unavailable_min_max`** (private, L723)
+  - Signature: `fn filter_layout_hides_unavailable_min_max()` (test)
+  - Purpose: Verifies compositor capability filtering.
+  - Behavior: When min/max unavailable, only Close remains.
+
+- **`caption_side_width_scales_with_button_count`** (private, L738)
+  - Signature: `fn caption_side_width_scales_with_button_count()` (test)
+  - Purpose: Ensures width grows with button count.
+  - Behavior: Empty side zero; two buttons wider than one.
+
+- **`caption_buttons_map_to_explicit_actions`** (private, L746)
+  - Signature: `fn caption_buttons_map_to_explicit_actions()` (test)
+  - Purpose: Validates caption button action mapping.
+  - Behavior: Minimize→Minimize, maximize/restore→Zoom, close→Close.
+
+- **`caption_buttons_map_to_native_control_areas`** (private, L754)
+  - Signature: `fn caption_buttons_map_to_native_control_areas()` (test)
+  - Purpose: Validates GPUI native control area mapping.
+  - Behavior: Min→Min, max/restore→Max, close→Close.
+
+- **`resize_edge_detects_corners_and_sides`** (private, L774)
+  - Signature: `fn resize_edge_detects_corners_and_sides()` (test)
+  - Purpose: Spot-checks resize hit testing.
+  - Behavior: Corner maps to TopLeft; interior None; top edge detected mid-width.
+
+##### Context: `CaptionWindowControls`
+
+- **`windows`** (private, L421)
+  - Signature: `fn windows(maximized: bool) -> Self`
+  - Purpose: Factory for Windows Fluent caption strip.
+  - Behavior: Fixed minimize/maximize/close order, rectangular style (`gtk_style: false`).
+
+- **`linux`** (private, L433)
+  - Signature: `fn linux(buttons: Vec<CaptionKind>, maximized: bool) -> Self`
+  - Purpose: Factory for Linux Adwaita-style caption row.
+  - Behavior: Uses provided button list and circular GTK styling.
+
+##### Context: `RenderOnce for CaptionWindowControls`
+
+- **`render`** (private, L443)
+  - Signature: `fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement`
+  - Purpose: Renders horizontal caption button row.
+  - Behavior: Builds flex row; adds GTK gap/padding when `gtk_style`; chooses restore vs maximize icon when maximized; assigns stable ids per index.
+
+##### Context: `CaptionButton`
+
+- **`minimize`** (private, L483)
+  - Signature: `fn minimize() -> Self`
+  - Purpose: Builder for minimize caption button.
+  - Behavior: Sets `CaptionButtonKind::Minimize`.
+
+- **`restore`** (private, L491)
+  - Signature: `fn restore() -> Self`
+  - Purpose: Builder for restore (un-maximize) caption button.
+  - Behavior: Sets `CaptionButtonKind::Restore`.
+
+- **`maximize`** (private, L499)
+  - Signature: `fn maximize() -> Self`
+  - Purpose: Builder for maximize caption button.
+  - Behavior: Sets `CaptionButtonKind::Maximize`.
+
+- **`close`** (private, L507)
+  - Signature: `fn close() -> Self`
+  - Purpose: Builder for close caption button.
+  - Behavior: Sets `CaptionButtonKind::Close`.
+
+- **`with_style`** (private, L515)
+  - Signature: `fn with_style(mut self, gtk_style: bool) -> Self`
+  - Purpose: Selects GTK circular vs Windows rectangular styling.
+  - Behavior: Sets `gtk_style` flag on builder.
+
+- **`with_index`** (private, L520)
+  - Signature: `fn with_index(mut self, index: usize) -> Self`
+  - Purpose: Assigns stable index for element id disambiguation.
+  - Behavior: Stores index used by `id()`.
+
+- **`id`** (private, L525)
+  - Signature: `fn id(self) -> SharedString`
+  - Purpose: Stable GPUI element id for a caption button.
+  - Behavior: Formats `"{kind}-{index}"` (minimize, restore, maximize, close).
+
+- **`icon`** (private, L539)
+  - Signature: `fn icon(self) -> IconName`
+  - Purpose: Icon for the caption button kind.
+  - Behavior: WindowMinimize/Restore/Maximize icons; Close uses Clear icon.
+
+- **`action`** (private, L548)
+  - Signature: `fn action(self) -> CaptionAction`
+  - Purpose: Window action associated with the button.
+  - Behavior: Minimize→Minimize; Restore/Maximize→Zoom; Close→Close.
+
+- **`control_area`** (private, L556)
+  - Signature: `fn control_area(self) -> WindowControlArea`
+  - Purpose: Native window control hit region for the platform shell.
+  - Behavior: Maps actions to Min/Max/Close `WindowControlArea` values.
+
+- **`activate`** (private, L564)
+  - Signature: `fn activate(self, window: &mut Window, cx: &mut App)`
+  - Purpose: Executes caption button click behavior.
+  - Behavior: Minimize calls `minimize_window`; Zoom calls `zoom_window`; Close calls `cx.quit()`.
+
+##### Context: `RenderOnce for CaptionButton`
+
+- **`render`** (private, L581)
+  - Signature: `fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement`
+  - Purpose: Draws one caption button with hover and native control area.
+  - Behavior: Close button hovers error color; others use element hover. GTK style uses circular compact target; Windows style uses full-height rectangular strip. Registers `window_control_area` and click handler calling `activate`.

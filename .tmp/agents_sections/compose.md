@@ -1,0 +1,196 @@
+### `src/compose.rs`
+
+#### Types / constants
+
+- **`COMPOSE_DEFAULT_WIDTH`** (pub, L23)
+  - Signature: `pub const COMPOSE_DEFAULT_WIDTH: f32 = 790.0`
+  - Purpose: Default compose window width in logical pixels on first open.
+  - Behavior: Used by `Config::default` and clamped upward by `clamp_compose_size`.
+
+- **`COMPOSE_DEFAULT_HEIGHT`** (pub, L25)
+  - Signature: `pub const COMPOSE_DEFAULT_HEIGHT: f32 = 720.0`
+  - Purpose: Default compose window height in logical pixels on first open.
+  - Behavior: Persisted in config defaults and respected unless below minimum height.
+
+- **`COMPOSE_MIN_WIDTH`** (pub, L27)
+  - Signature: `pub const COMPOSE_MIN_WIDTH: f32 = 480.0`
+  - Purpose: Minimum allowed compose window width.
+  - Behavior: Enforced by `clamp_compose_size` when restoring saved sizes.
+
+- **`COMPOSE_MIN_HEIGHT`** (pub, L29)
+  - Signature: `pub const COMPOSE_MIN_HEIGHT: f32 = 400.0`
+  - Purpose: Minimum allowed compose window height.
+  - Behavior: Enforced by `clamp_compose_size` when restoring saved sizes.
+
+- **`COMPOSE_POSITION_UNSET`** (pub, L33)
+  - Signature: `pub const COMPOSE_POSITION_UNSET: f32 = -1.0`
+  - Purpose: Sentinel coordinate stored in config when the compose window has never been placed.
+  - Behavior: Negative x/y values cause `open_bounds` to center the window instead of using saved origin.
+
+- **`FIELD_LABEL_WIDTH`** (private, L65)
+  - Signature: `const FIELD_LABEL_WIDTH: f32 = 72.0`
+  - Purpose: Fixed width of the From/To/Cc/Subject label column in pixels.
+  - Behavior: Applied in `field_row` and the To row so header rows align visually.
+
+- **`ComposeView`** (pub, L68)
+  - Signature: `pub struct ComposeView { accounts, from_account, show_cc_bcc, root, last_reported_bounds, white_background }`
+  - Purpose: GPUI entity rendering the standalone new-message window (visual mock).
+  - Behavior: Holds mock field state, a weak link to `RootView` for bounds persistence and close notification, cached white-background preference, and defers bounds sync to avoid re-entrancy during render.
+
+#### Functions / methods
+
+##### Context: `module`
+
+- **`open_bounds`** (pub, L38)
+  - Signature: `pub fn open_bounds(origin: Point<gpui::Pixels>, window_size: Size<gpui::Pixels>, cx: &App) -> Bounds<gpui::Pixels>`
+  - Purpose: Computes initial window bounds from persisted compose geometry.
+  - Behavior: Clamps size via `clamp_compose_size`. When `compose_position_is_unset(origin)`, returns centered bounds; otherwise uses the saved origin with clamped size.
+
+- **`clamp_compose_size`** (pub, L52)
+  - Signature: `pub fn clamp_compose_size(window_size: Size<gpui::Pixels>) -> Size<gpui::Pixels>`
+  - Purpose: Ensures stored compose dimensions meet minimum width/height.
+  - Behavior: Takes the max of each dimension with `COMPOSE_MIN_WIDTH` / `COMPOSE_MIN_HEIGHT`.
+
+- **`compose_position_is_unset`** (pub, L60)
+  - Signature: `pub fn compose_position_is_unset(origin: Point<gpui::Pixels>) -> bool`
+  - Purpose: Detects whether persisted coordinates mean "center on first open".
+  - Behavior: Returns true when either x or y converts to a negative `f32`.
+
+- **`compose_body_colors`** (private, L363)
+  - Signature: `fn compose_body_colors(white_background: bool) -> (Option<Hsla>, Color)`
+  - Purpose: Chooses compose body background and placeholder colors, mirroring the reader.
+  - Behavior: When `white_background` is true, returns white fill plus a custom mid-gray placeholder; otherwise transparent background with `Color::Disabled` placeholder.
+
+- **`window_title`** (pub, L425)
+  - Signature: `pub fn window_title(language: Language) -> &'static str`
+  - Purpose: Localized window title for compose windows.
+  - Behavior: Resolves `Key::ComposeWindowTitle` for the given language.
+
+- **`compose_body_uses_white_background_when_reader_pref_is_on`** (private, L436)
+  - Signature: `fn compose_body_uses_white_background_when_reader_pref_is_on()` (test)
+  - Purpose: Verifies white-background color mapping for compose body.
+  - Behavior: Asserts `compose_body_colors(true)` yields a background and `compose_body_colors(false)` yields none with disabled placeholder color.
+
+- **`clamp_compose_size_enforces_minimums`** (private, L445)
+  - Signature: `fn clamp_compose_size_enforces_minimums()` (test)
+  - Purpose: Ensures undersized stored dimensions are raised to minimums.
+  - Behavior: Clamps 100×200 to `COMPOSE_MIN_WIDTH` × `COMPOSE_MIN_HEIGHT`.
+
+- **`clamp_compose_size_leaves_large_sizes_unchanged`** (private, L452)
+  - Signature: `fn clamp_compose_size_leaves_large_sizes_unchanged()` (test)
+  - Purpose: Ensures sizes above minimums pass through unchanged.
+  - Behavior: Clamps 900×800 and expects identical output.
+
+- **`compose_position_unset_detects_negative_coordinates`** (private, L459)
+  - Signature: `fn compose_position_unset_detects_negative_coordinates()` (test)
+  - Purpose: Covers sentinel and normal coordinate detection.
+  - Behavior: Negative x or y is unset; (0, 0) is considered set.
+
+- **`window_title_is_localized`** (private, L469)
+  - Signature: `fn window_title_is_localized()` (test)
+  - Purpose: Checks English and Portuguese compose titles.
+  - Behavior: Expects "New Message" and "Nova mensagem".
+
+- **`new_view_defaults_to_first_account_and_hidden_cc_bcc`** (private, L475)
+  - Signature: `fn new_view_defaults_to_first_account_and_hidden_cc_bcc()` (test)
+  - Purpose: Validates initial `ComposeView` state with sample accounts.
+  - Behavior: Expects `from_account == 0`, hidden Cc/Bcc, and first account email as From address.
+
+- **`selected_from_address_is_empty_without_accounts`** (private, L484)
+  - Signature: `fn selected_from_address_is_empty_without_accounts()` (test)
+  - Purpose: Ensures empty account list yields empty From address.
+  - Behavior: Constructs view with no accounts and expects `""`.
+
+- **`toggle_cc_bcc_flips_visibility`** (private, L490)
+  - Signature: `fn toggle_cc_bcc_flips_visibility()` (test)
+  - Purpose: Documents expected toggle semantics (logic-only test).
+  - Behavior: Flips a boolean twice to assert show/hide behavior pattern.
+
+- **`cycle_from_account_wraps`** (private, L499)
+  - Signature: `fn cycle_from_account_wraps()` (test)
+  - Purpose: Documents wrap-around account cycling (logic-only test).
+  - Behavior: Increments from last index modulo account count expecting index 0.
+
+##### Context: `ComposeView`
+
+- **`new`** (pub, L88)
+  - Signature: `pub fn new(accounts: Vec<Account>, root: WeakEntity<RootView>, white_background: bool) -> Self`
+  - Purpose: Creates a compose view seeded with accounts and preferences.
+  - Behavior: Initializes first account selected, Cc/Bcc hidden, no reported bounds, and stores the weak root handle plus white-background flag.
+
+- **`set_white_background`** (pub(crate), L100)
+  - Signature: `pub(crate) fn set_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
+  - Purpose: Applies white-compose preference pushed from the main view without reading `RootView` during render.
+  - Behavior: Updates cached flag and calls `cx.notify()` only when the value changes.
+
+- **`toggle_cc_bcc`** (private, L108)
+  - Signature: `fn toggle_cc_bcc(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Shows or hides Cc and Bcc header rows.
+  - Behavior: Flips `show_cc_bcc` and notifies for re-render.
+
+- **`cycle_from_account`** (private, L114)
+  - Signature: `fn cycle_from_account(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Mock From-account selector cycling through available accounts.
+  - Behavior: No-op when `accounts` is empty; otherwise increments index modulo length and notifies.
+
+- **`send_message`** (pub(crate), L123)
+  - Signature: `pub(crate) fn send_message(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Placeholder send action until the domain layer exists.
+  - Behavior: Intentionally empty (ignores `cx`).
+
+- **`attach_file`** (pub(crate), L128)
+  - Signature: `pub(crate) fn attach_file(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Placeholder attach action until a file picker exists.
+  - Behavior: Intentionally empty (ignores `cx`).
+
+- **`discard_draft`** (pub(crate), L133)
+  - Signature: `pub(crate) fn discard_draft(&mut self, window: &mut Window, cx: &mut Context<Self>)`
+  - Purpose: Mock discard that closes the compose window.
+  - Behavior: Delegates to `close_window`.
+
+- **`close_window`** (pub(crate), L138)
+  - Signature: `pub(crate) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>)`
+  - Purpose: Closes the compose window and notifies the main view.
+  - Behavior: Defers work: upgrades `root` to call `on_compose_window_closed`, then removes the window. Avoids synchronous root updates during close handling.
+
+- **`sync_menus_if_active`** (private, L150)
+  - Signature: `fn sync_menus_if_active(&self, window: &Window, language: Language, cx: &mut Context<Self>)`
+  - Purpose: Keeps the global menu bar on the compose surface when this window is active.
+  - Behavior: Calls `app_menus::sync_compose_menus` when `window.is_window_active()`.
+
+- **`selected_from_address`** (private, L156)
+  - Signature: `fn selected_from_address(&self) -> &str`
+  - Purpose: Returns the email of the currently selected From account.
+  - Behavior: Looks up `accounts[from_account]` email or returns empty string.
+
+- **`render_toolbar`** (private, L163)
+  - Signature: `fn render_toolbar(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement`
+  - Purpose: Builds the bottom toolbar (discard, attach, send).
+  - Behavior: Renders bordered row with trash icon (discard), flexible spacer, attachment icon, and filled Send button wired to mock handlers.
+
+- **`render_header`** (private, L206)
+  - Signature: `fn render_header(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement`
+  - Purpose: Builds the compose header fields (From, To, optional Cc/Bcc, Subject).
+  - Behavior: From row cycles accounts on click; To row shows placeholder and Cc/Bcc toggle; optional Cc/Bcc rows and Subject row use `field_row`. Uses theme border and muted label colors.
+
+- **`cc_bcc_toggle`** (private, L288)
+  - Signature: `fn cc_bcc_toggle(&self, language: Language, text_color: Hsla, hover_bg: Hsla, cx: &mut Context<Self>) -> impl IntoElement`
+  - Purpose: Compact Cc/Bcc toggle aligned with 12px field rows.
+  - Behavior: Renders localized label with hover background, stops mouse-down propagation, and toggles Cc/Bcc visibility on click.
+
+- **`field_row`** (private, L312)
+  - Signature: `fn field_row(&self, label: &'static str, placeholder: impl Into<SharedString>, value_slot: Option<impl IntoElement>, border: Hsla) -> impl IntoElement`
+  - Purpose: One labeled header row with optional interactive value slot.
+  - Behavior: Fixed-width muted label, bottom border, and either a custom value element or disabled placeholder label.
+
+- **`render_body`** (private, L352)
+  - Signature: `fn render_body(&self, language: Language, white_background: bool) -> impl IntoElement`
+  - Purpose: Builds the message body placeholder area.
+  - Behavior: Flex-grow region with optional white background and localized body placeholder text.
+
+##### Context: `Render for ComposeView`
+
+- **`render`** (private, L380)
+  - Signature: `fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement`
+  - Purpose: Renders the full compose window and wires actions/menus/bounds sync.
+  - Behavior: When windowed bounds change, defers `root.sync_compose_window_bounds`. Syncs compose menus if active. Builds vertical layout with header, body, toolbar; registers `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, and `ComposeClose` actions.
