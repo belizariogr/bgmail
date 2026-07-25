@@ -3,7 +3,7 @@
 use gpui::{actions, Action, SharedString};
 
 actions!(
-    rmail,
+    bgmail,
     [
         Quit,
         ToggleCommandPalette,
@@ -25,7 +25,7 @@ actions!(
 
 /// Moves the selected message to a folder identified by its storage path.
 #[derive(Clone, PartialEq, Eq, Debug, Action)]
-#[action(namespace = rmail, no_json)]
+#[action(namespace = bgmail, no_json)]
 pub struct MoveMessageToFolder {
     pub path: SharedString,
 }

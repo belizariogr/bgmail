@@ -4,7 +4,7 @@ members = [
     "crates/theme",
     "crates/ui",
     "crates/storage",
-    "crates/rmail",
+    "crates/bgmail",
 ]
 
 [workspace.package]

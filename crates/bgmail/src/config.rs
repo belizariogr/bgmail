@@ -277,7 +277,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "rmail-config-test-{}-{nanos}.json",
+            "bgmail-config-test-{}-{nanos}.json",
             std::process::id()
         ))
     }

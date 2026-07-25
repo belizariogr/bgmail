@@ -11,7 +11,7 @@ No GPUI, no network.
 - Owns: SQLite schema/migrations version, `Database` API, folder path helpers
   (`sys:` / `user:`), message list/detail queries, move/star/folder ops, search
   text folding, `seed` / `seed_if_empty`.
-- Does not own: UI selection/state (`rmail`), future sync/protocol crates,
+- Does not own: UI selection/state (`bgmail`), future sync/protocol crates,
   credentials/keychain (future `accounts`).
 
 ## Local Contracts
@@ -28,12 +28,12 @@ No GPUI, no network.
 - Search: build/fold `search_text` for accent-insensitive matching; keep logic
   in `search.rs` with tests.
 - Seeding: `seed_if_empty` only populates an empty DB; mock content comes from
-  callers (`rmail` seed adapters), not hardcoded UI strings here.
+  callers (`bgmail` seed adapters), not hardcoded UI strings here.
 - Dependency rule: no `gpui`, `ui`, or `theme`.
 
 ## Work Guidance
 
-- Prefer extending `Database` methods over ad-hoc SQL in `rmail`.
+- Prefer extending `Database` methods over ad-hoc SQL in `bgmail`.
 - Every new query/mutation gets unit tests (tempfile DB).
 - Networking/sync state machine stays out of this crate until Stage 2 design
   lands it elsewhere (or a dedicated module with a clear API).

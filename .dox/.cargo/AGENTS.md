@@ -16,7 +16,7 @@ overrides) without scattering platform hacks into crate sources.
 - `TOOLCHAINS=com.apple.dt.toolchain.Metal` so GPUI's Metal shader build finds
   Xcode 26+'s unbundled Metal Toolchain. Harmless/ignored on non-macOS.
 - Keep overrides minimal and documented; prefer crate-level features for
-  optional runtime deps (e.g. `rmail`'s `cef-osr`).
+  optional runtime deps (e.g. `bgmail`'s `cef-osr`).
 - Do not commit machine-local absolute paths or secrets here.
 
 ## Work Guidance
@@ -28,7 +28,7 @@ overrides) without scattering platform hacks into crate sources.
 
 ## Verification
 
-- `cargo build -p rmail` succeeds on supported hosts after documented setup.
+- `cargo build -p bgmail` succeeds on supported hosts after documented setup.
 
 ## Child DOX Index
 

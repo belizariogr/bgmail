@@ -26,7 +26,7 @@ Requires the Rust toolchain defined in `rust-toolchain.toml` (installed
 automatically by `rustup`).
 
 ```bash
-cargo run -p rmail        # opens the visual prototype
+cargo run -p bgmail        # opens the visual prototype
 cargo test --workspace    # runs the tests
 cargo clippy --workspace  # lint
 ```
@@ -54,7 +54,7 @@ sudo apt install libnss3 libnspr4 libgbm1 libasound2 libxkbcommon0 libgtk-3-0
 ```
 
 To build without the HTML reader (plain-text reader only):
-`cargo run -p rmail --no-default-features`.
+`cargo run -p bgmail --no-default-features`.
 
 CEF re-executes the BGMail binary for its own sub-processes (renderer, GPU,
 utility); this is handled automatically at startup and those processes exit on
@@ -79,7 +79,7 @@ crates/
 ├── theme/   # themes and colors (light/dark)
 ├── ui/      # reusable visual components (Label, Icon, Button, ListItem…)
 ├── storage/ # SQLite persistence (mail.db under ~/.config/BGMail/)
-└── rmail/   # binary: window, layout, UI state and localization
+└── bgmail/   # binary: window, layout, UI state and localization
 ```
 
 ## Project documentation

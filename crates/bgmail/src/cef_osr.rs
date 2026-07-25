@@ -700,7 +700,7 @@ fn persist_temp_file(extension: &str, bytes: &[u8]) -> Option<std::path::PathBuf
         .ok()?
         .as_nanos();
     let mut path = std::env::temp_dir();
-    path.push(format!("rmail-image-{nanos}.{extension}"));
+    path.push(format!("bgmail-image-{nanos}.{extension}"));
     std::fs::write(&path, bytes).ok()?;
     Some(path)
 }

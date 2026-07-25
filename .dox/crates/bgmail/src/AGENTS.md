@@ -1,13 +1,13 @@
-# crates/rmail/src/ — Source API
+# crates/bgmail/src/ — Source API
 
 ## Purpose
 
-Source for the `rmail` binary: app entry, views, webview/CEF, locale, config, and OS helpers.
+Source for the `bgmail` binary: app entry, views, webview/CEF, locale, config, and OS helpers.
 
 ## Ownership
 
-- Owns: All modules under `crates/rmail/src/`.
-- Does not own: crate-level dependency/feature policy (parent `.dox/crates/rmail/AGENTS.md`).
+- Owns: All modules under `crates/bgmail/src/`.
+- Does not own: crate-level dependency/feature policy (parent `.dox/crates/bgmail/AGENTS.md`).
 
 ## Local Contracts
 
@@ -21,11 +21,11 @@ Source for the `rmail` binary: app entry, views, webview/CEF, locale, config, an
 
 - After adding/removing/renaming a function, update this catalog in the same
   change.
-- Do not weaken parent DOX contracts from root/`crates/`/`rmail/`.
+- Do not weaken parent DOX contracts from root/`crates/`/`bgmail/`.
 
 ## Verification
 
-- `cargo test -p rmail`
+- `cargo test -p bgmail`
 - Workspace `fmt` / `clippy -D warnings` as required by root `AGENTS.md`.
 
 ## Child DOX Index
@@ -40,7 +40,7 @@ _624 functions/methods documented._
 
 #### Types / constants
 
-- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`**: GPUI action types declared via the `actions!` macro under the `rmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
+- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
 - **struct `MoveMessageToFolder`**: Parameterized action carrying a folder storage path (`path: SharedString`). Dispatched when the user picks a move target from menus or the command palette.
 
 #### Functions / methods
@@ -241,7 +241,7 @@ _(No functions — only action types.)_
 - **`persist_temp_file`** (private, L696)
   - Signature: `fn persist_temp_file(extension: &str, bytes: &[u8]) -> Option<std::path::PathBuf>`
   - Purpose: Materializes inline image bytes to a uniquely named temp file for OS viewing.
-  - Behavior: Builds `rmail-image-{nanos}.{extension}` in the system temp dir, writes bytes, returns path on success; `None` on clock or I/O failure.
+  - Behavior: Builds `bgmail-image-{nanos}.{extension}` in the system temp dir, writes bytes, returns path on success; `None` on clock or I/O failure.
 - **`ipc_shim_script`** (private, L713)
   - Signature: `fn ipc_shim_script() -> String`
   - Purpose: Builds the inline script that defines `window.ipc.postMessage` via prefixed `console.log`.

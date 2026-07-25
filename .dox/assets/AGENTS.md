@@ -8,7 +8,7 @@ metadata leftovers, and the application icon.
 ## Ownership
 
 - Owns: shared files under `assets/` (icons, fonts, appIcon).
-- Does not own: rmail sample e-mail fixtures (`crates/rmail/assets/`), runtime
+- Does not own: bgmail sample e-mail fixtures (`crates/bgmail/assets/`), runtime
   embedding glue (`crates/ui/src/assets.rs`).
 
 ## Local Contracts
@@ -29,7 +29,7 @@ metadata leftovers, and the application icon.
 ## Verification
 
 - Visual/manual: icons tint and share a consistent square footprint.
-- `ui`/`rmail` tests that touch icon or fixture loading continue to pass.
+- `ui`/`bgmail` tests that touch icon or fixture loading continue to pass.
 
 ## Child DOX Index
 

@@ -1,4 +1,4 @@
-# crates/rmail/ — Application binary
+# crates/bgmail/ — Application binary
 
 ## Purpose
 
@@ -17,7 +17,7 @@ localization, settings/compose, HTML reader (CEF OSR), and wiring to `storage`.
 ## Local Contracts
 
 - Binary name is `BGMail` (menu title on unbundled macOS). Package crate name
-  remains `rmail`.
+  is `bgmail`.
 - Default feature `cef-osr` enables CEF windowless HTML reader; plain-text
   fallback with `--no-default-features`.
 - **Modules (flat under `src/`):**
@@ -51,14 +51,14 @@ localization, settings/compose, HTML reader (CEF OSR), and wiring to `storage`.
 
 ## Verification
 
-- `cargo test -p rmail` (sanitize, config, locale, layout helpers, IPC parsers,
+- `cargo test -p bgmail` (sanitize, config, locale, layout helpers, IPC parsers,
   …).
-- `cargo run -p rmail` (and `--no-default-features` for text-only reader).
+- `cargo run -p bgmail` (and `--no-default-features` for text-only reader).
 - Workspace `fmt` / `clippy -D warnings` / `test --workspace`.
 
 ## Child DOX Index
 
 | Scope | Doc | Owns |
 |---|---|---|
-| `crates/rmail/src/` | [`.dox/crates/rmail/src/AGENTS.md`](src/AGENTS.md) | Full API catalog (every fn/method in the binary) |
-| `crates/rmail/assets/` | [`.dox/crates/rmail/assets/AGENTS.md`](assets/AGENTS.md) | Bundled sample e-mails and reader fixture images |
+| `crates/bgmail/src/` | [`.dox/crates/bgmail/src/AGENTS.md`](src/AGENTS.md) | Full API catalog (every fn/method in the binary) |
+| `crates/bgmail/assets/` | [`.dox/crates/bgmail/assets/AGENTS.md`](assets/AGENTS.md) | Bundled sample e-mails and reader fixture images |

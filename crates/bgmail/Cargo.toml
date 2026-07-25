@@ -1,5 +1,5 @@
 [package]
-name = "rmail"
+name = "bgmail"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ default-run = "BGMail"
 
 # The binary is intentionally named "BGMail" (mixed case): on macOS, when running
 # unbundled (e.g. `cargo run`), the application menu title comes from the running
-# process name, so this makes the global menu show "BGMail" instead of "rmail".
+# process name, so this makes the global menu show "BGMail" instead of "bgmail".
 [[bin]]
 name = "BGMail"
 path = "src/main.rs"

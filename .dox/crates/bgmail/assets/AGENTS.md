@@ -1,4 +1,4 @@
-# crates/rmail/assets/ — App-bundled sample content
+# crates/bgmail/assets/ — App-bundled sample content
 
 ## Purpose
 
@@ -25,7 +25,7 @@ tests — not product branding assets.
 
 ## Verification
 
-- Existing rmail tests that assert fixture magic bytes / document assembly.
+- Existing bgmail tests that assert fixture magic bytes / document assembly.
 
 ## Child DOX Index
 

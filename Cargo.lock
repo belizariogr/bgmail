@@ -533,6 +533,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bgmail"
+version = "0.1.0"
+dependencies = [
+ "async-channel 2.5.0",
+ "cef",
+ "gpui",
+ "image",
+ "lol_html",
+ "objc",
+ "open",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "storage",
+ "tempfile",
+ "theme",
+ "ui",
+ "urlencoding",
+ "windows 0.61.3",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.71.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4691,29 +4714,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rmail"
-version = "0.1.0"
-dependencies = [
- "async-channel 2.5.0",
- "cef",
- "gpui",
- "image",
- "lol_html",
- "objc",
- "open",
- "raw-window-handle",
- "serde",
- "serde_json",
- "smallvec",
- "storage",
- "tempfile",
- "theme",
- "ui",
- "urlencoding",
- "windows 0.61.3",
 ]
 
 [[package]]

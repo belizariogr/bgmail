@@ -55,7 +55,7 @@ testing and shorter incremental compile times.
 | ---------------- | --------------------------------------------------------------------- | ------ |
 | `crates/theme`   | Theme and color definitions (light/dark). Mirrors Zed's `theme`.      | ✅ mock |
 | `crates/ui`      | Component library (`Label`, `Icon`, `Button`, `ListItem`…).           | ✅ mock |
-| `crates/rmail`   | Binary: window, layout, UI state and localization.       | ✅ mock + SQLite wired |
+| `crates/bgmail`   | Binary: window, layout, UI state and localization.       | ✅ mock + SQLite wired |
 | `crates/storage` | Local persistence (SQLite via `rusqlite`, `mail.db`).    | ✅ Stage 2 |
 | `crates/mail_core` *(future)* | Domain models and business rules, no UI dependency.      | ⬜ |
 | `crates/protocols` *(future)* | IMAP/POP3/SMTP/Gmail abstractions behind *traits*.       | ⬜ |
@@ -167,13 +167,13 @@ active theme.
   official FontAwesome 6 Free Solid set (Star uses Regular for its outline variant;
   icons under CC BY 4.0), normalized to a square viewBox for a consistent footprint.
 - **UI language**: English by default, with a localization layer
-  (`crates/rmail/src/locale.rs`) that also ships Brazilian Portuguese and can be
+  (`crates/bgmail/src/locale.rs`) that also ships Brazilian Portuguese and can be
   switched at runtime from the settings.
 
 ## 10. How to run
 
 ```bash
-cargo run -p rmail        # opens the visual mock
+cargo run -p bgmail        # opens the visual mock
 cargo test --workspace    # runs the tests
 cargo clippy --workspace  # lint
 ```

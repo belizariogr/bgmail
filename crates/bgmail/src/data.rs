@@ -466,7 +466,7 @@ fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> Sha
          <a href=\"https://example.com\">links</a> and <code>inline code</code>.</p>\
          <p>Here is a deliberately long link so you can see how the status bar \
          handles overflow on hover: \
-         <a href=\"https://www.example.com/very/long/path/to/a/resource/that/keeps/going/and/going/even/further?utm_source=rmail&amp;utm_medium=email&amp;utm_campaign=newsletter-2026-summer-edition&amp;utm_term=status-bar-overflow-test&amp;utm_content=hero-call-to-action-button&amp;ref=footer&amp;session=abcdef0123456789abcdef0123456789&amp;token=ZmFrZS10b2tlbi1mb3ItdGVzdGluZy1wdXJwb3Nlcy1vbmx5&amp;page=1&amp;sort=desc\">a very long tracking URL</a>.</p>\
+         <a href=\"https://www.example.com/very/long/path/to/a/resource/that/keeps/going/and/going/even/further?utm_source=bgmail&amp;utm_medium=email&amp;utm_campaign=newsletter-2026-summer-edition&amp;utm_term=status-bar-overflow-test&amp;utm_content=hero-call-to-action-button&amp;ref=footer&amp;session=abcdef0123456789abcdef0123456789&amp;token=ZmFrZS10b2tlbi1mb3ItdGVzdGluZy1wdXJwb3Nlcy1vbmx5&amp;page=1&amp;sort=desc\">a very long tracking URL</a>.</p>\
          <p>And an extreme one (~2000 characters): \
          <a href=\"{huge_href}\">a 2000-character URL</a>.</p>\
          <h3>Highlights</h3>\
@@ -488,10 +488,10 @@ fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> Sha
          render, while remote ones load only when you allow remote content in \
          Settings &rsaquo; Privacy:</p>\
          <p><img src=\"{image_src}\" alt=\"Inline image\" width=\"{width}\" height=\"{height}\"></p>\
-         <p><img src=\"https://picsum.photos/seed/rmail/{width}/{height}\" \
+         <p><img src=\"https://picsum.photos/seed/bgmail/{width}/{height}\" \
          alt=\"Remote image (blocked unless you allow remote content)\" \
          width=\"{width}\" height=\"{height}\"></p>\
-         <p><img src=\"https://picsum.photos/seed/rmail2/{width}/{height}\" \
+         <p><img src=\"https://picsum.photos/seed/bgmail2/{width}/{height}\" \
          alt=\"Another remote image (blocked unless you allow remote content)\" \
          width=\"{width}\" height=\"{height}\"></p>\
          <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor \

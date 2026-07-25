@@ -11,7 +11,7 @@ an e-mail client, without Zed-scale bloat.
 - Owns: visual primitives (`Label`, `Icon`, `Button`, `IconButton`, `ListItem`,
   `Scrollbar`, `Switch`, `TextInput`, `Tooltip`), `Color`, layout helpers
   (`h_flex` / `v_flex`), embedded SVG `Assets` / `IconName`.
-- Does not own: theme palettes (`theme`), app views/windows (`rmail`), mail
+- Does not own: theme palettes (`theme`), app views/windows (`bgmail`), mail
   domain (`storage` / future `mail_core`).
 
 ## Local Contracts
@@ -24,7 +24,7 @@ an e-mail client, without Zed-scale bloat.
   `assets.rs`, rendered with `gpui::svg()` (tinted). No icon fonts.
 - New icons: add SVG to `assets/icons/`, wire `IconName` + embed in `Assets`,
   keep square viewBox footprint.
-- Prefer reusing existing components over one-off markup in `rmail`.
+- Prefer reusing existing components over one-off markup in `bgmail`.
 - Windows-only deps for text input stay behind `cfg`; do not leak OS details
   into public component APIs.
 
@@ -32,9 +32,9 @@ an e-mail client, without Zed-scale bloat.
 
 - Before adding a component, check Zed (`~/dev/zed`) for the equivalent and
   mirror names/API shape where practical.
-- Keep the public surface small; extract only when `rmail` repeats the same UI.
+- Keep the public surface small; extract only when `bgmail` repeats the same UI.
 - User-facing copy does not live here — callers pass strings (localized in
-  `rmail::locale`).
+  `bgmail::locale`).
 
 ## Verification
 

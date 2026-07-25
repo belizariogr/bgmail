@@ -55,7 +55,7 @@ and [`TODO.md`](TODO.md) (current state).
 - **Names**: English for code identifiers.
 - **Language**: English is the default language of the app and the codebase
   (identifiers, comments and UI text). The UI also ships a localization layer
-  (`crates/rmail/src/locale.rs`) with English and Brazilian Portuguese; add new
+  (`crates/bgmail/src/locale.rs`) with English and Brazilian Portuguese; add new
   user-facing strings as keys there instead of hardcoding them.
 - **Comments**: explain the *why* (intent, trade-offs), not the *what*. Do not
   narrate the obvious.
@@ -79,7 +79,7 @@ BGMail/
     ├── theme/ ← themes and colors (light/dark)
     ├── ui/ ← reusable visual components
     ├── storage/ ← SQLite persistence (mail.db)
-    └── rmail/ ← binary (window + layout + state + localization)
+    └── bgmail/ ← binary (window + layout + state + localization)
 ```
 
 ## Scope limits (current)
@@ -88,8 +88,8 @@ BGMail/
   progress — see `TODO.md`.
 - Do **not** implement networking, OAuth, IMAP/POP3/SMTP, or Gmail API yet
   (Stage 3). Keep protocol code out until Stage 2 sync/storage is stable.
-- Sample / seed data stays isolated (`crates/rmail/src/data.rs`,
-  `crates/rmail/src/db_seed.rs`, `storage::seed`) so it can be replaced by the
+- Sample / seed data stays isolated (`crates/bgmail/src/data.rs`,
+  `crates/bgmail/src/db_seed.rs`, `storage::seed`) so it can be replaced by the
   real mail layer later.
 - Child DOX docs under `.dox/` own crate-local contracts; this file owns
   repo-wide rules.

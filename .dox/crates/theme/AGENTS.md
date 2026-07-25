@@ -10,7 +10,7 @@ app-global active theme for consistent coloring across UI.
 - Owns: `Theme`, `ThemeColors`, `Appearance`, `ActiveTheme`, built-in light/dark
   palettes (VSCode Light/Dark Modern).
 - Does not own: semantic component color roles (`ui::Color`), layout/components
-  (`ui`), app chrome (`rmail`).
+  (`ui`), app chrome (`bgmail`).
 
 ## Local Contracts
 

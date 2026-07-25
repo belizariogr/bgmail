@@ -10,16 +10,18 @@
 - ✅ Set up the Cargo workspace + pinned toolchain (`rust-toolchain.toml`)
 - ✅ `.gitignore`
 - ✅ DOX hierarchy: root Child DOX Index + `.dox/` mirrors for `crates/`
-      (theme, ui, storage, rmail), `docs/`, `assets/` (+ icons), `.cargo/`
+      (theme, ui, storage, bgmail), `docs/`, `assets/` (+ icons), `.cargo/`
 - ✅ DOX full source API catalogs under `.dox/crates/*/src/AGENTS.md` (every
       function/method: purpose + behavior)
+- ✅ Rename app crate path/package `rmail` → `bgmail` (`crates/bgmail`); remove
+      `crates/rmail`
 
 ## Stage 1 — Visual mock (current)
 - ✅ `theme` crate: `ThemeColors`, dark theme (VSCode Dark Modern) and light
       (VSCode Light Modern), `ActiveTheme`, toggle + tests
 - ✅ `ui` crate: prelude, `Color`, `Label`, `Icon`, `Button`, `IconButton`,
       `ListItem`, `h_flex`/`v_flex` helpers
-- ✅ Sample data (`crates/rmail/src/data.rs`) + tests
+- ✅ Sample data (`crates/bgmail/src/data.rs`) + tests
 - ✅ macOS Mail-style three-column layout (sidebar, list, reader)
 - ✅ Unified toolbar laid out like macOS Mail: sidebar toggle (left), mailbox
       title + message count and filter/more over the list, and compose +
@@ -81,7 +83,7 @@
       Regular for the outline variant; icons CC BY 4.0), normalized to a square
       viewBox so every icon shares a consistent footprint. `chevron-right.svg`
       stays a hand-drawn stroke chevron because the sidebar disclosure rotates it.
-- ✅ Localization (i18n): `crates/rmail/src/locale.rs` with `Language`
+- ✅ Localization (i18n): `crates/bgmail/src/locale.rs` with `Language`
       (English default + Brazilian Portuguese), a string catalog and an
       `ActiveLanguage` global; UI resolves strings at render time, with a
       language picker in the General settings. English is the default everywhere.
@@ -98,17 +100,17 @@
       scrolling, text selection and copy natively. The webview is a child of the
       GPUI window, layered over the reader body; a `canvas` element keeps its
       bounds in sync each paint, and it is hidden when the reader isn't on screen.
-      `crates/rmail/src/web_view.rs` owns the platform abstraction (`EmailWebView`,
+      `crates/bgmail/src/web_view.rs` owns the platform abstraction (`EmailWebView`,
       no-op on unsupported targets) plus a themed `email_document` builder
       (theme-aware CSS, dark/light `color-scheme`); the reader falls back to a
       plain-text view where no webview backend exists. `Message::body` stays a
       `MessageBody::{Html, Text}` and the mock mixes both. The first mock message
-      embeds a real 700×200 PNG (`crates/rmail/assets/tweezers.png`) as a
+      embeds a real 700×200 PNG (`crates/bgmail/assets/tweezers.png`) as a
       self-contained base64 `data:` URI with explicit `width`/`height`. Tested:
       HTML escaping, color formatting, document assembly (scheme + body),
       dependency-free base64 (RFC 4648 vectors), the data URI shape and the image
       magic bytes (guards against a mislabeled WebP).
-- ✅ Rudimentary persisted settings (`crates/rmail/src/config.rs`): main window
+- ✅ Rudimentary persisted settings (`crates/bgmail/src/config.rs`): main window
       position + size (the *restored* bounds — while maximized the full-screen
       frame is never persisted), a       `maximized` flag plus the maximized frame (macOS zoom via
       `Window::is_maximized`). On reopen it starts maximized without flicker —
@@ -258,7 +260,7 @@
       macOS, on by default via the `cef-osr` feature (`linux-webview` remains an
       alias). Chromium renders each body to an off-screen BGRA buffer that GPUI
       composites as a `RenderImage` (`COMPOSITES_IN_GPUI = true` everywhere; the
-      reader drives `paint` + pointer/keyboard forwarding). `crates/rmail/src/cef_osr.rs`
+      reader drives `paint` + pointer/keyboard forwarding). `crates/bgmail/src/cef_osr.rs`
       owns the CEF integration (handlers, external message pump, console→IPC).
       The former `wry` child webviews (WKWebView / WebView2) are removed.
       Scroll path tuned for soft OSR: disable Chromium smooth-scrolling (full-buffer
