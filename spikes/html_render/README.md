@@ -91,3 +91,11 @@ python3 -I ../tools/build_report.py      # after reviews in out/reviews/batch_*.
   `out/reviews_real/` (`RUBRIC_REAL.md`).
 - Reviews per round: `out/reviews_hv/` (800px, `RUBRIC_HV.md`, `final.json`)
   and `out/reviews_widths/` (all widths, `RUBRIC_WIDTHS.md`, `final.json`).
+
+## Trying the mails in the app
+
+`tools/run_preview.sh [--reset]` builds and runs BGMail on a preview database
+(`~/.cache/bgmail-preview/mail.db`, the real one is untouched) seeded with the
+built-in samples, `corpus/` (as `tpl-*`), `corpus_real/` (when present) and
+any `*.html` dropped in `~/.cache/bgmail-preview/extra/`. `--reset` rebuilds
+the database (after adding mails).

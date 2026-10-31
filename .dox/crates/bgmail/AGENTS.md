@@ -59,6 +59,10 @@ wiring to `storage`.
   - `window_drag` / `window_frame` — portable window move/CSD; OS code behind
     `cfg`.
   - `startup` — debug startup milestones (keep startup path light).
+- Development preview: `BGMAIL_DB` opens another database instead of
+  `~/.config/BGMail/mail.db`, and `BGMAIL_SAMPLE_DIR` adds its `*.html` to
+  the seed (only when that database is first created);
+  `spikes/html_render/tools/run_preview.sh` uses both.
 - UI state: `Entity` + `impl Render`; mutate via `cx.listener` + `cx.notify()`.
 - OS-specific code only in abstracted helpers (`window_drag`, notifications,
   etc.), never leaked into layout/domain types.

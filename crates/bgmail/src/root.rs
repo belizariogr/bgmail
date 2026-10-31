@@ -491,7 +491,12 @@ fn ui_accounts(accounts: &[storage::Account]) -> Vec<data::Account> {
 
 impl RootView {
     pub fn new(settings: Config) -> Self {
-        Self::new_with_database(settings, storage::database_path())
+        // Development: `BGMAIL_DB` opens another database (e.g. one seeded
+        // with `BGMAIL_SAMPLE_DIR`), leaving the real one untouched.
+        let db_path = std::env::var_os("BGMAIL_DB")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(storage::database_path);
+        Self::new_with_database(settings, db_path)
     }
 
     fn new_with_database(settings: Config, db_path: impl AsRef<std::path::Path>) -> Self {
@@ -513,12 +518,12 @@ impl RootView {
         );
         let crash_guard = CrashGuard::beside(db_path.as_ref());
         let db = storage::Database::open(db_path).expect("failed to open mail database");
-        storage::seed_if_empty(
-            db.conn(),
-            &db_seed::seed_accounts(),
-            &db_seed::seed_messages(),
-        )
-        .expect("failed to seed mail database");
+        let mut seed_messages = db_seed::seed_messages();
+        if let Some(dir) = std::env::var_os("BGMAIL_SAMPLE_DIR") {
+            seed_messages.extend(db_seed::sample_dir_messages(std::path::Path::new(&dir)));
+        }
+        storage::seed_if_empty(db.conn(), &db_seed::seed_accounts(), &seed_messages)
+            .expect("failed to seed mail database");
 
         let accounts = db.list_accounts().expect("failed to load accounts");
         let mut folders_by_account = HashMap::new();

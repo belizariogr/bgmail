@@ -88,6 +88,67 @@ fn seed_message(account_email: &str, sort_order: i64, message: &Message) -> Seed
     }
 }
 
+/// Development: every `*.html` file in `dir` (sorted by name) as an extra
+/// seeded message in the default account's inbox, to try real-world mail in
+/// the app (`BGMAIL_SAMPLE_DIR`). The subject is the page's `<title>` or the
+/// file name; files that aren't UTF-8 are read lossily.
+pub fn sample_dir_messages(dir: &std::path::Path) -> Vec<SeedMessage> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+        })
+        .collect();
+    paths.sort();
+    let account = sample_accounts()
+        .first()
+        .map(|a| a.email.to_string())
+        .unwrap_or_else(|| "you@gmail.com".into());
+    let first_order = sample_messages().len() as i64;
+    paths
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| {
+            let bytes = std::fs::read(path).ok()?;
+            let html = String::from_utf8_lossy(&bytes).into_owned();
+            let stem = path.file_stem()?.to_string_lossy().into_owned();
+            let subject = html_title(&html).unwrap_or_else(|| stem.clone());
+            let message = Message {
+                sender: stem.clone().into(),
+                sender_email: format!("{stem}@samples.test").into(),
+                subject: subject.into(),
+                preview: "".into(),
+                body: MessageBody::Html(html.into()),
+                time: "Sample".into(),
+                unread: true,
+                starred: false,
+                has_attachment: false,
+            };
+            Some(seed_message(&account, first_order + index as i64, &message))
+        })
+        .collect()
+}
+
+/// The text of an HTML page's `<title>`, whitespace collapsed (`None` when
+/// missing or empty).
+fn html_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let start = start + lower[start..].find('>')? + 1;
+    let end = start + lower[start..].find("</title")?;
+    let title = html
+        .get(start..end)?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!title.is_empty()).then_some(title)
+}
+
 /// System folder path for a unified sidebar mailbox.
 pub fn global_folder_path(global: GlobalMailbox) -> &'static str {
     match global {
@@ -135,6 +196,24 @@ pub fn message_body_from_detail(detail: &storage::MessageDetail) -> MessageBody 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sample_dirs_become_inbox_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("b-news.html"),
+            "<html><head><TITLE> Big\n Sale </TITLE></head><body>x</body></html>",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("a-plain.html"), "<p>no title</p>").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "skip").unwrap();
+        let messages = sample_dir_messages(dir.path());
+        let subjects: Vec<_> = messages.iter().map(|m| m.subject.as_str()).collect();
+        assert_eq!(subjects, ["a-plain", "Big Sale"]);
+        assert_eq!(messages[0].raw_format, "html");
+        assert!(messages[0].sort_order >= sample_messages().len() as i64);
+        assert!(sample_dir_messages(&dir.path().join("missing")).is_empty());
+    }
 
     #[test]
     fn seed_messages_match_sample_count() {

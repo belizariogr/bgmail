@@ -879,6 +879,9 @@ _(None at module top level — conversion helpers only.)_
 
 #### Functions / methods
 
+- **`sample_dir_messages(dir)`** (pub): Development (`BGMAIL_SAMPLE_DIR`): every `*.html` in `dir`, sorted, as extra unread inbox messages of the default account after the samples; subject from `<title>` (`html_title`) else the file stem, sender = file stem.
+- **`html_title(html)`** (private): Text of `<title>` with whitespace collapsed; `None` when missing/empty.
+
 ##### Context: `module`
 
 - **`seed_accounts`** (pub, L12)
