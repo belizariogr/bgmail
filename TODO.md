@@ -464,10 +464,32 @@
      opposing reviews: unwinding through Blitz/GPUI state is unsound and
      doesn't cover overflow/OOM). Measured: 660 KB mail ~60 ms, 2.6 MB
      ~260 ms (release, UI thread; the Blitz document is not `Send`).
-  4. ⬜ Real-mail round: ~50 exported, anonymised mails from real inboxes
-     (Outlook/Word-generated, long forwarded threads, malformed HTML,
-     newsletters of MBs, CJK/RTL, plain text → HTML) through the
-     `spikes/html_render` loop at several widths.
+  4. 🔄 Real-mail round. The corpus is `spikes/html_render/corpus_real/`
+     (git-ignored): 25 newsletters from 2002, mostly in quirks mode, plus 20
+     current templates.
+     - Body heights against Chromium at 800px: mean deviation 0.53% over 89
+       mails, counting the template corpus.
+     - Fixed:
+       - broken-image rendering (alt text, frames, floats, spacing);
+       - the quirks-mode line height rule (strut, nested spans, `&nbsp;`,
+         lone `<br>`);
+       - quirky margins, quirks.css and quirks-mode parsing (`<p><table>`);
+       - the rowspan column cursor;
+       - spanning and short fixed columns, table width/height as minimums,
+         capped padded percentage columns;
+       - inline width ignored around blocks;
+       - cell `vertical-align` growing lines;
+       - empty-inline blocks collapsing margins;
+       - `valign`, image `align`/`hspace`, `<body link>`, `<hr>` attributes;
+       - inline borders drawn as rings;
+       - `<select>` (closed drop-down) and `<input size>` with Chromium's
+         metrics;
+       - the reader keeping the message's doctype.
+     - Next:
+       - recapture at 4 widths and re-review with agents;
+       - ham-01, ham-16, ham-05: remaining drift (iframe ads, listbox
+         `<select size>`);
+       - CJK/RTL and multi-MB mail are still missing from the corpus.
   5. ⬜ Later: zoom, print, animated GIF.
 - ⬜ Stage 3 — remote content on request: HTTP image fetcher behind
       `html_view::Resources` (per-message/per-image unblock, cache, size/time

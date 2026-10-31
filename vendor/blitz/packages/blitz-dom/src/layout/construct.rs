@@ -455,6 +455,13 @@ fn collect_layout_children_with_wrap(
                 return;
             }
         }
+        // BGMail: a `<select>` is a closed drop-down showing its selected
+        // option (mail is never interactive): a read-only one-line text
+        // control, as wide as its widest option. Options generate no boxes.
+        if tag_name == "select" {
+            create_select_display(doc, container_node_id);
+            return;
+        }
 
         #[cfg(feature = "svg")]
         if matches!(tag_name, "svg") {
@@ -870,7 +877,73 @@ fn collect_complex_layout_children(
     out.maybe_push_anon_block(doc);
 }
 
+/// BGMail: the option texts of a `<select>` (in order, `label` first,
+/// whitespace collapsed) and the index of the one it shows: the last
+/// `selected` option, else the first.
+pub(crate) fn select_options(doc: &BaseDocument, select_id: NodeId) -> (Vec<String>, usize) {
+    let mut options = Vec::new();
+    let mut selected = 0;
+    let mut stack: Vec<NodeId> = doc.nodes[select_id]
+        .children
+        .iter()
+        .rev()
+        .copied()
+        .collect();
+    while let Some(id) = stack.pop() {
+        let node = &doc.nodes[id];
+        let Some(element) = node.element_data() else {
+            continue;
+        };
+        match element.name.local.as_ref() {
+            "option" => {
+                if element.attr(local_name!("selected")).is_some() {
+                    selected = options.len();
+                }
+                let text = element
+                    .attr(local_name!("label"))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| node.text_content());
+                options.push(text.split_ascii_whitespace().collect::<Vec<_>>().join(" "));
+            }
+            "optgroup" => stack.extend(node.children.iter().rev().copied()),
+            _ => {}
+        }
+    }
+    (options, selected)
+}
+
+/// BGMail: see the `select` case in `collect_layout_children`.
+fn create_select_display(doc: &mut BaseDocument, select_id: NodeId) {
+    let (options, selected) = select_options(doc, select_id);
+    doc.iter_subtree_mut(select_id, |id: NodeId, doc: &mut BaseDocument| {
+        if id != select_id {
+            doc.nodes[id].remove_damage(CONSTRUCT_BOX | CONSTRUCT_DESCENDENT | CONSTRUCT_FC);
+        }
+    });
+    // Measure all options as lines of one layout: its width is the widest.
+    create_text_editor_with(doc, select_id, false, Some(options.join("\n")));
+    let scale = doc.viewport.scale();
+    let text = options.get(selected).cloned().unwrap_or_default();
+    let font_ctx = &mut doc.font_ctx.lock().unwrap();
+    let element = doc.nodes[select_id].data.downcast_element_mut().unwrap();
+    if let SpecialElementData::TextInput(data) = &mut element.special_data {
+        let width = data.editor.try_layout().map_or(0.0, |l| l.width()) / scale;
+        data.select_width = Some(width);
+        data.editor.set_text(&text);
+        data.editor.refresh_layout(font_ctx, &mut doc.layout_ctx);
+    }
+}
+
 fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multiline: bool) {
+    create_text_editor_with(doc, input_element_id, is_multiline, None)
+}
+
+fn create_text_editor_with(
+    doc: &mut BaseDocument,
+    input_element_id: NodeId,
+    is_multiline: bool,
+    text: Option<String>,
+) {
     let node = &mut doc.nodes[input_element_id];
     let parley_style = node
         .primary_styles()
@@ -886,14 +959,16 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
         .map(|s| stylo_to_parley::base_direction(s.clone_direction(), s.clone_unicode_bidi()))
         .unwrap_or(parley::BaseDirection::Auto);
 
-    let initial_text = if is_multiline {
+    let initial_text = if let Some(text) = &text {
+        text.clone()
+    } else if is_multiline {
         node.text_content()
     } else {
         node.attr(local_name!("value")).unwrap_or("").to_string()
     };
     let is_focussed = node.is_focussed();
     let element = &mut node.data.downcast_element_mut().unwrap();
-    if !matches!(element.special_data, SpecialElementData::TextInput(_)) {
+    if text.is_some() || !matches!(element.special_data, SpecialElementData::TextInput(_)) {
         let mut text_input_data = TextInputData::new(is_multiline);
         let editor = &mut text_input_data.editor;
         editor.set_text(&initial_text);

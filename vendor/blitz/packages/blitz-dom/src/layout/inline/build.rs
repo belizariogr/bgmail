@@ -1,10 +1,12 @@
 use blitz_traits::node_id::NodeId;
 use markup5ever::local_name;
 use parley::{
-    FontContext, InlineBox, InlineBoxKind, LayoutContext, TreeBuilder, WhiteSpaceCollapse,
+    FontContext, InlineBox, InlineBoxKind, LayoutContext, LineHeight, TreeBuilder,
+    WhiteSpaceCollapse,
 };
 use style::{
     computed_values::position::T as PositionProperty,
+    values::computed::BorderStyle,
     values::{
         computed::{Display, Float},
         specified::box_::{DisplayInside, DisplayOutside},
@@ -28,6 +30,7 @@ pub(crate) fn build_inline_layout_into(
     text_layout: &mut TextLayout,
     scale: f32,
     inline_context_root_node_id: NodeId,
+    line_height_quirk: bool,
 ) {
     // Get the inline context's root node's text styles
     let root_node = &nodes[inline_context_root_node_id];
@@ -37,16 +40,71 @@ pub(crate) fn build_inline_layout_into(
             .and_then(|parent_id| nodes[parent_id].primary_styles())
     });
 
-    let parley_style = root_node_style
-        .as_ref()
-        .map(|s| stylo_to_parley::style(inline_context_root_node_id, s))
-        .unwrap_or_else(|| parley::TextStyle {
-            white_space_collapse: WhiteSpaceCollapse::Collapse,
-            ..Default::default()
-        });
+    // BGMail: an anonymous block wrapping the inline content of an inline
+    // element that also contains blocks (`<font size=1>text<p>..</p></font>`)
+    // inherits, per CSS 2.1 §9.2.1.1, from the enclosing *block*: that block
+    // gives the line its strut. The inline ancestors still style their text,
+    // so they become style spans around the content (outermost first).
+    let mut inline_ancestors = Vec::new();
+    let mut strut_style = None;
+    if root_node.is_anonymous() {
+        let mut ancestor = root_node.parent;
+        while let Some(id) = ancestor {
+            let node = &nodes[id];
+            if node
+                .display_style()
+                .is_some_and(|display| display.is_inline_flow())
+            {
+                inline_ancestors.push(id);
+                ancestor = node.parent;
+            } else {
+                if !inline_ancestors.is_empty() {
+                    strut_style = node.primary_styles().map(|style| (id, style));
+                }
+                break;
+            }
+        }
+    }
+    let mut parley_style = match &strut_style {
+        Some((block_id, style)) => stylo_to_parley::style(*block_id, style),
+        None => root_node_style
+            .as_ref()
+            .map(|s| stylo_to_parley::style(inline_context_root_node_id, s))
+            .unwrap_or_else(|| parley::TextStyle {
+                white_space_collapse: WhiteSpaceCollapse::Collapse,
+                ..Default::default()
+            }),
+    };
+    // BGMail: the block's own `vertical-align` (a cell's `middle`) aligns the
+    // block, not its lines; as the root style it would shift every span that
+    // inherits the root's style (`<td>a<br>b` lines grew by a pixel).
+    parley_style.vertical_align = Default::default();
+    // The block's strut only counts when the block itself holds text (with
+    // inline ancestors, that text belongs to the innermost one).
+    if line_height_quirk && (strut_style.is_some() || !has_direct_text(nodes, root_node)) {
+        parley_style.line_height = LineHeight::Absolute(0.0);
+    }
 
     // Create a parley tree builder
     let mut builder = layout_ctx.tree_builder(font_ctx, scale, true, &parley_style);
+    let mut open_spans = 0;
+    if strut_style.is_some() {
+        for &id in inline_ancestors.iter().rev() {
+            if let Some(style) = nodes[id].primary_styles() {
+                let mut span = stylo_to_parley::style(id, &style);
+                let text_node = if id == inline_ancestors[0] {
+                    root_node
+                } else {
+                    &nodes[id]
+                };
+                if line_height_quirk && line_height_quirk_applies(nodes, text_node, &style) {
+                    span.line_height = LineHeight::Absolute(0.0);
+                }
+                builder.push_style_span(span);
+                open_spans += 1;
+            }
+        }
+    }
     if let Some(style) = root_node_style.as_deref() {
         builder.set_base_direction(stylo_to_parley::base_direction(
             style.clone_direction(),
@@ -86,6 +144,10 @@ pub(crate) fn build_inline_layout_into(
     let mut text_transformer = TextTransformer::default();
     text_transformer.word_break(&builder);
 
+    let mut quirk = LineHeightQuirk {
+        enabled: line_height_quirk,
+        line_empty: true,
+    };
     if let Some(before_id) = root_node.before() {
         build_inline_layout_recursive(
             &mut builder,
@@ -93,6 +155,7 @@ pub(crate) fn build_inline_layout_into(
             nodes,
             before_id,
             &text_transform,
+            &mut quirk,
         );
     }
     for child_id in root_node.children.iter().copied() {
@@ -102,6 +165,7 @@ pub(crate) fn build_inline_layout_into(
             nodes,
             child_id,
             &text_transform,
+            &mut quirk,
         );
     }
     if let Some(after_id) = root_node.after() {
@@ -111,9 +175,13 @@ pub(crate) fn build_inline_layout_into(
             nodes,
             after_id,
             &text_transform,
+            &mut quirk,
         );
     }
 
+    for _ in 0..open_spans {
+        builder.pop_style_span();
+    }
     text_layout.text = builder.build_into(&mut text_layout.layout);
     return;
 
@@ -123,6 +191,7 @@ pub(crate) fn build_inline_layout_into(
         nodes: &crate::NodeTree,
         node_id: NodeId,
         parent_text_transform: &CaseTransform,
+        quirk: &mut LineHeightQuirk,
     ) {
         let node = &nodes[node_id];
 
@@ -185,6 +254,7 @@ pub(crate) fn build_inline_layout_into(
                                 nodes,
                                 child_id,
                                 &text_transform,
+                                quirk,
                             );
                         }
                         builder.pop_style_span();
@@ -196,6 +266,7 @@ pub(crate) fn build_inline_layout_into(
                             if box_kind == InlineBoxKind::InFlow {
                                 text_transformer.word_break(builder);
                             }
+                            quirk.line_empty = false;
                             builder.push_inline_box(InlineBox {
                                 id: node_id.as_u64(),
                                 kind: box_kind,
@@ -213,19 +284,36 @@ pub(crate) fn build_inline_layout_into(
                         } else if *tag_name == local_name!("br") {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             // TODO: update span id for br spans
-                            builder.push_style_modification_span(&[
-                                parley::StyleProperty::WhiteSpaceCollapse(
-                                    WhiteSpaceCollapse::Preserve,
-                                ),
-                            ]);
+                            match style.filter(|_| quirk.enabled && quirk.line_empty) {
+                                // BGMail: under the line height quirk a break
+                                // alone on its line is text: its own span gives
+                                // that line the parent's line height (the
+                                // parent may have none, holding no text).
+                                Some(style) => builder.push_style_span(parley::TextStyle {
+                                    white_space_collapse: WhiteSpaceCollapse::Preserve,
+                                    ..stylo_to_parley::style(node.id, style)
+                                }),
+                                None => builder.push_style_modification_span(&[
+                                    parley::StyleProperty::WhiteSpaceCollapse(
+                                        WhiteSpaceCollapse::Preserve,
+                                    ),
+                                ]),
+                            }
                             builder.push_text("\n");
                             builder.pop_style_span();
+                            quirk.line_empty = true;
                             text_transformer.word_break(builder);
                         } else {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             let style = node
                                 .primary_styles()
-                                .map(|s| stylo_to_parley::style(node.id, &s))
+                                .map(|s| {
+                                    let mut style = stylo_to_parley::style(node.id, &s);
+                                    if quirk.enabled && line_height_quirk_applies(nodes, node, &s) {
+                                        style.line_height = LineHeight::Absolute(0.0);
+                                    }
+                                    style
+                                })
                                 .unwrap_or_else(|| parley::TextStyle {
                                     white_space_collapse: WhiteSpaceCollapse::Collapse,
                                     ..Default::default()
@@ -255,6 +343,7 @@ pub(crate) fn build_inline_layout_into(
                                     nodes,
                                     before_id,
                                     &text_transform,
+                                    quirk,
                                 );
                             }
 
@@ -265,6 +354,7 @@ pub(crate) fn build_inline_layout_into(
                                     nodes,
                                     child_id,
                                     &text_transform,
+                                    quirk,
                                 );
                             }
                             if let Some(after_id) = node.after() {
@@ -274,6 +364,7 @@ pub(crate) fn build_inline_layout_into(
                                     nodes,
                                     after_id,
                                     &text_transform,
+                                    quirk,
                                 );
                             }
 
@@ -292,6 +383,7 @@ pub(crate) fn build_inline_layout_into(
                         if box_kind == InlineBoxKind::InFlow {
                             text_transformer.word_break(builder);
                         }
+                        quirk.line_empty = false;
                         builder.push_inline_box(InlineBox {
                             id: node_id.as_u64(),
                             kind: box_kind,
@@ -313,6 +405,9 @@ pub(crate) fn build_inline_layout_into(
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                 // dbg!(&data.content);
 
+                if !data.content.chars().all(|c| c.is_ascii_whitespace()) {
+                    quirk.line_empty = false;
+                }
                 let text =
                     text_transformer.transform(&data.content, parent_text_transform, builder);
                 builder.push_text(text);
@@ -323,6 +418,54 @@ pub(crate) fn build_inline_layout_into(
             NodeData::Document(_) => unreachable!(),
         }
     }
+}
+
+/// BGMail: line height quirk state while building an inline context.
+struct LineHeightQuirk {
+    enabled: bool,
+    /// Whether nothing (no text, no box) precedes on the current line since
+    /// the start or the last `<br>`.
+    line_empty: bool,
+}
+
+/// BGMail: the (limited-)quirks line height calculation quirk
+/// (quirks.spec.whatwg.org §3.3): an inline box with no text of its own and
+/// no vertical padding or border sizes lines as if its `line-height` were 0,
+/// so `<p><font size=1>text</font></p>` lines are as tall as the small text,
+/// not the paragraph's strut. Like Blink, only the box directly holding the
+/// text counts, not its ancestors.
+fn line_height_quirk_applies(
+    nodes: &crate::NodeTree,
+    node: &crate::Node,
+    style: &style::properties::ComputedValues,
+) -> bool {
+    let border = style.get_border();
+    let padding = style.get_padding();
+    // The computed width of a `none` border is still its declared width.
+    let no_border = |style: BorderStyle, width: app_units::Au| {
+        style.none_or_hidden() || width == app_units::Au(0)
+    };
+    no_border(border.border_top_style, border.border_top_width.0)
+        && no_border(border.border_bottom_style, border.border_bottom_width.0)
+        && padding
+            .padding_top
+            .0
+            .to_length()
+            .is_some_and(|l| l.px() == 0.0)
+        && padding
+            .padding_bottom
+            .0
+            .to_length()
+            .is_some_and(|l| l.px() == 0.0)
+        && !has_direct_text(nodes, node)
+}
+
+/// Whether `node` has a text child that is not just collapsible whitespace.
+fn has_direct_text(nodes: &crate::NodeTree, node: &crate::Node) -> bool {
+    node.children.iter().any(|&id| match &nodes[id].data {
+        NodeData::Text(data) => !data.content.chars().all(|c| c.is_ascii_whitespace()),
+        _ => false,
+    })
 }
 
 /// BGMail: marks inline boxes that are spacers for an inline element's

@@ -15,6 +15,7 @@ use style::values::computed::length_percentage::{
 };
 use style::values::computed::{Length, LengthPercentage};
 use style::values::generics::Optional;
+use style::values::generics::calc::MinMaxOp;
 use style::values::specified::box_::{DisplayInside, DisplayOutside};
 use style::{
     Atom, computed_values::border_collapse::T as BorderCollapse,
@@ -93,7 +94,8 @@ struct ColumnCursor {
     col: u16,
     /// The total number of columns seen so far
     num_columns: u16,
-    /// For each column, the number of further rows it is occupied by a rowspan cell
+    /// For each column, the number of rows (counting the current one) it stays
+    /// occupied by a rowspan cell; `start_row` counts the new row off
     rowspans: Vec<u16>,
 }
 
@@ -118,8 +120,11 @@ impl ColumnCursor {
         if self.rowspans.len() < end as usize {
             self.rowspans.resize(end as usize, 0);
         }
+        // BGMail: the cell's own row is counted off by the next `start_row`;
+        // storing `rowspan - 1` freed the columns one row early, so declared
+        // widths of the next row's cells landed on the wrong columns.
         for remaining in &mut self.rowspans[self.col as usize..end as usize] {
-            *remaining = rowspan - 1;
+            *remaining = rowspan;
         }
         self.col = end;
         self.num_columns = self.num_columns.max(end);
@@ -187,16 +192,22 @@ fn percent_plus_length(
     percent: f32,
     length: f32,
 ) -> TrackSizingFunction {
-    let node = CalcNode::Sum(
+    let percentage = |percent| {
+        CalcNode::Leaf(ComputedLeaf::Percentage(CalcPercentageLeaf::new(
+            percent,
+            Optional::Some(NumericBaseType::Length),
+        )))
+    };
+    let sum = CalcNode::Sum(
         vec![
-            CalcNode::Leaf(ComputedLeaf::Percentage(CalcPercentageLeaf::new(
-                percent,
-                Optional::Some(NumericBaseType::Length),
-            ))),
+            percentage(percent),
             CalcNode::Leaf(ComputedLeaf::Length(Length::new(length))),
         ]
         .into(),
     );
+    // BGMail: a column is never wider than the table (Chromium: a `100%`
+    // cell with padding fills the table instead of overflowing it).
+    let node = CalcNode::MinMax(vec![sum, percentage(1.0)].into(), MinMaxOp::Min);
     let value = LengthPercentage::new_calc(node, AllowedNumericType::NonNegative);
     let dim = match value.unpack() {
         UnpackedLengthPercentage::Calc(calc) => {
@@ -235,6 +246,16 @@ pub(crate) fn build_table_context(
 
     let mut style = table_taffy_style(&stylo_styles, wm);
     style.item_is_table = true;
+    // BGMail: a table's `height` is a minimum: the table grows to fit its
+    // rows (`<table height=40>` around two taller rows).
+    if style.size.height.tag() == taffy::CompactLength::LENGTH_TAG {
+        let height = style.size.height.value();
+        let min = style.min_size.height.into_raw();
+        if min.tag() != taffy::CompactLength::LENGTH_TAG || min.value() < height {
+            style.min_size.height = style_helpers::length(height);
+        }
+        style.size.height = style_helpers::auto();
+    }
     // Use `dense` row-flow so that each cell scans the row from its
     // leftmost column for the first free track. Without `dense`,
     // `place_definite_secondary_axis_item` keeps a per-item secondary
@@ -740,6 +761,8 @@ fn collect_table_cells(
             // (they are the table's gaps), or every row grows by its borders.
             node.flags
                 .set(crate::node::NodeFlags::IS_COLLAPSED_BORDER_CELL, collapsed);
+            node.flags
+                .set(crate::node::NodeFlags::IS_TABLE_CELL, !anonymous);
             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             let stylo_style = &node.primary_styles().unwrap();
             let colspan: u16 = (!anonymous)
@@ -876,7 +899,15 @@ fn collect_table_cells(
                 style.size.width = style_helpers::auto();
                 // BGMail: min/max heights on table cells are undefined in CSS 2.1 and
                 // ignored by Blink (e-mail templates set `min-height` on cells).
-                style.min_size.height = style_helpers::auto();
+                // A cell's `height` is a minimum: the row grows to fit its
+                // content (`<td height=81>` around taller content).
+                style.min_size.height =
+                    if style.size.height.tag() == taffy::CompactLength::LENGTH_TAG {
+                        style_helpers::length(style.size.height.value())
+                    } else {
+                        style_helpers::auto()
+                    };
+                style.size.height = style_helpers::auto();
                 style.max_size.height = style_helpers::auto();
             } else if style.size.width.is_auto() {
                 // A block with `width:auto` fills its (anonymous) cell like any block
@@ -1113,9 +1144,17 @@ pub(crate) fn distribute_auto_columns(
         .filter_map(|i| columns[i].3.map(|p| (i, (p * inner).max(columns[i].0), p)))
         .collect();
     grow(&mut widths, &mut remaining, &percent);
+    // Short of space, fixed columns get it in proportion to how far each is
+    // from its width (Chromium interpolates between minimum and width: no
+    // column overshoots, so none of the space is lost to capping).
     let fixed: Vec<(usize, f32, f32)> = (0..n)
         .filter(|&i| columns[i].3.is_none())
-        .filter_map(|i| columns[i].2.map(|f| (i, f.max(columns[i].0), f.max(1.0))))
+        .filter_map(|i| {
+            columns[i].2.map(|f| {
+                let target = f.max(columns[i].0);
+                (i, target, target - columns[i].0)
+            })
+        })
         .collect();
     grow(&mut widths, &mut remaining, &fixed);
     let auto: Vec<usize> = (0..n)
@@ -1148,6 +1187,58 @@ pub(crate) fn distribute_auto_columns(
         }
     }
     widths
+}
+
+/// BGMail: widens the columns a cell spans by `excess`, the cell's
+/// min-content (`min`) or max-content width beyond theirs, like Chromium:
+/// fixed-width columns grow toward their width first (minimums only: a
+/// fixed column's maximum already is its width), then auto columns take the
+/// rest in proportion to their max-content width; without auto columns,
+/// every column does, in proportion to its width. Columns are (min, max,
+/// fixed, percent).
+fn distribute_span_excess(
+    columns: &mut [(f32, f32, Option<f32>, Option<f32>)],
+    mut excess: f32,
+    min: bool,
+) {
+    if min {
+        let need: f32 = columns
+            .iter()
+            .filter_map(|c| c.2.map(|fixed| (fixed - c.0).max(0.0)))
+            .sum();
+        if need > 0.0 {
+            let used = need.min(excess);
+            for c in columns.iter_mut() {
+                if let Some(fixed) = c.2 {
+                    c.0 += (fixed - c.0).max(0.0) * used / need;
+                }
+            }
+            excess -= used;
+        }
+        if excess <= 0.0 {
+            return;
+        }
+    }
+    let is_auto = |c: &(f32, f32, Option<f32>, Option<f32>)| c.2.is_none() && c.3.is_none();
+    let any_auto = columns.iter().any(is_auto);
+    let takes = |c: &(f32, f32, Option<f32>, Option<f32>)| !any_auto || is_auto(c);
+    let weight = |c: &(f32, f32, Option<f32>, Option<f32>)| {
+        if takes(c) { c.2.unwrap_or(c.1) } else { 0.0 }
+    };
+    let total: f32 = columns.iter().map(weight).sum();
+    let count = columns.iter().filter(|c| takes(c)).count().max(1) as f32;
+    for c in columns.iter_mut() {
+        let share = match (takes(c), total > 0.0) {
+            (false, _) => 0.0,
+            (true, true) => weight(c) / total,
+            (true, false) => 1.0 / count,
+        };
+        if min {
+            c.0 += excess * share;
+        } else {
+            c.1 += excess * share;
+        }
+    }
 }
 
 impl TableTreeWrapper<'_, '_> {
@@ -1255,21 +1346,19 @@ impl TableTreeWrapper<'_, '_> {
             }
             let inner_gaps = gap * (end - col - 1) as f32;
             let covered_min: f32 = columns[col..end].iter().map(|c| c.0).sum::<f32>() + inner_gaps;
-            let covered_max: f32 = columns[col..end].iter().map(|c| c.1).sum::<f32>() + inner_gaps;
-            let weights: f32 = columns[col..end].iter().map(|c| c.1).sum();
-            let count = (end - col) as f32;
+            // A fixed column's max-content width is its width.
+            let covered_max: f32 = columns[col..end]
+                .iter()
+                .map(|c| c.2.map_or(c.1, |fixed| fixed.max(c.0)))
+                .sum::<f32>()
+                + inner_gaps;
+            if min > covered_min {
+                distribute_span_excess(&mut columns[col..end], min - covered_min, true);
+            }
+            if max > covered_max {
+                distribute_span_excess(&mut columns[col..end], max - covered_max, false);
+            }
             for c in &mut columns[col..end] {
-                let share = if weights > 0.0 {
-                    c.1 / weights
-                } else {
-                    1.0 / count
-                };
-                if min > covered_min {
-                    c.0 += (min - covered_min) * share;
-                }
-                if max > covered_max {
-                    c.1 += (max - covered_max) * share;
-                }
                 c.1 = c.1.max(c.0);
             }
         }
@@ -1291,7 +1380,7 @@ impl TableTreeWrapper<'_, '_> {
             min_width.map_or(w, |m| w.max(m))
         };
         let outer = match (inputs.known_dimensions.width, inputs.available_space.width) {
-            (Some(width), _) => width,
+            (Some(width), _) => width.max(sum_min + chrome),
             (None, AvailableSpace::Definite(available)) => match style
                 .size
                 .width
@@ -1307,6 +1396,12 @@ impl TableTreeWrapper<'_, '_> {
         let widths = distribute_auto_columns(&columns, inner);
 
         let mut style = style.clone();
+        // A table is never narrower than its columns' content (`<table
+        // width=100>` around 159px of unbreakable text grows to 159px).
+        let min_outer = sum_min + chrome;
+        if min_width.is_none_or(|m| m < min_outer) {
+            style.min_size.width = style_helpers::length(min_outer);
+        }
         style.grid_template_columns = widths
             .into_iter()
             .map(|w| GridTemplateComponent::Single(style_helpers::length(w)))
@@ -1317,7 +1412,66 @@ impl TableTreeWrapper<'_, '_> {
 
 #[cfg(test)]
 mod auto_table_tests {
-    use super::distribute_auto_columns;
+    use super::{ColumnCursor, distribute_auto_columns, distribute_span_excess};
+
+    #[test]
+    fn span_minimums_fill_fixed_columns_first() {
+        // (min, max, fixed, percent)
+        let mut columns = [(310.0, 310.0, None, None), (39.0, 92.0, Some(110.0), None)];
+        distribute_span_excess(&mut columns, 71.0, true);
+        assert!(close(&[columns[0].0, columns[1].0], &[310.0, 110.0]));
+        // Beyond the fixed widths, auto columns take the rest...
+        let mut columns = [(28.0, 59.0, None, None), (8.0, 8.0, Some(50.0), None)];
+        distribute_span_excess(&mut columns, 264.0, true);
+        assert!(close(&[columns[0].0, columns[1].0], &[250.0, 50.0]));
+        // ...or, without any, every column by its width.
+        let mut columns = [(8.0, 8.0, Some(100.0), None), (8.0, 8.0, Some(50.0), None)];
+        distribute_span_excess(&mut columns, 284.0, true);
+        assert!(close(&[columns[0].0, columns[1].0], &[200.0, 100.0]));
+    }
+
+    #[test]
+    fn span_maximums_skip_fixed_columns_when_auto_ones_exist() {
+        let mut columns = [(28.0, 59.0, None, None), (8.0, 8.0, Some(50.0), None)];
+        distribute_span_excess(&mut columns, 191.0, false);
+        assert!(close(&[columns[0].1, columns[1].1], &[250.0, 8.0]));
+    }
+
+    #[test]
+    fn short_fixed_columns_lose_no_space() {
+        // Fixed widths summing past the table share all of it, each in
+        // proportion to its distance from its minimum.
+        let w = distribute_auto_columns(
+            &[
+                (478.0, 478.0, Some(483.0), None),
+                (5.0, 5.0, Some(5.0), None),
+                (151.0, 151.0, Some(161.0), None),
+            ],
+            648.0,
+        );
+        assert!((w.iter().sum::<f32>() - 648.0).abs() < 0.01);
+        assert!(close(&w, &[482.6667, 5.0, 160.3333]));
+    }
+
+    #[test]
+    fn rowspan_cells_occupy_their_columns_in_every_spanned_row() {
+        let mut cursor = ColumnCursor::default();
+        let mut row = |cursor: &mut ColumnCursor, cells: &[(u16, u16)]| {
+            cursor.start_row();
+            cells
+                .iter()
+                .map(|&(colspan, rowspan)| {
+                    let col = cursor.next_free();
+                    cursor.place(colspan, rowspan);
+                    col
+                })
+                .collect::<Vec<u16>>()
+        };
+        // <td rowspan=2><td colspan=2> / <td><td> / <td><td><td>
+        assert_eq!(row(&mut cursor, &[(1, 2), (2, 1)]), [0, 1]);
+        assert_eq!(row(&mut cursor, &[(1, 1), (1, 1)]), [1, 2]);
+        assert_eq!(row(&mut cursor, &[(1, 1), (1, 1), (1, 1)]), [0, 1, 2]);
+    }
 
     fn close(a: &[f32], b: &[f32]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.01)

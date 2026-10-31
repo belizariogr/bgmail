@@ -349,9 +349,19 @@ impl LayoutPassState<'_> {
                 .downcast_element_mut()
                 .unwrap()
                 .inline_layout_data = Some(inline_layout);
-            return LayoutOutput::from_outer_size(
-                Size::ZERO.maybe_max(container_pb.sum_axes().map(Some)),
-            );
+            // BGMail: a block holding only empty inlines (`<p><font></font></p>`,
+            // common after the parser reopens formatting elements) has no line
+            // boxes: it keeps the width it was given and, empty, lets margins
+            // collapse through it like `<p></p>`.
+            let size = Size {
+                width: known_dimensions.width.unwrap_or(0.0),
+                height: known_dimensions.height.unwrap_or(0.0),
+            }
+            .maybe_max(container_pb.sum_axes().map(Some));
+            return LayoutOutput {
+                margins_can_collapse_through: size.height == 0.0,
+                ..LayoutOutput::from_outer_size(size)
+            };
         }
 
         // Compute available space
@@ -945,7 +955,7 @@ impl LayoutPassState<'_> {
         let mut quirk_box_shift: std::collections::HashMap<u64, f32> = Default::default();
         if self.line_height_quirk
             && inline_layout.layout.inline_boxes().len() > 0
-            && inline_layout.text.chars().all(char::is_whitespace)
+            && inline_layout.text.chars().all(|c| c.is_ascii_whitespace())
         {
             let mut new_height = 0.0f32;
             let mut all_lines_have_boxes = true;

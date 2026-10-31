@@ -1,6 +1,6 @@
 """Aligns Chromium and Blitz element boxes (document order) and prints where
 they diverge. usage: layout_diff.py chrome.tsv blitz.tsv [threshold_px] [max]"""
-import sys
+import difflib, sys
 SKIP = {'tbody', 'thead', 'tfoot', 'tr'}  # boxless in Blitz
 def load(p):
     return [r for r in (l.rstrip('\n').split('\t') for l in open(p) if l.strip()) if r[0] not in SKIP]
@@ -11,11 +11,14 @@ print(f"elements chrome={len(c)} blitz={len(b)}")
 shown = 0
 prev_dy = 0
 INLINE = {'a','span','b','strong','em','i','u','font','sup','sub','small','br','code','s','strike','label','abbr','mark','wbr','o:p'}
-for i, (ce, be) in enumerate(zip(c, b)):
+# Align by tag sequence: the reader replaces unavailable images with spans
+# (icon + alt text), so the two lists are not index-aligned.
+blocks = difflib.SequenceMatcher(
+    None, [r[0] for r in c], [r[0] for r in b], autojunk=False).get_matching_blocks()
+for i, j in ((ci + k, bi + k) for ci, bi, n in blocks for k in range(n)):
+    ce, be = c[i], b[j]
     if ce[0] in INLINE and be[3] == '0' and be[4] == '0':
         continue  # inline boxes are not laid out as boxes in Blitz
-    if ce[0] != be[0]:
-        print(f"#{i} TAG MISMATCH chrome={ce[0]} blitz={be[0]} — alignment lost"); break
     cx, cy, cw, ch = map(float, ce[1:]); bx, by, bw, bh = map(float, be[1:])
     dy = by - cy
     # report size mismatches and *changes* in vertical drift (where error is introduced)

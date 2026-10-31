@@ -90,10 +90,57 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `struct HtmlDocument`: Blitz document + resources + cached layout width,
   content width/height and `(height, display list)`, selection color, base
   URL, link capture and last find matches.
-- `HtmlDocument::parse(html, options)`: parses via `force_html_parse`, wires the
-  `ResourceProvider`, base URL, UA sheets, the shared browser-like font
-  context (`fonts::font_context`) and the `LinkCapture` navigation provider, and enables Blitz's line height quirk unless
-  `document_mode(html)` is `NoQuirks`.
+- `const IMAGE_FRAME` / `IMAGE_ICON` (private): CSS of the silver frame
+  Chromium draws around broken images and of the 16px broken-image icon slot.
+- `fn compact_style(style)` (private): an inline `style`, lower-cased without
+  spaces, for the `display:block` / `float:` / pixel-size checks.
+- `fn style_px(compact, property)` (private): pixel value of `width`/`height`
+  in a compacted style.
+- `fn replace_unavailable_images(doc, resources, base, quirks)` (private):
+  images whose `src` isn't available (`Resources::is_available`) take
+  Chromium's broken-image rendering:
+  - With alt text:
+    - Inline images become a span holding the icon slot and the alt text.
+      They keep `class`/`id`/`title`/`align`, the `align` float and
+      `hspace`/`vspace` margins (quirks: 3px toward the text).
+    - Block-level ones (`display:block`, floated, `align=left/right`) keep
+      their width, with the height from the attributes' ratio.
+    - In quirks mode, any declared size wins: a framed box (square from one
+      dimension) clipping the alt text.
+  - Without alt (or with `alt=""`):
+    - Both dimensions declared: a framed box of that size, unframed below
+      2px.
+    - Otherwise, without `alt`: a framed 16×16 box.
+- `const FORM_CONTROLS_UA_CSS` (private), always applied: Chromium's control
+  metrics:
+  - 13.33px `sans-serif` font;
+  - text inputs with 1px border + 2px/3px padding;
+  - `<select>` `inline-block`, border-box, padded for the ▾;
+  - 13px check boxes and radios with Chromium's margins.
+- `const QUIRKS_UA_CSS` (private), quirks mode only: Chromium's quirks.css:
+  - tables don't inherit font, alignment or white-space;
+  - 3px beside `img[align]`;
+  - `form` bottom margin;
+  - border-box text inputs;
+  - `[data-bgmail-quirky-start|end]` margins dropped.
+- `fn mark_quirky_margins(doc)` (private), quirks mode only: marks the blocks
+  whose default ("quirky") margin Chromium ignores, so the UA sheet can drop
+  it:
+  - the first p/list/heading/blockquote/pre/dl of the body or a cell
+    (`data-bgmail-quirky-start`);
+  - the last p/pre of a cell (`data-bgmail-quirky-end`).
+  The walk looks through div/center/font/form/span wrappers and skips
+  comments, collapsible whitespace and `align=left/right` img/table floats.
+  Text beside the block keeps its margin.
+- `HtmlDocument::parse(html, options)`:
+  - Parses via `force_html_parse(html, mode)`.
+  - Wires the `ResourceProvider`, base URL, the shared browser-like font
+    context (`fonts::font_context`) and the `LinkCapture` navigation provider.
+  - UA sheets: Blitz default + `FORM_CONTROLS_UA_CSS` (+ `QUIRKS_UA_CSS` in
+    quirks) + `user_agent_css`.
+  - Then runs `replace_unavailable_images` (and `mark_quirky_margins` in
+    quirks), and enables Blitz's line height quirk unless
+    `document_mode(html)` is `NoQuirks`.
 - `with_depth()` (private): records the tree's nesting depth after parsing.
 - `HtmlDocument::try_parse(html, options) -> Result<Self, RenderError>`:
   `parse`, then `TooDeep` above `MAX_NESTING_DEPTH`.
@@ -133,9 +180,10 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `HtmlDocument::blitz()` / `blitz_mut()`: underlying `BaseDocument`; mutable
   access invalidates the display list.
 - `fn viewport(width, appearance)` (private): Blitz viewport at scale 1.
-- `fn force_html_parse(html) -> String`: strips BOM, `<?xml` and doctype prologs
-  (any case) and prefixes `<!DOCTYPE html>\n`, so Blitz never picks its XML
-  parser.
+- `fn force_html_parse(html, mode) -> String`: strips BOM, `<?xml` and doctype
+  prologs (any case) and prefixes a doctype Blitz never takes for XML:
+  `<!DOCTYPE html>`, or for `Quirks` a legacy HTML 4.0 one so html5ever keeps
+  the quirks tree building (`<table>` doesn't close an open `<p>`).
 - `fn box_of(html, id)` (test helper): border box of `#id` at 400px.
 - Tests: document modes, line height quirk (quirks vs standards cell height),
   RTL box-only lines reversed, keyword max widths (`min-content`,
@@ -152,6 +200,15 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   refused and never laid out,
   symbol list markers drawn as 5px discs (not "•" glyphs),
   prolog replacement, fragments, lowercase doctype, layout height + caching,
+  unavailable images (standards, quirks, tiny, floated with hspace/vspace),
+  quirks tables resetting fonts, image `align`/`hspace`, `valign`, cell and
+  table sizes as minimums, legacy link/`hr` attributes, line height quirk
+  (text-free boxes, nested spans, `&nbsp;`, breaks alone on a line), quirky
+  margins at cell edges, quirks parsing of `<p><table>`, capped padded
+  percentage columns, spanning cells widening fixed columns first, short
+  fixed columns sharing the whole table, inline width ignored around blocks,
+  cell `vertical-align` not growing lines, empty-inline blocks collapsing
+  margins, form control sizes,
   root background filling a requested height, relative URLs neither panicking
   nor counted as remote, XHTML mail keeps block `<p>`, blocked remote image
   recording, text runs carry ordered words + face.
@@ -254,11 +311,14 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `resolve(url)`: `data:` decoded, `cid:` (percent-decoded) from attachments,
   `file:` only when allowed, `bgmail:` (message-relative) missing, everything
   else blocked and recorded.
+- `Resources::is_available(url)`: whether `resolve` would serve the URL
+  (decodable `data:`, known `cid:`, allowed `file:`), without recording it.
 - `fn percent_decode(input)` (private): `%XX` decoding, invalid sequences kept.
 - `struct ResourceProvider(Arc<Resources>)` (crate): `NetProvider` that answers
   Blitz synchronously (`bytes` or `error`).
 - Tests: data URLs, cid with/without brackets, percent-encoded cid, remote
-  blocking + recording, message-relative URLs, file opt-in, percent decoding.
+  blocking + recording, message-relative URLs, file opt-in, percent decoding,
+  availability without recording.
 
 ### `gradient.rs`
 - `fn gradient_t(kind, point)`: position along linear (projection), radial

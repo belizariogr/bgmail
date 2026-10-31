@@ -37,6 +37,9 @@ bitflags! {
         /// BGMail: a cell of a `border-collapse: collapse` table, whose borders
         /// belong to the table (drawn and sized as its grid gaps).
         const NO_BORDER = 1 << 5;
+        /// BGMail: a table cell, whose `height` is a minimum (the row grows to
+        /// fit its content, as in browsers).
+        const TABLE_CELL = 1 << 6;
     }
 }
 
@@ -143,6 +146,19 @@ impl<T: Deref<Target = ComputedValues>> TaffyStyloStyle<T> {
         {
             None
         }
+    }
+    /// BGMail: a non-replaced `display: inline` element ignores `width`,
+    /// `height` and their min/max. Blitz still lays out an inline that
+    /// contains blocks as a box, which must not take them (`<a
+    /// style="width:200px">` around a table in a 120px cell).
+    #[inline]
+    fn ignores_size(&self) -> bool {
+        let display = self.style.clone_display();
+        display.outside() == stylo::DisplayOutside::Inline
+            && display.inside() == stylo::DisplayInside::Flow
+            && !self.flags.intersects(
+                StyleFlags::IS_REPLACED | StyleFlags::IS_BUTTON | StyleFlags::IS_BUTTON_INPUT,
+            )
     }
 
     /// Map a physical rect into the layout writing mode's axes
@@ -252,30 +268,44 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
 
     #[inline]
     fn size(&self) -> taffy::Size<taffy::Dimension> {
+        if self.ignores_size() {
+            return taffy::Size::auto();
+        }
         let position_styles = self.style.get_position();
         self.size(taffy::Size {
             width: convert::size_with_keyword_max(
                 &position_styles.width,
                 &position_styles.max_width,
             ),
-            height: convert::size_with_keyword_max(
-                &position_styles.height,
-                &position_styles.max_height,
-            ),
+            height: if self.flags.contains(StyleFlags::TABLE_CELL) {
+                taffy::Dimension::auto()
+            } else {
+                convert::size_with_keyword_max(&position_styles.height, &position_styles.max_height)
+            },
         })
     }
 
     #[inline]
     fn min_size(&self) -> taffy::Size<taffy::LengthPercentageAuto> {
+        if self.ignores_size() {
+            return taffy::Size::auto();
+        }
         let position_styles = self.style.get_position();
         self.size(taffy::Size {
             width: convert::min_size(&position_styles.min_width),
-            height: convert::min_size(&position_styles.min_height),
+            height: if self.flags.contains(StyleFlags::TABLE_CELL) {
+                convert::min_size(&position_styles.height)
+            } else {
+                convert::min_size(&position_styles.min_height)
+            },
         })
     }
 
     #[inline]
     fn max_size(&self) -> taffy::Size<taffy::LengthPercentageAuto> {
+        if self.ignores_size() {
+            return taffy::Size::auto();
+        }
         let position_styles = self.style.get_position();
         self.size(taffy::Size {
             width: convert::max_size(&position_styles.max_width),

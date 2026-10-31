@@ -1051,7 +1051,8 @@ _(None at module top level — conversion helpers only.)_
 - **`email_document`** (pub)
   - Signature: `pub fn email_document(colors: DocumentColors, body: &MessageBody) -> RenderedEmail`
   - Purpose: Builds the reader document for a body.
-  - Behavior: HTML bodies are sanitized with remote loading off (Stage 3 adds loading); plain text is escaped into `<pre class="plain">`. Wraps the result in a doctype'd document with `document_css`.
+  - Behavior: HTML bodies are sanitized with remote loading off (Stage 3 adds loading); plain text is escaped into `<pre class="plain">`. Wraps the result in a document with `document_css` that starts with the body's own doctype (`leading_doctype`, so legacy mail keeps its quirks mode), else `<!DOCTYPE html>`.
+- **`leading_doctype`** (private): The doctype an HTML body starts with, after a BOM, whitespace, `<?…?>` declarations and comments; `None` without one.
 - **`document_css`** (private): Theme stylesheet (color scheme, page colors/padding/font, links in accent, blocked-image placeholder, code/pre/blockquote/hr styles).
 - **`css_color`** / **`css_color_alpha`** / **`channel`** (private): Theme colors → CSS `rgb()`/`rgba()`; channel clamps and rounds to 0–255.
 - **`sanitize_html`** (private, test-only): `sanitize_html_inner` without the remote-image report.

@@ -58,6 +58,19 @@ impl Resources {
             .unwrap_or_default()
     }
 
+    /// Whether [`Self::resolve`] would serve `url` (without recording it as
+    /// blocked): decodable `data:`, known `cid:` attachments, and `file:`
+    /// when allowed.
+    pub fn is_available(&self, url: &url::Url) -> bool {
+        match url.scheme() {
+            "data" => data_url::DataUrl::process(url.as_str())
+                .is_ok_and(|data| data.decode_to_vec().is_ok()),
+            "cid" => self.attachments.contains_key(&percent_decode(url.path())),
+            "file" => self.allow_file_urls,
+            _ => false,
+        }
+    }
+
     /// Resolves a URL according to the offline policy.
     pub fn resolve(&self, url: &url::Url) -> Resolution {
         match url.scheme() {
@@ -200,6 +213,17 @@ mod tests {
             r.resolve(&url("bgmail://message/assets/x.png")),
             Resolution::Missing
         );
+        assert!(r.blocked_urls().is_empty());
+    }
+
+    #[test]
+    fn availability_matches_the_policy_without_recording() {
+        let r = Resources::new().with_attachment("logo", b"png".to_vec());
+        assert!(r.is_available(&url("data:image/png;base64,aGk=")));
+        assert!(r.is_available(&url("cid:logo")));
+        assert!(!r.is_available(&url("cid:other")));
+        assert!(!r.is_available(&url("https://tracker.example/p.gif")));
+        assert!(!r.is_available(&url("file:///tmp/x.png")));
         assert!(r.blocked_urls().is_empty());
     }
 

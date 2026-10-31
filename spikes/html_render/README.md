@@ -80,7 +80,14 @@ python3 -I ../tools/build_report.py      # after reviews in out/reviews/batch_*.
   sibling copy with `<!DOCTYPE html>` (html_view renders it in standards mode).
 - `tools/ldiff.sh <stem> [px] [max] [width]`: element-box diff Chromium vs
   Blitz (`corpus_build/layout_dump.mjs` + `layout_dump` example, rebuilt);
-  finds where layout drifts. `corpus_build/attrs.mjs <file> <idx>...` prints
-  computed styles.
+  finds where layout drifts. Boxes are aligned by tag sequence
+  (`layout_diff.py`, difflib), so the reader's broken-image spans don't break
+  the alignment. `corpus_build/attrs.mjs <file> <idx>...` prints computed
+  styles.
+- Real mail: `corpus_real/` (git-ignored: third-party messages, 2002-era
+  newsletters and current templates) with `out_real*/` results.
+  `CORPUS=corpus_real TAG=real_ tools/capture_widths.sh <n>` captures it;
+  `CORPUS=corpus_real tools/ldiff.sh <stem>` diffs it. Reviews in
+  `out/reviews_real/` (`RUBRIC_REAL.md`).
 - Reviews per round: `out/reviews_hv/` (800px, `RUBRIC_HV.md`, `final.json`)
   and `out/reviews_widths/` (all widths, `RUBRIC_WIDTHS.md`, `final.json`).

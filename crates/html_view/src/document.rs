@@ -142,6 +142,222 @@ impl std::fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
+/// Thin frame and icon slot browsers draw for unavailable images.
+const IMAGE_FRAME: &str = "border:1px solid silver;box-sizing:border-box;";
+const IMAGE_ICON: &str = "display:inline-block;width:16px;height:16px;\
+     vertical-align:text-bottom;border:1px solid silver;box-sizing:border-box;";
+
+/// Declarations of an inline `style`, lower-cased with spaces removed, for
+/// the few checks below (`display:block`, explicit pixel sizes).
+fn compact_style(style: &str) -> String {
+    style
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// A `px` length declared for `property` in a compacted inline style.
+fn style_px(style: &str, property: &str) -> Option<f32> {
+    style.split(';').find_map(|declaration| {
+        let value = declaration.strip_prefix(property)?.strip_prefix(':')?;
+        value
+            .strip_suffix("px")?
+            .parse()
+            .ok()
+            .filter(|px: &f32| *px > 0.0)
+    })
+}
+
+/// Shows unavailable images (blocked remote, missing `cid:`) the way
+/// Chromium does, so mail laid out around images keeps its shape:
+/// - with alt text: the alt text after a 16px icon slot, inline (declared
+///   sizes ignored), or as a block keeping the width and the attributes'
+///   aspect ratio when the image is `display:block`;
+/// - without alt text (or `alt=""`): a framed box of the declared size, or
+///   just the 16px icon slot when a dimension is missing (not for `alt=""`).
+///
+/// In quirks mode (`quirks`) any declared size wins, alt text or not: a
+/// framed box of that size (square when only one dimension is declared)
+/// with the alt text clipped inside.
+fn replace_unavailable_images(
+    doc: &mut BaseDocument,
+    resources: &Resources,
+    base: &url::Url,
+    quirks: bool,
+) {
+    enum Fallback {
+        /// Replace the image with a span holding the icon slot and alt text.
+        AltText {
+            alt: String,
+            style: String,
+            attrs: Vec<blitz_dom::Attribute>,
+        },
+        /// Keep the image, restyled.
+        Restyle(String),
+    }
+    let mut fallbacks = Vec::new();
+    let mut stack = vec![doc.root_node().id];
+    while let Some(id) = stack.pop() {
+        let Some(node) = doc.get_node(id) else {
+            continue;
+        };
+        stack.extend(node.children.iter().copied());
+        let Some(element) = node.element_data() else {
+            continue;
+        };
+        if element.name.local != local_name!("img") {
+            continue;
+        }
+        let available = element
+            .attr(local_name!("src"))
+            .and_then(|src| base.join(src.trim()).ok())
+            .is_some_and(|url| resources.is_available(&url));
+        if available {
+            continue;
+        }
+        let attr_px = |name| {
+            element
+                .attr(name)
+                .and_then(|value| value.trim().trim_end_matches("px").parse::<f32>().ok())
+                .filter(|px| *px > 0.0)
+        };
+        let own = element.attr(local_name!("style")).unwrap_or("");
+        let compact = compact_style(own);
+        let width = style_px(&compact, "width").or(attr_px(local_name!("width")));
+        let height = style_px(&compact, "height").or(attr_px(local_name!("height")));
+        let alt = element.attr(local_name!("alt")).map(str::trim);
+        // Quirks mode keeps the declared size (square from one dimension).
+        let (width, height) = match (quirks, width, height) {
+            (true, Some(w), None) => (Some(w), Some(w)),
+            (true, None, Some(h)) => (Some(h), Some(h)),
+            _ => (width, height),
+        };
+        let quirks_box = quirks && width.is_some();
+        let fallback = match alt {
+            Some(alt) if !alt.is_empty() => {
+                let attrs = ["class", "id", "title", "align"]
+                    .into_iter()
+                    .filter_map(|name| {
+                        element
+                            .attrs()
+                            .iter()
+                            .find(|a| &*a.name.local == name)
+                            .cloned()
+                    })
+                    .collect();
+                // The image's `align` floats (or aligns) the alt text too,
+                // and its `hspace`/`vspace` (or quirks-mode float spacing)
+                // still space it; they go before the author style it loses to.
+                let align_attr = element
+                    .attr(local_name!("align"))
+                    .map(|a| a.trim().to_ascii_lowercase());
+                let align = align_attr
+                    .as_deref()
+                    .and_then(blitz_dom::legacy_image_align_css)
+                    .unwrap_or("");
+                let mut spacing = match (quirks, align_attr.as_deref()) {
+                    (true, Some("left")) => "margin-right:3px;".to_string(),
+                    (true, Some("right")) => "margin-left:3px;".to_string(),
+                    _ => String::new(),
+                };
+                if let Some(px) = attr_px(local_name!("hspace")) {
+                    spacing.push_str(&format!("margin-left:{px}px;margin-right:{px}px;"));
+                }
+                if let Some(px) = attr_px(local_name!("vspace")) {
+                    spacing.push_str(&format!("margin-top:{px}px;margin-bottom:{px}px;"));
+                }
+                let own = format!("{spacing}{own}");
+                // A floated image is block-level: it keeps its box like
+                // `display:block` does.
+                let block = compact.contains("display:block")
+                    || compact.contains("float:left")
+                    || compact.contains("float:right")
+                    || matches!(align_attr.as_deref(), Some("left" | "right"));
+                let style = if quirks_box {
+                    let display = if compact.contains("display:block") {
+                        "block"
+                    } else {
+                        "inline-block"
+                    };
+                    format!(
+                        "{own};display:{display};overflow:hidden;width:{}px;height:{}px;\
+                         vertical-align:bottom;{IMAGE_FRAME}{align}",
+                        width.unwrap_or(16.0),
+                        height.unwrap_or(16.0)
+                    )
+                } else if block {
+                    // Keep the block's width; its height follows the
+                    // attributes' ratio when only the width is fixed.
+                    let ratio = match (
+                        attr_px(local_name!("width")),
+                        attr_px(local_name!("height")),
+                    ) {
+                        (Some(w), Some(h)) if style_px(&compact, "height").is_none() => {
+                            format!("aspect-ratio:{w}/{h};")
+                        }
+                        _ => String::new(),
+                    };
+                    let width = width.map_or(String::new(), |w| format!("width:{w}px;"));
+                    format!("{width}{ratio}{own};display:block;overflow:hidden;{align}")
+                } else {
+                    format!("{spacing}{align}")
+                };
+                Fallback::AltText {
+                    alt: alt.to_string(),
+                    style,
+                    attrs,
+                }
+            }
+            _ => match (width, height) {
+                // Too small for the frame's borders: just keep the size.
+                (Some(w), Some(h)) if w < 2.0 || h < 2.0 => Fallback::Restyle(format!(
+                    "{own};width:{w}px;height:{h}px;box-sizing:border-box"
+                )),
+                (Some(w), Some(h)) => {
+                    Fallback::Restyle(format!("{own};width:{w}px;height:{h}px;{IMAGE_FRAME}"))
+                }
+                _ if alt.is_none() => {
+                    Fallback::Restyle(format!("{own};width:16px;height:16px;{IMAGE_FRAME}"))
+                }
+                _ => continue,
+            },
+        };
+        fallbacks.push((id, fallback));
+    }
+    let mut mutator = doc.mutate();
+    for (img, fallback) in fallbacks {
+        match fallback {
+            Fallback::Restyle(style) => {
+                mutator.set_attribute(img, blitz_dom::qual_name!("style"), &style);
+            }
+            Fallback::AltText {
+                alt,
+                style,
+                mut attrs,
+            } => {
+                if !style.is_empty() {
+                    attrs.push(blitz_dom::Attribute {
+                        name: blitz_dom::qual_name!("style"),
+                        value: style,
+                    });
+                }
+                let span = mutator.create_element(blitz_dom::qual_name!("span", html), attrs);
+                let icon = mutator.create_element(
+                    blitz_dom::qual_name!("span", html),
+                    vec![blitz_dom::Attribute {
+                        name: blitz_dom::qual_name!("style"),
+                        value: IMAGE_ICON.to_string(),
+                    }],
+                );
+                let text = mutator.create_text_node(&alt);
+                mutator.append_children(span, &[icon, text]);
+                mutator.replace_node_with(img, &[span]);
+            }
+        }
+    }
+}
+
 /// Deepest node nesting under `root` (iterative: the tree may be too deep
 /// for recursion, which is what this guards against).
 fn nesting_depth(doc: &BaseDocument, root: NodeId) -> usize {
@@ -154,6 +370,143 @@ fn nesting_depth(doc: &BaseDocument, root: NodeId) -> usize {
         }
     }
     deepest
+}
+
+/// Chromium's form control metrics (its UA sheet and theme), which the
+/// controls of old newsletters' search boxes size table columns by: a
+/// 13.33px UI font, text inputs with 3px of border + padding around their
+/// text, closed drop-downs with room for the arrow at their end, 13px check
+/// boxes and radio buttons.
+const FORM_CONTROLS_UA_CSS: &str = "input, select, textarea, button { \
+     font: 13.333px sans-serif; letter-spacing: normal; word-spacing: normal; \
+     text-transform: none; text-indent: 0; text-shadow: none; } \
+     input:not([type]), input[type=text i], input[type=password i], input[type=email i], \
+     input[type=search i], input[type=tel i], input[type=url i] { \
+     border: 1px solid #767676; border-radius: 2px; padding: 2px 3px; \
+     background-color: white; color: black; } \
+     select { display: inline-block; border: 1px solid #767676; border-radius: 2px; \
+     padding: 1px 16px 1px 4px; box-sizing: border-box; \
+     background-color: white; color: black; white-space: pre; } \
+     input[type=checkbox i], input[type=radio i] { box-sizing: border-box; \
+     width: 13px; height: 13px; padding: 0; margin: 3px 3px 3px 4px; } \
+     input[type=radio i] { margin: 3px 3px 0 5px; }";
+
+/// Chromium's quirks-mode UA rules that mail visibly depends on:
+/// - tables don't inherit font and alignment (an old page's small body font
+///   doesn't shrink its table headlines);
+/// - floated images get 3px of space toward the text, forms a bottom margin,
+///   text inputs border-box sizing (quirks.css);
+/// - the default ("quirky") margins at the start of the body or a table
+///   cell and at the end of a cell are dropped (see
+///   [`mark_quirky_margins`]); author margins win over it.
+const QUIRKS_UA_CSS: &str = "table { white-space: normal; line-height: normal; \
+     font-weight: normal; font-size: medium; font-variant: normal; font-style: normal; \
+     text-align: start; } \
+     img[align=left i] { margin-right: 3px; } img[align=right i] { margin-left: 3px; } \
+     input:not([type=image i]), textarea { box-sizing: border-box; } \
+     form { margin-block-end: 1em; } \
+     [data-bgmail-quirky-start] { margin-top: 0; } \
+     [data-bgmail-quirky-end] { margin-bottom: 0; }";
+
+/// Marks the blocks whose default margin Chromium ignores in quirks mode
+/// (Blink's "quirky" `__qem` margins), for [`QUIRKS_UA_CSS`]:
+/// - `data-bgmail-quirky-start`: the paragraph, list, heading, ... that is
+///   the first content of the body or a table cell;
+/// - `data-bgmail-quirky-end`: the paragraph or `pre` that is the last
+///   content of a table cell (other blocks' bottom margins aren't quirky).
+///
+/// Both look through wrappers (`<td><font><p>`). Text beside the block keeps
+/// its margin, which is why this is a DOM pass and not a `:first-child`
+/// selector.
+fn mark_quirky_margins(doc: &mut BaseDocument) {
+    const QUIRKY_START: [&str; 16] = [
+        "p",
+        "ul",
+        "ol",
+        "dl",
+        "menu",
+        "dir",
+        "blockquote",
+        "pre",
+        "listing",
+        "xmp",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+    ];
+    const QUIRKY_END: [&str; 4] = ["p", "pre", "listing", "xmp"];
+    const WRAPPERS: [&str; 5] = ["div", "center", "font", "form", "span"];
+    let tag = |doc: &BaseDocument, id: NodeId| {
+        doc.get_node(id)
+            .and_then(|node| node.element_data())
+            .map(|element| element.name.local.to_string())
+    };
+    // The quirky block at one edge of `container`, through wrappers.
+    let edge_block = |doc: &BaseDocument, mut container: NodeId, end: bool, quirky: &[&str]| loop {
+        let node = doc.get_node(container)?;
+        // Comments, collapsible whitespace and floats (`<img align=left>`)
+        // aren't in-flow content.
+        let is_content = |child: &NodeId| {
+            doc.get_node(*child).is_some_and(|child| match &child.data {
+                blitz_dom::NodeData::Text(text) => {
+                    !text.content.chars().all(|c| c.is_ascii_whitespace())
+                }
+                blitz_dom::NodeData::Comment { .. } => false,
+                blitz_dom::NodeData::Element(element) => {
+                    !matches!(
+                        element
+                            .attr(local_name!("align"))
+                            .map(str::to_ascii_lowercase)
+                            .as_deref(),
+                        Some("left" | "right")
+                    ) || !matches!(element.name.local.as_ref(), "img" | "table")
+                }
+                _ => true,
+            })
+        };
+        let child = if end {
+            node.children.iter().rev().copied().find(is_content)
+        } else {
+            node.children.iter().copied().find(is_content)
+        }?;
+        match tag(doc, child).as_deref() {
+            Some(name) if quirky.contains(&name) => return Some(child),
+            Some(name) if WRAPPERS.contains(&name) => container = child,
+            _ => return None,
+        }
+    };
+    let mut marked = Vec::new();
+    let mut stack = vec![doc.root_node().id];
+    while let Some(id) = stack.pop() {
+        if let Some(node) = doc.get_node(id) {
+            stack.extend(node.children.iter().copied());
+        }
+        let cell = match tag(doc, id).as_deref() {
+            Some("td" | "th") => true,
+            Some("body") => false,
+            _ => continue,
+        };
+        if let Some(block) = edge_block(doc, id, false, &QUIRKY_START) {
+            marked.push((block, "data-bgmail-quirky-start"));
+        }
+        if let Some(block) = cell
+            .then(|| edge_block(doc, id, true, &QUIRKY_END))
+            .flatten()
+        {
+            marked.push((block, "data-bgmail-quirky-end"));
+        }
+    }
+    let mut mutator = doc.mutate();
+    for (id, attr) in marked {
+        mutator.set_attribute(
+            id,
+            blitz_dom::QualName::new(None, blitz_dom::ns!(), attr.into()),
+            "",
+        );
+    }
 }
 
 /// Text selection highlight used when [`DocumentOptions::selection_color`]
@@ -251,7 +604,14 @@ impl HtmlDocument {
             .clone()
             .unwrap_or_else(|| MESSAGE_BASE_URL.to_string());
         let links = Arc::new(LinkCapture::default());
-        let mut ua_stylesheets = vec![UserAgentStylesheet::default_sheet()];
+        let mode = document_mode(html);
+        let mut ua_stylesheets = vec![
+            UserAgentStylesheet::default_sheet(),
+            UserAgentStylesheet::parse(FORM_CONTROLS_UA_CSS),
+        ];
+        if mode == DocumentMode::Quirks {
+            ua_stylesheets.push(UserAgentStylesheet::parse(QUIRKS_UA_CSS));
+        }
         if let Some(css) = &options.user_agent_css {
             ua_stylesheets.push(UserAgentStylesheet::parse(css));
         }
@@ -266,10 +626,16 @@ impl HtmlDocument {
             font_ctx: Some(crate::fonts::font_context()),
             ..Default::default()
         };
-        let mut inner = blitz_html::HtmlDocument::from_html(&force_html_parse(html), config);
-        // Blitz always parses in no-quirks mode (see `force_html_parse`); keep
-        // the one quirk mail layouts visibly depend on.
-        inner.set_line_height_quirk(document_mode(html) != DocumentMode::NoQuirks);
+        let mut inner = blitz_html::HtmlDocument::from_html(&force_html_parse(html, mode), config);
+        let base = url::Url::parse(&base_url)
+            .unwrap_or_else(|_| url::Url::parse(MESSAGE_BASE_URL).expect("valid base URL"));
+        replace_unavailable_images(&mut inner, &resources, &base, mode == DocumentMode::Quirks);
+        if mode == DocumentMode::Quirks {
+            mark_quirky_margins(&mut inner);
+        }
+        // Blitz styles in no-quirks mode; keep the quirk mail layouts visibly
+        // depend on.
+        inner.set_line_height_quirk(mode != DocumentMode::NoQuirks);
         Self {
             inner,
             resources,
@@ -282,8 +648,7 @@ impl HtmlDocument {
                 let [r, g, b, a] = options.selection_color.unwrap_or(DEFAULT_SELECTION_COLOR);
                 peniko::Color::from_rgba8(r, g, b, a)
             },
-            base_url: url::Url::parse(&base_url)
-                .unwrap_or_else(|_| url::Url::parse(MESSAGE_BASE_URL).expect("valid base URL")),
+            base_url: base,
             links,
             find_matches: Vec::new(),
             depth: 0,
@@ -649,9 +1014,11 @@ fn viewport(width: u32, appearance: Appearance) -> Viewport {
 /// Blitz sniffs XHTML doctypes, `<?xml` prologs and `<html xmlns=…xhtml>` roots
 /// and switches to its XML parser, which drops the HTML user-agent stylesheet
 /// (`<p>` turns inline, hidden preheaders show). Mail is always `text/html`, so
-/// browsers parse it as HTML; replacing the prolog with an HTML5 doctype on its
-/// own line makes Blitz do the same.
-pub fn force_html_parse(html: &str) -> String {
+/// browsers parse it as HTML; replacing the prolog with an HTML doctype on its
+/// own line makes Blitz do the same. A quirks-mode document gets a legacy
+/// HTML 4 doctype, so the parser keeps its quirks (`<table>` doesn't close an
+/// open `<p>`).
+pub fn force_html_parse(html: &str, mode: DocumentMode) -> String {
     let mut rest = html.trim_start_matches('\u{feff}').trim_start();
     loop {
         let lower = rest
@@ -667,7 +1034,11 @@ pub fn force_html_parse(html: &str) -> String {
             break;
         }
     }
-    format!("<!DOCTYPE html>\n{rest}")
+    let doctype = match mode {
+        DocumentMode::Quirks => "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">",
+        DocumentMode::LimitedQuirks | DocumentMode::NoQuirks => "<!DOCTYPE html>",
+    };
+    format!("{doctype}\n{rest}")
 }
 
 #[cfg(test)]
@@ -723,7 +1094,7 @@ mod tests {
     #[test]
     fn force_html_parse_replaces_xhtml_prolog() {
         let html = "\u{feff}<?xml version=\"1.0\"?>\n<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"x\"><html xmlns=\"http://www.w3.org/1999/xhtml\"><p>a</p></html>";
-        let out = force_html_parse(html);
+        let out = force_html_parse(html, DocumentMode::LimitedQuirks);
         assert!(out.starts_with("<!DOCTYPE html>\n<html xmlns="));
         assert!(!out.contains("XHTML"));
     }
@@ -731,7 +1102,7 @@ mod tests {
     #[test]
     fn force_html_parse_adds_doctype_to_fragments() {
         assert_eq!(
-            force_html_parse("<div>x</div>"),
+            force_html_parse("<div>x</div>", DocumentMode::NoQuirks),
             "<!DOCTYPE html>\n<div>x</div>"
         );
     }
@@ -739,7 +1110,7 @@ mod tests {
     #[test]
     fn force_html_parse_handles_lowercase_doctype() {
         assert_eq!(
-            force_html_parse("<!doctype html><p>x"),
+            force_html_parse("<!doctype html><p>x", DocumentMode::NoQuirks),
             "<!DOCTYPE html>\n<p>x"
         );
     }
@@ -1138,6 +1509,131 @@ mod tests {
     }
 
     #[test]
+    fn valign_attributes_align_cells() {
+        // A tall cell and a short one whose content `valign` (on the cell or
+        // its row) places within the row.
+        let row = |attrs: &str, cell: &str| {
+            format!("<!DOCTYPE html><body style=\"margin:0\"><table cellpadding=0 cellspacing=0><tr {attrs}><td><div style=\"height:100px;width:10px\"></div></td><td {cell}><div id=\"c\" style=\"height:20px;width:10px\"></div></td></tr></table>")
+        };
+        assert_eq!(box_of(&row("", "VALIGN=\"top\""), "c").1, 0.0);
+        assert_eq!(box_of(&row("valign=bottom", ""), "c").1, 80.0);
+        // No attribute: browsers center cells vertically.
+        assert_eq!(box_of(&row("", ""), "c").1, 40.0);
+    }
+
+    #[test]
+    fn unavailable_images_follow_chromium_fallbacks() {
+        // Mirrors Chromium's measured boxes for broken images (see the
+        // `replace_unavailable_images` docs).
+        let html = "<!DOCTYPE html><body style=\"margin:0;font:16px Arial\">\
+            <div id=\"a\"><img src=\"https://t.test/a.png\" alt=\"ACME Logo\" width=\"120\" height=\"40\"></div>\
+            <div><img id=\"e\" src=\"https://t.test/e.png\" alt=\"Ratio\" width=\"180\" height=\"126\" style=\"display:block;width:180px;height:auto\"></div>\
+            <div><img id=\"d\" src=\"https://t.test/d.png\" width=\"120\" height=\"40\"></div>\
+            <div><img id=\"b\" src=\"cid:missing\"></div>\
+            <div><img id=\"j\" src=\"https://t.test/j.png\" alt=\"\" style=\"width:50px;height:50px\"></div>\
+            <div><img id=\"z\" src=\"https://t.test/z.png\" alt=\"\"></div></body>";
+        let mut doc = laid_out(html);
+        doc.select_all();
+        let text = doc.selected_text().unwrap_or_default();
+        assert!(
+            text.contains("ACME Logo") && text.contains("Ratio"),
+            "{text}"
+        );
+        let size = |id: &str| box_of(html, id).2..=box_of(html, id).3;
+        // Inline with alt: one line of text, declared size ignored.
+        let (_, _, _, line) = box_of(html, "a");
+        assert!(line < 30.0, "{line}");
+        // Block with alt: width kept, height from the attributes' ratio.
+        let (_, _, w, h) = box_of(html, "e");
+        assert_eq!((w, h.round()), (180.0, 126.0));
+        // No alt: framed declared size, or the 16px icon slot.
+        assert_eq!(size("d"), 120.0..=40.0);
+        assert_eq!(size("b"), 16.0..=16.0);
+        assert_eq!(size("j"), 50.0..=50.0);
+        // Decorative without size: nothing.
+        assert_eq!(size("z"), 0.0..=0.0);
+    }
+
+    #[test]
+    fn quirks_mode_unavailable_images_keep_declared_sizes() {
+        let html = "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\"><body style=\"margin:0\">\
+            <div><img id=\"c\" src=\"https://t.test/c.png\" alt=\"Sized alt\" width=\"120\" height=\"40\"></div>\
+            <div><img id=\"f\" src=\"https://t.test/f.png\" width=\"177\" style=\"height:auto\"></div></body>";
+        let size = |id: &str| {
+            let (_, _, w, h) = box_of(html, id);
+            (w, h)
+        };
+        assert_eq!(size("c"), (120.0, 40.0));
+        // One dimension: a square.
+        assert_eq!(size("f"), (177.0, 177.0));
+    }
+
+    #[test]
+    fn quirks_mode_tables_reset_inherited_fonts() {
+        let body = "<body style=\"margin:0;font-size:8pt\"><table><tr><td><span id=\"s\">X</span></td></tr></table>";
+        let font_size = |doctype: &str| {
+            let mut doc = laid_out(&format!("{doctype}{body}"));
+            let list = doc.display_list();
+            list.commands
+                .iter()
+                .find_map(|c| match c {
+                    crate::display_list::Command::Text(run) => Some(run.font_size),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            font_size("<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">"),
+            16.0
+        );
+        assert!((font_size("<!DOCTYPE html>") - 8.0 * 4.0 / 3.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn image_align_floats_and_hspace_adds_margins() {
+        let html = "<!DOCTYPE html><body style=\"margin:0\"><div><img id=\"r\" src=\"cid:x\" width=\"50\" height=\"50\" align=\"right\"><img id=\"l\" src=\"cid:y\" width=\"50\" height=\"50\" ALIGN=\"left\" hspace=\"10\">text beside the images</div></body>";
+        let (x, y, _, _) = box_of(html, "r");
+        assert_eq!((x, y), (350.0, 0.0));
+        let (x, y, _, _) = box_of(html, "l");
+        assert_eq!((x, y), (10.0, 0.0));
+    }
+
+    #[test]
+    fn cell_heights_are_minimums() {
+        let html = |content: u32| {
+            format!("<!DOCTYPE html><body style=\"margin:0\"><table id=\"t\" cellpadding=0 cellspacing=0><tr><td height=\"81\"><div style=\"height:{content}px;width:10px\"></div></td></tr></table>")
+        };
+        // Taller content grows the row; shorter content keeps the height.
+        assert_eq!(box_of(&html(300), "t").3, 300.0);
+        assert_eq!(box_of(&html(20), "t").3, 81.0);
+    }
+
+    #[test]
+    fn legacy_link_and_hr_attributes_apply() {
+        let html = "<!DOCTYPE html><body link=\"#ff0000\" style=\"margin:0\"><a href=\"https://x.test\">link</a><hr id=\"h\" align=\"left\" width=\"100\" size=\"6\" color=\"#00ff00\"><hr id=\"z\" size=\"1\"></body>";
+        let mut doc = laid_out(html);
+        let commands = &doc.display_list().commands;
+        let red = peniko::Color::from_rgba8(255, 0, 0, 255);
+        let green = peniko::Color::from_rgba8(0, 255, 0, 255);
+        let uses = |color| {
+            commands.iter().any(|c| match c {
+                crate::display_list::Command::Text(run) => run.color == color,
+                crate::display_list::Command::Fill {
+                    brush: crate::display_list::Brush::Solid(fill),
+                    ..
+                } => *fill == color,
+                _ => false,
+            })
+        };
+        assert!(uses(red), "link colour from <body link>");
+        assert!(uses(green), "hr colour");
+        // Chromium: 100px content + 1px borders, `size` includes the borders.
+        let (x, _, w, h) = box_of(html, "h");
+        assert_eq!((x, w, h), (0.0, 102.0, 6.0));
+        assert_eq!(box_of(html, "z").3, 1.0);
+    }
+
+    #[test]
     fn collapsed_borders_are_counted_once_per_row() {
         // 1px collapsed borders: rows are 20px of content + one shared border.
         let cell =
@@ -1195,5 +1691,178 @@ mod tests {
             crate::display_list::Command::Text(run) if run.words.iter().any(|w| w.text == "•"))
         });
         assert!(!glyph_bullet);
+    }
+
+    const QUIRKS: &str = "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">";
+
+    #[test]
+    fn line_height_quirk_drops_the_strut_of_text_free_boxes() {
+        let height = |doctype: &str, content: &str| {
+            let html = format!(
+                "{doctype}<body style=\"margin:0\"><p id=\"p\" style=\"margin:0\">{content}</p>"
+            );
+            box_of(&html, "p").3
+        };
+        let small = "<font size=\"1\">x</font>";
+        // Quirks: the line is as tall as the small text, not the paragraph's strut.
+        assert!(height(QUIRKS, small) < height("<!DOCTYPE html>", small));
+        // Text-free ancestors of the text don't count either.
+        let nested = "<em><span><font size=\"1\">x</font></span></em>";
+        assert_eq!(height(QUIRKS, nested), height(QUIRKS, small));
+        // `&nbsp;` is text: it keeps the paragraph's line height.
+        assert_eq!(height(QUIRKS, "&nbsp;"), height(QUIRKS, "x"));
+    }
+
+    #[test]
+    fn breaks_alone_on_their_line_keep_the_parent_line_height() {
+        let height = |content: &str| {
+            let html = format!(
+                "{QUIRKS}<body style=\"margin:0\"><p id=\"p\" style=\"margin:0\">{content}</p>"
+            );
+            box_of(&html, "p").3
+        };
+        let small = height("<font size=\"1\">x</font>");
+        // A break after text adds nothing; one alone on its line adds a full line.
+        assert_eq!(
+            height("<font size=\"1\">x</font><br><font size=\"1\">y</font>"),
+            2.0 * small
+        );
+        assert!(height("<br><font size=\"1\">y</font>") > 2.0 * small);
+    }
+
+    #[test]
+    fn quirky_margins_drop_at_the_edges_of_cells() {
+        let cell = |content: &str| {
+            let html = format!("{QUIRKS}<body style=\"margin:0\"><table cellpadding=0 cellspacing=0><tr><td id=\"c\">{content}</td></tr></table>");
+            box_of(&html, "c").3
+        };
+        let line = cell("a");
+        // A cell's leading and closing paragraphs lose their default margins,
+        // through wrappers and floats too.
+        assert_eq!(cell("<p>a</p>"), line);
+        assert_eq!(cell("<font><!-- c --><p>a</p></font>"), line);
+        assert_eq!(
+            cell("<img src=\"cid:x\" width=\"5\" height=\"5\" align=\"left\"><p>a</p>"),
+            line
+        );
+        // Text before the paragraph keeps its top margin; a list keeps its bottom one.
+        assert!(cell("x<p>a</p>") > 2.0 * line);
+        assert!(cell("<ul><li>a</li></ul>") > line);
+        // Author margins stay.
+        assert!(cell("<p style=\"margin-top:10px\">a</p>") > line);
+        // Standards mode keeps every margin.
+        let html = "<!DOCTYPE html><body style=\"margin:0\"><table cellpadding=0 cellspacing=0><tr><td id=\"c\"><p>a</p></td></tr></table>";
+        assert!(box_of(html, "c").3 > line);
+    }
+
+    #[test]
+    fn quirks_mode_parsing_keeps_tables_inside_paragraphs() {
+        let p = |doctype: &str| {
+            let html = format!("{doctype}<body style=\"margin:0\"><p id=\"p\">a<table><tr><td><div style=\"height:50px\"></div></td></tr></table>b</p>");
+            box_of(&html, "p").3
+        };
+        assert!(p(QUIRKS) > 50.0);
+        assert!(p("<!DOCTYPE html>") < 50.0);
+    }
+
+    #[test]
+    fn tiny_and_floated_unavailable_images_match_chromium() {
+        let html = "<!DOCTYPE html><body style=\"margin:0\"><div style=\"width:300px\">\
+            <img id=\"t\" src=\"https://t.test/t.gif\" width=\"1\" height=\"1\">\
+            <img id=\"f\" src=\"https://t.test/f.gif\" width=\"66\" height=\"86\" align=\"left\" hspace=\"15\" vspace=\"5\" alt=\"Wayne\">text</div>";
+        let (_, _, w, h) = box_of(html, "t");
+        assert_eq!((w, h), (1.0, 1.0));
+        let doc = laid_out(html);
+        let blitz = doc.blitz();
+        // The alt-text replacement of the floated image keeps its box and spacing.
+        let span = blitz
+            .get_node(blitz.get_element_by_id("f").unwrap())
+            .unwrap();
+        let p = span.absolute_position(0.0, 0.0);
+        let size = span.final_layout().size;
+        assert_eq!((p.x, p.y, size.width, size.height), (15.0, 5.0, 66.0, 86.0));
+    }
+
+    #[test]
+    fn table_sizes_are_minimums() {
+        let html = "<!DOCTYPE html><body style=\"margin:0\">\
+            <table id=\"h\" height=\"40\" cellpadding=0 cellspacing=0><tr><td height=\"50\">a</td></tr><tr><td height=\"20\">b</td></tr></table>\
+            <table id=\"w\" width=\"100\" cellpadding=0 cellspacing=0><tr><td><div style=\"width:200px;height:1px\"></div></td></tr></table>";
+        assert_eq!(box_of(html, "h").3, 70.0);
+        assert_eq!(box_of(html, "w").2, 200.0);
+    }
+
+    #[test]
+    fn fixed_tables_cap_padded_percentage_columns() {
+        let html = "<!DOCTYPE html><body style=\"margin:0\"><table style=\"width:300px;table-layout:fixed\" cellpadding=0 cellspacing=0><tr>\
+            <td id=\"c\" style=\"width:100%;padding:0 60px\">a</td><td>b</td></tr></table>";
+        assert_eq!(box_of(html, "c").2, 300.0);
+    }
+
+    #[test]
+    fn spanning_cells_widen_fixed_columns_first() {
+        let html = |first: &str, second: &str| {
+            format!("<!DOCTYPE html><body style=\"margin:0\"><table cellpadding=0 cellspacing=0><tr>\
+                <td id=\"a\"{first}><div style=\"width:5px;height:1px\"></div></td><td id=\"b\"{second}>x</td></tr>\
+                <tr><td colspan=\"2\"><div style=\"width:300px;height:1px\"></div></td></tr></table>")
+        };
+        // An auto column takes the excess; a fixed one keeps its width.
+        let auto_fixed = html("", " width=\"50\"");
+        assert_eq!(
+            (box_of(&auto_fixed, "a").2, box_of(&auto_fixed, "b").2),
+            (250.0, 50.0)
+        );
+        // Only fixed columns: in proportion to their widths.
+        let fixed = html(" width=\"100\"", " width=\"50\"");
+        assert_eq!(
+            (box_of(&fixed, "a").2, box_of(&fixed, "b").2),
+            (200.0, 100.0)
+        );
+    }
+
+    #[test]
+    fn short_fixed_columns_share_the_whole_table() {
+        let html = "<!DOCTYPE html><body style=\"margin:0\"><table id=\"t\" width=\"300\" cellpadding=0 cellspacing=0><tr>\
+            <td id=\"a\" width=\"300\">a</td><td id=\"b\" width=\"5\"><div style=\"width:5px\"></div></td><td id=\"c\" width=\"100\">c</td></tr></table>";
+        let total = box_of(html, "a").2 + box_of(html, "b").2 + box_of(html, "c").2;
+        assert_eq!(total, box_of(html, "t").2);
+        // A column already at its width loses nothing.
+        assert_eq!(box_of(html, "b").2, 5.0);
+    }
+
+    #[test]
+    fn inline_elements_ignore_width_around_blocks() {
+        let html = "<!DOCTYPE html><body style=\"margin:0\"><div style=\"width:120px\"><a id=\"a\" style=\"width:200px\"><div>x</div></a></div>";
+        assert_eq!(box_of(html, "a").2, 120.0);
+    }
+
+    #[test]
+    fn cell_vertical_align_does_not_grow_lines() {
+        let html = "<!DOCTYPE html><body style=\"margin:0\"><div id=\"d\">a<br>b</div><table cellpadding=0 cellspacing=0><tr><td id=\"c\">a<br>b</td></tr></table>";
+        assert_eq!(box_of(html, "c").3, box_of(html, "d").3);
+    }
+
+    #[test]
+    fn empty_inline_blocks_collapse_their_margins() {
+        let html = "<!DOCTYPE html><body style=\"margin:0\"><div id=\"a\"><p>a</p><p><font></font></p></div><div id=\"b\"><p>a</p><p></p></div>";
+        assert_eq!(box_of(html, "a").3, box_of(html, "b").3);
+        assert_eq!(box_of(html, "a").2, 400.0);
+    }
+
+    #[test]
+    fn form_controls_take_chromium_sizes() {
+        let html = "<!DOCTYPE html><body style=\"margin:0\">\
+            <div><input id=\"i10\" size=\"10\"></div><div><input id=\"i\"></div>\
+            <div><select id=\"s\"><option>a</option></select></div>\
+            <div><select id=\"l\"><option>a</option><option selected>A much longer option</option></select></div>\
+            <div><input id=\"r\" type=\"radio\"></div>";
+        // `size` characters of the 13.33px control font, plus border and padding.
+        assert!((box_of(html, "i10").2 - 98.0).abs() < 1.0);
+        assert!((box_of(html, "i").2 - 158.0).abs() < 1.0);
+        // A drop-down is as wide as its widest option plus the arrow.
+        let (_, _, short, height) = box_of(html, "s");
+        assert!(height > 10.0 && short > 22.0);
+        assert!(box_of(html, "l").2 > short + 50.0);
+        assert_eq!(box_of(html, "r").2, 13.0);
     }
 }

@@ -79,6 +79,8 @@ pub use stylo_taffy::CopyStyleGetters;
 // BGMail: embedder-chosen fonts for CSS generic families.
 pub use stylo_to_kurbo::resolve_2d_transform;
 pub use stylo_to_parley::set_generic_family_names;
+// BGMail: html_view applies image `align` to its alt-text fallback.
+pub use stylo::legacy_image_align_css;
 
 pub mod net;
 pub mod util;

@@ -168,34 +168,19 @@ pub(crate) fn draw_inline_backgrounds<'a>(
                 0.0
             },
         );
-        let has_border = bw.iter().any(|w| *w > 0.0);
-        if has_border {
-            // Border color: the top side's (mail buttons use one colour).
-            let border_color = border
-                .border_top_color
-                .resolve_to_absolute(&current_color)
-                .as_srgb_color();
-            scene.fill(
-                Fill::NonZero,
-                transform,
-                border_color,
-                None,
-                &kurbo::RoundedRect::from_rect(outer, radii),
-            );
-        }
+        let inner = Rect::new(
+            outer.x0 + if first { bw[3] } else { 0.0 },
+            outer.y0 + bw[0],
+            outer.x1 - if last { bw[1] } else { 0.0 },
+            outer.y1 - bw[2],
+        );
+        let inner_radii = kurbo::RoundedRectRadii::new(
+            (radii.top_left - bw[0].max(bw[3])).max(0.0),
+            (radii.top_right - bw[0].max(bw[1])).max(0.0),
+            (radii.bottom_right - bw[2].max(bw[1])).max(0.0),
+            (radii.bottom_left - bw[2].max(bw[3])).max(0.0),
+        );
         if bg_color != Color::TRANSPARENT {
-            let inner = Rect::new(
-                outer.x0 + if first { bw[3] } else { 0.0 },
-                outer.y0 + bw[0],
-                outer.x1 - if last { bw[1] } else { 0.0 },
-                outer.y1 - bw[2],
-            );
-            let inner_radii = kurbo::RoundedRectRadii::new(
-                (radii.top_left - bw[0].max(bw[3])).max(0.0),
-                (radii.top_right - bw[0].max(bw[1])).max(0.0),
-                (radii.bottom_right - bw[2].max(bw[1])).max(0.0),
-                (radii.bottom_left - bw[2].max(bw[3])).max(0.0),
-            );
             scene.fill(
                 Fill::NonZero,
                 transform,
@@ -204,6 +189,53 @@ pub(crate) fn draw_inline_backgrounds<'a>(
                 &kurbo::RoundedRect::from_rect(inner, inner_radii),
             );
         }
+        if bw.iter().any(|w| *w > 0.0) {
+            // Border color: the top side's (mail buttons use one colour).
+            let border_color = border
+                .border_top_color
+                .resolve_to_absolute(&current_color)
+                .as_srgb_color();
+            // The border is the ring between the outer and inner boxes, so
+            // the background (or the page) shows inside it.
+            let ring = inline_border_ring(outer, radii, inner, inner_radii);
+            scene.fill(Fill::NonZero, transform, border_color, None, &ring);
+        }
+    }
+}
+
+/// BGMail: the area between an inline box's outer (border) and inner
+/// (padding) boxes: the outer outline plus the reversed inner one, so a
+/// non-zero fill leaves the inside empty.
+pub(crate) fn inline_border_ring(
+    outer: Rect,
+    radii: kurbo::RoundedRectRadii,
+    inner: Rect,
+    inner_radii: kurbo::RoundedRectRadii,
+) -> kurbo::BezPath {
+    use kurbo::Shape as _;
+    let mut ring = kurbo::RoundedRect::from_rect(outer, radii).to_path(0.1);
+    if inner.width() > 0.0 && inner.height() > 0.0 {
+        let hole = kurbo::RoundedRect::from_rect(inner, inner_radii)
+            .to_path(0.1)
+            .reverse_subpaths();
+        ring.extend(hole);
+    }
+    ring
+}
+
+#[cfg(test)]
+mod inline_border_tests {
+    use super::*;
+
+    #[test]
+    fn border_rings_leave_the_inside_empty() {
+        let outer = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let inner = Rect::new(0.0, 0.0, 100.0, 19.0);
+        let ring = inline_border_ring(outer, Default::default(), inner, Default::default());
+        use kurbo::Shape as _;
+        // Inside the padding box: not covered; on the bottom border: covered.
+        assert_eq!(ring.winding(kurbo::Point::new(50.0, 10.0)), 0);
+        assert_ne!(ring.winding(kurbo::Point::new(50.0, 19.5)), 0);
     }
 }
 

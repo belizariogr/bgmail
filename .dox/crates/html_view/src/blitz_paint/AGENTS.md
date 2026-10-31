@@ -34,8 +34,13 @@ images, SVG, list markers, selections, text decorations and text.
   - `text.rs` (`stroke_text`): glyph runs in colour-bitmap fonts (emoji) are
     recorded as `ColorGlyphs` (`crate::text::color_glyph_run`).
   - `text.rs` (`draw_inline_backgrounds`): inline boxes paint background over
-    the padding box with borders and radius; horizontal padding/border only on
-    the element's first/last fragment (consecutive runs merged per line).
+    the padding box, then their border as a ring (`inline_border_ring`: outer
+    path + reversed inner path, so the inside stays empty), with radius;
+    horizontal padding/border only on the element's first/last fragment
+    (consecutive runs merged per line).
+  - `render/form_controls.rs` (`draw_select_arrow`): a `<select>` (laid out by
+    Blitz as a read-only text control) gets a ▾ chevron centered in its end
+    padding, in the text color.
   - `render.rs`: callers pass the source text (inline layout text, list marker
     text; `None` for text inputs).
   - `render.rs` (`draw_marker`): symbol markers (`•`, `◦`, `▪`, `■`) are drawn

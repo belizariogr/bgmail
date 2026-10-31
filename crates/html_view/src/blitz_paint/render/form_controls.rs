@@ -9,6 +9,10 @@ use style::dom::TElement as _;
 
 impl ElementCx<'_, '_> {
     pub(super) fn draw_input(&self, scene: &mut crate::display_list::DisplayList) {
+        if self.node.local_name() == "select" {
+            self.draw_select_arrow(scene);
+            return;
+        }
         if self.node.local_name() != "input" {
             return;
         }
@@ -43,6 +47,33 @@ impl ElementCx<'_, '_> {
             }
             _ => {}
         }
+    }
+}
+
+impl ElementCx<'_, '_> {
+    /// BGMail: the drop-down arrow of a `<select>` (drawn as a closed
+    /// control), centered in its end padding, in the text color.
+    fn draw_select_arrow(&self, scene: &mut crate::display_list::DisplayList) {
+        let content = self.frame.content_box;
+        let padding = self.frame.padding_box;
+        if padding.x1 - content.x1 < 6.0 * self.scale {
+            return;
+        }
+        let center = Point::new((content.x1 + padding.x1) / 2.0, padding.center().y);
+        let half = 3.5 * self.scale;
+        let mut path = BezPath::new();
+        path.move_to((center.x - half, center.y - half / 2.0));
+        path.line_to((center.x, center.y + half / 2.0));
+        path.line_to((center.x + half, center.y - half / 2.0));
+        let stroke = Stroke {
+            width: 1.5 * self.scale,
+            join: Join::Round,
+            start_cap: Cap::Round,
+            end_cap: Cap::Round,
+            ..Stroke::default()
+        };
+        let color = self.style.clone_color().as_srgb_color();
+        scene.stroke(&stroke, self.transform, color, None, &path);
     }
 }
 

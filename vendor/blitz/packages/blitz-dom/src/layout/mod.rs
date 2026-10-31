@@ -327,6 +327,23 @@ impl LayoutPassState<'_> {
                     return output;
                 }
 
+                // BGMail: a closed drop-down, as wide as its widest option.
+                if *element_data.name.local == *"select" {
+                    let width = element_data
+                        .text_input_data()
+                        .and_then(|data| data.select_width)
+                        .unwrap_or(0.0);
+                    return compute_leaf_layout(
+                        inputs,
+                        &node.layout_style(),
+                        resolve_calc_value,
+                        |_known_size, _available_space| taffy::Size {
+                            width,
+                            height: resolved_line_height.unwrap_or(16.0),
+                        },
+                    );
+                }
+
                 if *element_data.name.local == *"input" {
                     match element_data.attr(local_name!("type")) {
                         // if the input type is hidden, hide it
@@ -357,16 +374,21 @@ impl LayoutPassState<'_> {
                             );
                         }
                         None | Some("text" | "password" | "email" | "tel" | "url" | "search") => {
+                            // BGMail: like Chromium, `size` characters wide (20 by
+                            // default) whatever the space: average character
+                            // widths plus one maximum-width character.
+                            let size = element_data
+                                .attr(local_name!("size"))
+                                .and_then(|val| val.trim().parse::<u32>().ok())
+                                .filter(|&size| size > 0)
+                                .unwrap_or(20) as f32;
+                            let width = text_control_width(size, font_size.unwrap_or(16.0));
                             return compute_leaf_layout(
                                 inputs,
                                 &node.layout_style(),
                                 resolve_calc_value,
                                 |_known_size, _available_space| taffy::Size {
-                                    width: match inputs.available_space.width {
-                                        AvailableSpace::Definite(limit) => limit.min(300.0),
-                                        AvailableSpace::MinContent => 0.0,
-                                        AvailableSpace::MaxContent => 300.0,
-                                    },
+                                    width,
                                     height: resolved_line_height.unwrap_or(16.0),
                                 },
                             );
@@ -988,4 +1010,12 @@ impl Iterator for RefCellChildIter<'_> {
             taffy_node_id(*id)
         })
     }
+}
+
+/// BGMail: content width of a text input `size` characters wide, as Chromium
+/// computes it (`size` average character widths plus the difference between
+/// the maximum and average widths), with the average and maximum of a
+/// typical sans-serif UI font (0.45em and 2.7em).
+pub(crate) fn text_control_width(size: f32, font_size: f32) -> f32 {
+    font_size * (0.45 * size + 2.25)
 }

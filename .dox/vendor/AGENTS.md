@@ -78,6 +78,49 @@ repository instead of living in someone's checkout.
   - `stylo_to_parley.rs`: `set_generic_family_names` (embedder resolves CSS
     generics to single family names); font lists without a generic end in
     `serif`.
+  - Real-mail round (2002-era quirks mail + modern templates, measured
+    against Chromium):
+    - `layout/table.rs`:
+      - `ColumnCursor` keeps rowspan columns occupied through every spanned
+        row. It used to free them one row early, which misplaced declared
+        widths.
+      - A cell's `height` is a minimum (`NodeFlags::IS_TABLE_CELL` →
+        `StyleFlags::TABLE_CELL`). So is a table's own `height`.
+      - Automatic layout gives the table `min-width` = its columns' min-content.
+      - Spanning cells widen columns through `distribute_span_excess`:
+        - minimums: fixed columns first, then auto columns, else all columns
+          by width;
+        - maximums: auto columns first.
+      - Short of space, fixed columns grow in proportion to their distance
+        from their minimum, so no space is lost.
+      - Fixed layout caps `percent + padding` columns at 100%.
+    - `layout/inline/build.rs` (`LineHeightQuirk`): under the line height
+      quirk:
+      - an inline box, or the root strut, with no direct text and no vertical
+        padding or border gets `line-height: 0`;
+      - a `<br>` alone on its line gets its own span with the parent's line
+        height;
+      - only ASCII whitespace counts as no text (`&nbsp;` is text).
+    - `layout/inline/build.rs`:
+      - The root's `vertical-align` is reset. A cell's `middle` used to shift
+        `<br>` spans.
+      - Anonymous blocks inside inlines take the enclosing block as their strut
+        and push the inline ancestors as spans.
+    - `layout/inline/layout.rs`: a block holding only empty inlines keeps its
+      given width and lets margins collapse through.
+    - `stylo_taffy/src/wrapper.rs` (`ignores_size`): non-replaced
+      `display: inline` boxes ignore width, height and min/max sizes.
+    - `layout/construct.rs` (`select_options`, `create_select_display`) +
+      `layout/mod.rs`:
+      - `<select>` is a read-only one-line text control showing its selected
+        option, as wide as its widest option (`TextInputData::select_width`).
+      - Text inputs are `size` characters wide (`text_control_width`, default
+        20).
+    - `stylo.rs`:
+      - `valign` on table parts;
+      - image `align`, `hspace`, `vspace` (`legacy_image_align_css`, exported);
+      - `<body link>`;
+      - `<hr color/noshade/size/width/align>`.
 - `taffy`:
   - `compute/block.rs`: compressible replaced items with percentage
     `width`/`max-width` contribute 0 to min-content width; block-level replaced

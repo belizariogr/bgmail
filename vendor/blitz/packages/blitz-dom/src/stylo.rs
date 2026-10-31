@@ -1619,6 +1619,22 @@ where
 }
 
 /// The `<table>` a `td`/`th` belongs to (cell → row → optional row group → table).
+/// BGMail: the `<body>` element above `node`, if any.
+fn body_of(node: BlitzNode<'_>) -> Option<BlitzNode<'_>> {
+    let mut current = node.parent.map(|id| node.with(id));
+    while let Some(candidate) = current {
+        if candidate
+            .data
+            .downcast_element()
+            .is_some_and(|el| el.name.local == local_name!("body"))
+        {
+            return Some(candidate);
+        }
+        current = candidate.parent.map(|id| candidate.with(id));
+    }
+    None
+}
+
 fn table_of_cell(node: BlitzNode<'_>) -> Option<BlitzNode<'_>> {
     let mut current = node.parent.map(|id| node.with(id));
     for _ in 0..3 {
@@ -1686,6 +1702,31 @@ fn legacy_font_size_px(value: &str) -> Option<f32> {
     })
 }
 
+/// BGMail: CSS for an image's legacy `align`: `left`/`right` float, the
+/// vertical keywords map to `vertical-align`.
+pub fn legacy_image_align_css(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "left" => Some("float:left;"),
+        "right" => Some("float:right;"),
+        "top" | "texttop" => Some("vertical-align:top;"),
+        "middle" | "absmiddle" | "center" => Some("vertical-align:middle;"),
+        "bottom" | "baseline" | "absbottom" => Some("vertical-align:baseline;"),
+        _ => None,
+    }
+}
+
+/// BGMail: CSS `vertical-align` for a legacy `valign` value
+/// (case-insensitive `top`, `middle`, `bottom`, `baseline`).
+fn legacy_valign_css(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "top" => Some("top"),
+        "middle" | "center" => Some("middle"),
+        "bottom" => Some("bottom"),
+        "baseline" => Some("baseline"),
+        _ => None,
+    }
+}
+
 /// CSS equivalent of the legacy table/cell/font attributes of `node`.
 fn legacy_presentational_css(node: BlitzNode<'_>, elem: &crate::node::ElementData) -> String {
     let tag = &elem.name.local;
@@ -1749,6 +1790,97 @@ fn legacy_presentational_css(node: BlitzNode<'_>, elem: &crate::node::ElementDat
             css.push_str(&format!("color:{color};"));
         }
     }
+    // BGMail: `<body link>` colours links (`vlink`/`alink` need history and
+    // active state, which a mail reader doesn't track).
+    if *tag == local_name!("a") && elem.attr(local_name!("href")).is_some() {
+        if let Some(color) = body_of(node)
+            .and_then(|body| body.data.downcast_element())
+            .and_then(|body| body.attr(local_name!("link")))
+            .and_then(legacy_color_css)
+        {
+            css.push_str(&format!("color:{color};"));
+        }
+    }
+    // BGMail: legacy `<hr>` attributes (HTML rendering §15.3.11).
+    if *tag == local_name!("hr") {
+        if let Some(color) = elem.attr(local_name!("color")).and_then(legacy_color_css) {
+            css.push_str(&format!(
+                "border-style:solid;border-color:{color};background-color:{color};"
+            ));
+        } else if elem.attr(local_name!("noshade")).is_some() {
+            css.push_str("border-style:solid;border-color:gray;background-color:gray;");
+        }
+        if let Some(px) = elem
+            .attr(local_name!("size"))
+            .and_then(parse_legacy_integer)
+        {
+            // Height counts the 1px top and bottom borders; `size=1` drops
+            // the bottom one (Chromium).
+            if px <= 1 {
+                css.push_str("height:0;border-bottom-width:0;");
+            } else {
+                css.push_str(&format!("height:{}px;", px - 2));
+            }
+        }
+        if let Some(width) = elem.attr(local_name!("width")) {
+            let width = width.trim();
+            if let Some(percent) = width.strip_suffix('%') {
+                if let Ok(value) = percent.trim().parse::<f32>() {
+                    css.push_str(&format!("width:{value}%;"));
+                }
+            } else if let Some(px) = parse_legacy_integer(width) {
+                css.push_str(&format!("width:{px}px;"));
+            }
+        }
+        match elem
+            .attr(local_name!("align"))
+            .map(|a| a.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("left") => css.push_str("margin-left:0;margin-right:auto;"),
+            Some("right") => css.push_str("margin-left:auto;margin-right:0;"),
+            _ => {}
+        }
+    }
+    // BGMail: image `align` floats left/right or aligns vertically, and
+    // `hspace`/`vspace` are margins (HTML rendering §15.4.3).
+    if *tag == local_name!("img") {
+        if let Some(align) = elem
+            .attr(local_name!("align"))
+            .and_then(legacy_image_align_css)
+        {
+            css.push_str(align);
+        }
+        if let Some(px) = elem
+            .attr(local_name!("hspace"))
+            .and_then(parse_legacy_integer)
+        {
+            css.push_str(&format!("margin-left:{px}px;margin-right:{px}px;"));
+        }
+        if let Some(px) = elem
+            .attr(local_name!("vspace"))
+            .and_then(parse_legacy_integer)
+        {
+            css.push_str(&format!("margin-top:{px}px;margin-bottom:{px}px;"));
+        }
+    }
+    // BGMail: `valign` on table parts maps to `vertical-align` (cells inherit
+    // it from their row, like browsers' UA sheet).
+    let table_part = [
+        local_name!("td"),
+        local_name!("th"),
+        local_name!("tr"),
+        local_name!("tbody"),
+        local_name!("thead"),
+        local_name!("tfoot"),
+        local_name!("col"),
+        local_name!("colgroup"),
+    ];
+    if table_part.contains(tag) {
+        if let Some(align) = elem.attr(local_name!("valign")).and_then(legacy_valign_css) {
+            css.push_str(&format!("vertical-align:{align};"));
+        }
+    }
     // Named / bare-hex `bgcolor` (the `#hex` form is handled as a typed hint).
     if let Some(value) = elem.attr(local_name!("bgcolor")) {
         if !value.trim().starts_with('#') {
@@ -1763,6 +1895,30 @@ fn legacy_presentational_css(node: BlitzNode<'_>, elem: &crate::node::ElementDat
 #[cfg(test)]
 mod legacy_attr_tests {
     use super::*;
+
+    #[test]
+    fn maps_legacy_image_align() {
+        assert_eq!(legacy_image_align_css("LEFT"), Some("float:left;"));
+        assert_eq!(legacy_image_align_css(" right"), Some("float:right;"));
+        assert_eq!(
+            legacy_image_align_css("absmiddle"),
+            Some("vertical-align:middle;")
+        );
+        assert_eq!(
+            legacy_image_align_css("texttop"),
+            Some("vertical-align:top;")
+        );
+        assert_eq!(legacy_image_align_css("justify"), None);
+    }
+
+    #[test]
+    fn maps_legacy_valign() {
+        assert_eq!(legacy_valign_css(" TOP "), Some("top"));
+        assert_eq!(legacy_valign_css("center"), Some("middle"));
+        assert_eq!(legacy_valign_css("Bottom"), Some("bottom"));
+        assert_eq!(legacy_valign_css("baseline"), Some("baseline"));
+        assert_eq!(legacy_valign_css("sideways"), None);
+    }
 
     #[test]
     fn parses_legacy_integers() {

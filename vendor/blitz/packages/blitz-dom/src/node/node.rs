@@ -64,6 +64,9 @@ bitflags! {
         /// table's grid gaps, so the cell itself lays out without them). Set
         /// by table construction.
         const IS_COLLAPSED_BORDER_CELL = 0b00010000;
+        /// BGMail: a table cell (its `height` is a minimum). Set by table
+        /// construction.
+        const IS_TABLE_CELL = 0b00100000;
     }
 }
 
@@ -1171,6 +1174,9 @@ impl Node {
         let mut flags = stylo_taffy::StyleFlags::empty();
         if self.flags.contains(NodeFlags::IS_COLLAPSED_BORDER_CELL) {
             flags |= stylo_taffy::StyleFlags::NO_BORDER;
+        }
+        if self.flags.contains(NodeFlags::IS_TABLE_CELL) {
+            flags |= stylo_taffy::StyleFlags::TABLE_CELL;
         }
         if let Some(el) = self.data.downcast_element() {
             if crate::layout::replaced::is_replaced_element(&el.name.local) {

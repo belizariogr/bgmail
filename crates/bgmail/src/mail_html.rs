@@ -51,8 +51,15 @@ pub fn email_document(colors: DocumentColors, body: &MessageBody) -> RenderedEma
             0,
         ),
     };
+    // Keep the message's own doctype: a legacy one selects the (quirks)
+    // rendering mode its layout was written for.
+    let doctype = match body {
+        MessageBody::Html(html) => leading_doctype(html),
+        MessageBody::Text(_) => None,
+    }
+    .unwrap_or("<!DOCTYPE html>");
     let html = format!(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
+        "{doctype}<html><head><meta charset=\"utf-8\">\
          <style>{css}</style></head><body>{inner}</body></html>",
         css = document_css(colors),
     );
@@ -60,6 +67,26 @@ pub fn email_document(colors: DocumentColors, body: &MessageBody) -> RenderedEma
         html,
         blocked_images,
     }
+}
+
+/// The doctype an HTML body starts with (after a BOM, whitespace, an XML
+/// declaration and comments), if any.
+fn leading_doctype(html: &str) -> Option<&str> {
+    let mut rest = html.trim_start_matches('\u{feff}').trim_start();
+    loop {
+        if rest.starts_with("<?") {
+            rest = rest[rest.find("?>")? + 2..].trim_start();
+        } else if rest.starts_with("<!--") {
+            rest = rest[rest.find("-->")? + 3..].trim_start();
+        } else {
+            break;
+        }
+    }
+    let head = rest.get(..9)?;
+    if !head.eq_ignore_ascii_case("<!doctype") {
+        return None;
+    }
+    Some(&rest[..rest.find('>')? + 1])
 }
 
 /// Whether a link clicked in a message may be opened (in the system browser
@@ -967,6 +994,28 @@ mod tests {
         assert_eq!(plain_text("text <b unclosed"), "text");
         assert_eq!(plain_text("<script>never closed"), "");
         assert_eq!(plain_text("a <!-- open comment"), "a");
+    }
+
+    #[test]
+    fn documents_keep_the_message_doctype() {
+        let legacy = "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">";
+        assert_eq!(
+            leading_doctype(&format!("\u{feff} <!-- x -->{legacy}<html>")),
+            Some(legacy)
+        );
+        assert_eq!(leading_doctype("<p>no doctype</p>"), None);
+        let colors = doc_colors(
+            hsla(0.0, 0.0, 0.1, 1.0),
+            hsla(0.0, 0.0, 0.9, 1.0),
+            hsla(0.6, 0.7, 0.5, 1.0),
+        );
+        let doc = email_document(
+            colors,
+            &MessageBody::Html(format!("{legacy}<p>x</p>").into()),
+        );
+        assert!(doc.html.starts_with(legacy));
+        let doc = email_document(colors, &MessageBody::Text("x".into()));
+        assert!(doc.html.starts_with("<!DOCTYPE html>"));
     }
 
     #[test]

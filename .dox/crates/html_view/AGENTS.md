@@ -34,11 +34,20 @@ positions Blitz computed.
     `log/kv_unstable_serde` pulls a foreign `From<_> for fmt::Error` impl that
     breaks Stylo's derives). See `.dox/vendor/AGENTS.md`.
 - **Parse as HTML always:** `force_html_parse` replaces XHTML/XML prologs with
-  an HTML5 doctype (Blitz would otherwise parse mail as XML). The original
-  doctype still selects the document mode (`document_mode`): a missing doctype
+  an HTML doctype (Blitz would otherwise parse mail as XML); quirks documents
+  get a legacy HTML 4.0 one so the parser keeps its quirks. The original
+  doctype selects the document mode (`document_mode`): a missing doctype
   means **standards** (mail is shown inside standards-mode webmail pages);
   only explicit legacy doctypes (XHTML 1.0 / HTML 4.01 Transitional, HTML 4.0…)
-  give (limited-)quirks, which enables Blitz's line height quirk.
+  give (limited-)quirks, which enables Blitz's line height quirk; full quirks
+  also adds Chromium's quirks.css rules and quirky-margin dropping.
+- **Unavailable images** (blocked remote, missing `cid:`) are rewritten after
+  parsing into Chromium's broken-image rendering (alt text after an icon, or
+  framed boxes; see `replace_unavailable_images`), so layouts match a browser
+  that couldn't load them.
+- **Form controls** are inert pictures with Chromium's metrics: `<select>`
+  shows its selected option with a ▾ and is as wide as its widest option;
+  text inputs are `size` characters wide.
 - **Base URL:** defaults to `bgmail://message/` (Blitz panics resolving
   relative URLs against `about:blank`); that scheme resolves to "missing".
 - **Offline resources:** `data:` and `cid:` served from memory; `file:` only
@@ -107,8 +116,9 @@ positions Blitz computed.
   `spikes/html_render/corpus/`.
 - Known gaps: a selection can't start in blank space (Blitz anchors only on
   text); find highlights only the current match; blend modes and filters other than grayscale/opacity ignored;
-  glyph-only runs (form editors) not drawn; the quirks-mode strut rule for text
-  lines (Parley); weight matching follows CSS (a face list holding "Arial
+  glyph-only runs (form editors) not drawn; listbox `<select size>` drawn as a
+  drop-down; a bordered inline around a block draws a box border (Chromium:
+  empty line fragments); weight matching follows CSS (a face list holding "Arial
   Black" under "Arial" — Windows fonts on Linux — gives it for weight 800,
   Chromium gives Bold); small `<br>`/line-height drifts (≤5px).
 - Diagnostics: `viewer --capture` (stitched full-page grabs with `grim`),
