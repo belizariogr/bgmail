@@ -75,10 +75,13 @@ BGMail/
 ├── docs/
 │ └── PLANEJAMENTO.md ← vision, architecture and scope
 ├── assets/ ← shared icons, fonts, app icon
+├── spikes/ ← throwaway evaluations (own workspaces, not shipped)
+├── vendor/ ← patched third-party crates (serde_fmt, Blitz, Taffy)
 └── crates/
     ├── theme/ ← themes and colors (light/dark)
     ├── ui/ ← reusable visual components
     ├── storage/ ← SQLite persistence (mail.db)
+    ├── html_view/ ← native GPUI HTML (mail body) rendering on Blitz
     └── bgmail/ ← binary (window + layout + state + localization)
 ```
 
@@ -215,3 +218,5 @@ When the user requests a durable behavior change, record it here or in the relev
 | `docs/` | [`.dox/docs/AGENTS.md`](.dox/docs/AGENTS.md) | Planning and durable human/agent guidance docs |
 | `assets/` | [`.dox/assets/AGENTS.md`](.dox/assets/AGENTS.md) | Shared binary assets (icons, fonts, app icon) |
 | `.cargo/` | [`.dox/.cargo/AGENTS.md`](.dox/.cargo/AGENTS.md) | Workspace Cargo/build environment overrides |
+| `spikes/` | [`.dox/spikes/AGENTS.md`](.dox/spikes/AGENTS.md) | Throwaway technical evaluations (self-contained, never built with the workspace) |
+| `vendor/` | [`.dox/vendor/AGENTS.md`](.dox/vendor/AGENTS.md) | Patched third-party crates (serde_fmt, Blitz subset, Taffy) and their BGMail fixes |

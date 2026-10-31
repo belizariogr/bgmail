@@ -1,0 +1,113 @@
+# crates/html_view/ — Native GPUI HTML rendering (mail bodies)
+
+## Purpose
+
+Render HTML e-mail bodies **natively inside GPUI**: no webview, no child
+window, no off-screen browser, no CPU bitmap of the page. Blitz parses, styles
+(Stylo) and lays out (Taffy + Parley) the document; a painter derived from
+`blitz-paint` records a display list that is replayed with GPUI primitives, and
+text is shaped and drawn by GPUI's own text system, word by word, at the
+positions Blitz computed.
+
+## Ownership
+
+- Owns: `HtmlDocument` (parse/layout/paint cache), `HtmlView`/`HtmlElement`
+  (GPUI view/element), the display list, the GPUI replayer, gradient sampling,
+  the offline resource policy (`Resources`), the browser-like font policy
+  (`src/fonts.rs`), and the vendored painter `src/blitz_paint/`.
+- Does not own: HTML sanitisation policy and reader UI (`bgmail`), theme colors
+  (`theme`), networking (Stage 3, none here).
+
+## Local Contracts
+
+- **Dependency direction:** depends on `gpui` + Blitz crates only; never on
+  `bgmail`, `ui`, `theme` or `storage`.
+- **Blitz/Taffy:** `blitz-*` are path dependencies on `vendor/blitz` (rev
+  `e42ee1f` + BGMail layout fixes); Taffy is patched to `vendor/taffy`; Stylo
+  rev matches that Blitz. Layout fixes go there (see `.dox/vendor/AGENTS.md`);
+  re-run the `spikes/html_render` loop after any change.
+- **Build couplings with GPUI 0.2.2** (keep both or the build breaks):
+  - `fontique` with `fontconfig-dlopen`, and the `fontconfig` wrapper with
+    `dlopen`, on Linux/FreeBSD (GPUI builds `yeslogic-fontconfig-sys` in
+    dlopen mode).
+  - Root `[patch.crates-io] serde_fmt = vendor/serde_fmt` (GPUI's
+    `log/kv_unstable_serde` pulls a foreign `From<_> for fmt::Error` impl that
+    breaks Stylo's derives). See `.dox/vendor/AGENTS.md`.
+- **Parse as HTML always:** `force_html_parse` replaces XHTML/XML prologs with
+  an HTML5 doctype (Blitz would otherwise parse mail as XML). The original
+  doctype still selects the document mode (`document_mode`): a missing doctype
+  means **standards** (mail is shown inside standards-mode webmail pages);
+  only explicit legacy doctypes (XHTML 1.0 / HTML 4.01 Transitional, HTML 4.0…)
+  give (limited-)quirks, which enables Blitz's line height quirk.
+- **Base URL:** defaults to `bgmail://message/` (Blitz panics resolving
+  relative URLs against `about:blank`); that scheme resolves to "missing".
+- **Offline resources:** `data:` and `cid:` served from memory; `file:` only
+  with `Resources::allow_file_urls(true)` (tools/tests); every other scheme is
+  blocked and recorded (`blocked_remote_urls`).
+- **Coordinates:** documents lay out and paint at scale 1 in CSS px = GPUI
+  logical `Pixels`; GPUI applies the display scale factor.
+- **Fonts (browser policy, `fonts.rs`):** one process-wide shared font
+  collection (system scan once). Each CSS generic family resolves to **one**
+  font, given to Blitz as a family name (`blitz_dom::set_generic_family_names`;
+  Linux: Chromium's defaults — Times New Roman, Arial, monospace, … — through
+  fontconfig). Characters missing from the author's fonts fall back per
+  character in the platform order (Linux: family-less `FcFontSort`, as
+  Chromium); emoji clusters still try the colour emoji generic first. Font
+  lists without a generic end in `serif` (the browser default font).
+- **Text:** never forward glyph ids when the source text is known. Each word is
+  shaped with `TextSystem::shape_line` using the family/weight/style of the
+  face Parley resolved (`FaceSpec`) and placed at Blitz's x and baseline.
+- **Text placement:** when GPUI's shaped width differs from Blitz's word
+  width (letter-spacing, justification), clusters are placed individually.
+- **Colour emoji:** GPUI 0.2.2 draws CBDT emoji as monochrome masks on Linux,
+  so colour-bitmap fonts (CBDT/sbix) record `ColorGlyphs` and are drawn from
+  the font's own bitmaps via `paint_image`.
+- **Shapes:** rounded boxes arriving as paths are recognised
+  (`rounded_box_from_path`) and drawn as GPUI quads; rounded clip layers keep
+  their radii so images/gradients filling them get rounded corners (GPUI
+  masks are rectangular). Non-finite geometry is dropped. Dashes are split on
+  the CPU (`kurbo::dash`). `filter: grayscale()/opacity()` apply to images.
+- **Gradients:** two-stop linear → native GPUI `linear_gradient`; radial,
+  sweep and multi-stop → sampled texture (≤512 px side) drawn with
+  `paint_image`, cached per gradient/size.
+- **Canvas:** the root background is painted down to the bottom of the
+  visible area (`canvas_height`), like a browser canvas.
+- **Horizontal overflow:** layout always uses the pane width; mail wider than
+  that (fixed-width tables) reports `content_width()` (rightmost in-flow box,
+  not descending into overflow-clipping boxes) and `HtmlView` scrolls both
+  axes, extending the scroll area with a zero-height spacer of that width.
+- **Images:** drawn at less than half their size, they are pre-downscaled on
+  the CPU (area filter, premultiplied alpha) and cached per upload size —
+  GPUI samples without mipmaps.
+- **Vendored painter** (`src/blitz_paint/`, MIT/Apache-2.0, Blitz `e42ee1f`):
+  keep diffs minimal and marked `BGMail`; see its child doc.
+
+## Work Guidance
+
+- Prefer fixing layout/style issues upstream in Blitz; keep local changes to the
+  painting side.
+- Visual check: `cargo run -p html_view --example viewer -- [--width <px>] <file.html>...`
+  (Left/Right switch files). The spike corpus lives in
+  `spikes/html_render/corpus/`.
+- Known gaps: no interaction yet (hover, links, selection, copy, context
+  menu); blend modes and filters other than grayscale/opacity ignored;
+  glyph-only runs (form editors) not drawn; the quirks-mode strut rule for text
+  lines (Parley); weight matching follows CSS (a face list holding "Arial
+  Black" under "Arial" — Windows fonts on Linux — gives it for weight 800,
+  Chromium gives Bold); small `<br>`/line-height drifts (≤5px).
+- Diagnostics: `viewer --capture` (stitched full-page grabs with `grim`),
+  `layout_dump` (element boxes, diff with `spikes/html_render/tools/ldiff.sh`),
+  `dump_text`, `dump_cmds`, `measure`, `content_size` (content width/height
+  at a width, vs Chromium's overflow).
+
+## Verification
+
+- `cargo test -p html_view`
+- `cargo clippy -p html_view --all-targets -- -D warnings`
+- Visual: `viewer` example against `spikes/html_render/corpus`.
+
+## Child DOX Index
+
+| Scope | Doc | Owns |
+|---|---|---|
+| `crates/html_view/src/` | [`.dox/crates/html_view/src/AGENTS.md`](src/AGENTS.md) | Full API catalog (every fn/method) |
