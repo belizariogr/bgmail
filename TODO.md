@@ -429,7 +429,7 @@
       first cell keeps a text baseline (Chromium: bottom).
 - ⬜ GPUI 0.2.2 renders CBDT colour emoji as monochrome masks on Linux (whole
       app, not just mail); `html_view` works around it; upstream/upgrade later.
-- ⬜ **Reader roadmap (agreed order, after the fidelity block):**
+- ✅ **Reader roadmap (agreed order, after the fidelity block):**
   1. ✅ `html_view` milestone 2 — reader integrated and CEF era removed: the
      reader shows bodies through `HtmlView` (sanitized + themed by the new
      `mail_html` module, dark/light page, forced-white option, per-message
@@ -464,7 +464,7 @@
      opposing reviews: unwinding through Blitz/GPUI state is unsound and
      doesn't cover overflow/OOM). Measured: 660 KB mail ~60 ms, 2.6 MB
      ~260 ms (release, UI thread; the Blitz document is not `Send`).
-  4. 🔄 Real-mail round. The corpus is `spikes/html_render/corpus_real/`
+  4. ✅ Real-mail round. The corpus is `spikes/html_render/corpus_real/`
      (git-ignored): 25 newsletters from 2002, mostly in quirks mode, plus 20
      current templates.
      - Body heights against Chromium at 800px: mean deviation 0.51% over 89
@@ -509,7 +509,9 @@
        - ~~fonts registered under another family~~ decided: keep the
          system's family names; "<Family> Black" is drawn as the family at
          weight 900 (Arial Black filed under Arial gets its black face);
-       - CJK/RTL and multi-MB mail are still missing from the corpus.
+       - CJK/RTL checked with synthetic Chinese, Japanese, Korean, Arabic
+         and Hebrew mails: box geometry within 3px of Chromium, shaping
+         and bidi order identical. Multi-MB mail timed in milestone 4.
   5. ✅ Zoom, print, animated GIF.
      - ✅ Zoom: page zoom as Blitz's scale factor (text reflows and stays
        sharp); Ctrl/Cmd `+`/`-`/`0` and Ctrl/Cmd + wheel over the reader,
