@@ -369,6 +369,93 @@
 - ⬜ Packaging (macOS `.app`, Linux, Windows)
 
 ## Notes / open decisions
+- ✅ Spike: native HTML engine to replace CEF (`spikes/html_render/REPORT.md`).
+      47 e-mails, Chromium as reference. Mean fidelity: **Blitz 7.9/10**
+      (31/47 ≥ 8), **litehtml 6.6/10** (15/47 ≥ 8). Blitz bugs found:
+      XHTML doctype/`xmlns` sniffing parses mail as XML (workaround: force the
+      HTML parser), `<td style="display:block">` content vanishes, `align=center`
+      tables not centered. litehtml: `max-width` on `<table>` ignored (breaks
+      22/47), litehtml-rs sample painter ignores image scaling.
+      With 3 small engine fixes (+48 lines C++: table `max-width`, table
+      `align`/`<center>` centering, intrinsic width honoring `max-width`;
+      `spikes/html_render/patches/`) litehtml reaches **8.1/10** (35/47 ≥ 8,
+      none ≤ 4), on par with Blitz; leftovers are mostly painter-side
+      (underlines, generic font fallback) plus no `box-shadow`.
+      Blitz with 2 engine fixes (anonymous table cell for non-cell row
+      children, HTML `table align`; `patches/blitz-*.patch`, Blitz tests pass)
+      reaches **8.2/10** (36/47 ≥ 8, none ≤ 4).
+- ✅ Reader engine decided: **Blitz** (pure Rust) for parse/style/layout,
+      painted natively by GPUI in a new `crates/html_view` (no webview, no
+      child window, no bitmap).
+- ✅ `crates/html_view` milestone 1: Blitz-based HTML element for GPUI.
+      Builds next to `gpui 0.2.2` (fontique `fontconfig-dlopen`; patched
+      `vendor/serde_fmt`); painter vendored from `blitz-paint` records a
+      display list replayed with GPUI quads/paths/shadows/images/content masks;
+      text drawn word by word with GPUI's `shape_line` at Blitz positions
+      (face resolved from Parley's font); radial/sweep/multi-stop gradients
+      sampled to cached textures; offline resources (`data:`/`cid:`, remote
+      blocked + recorded); `viewer` example. 59 tests.
+- ✅ `html_view` fidelity loop vs Chromium (47-mail corpus, `spikes/html_render`,
+      captures of the real GPUI window): visual score **8.16 → 9.67/10**
+      (41/47 ≥ 9.5, min 8.0); mean SSIM 0.739 → 0.975. Blitz/Taffy now vendored
+      (`vendor/blitz`, `vendor/taffy`) with fixes: legacy table/font attributes
+      (`cellspacing`/`cellpadding`/`border`/`<font>`/named `bgcolor`), td padding
+      UA rule, browser automatic table layout, compressible replaced
+      min-content, replaced elements avoiding floats, float/padding height,
+      `table align`, anonymous cells, `-apple-system`→system-ui, line height
+      quirk ((limited-)quirks docs), line-fit tolerance, inline padding spacers.
+      Painter: per-cluster text placement, colour emoji from CBDT/sbix bitmaps
+      (GPUI 0.2.2 can't draw them), rounded boxes/clips, dashes, grayscale/
+      opacity filters, canvas to viewport bottom, non-finite geometry guard,
+      hierarchical default base URL (relative `src` crashed Blitz).
+- ✅ `html_view` fidelity round 2: score **9.67 → 9.77** (46/47 ≥ 9.5, min
+      9.2), SSIM 0.985. Doctype-less mail renders in standards mode (references
+      regenerated the same way); `dir="rtl"` box-only lines mirrored; keyword
+      `max-width` (`min-content`/`max-content`); anonymous-cell margin
+      collapsing; list markers drawn as Chromium-sized shapes.
+- ✅ `html_view` fidelity round 3 (multi-width): validated at 375/600/800/1280
+      px; reviewed combinations average **9.75** (57/60 ≥ 9.5), SSIM 0.969 /
+      0.982 / 0.989 / 0.994. Browser font policy (one font per generic,
+      per-character fallback like Chromium, default `serif`); responsive
+      stacking (`display:block` cells share one anonymous cell); horizontal
+      scrolling for overflowing mail; collapsed borders counted once; images
+      pre-downscaled; rounded clip corners on partial fills; definite image
+      heights under `max-width`; inline-block baselines (buttons, tables);
+      percent columns summing to 100%; markers on a block item's first line.
+- ⬜ `html_view` remaining: weight 800 picks "Arial Black" when Windows fonts
+      are installed on Linux (Chromium picks Bold; mailgun/plaid 9.0–9.4);
+      quirks-mode strut for text lines (legacy doctypes only; needs Parley);
+      ≤5px `<br>`/line-height drifts; `inline-table` with block content in its
+      first cell keeps a text baseline (Chromium: bottom).
+- ⬜ GPUI 0.2.2 renders CBDT colour emoji as monochrome masks on Linux (whole
+      app, not just mail); `html_view` works around it; upstream/upgrade later.
+- ⬜ **Reader roadmap (agreed order, after the fidelity block):**
+  1. ⬜ `html_view` milestone 2 — integrate in the reader **and clean up the
+     CEF era**: show mail through `HtmlView` (keep the `lol_html` sanitiser,
+     remote-content toggle, "Open in browser"; dark mode via
+     `DocumentOptions`; per-message layout cache; pane resize). Remove what
+     only existed to fit CEF/webviews: `cef_osr.rs`, `web_view.rs`, the
+     `cef`/`cef-osr`/`linux-webview` features and deps, CEF init/shutdown in
+     `main.rs`, the OSR tick/focus/`pump_platform_events` plumbing in
+     `root.rs`; re-check designs justified by the webview (e.g.
+     `command_palette_overlay.rs`, window/focus workarounds) and keep only
+     what still pays for itself; update README, `.dox/crates/bgmail/**`,
+     `.dox/.cargo` and `.dox/crates/AGENTS.md`.
+  2. ⬜ Milestone 3 — interaction: hover/cursor + link clicks (URL preview,
+     open in browser), text selection painted with the theme color + copy,
+     native context menu (link/image/text) via `doc.hit`, find in message,
+     keyboard scroll.
+  3. ⬜ Milestone 4 — robustness: parse/layout off the UI thread or behind
+     `catch_unwind` (a Blitz panic must not take the app down), size/time
+     limits for huge mail, graceful fallback to plain text.
+  4. ⬜ Real-mail round: ~50 exported, anonymised mails from real inboxes
+     (Outlook/Word-generated, long forwarded threads, malformed HTML,
+     newsletters of MBs, CJK/RTL, plain text → HTML) through the
+     `spikes/html_render` loop at several widths.
+  5. ⬜ Later: zoom, print, animated GIF, remote-content loading (Stage 3).
+- ⬜ Upstream the `vendor/blitz` and `vendor/taffy` fixes (each is marked
+      `BGMail`), then drop the vendored copies. Either way: behind a `crates/html_view` API, with
+      "Open in browser" as the escape hatch.
 - Reassess GPUI crates.io `0.2.2` vs `main` if some API is missing.
 - ~~Define the local storage format (SQLite vs files) in Stage 2.~~ **SQLite**
       (`crates/storage`, `mail.db` under `~/.config/BGMail/`).

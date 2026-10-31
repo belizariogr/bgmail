@@ -1,0 +1,11 @@
+{
+  "mjml-black-friday": {"score": 9.8, "issues": ["[baixo]{layout} Altura total ~1% maior (960 vs 950px), diferença de métricas de linha distribuída entre os blocos de texto"], "css_suspect": "line-height/métricas de fonte"},
+  "mjml-racoon": {"score": 9.3, "issues": ["[médio]{layout} Rodapé de benefícios: título 'PAYMENT METHODS' quebra em duas linhas ('PAYMENT' / 'METHODS'), no Chromium cabe em uma linha; texto de apoio desce ~10px e as colunas ficam desalinhadas", "[baixo]{layout} Altura total ~1.5% maior (2596 vs 2557px); seções a partir de 'SUMMER COLLECTION' deslocadas ~1-2px para baixo"], "css_suspect": "largura de texto/shaping em coluna estreita de tabela (mj-column 33%) próxima ao limite de quebra"},
+  "postmark-invoice": {"score": 9.9, "issues": [], "css_suspect": ""},
+  "re-03-protocol-product-update": {"score": 9.8, "issues": ["[baixo]{layout} Altura levemente diferente por métricas de linha; layout, imagens, badge 'Feature' e cards do blog idênticos"], "css_suspect": "line-height/métricas de fonte"},
+  "re-amazon-review": {"score": 9.8, "issues": ["[baixo]{layout} Espaçamentos verticais do rodapé com diferença de ~1px; borda superior laranja e layout de duas colunas idênticos ao Chromium"], "css_suspect": "line-height/métricas de fonte"},
+  "re-google-play-policy-update": {"score": 9.8, "issues": ["[baixo]{layout} Diferenças sub-pixel de espaçamento vertical; faixas diagonais azuis, cartão e rodapé 'Connect with us' corretos"], "css_suspect": "line-height/métricas de fonte"},
+  "re-papermark-year-in-review": {"score": 8.0, "issues": ["[alto]{paint} Cards com gradiente ('Viewers spent', 'Your top document', 'Your most active month', 'Your documents were viewed from') têm os cantos DIREITOS retos (sem border-radius ~12px); os cantos esquerdos ficam arredondados. No Chromium os 4 cantos são arredondados", "[baixo]{layout} Altura total ~2.5% maior (2290 vs 2235px)"], "css_suspect": "background-image linear-gradient não recortado pelo border-radius (clip do layer de gradiente ignora o raio no lado direito)"},
+  "re-plaid-verify-identity": {"score": 9.8, "issues": ["[baixo]{layout} Altura ~1.7% maior (610 vs 600px), espaçamento vertical levemente maior no rodapé 'SECURELY POWERED BY PLAID'"], "css_suspect": "line-height/métricas de fonte"},
+  "re-twitch-reset-password": {"score": 9.9, "issues": [], "css_suspect": ""}
+}

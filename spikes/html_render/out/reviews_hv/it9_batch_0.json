@@ -1,0 +1,24 @@
+{
+  "client-apple-mail": {"score": 9.9, "issues": [], "css_suspect": ""},
+  "client-gmail-reply": {"score": 9.3, "issues": [
+    "[médio]{layout} Espaço entre a linha pequena da assinatura ('+55 11 98765-4321', fonte reduzida) e a linha de atribuição 'Em qui., 30 de out...' ~7px maior que no Chromium; todo o bloco citado (blockquote com borda esquerda) fica deslocado ~7px para baixo"
+  ], "css_suspect": "altura da line box de texto com font-size pequeno dentro de bloco com font-size maior (strut/line-height herdado do pai) ou margem após o div da assinatura"},
+  "mjml-newsletter": {"score": 9.6, "issues": [
+    "[baixo]{paint} Título 'Here is what you've missed' (font-family:Helvetica Neue sem genérico) cai em fonte sem serifa, enquanto Chromium usa a serifa padrão; altura/posição ~2px diferente",
+    "[baixo]{layout} Rodapé 'Stay in touch!' e ícones sociais ~1px acima do Chromium"
+  ], "css_suspect": "fallback de font-family sem família genérica (Chromium usa serif padrão)"},
+  "postmark-receipt": {"score": 9.8, "issues": [], "css_suspect": ""},
+  "re-04-arcane-newsletter": {"score": 9.8, "issues": [], "css_suspect": ""},
+  "re-05-studio-abandoned-cart": {"score": 9.7, "issues": [
+    "[baixo]{paint} Estrelas '★★★★★' (20px) do depoimento renderizadas bem maiores (~2x) que no Chromium, por glifo de fallback diferente; posição e alinhamento corretos"
+  ], "css_suspect": "fallback de fonte para U+2605"},
+  "re-apple-receipt": {"score": 8.6, "issues": [
+    "[médio]{layout} Bloco Apple Card: espaço entre o logo 'Card' e o título 'Save 3% on all your Apple purchases.' ~14px maior que no Chromium (margin-top do td display:block 15px somada à margin-top 16px do <p> em vez de colapsar); todo o restante do e-mail desce ~14px",
+    "[médio]{paint} Ícone HBO Max sem cantos arredondados (border-radius:14px no <img> ignorado; Chromium mostra ícone arredondado)"
+  ], "css_suspect": "colapso de margens pai/primeiro filho em td com display:block; border-radius em <img>"},
+  "re-koala-welcome": {"score": 9.9, "issues": [], "css_suspect": ""},
+  "re-raycast-magic-link": {"score": 9.2, "issues": [
+    "[médio]{paint} Emojis 👉/👈 (U+1F449/U+1F448) do link 'Click here to sign in' desenhados como glifos monocromáticos de contorno na cor do link (fonte de símbolos), em vez dos emojis coloridos do Chromium; o emoji 🪄 do título sai colorido corretamente"
+  ], "css_suspect": "fallback de fonte para emoji (seleção de fonte monocromática antes da fonte de emoji colorida)"},
+  "re-vercel-invite-user": {"score": 9.8, "issues": [], "css_suspect": ""}
+}

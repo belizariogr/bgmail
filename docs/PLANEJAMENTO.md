@@ -57,6 +57,7 @@ testing and shorter incremental compile times.
 | `crates/ui`      | Component library (`Label`, `Icon`, `Button`, `ListItem`…).           | ✅ mock |
 | `crates/bgmail`   | Binary: window, layout, UI state and localization.       | ✅ mock + SQLite wired |
 | `crates/storage` | Local persistence (SQLite via `rusqlite`, `mail.db`).    | ✅ Stage 2 |
+| `crates/html_view` | Native GPUI HTML rendering: Blitz layout, GPUI paint and text. | 🔄 milestone 1 |
 | `crates/mail_core` *(future)* | Domain models and business rules, no UI dependency.      | ⬜ |
 | `crates/protocols` *(future)* | IMAP/POP3/SMTP/Gmail abstractions behind *traits*.       | ⬜ |
 | `crates/accounts` *(future)*  | Account and credential management (per-platform keychain). | ⬜ |

@@ -1,0 +1,82 @@
+{
+  "mjml-black-friday": {
+    "score": 9.5,
+    "issues": [
+      "[baixo]{layout} Espaçamento vertical levemente maior no bloco 'Black Friday'/botão 'Shop Now'/rodapé (~+1% de altura total), também na referência Blitz CPU"
+    ],
+    "css_suspect": "line-height/altura de linha em células de tabela mj-text (diferença mínima)"
+  },
+  "mjml-racoon": {
+    "score": 8.5,
+    "issues": [
+      "[médio]{layout} Seção de rodapé escura: 'PAYMENT METHODS' quebra em duas linhas (Chromium em uma), aumentando a altura da linha de ícones; igual na Blitz CPU",
+      "[baixo]{layout} Imagens dos produtos e espaçamentos entre blocos ligeiramente maiores, acumulando ~+40px (≈1,5%) até o rodapé; seções 'Anderson Sweater' e 'Summer Collection' deslocadas para baixo",
+      "[baixo]{layout} Botões 'BUY NOW' um pouco mais largos/altos que no Chromium"
+    ],
+    "css_suspect": "largura de colunas mj-column (table width em %/max-width) e padding de células; quebra de texto por largura de coluna ligeiramente menor"
+  },
+  "postmark-invoice": {
+    "score": 8.5,
+    "issues": [
+      "[médio]{layout} Espaçamentos verticais maiores em todo o corpo (caixa 'Amount Due', área do botão 'Pay Invoice', tabela de itens e rodapé): altura total ~6% maior (1195 vs 1127px); igual na Blitz CPU",
+      "[baixo]{layout} Cartão branco do corpo não ocupa a largura total: aparecem faixas cinza de ~5px nas laterais, inexistentes no Chromium",
+      "[baixo]{layout} Linhas da tabela de itens (Description/Amount) mais altas que no Chromium"
+    ],
+    "css_suspect": "padding/line-height em células de tabela e width:100% + margem do wrapper (.email-body/.email-body_inner)"
+  },
+  "re-03-protocol-product-update": {
+    "score": 7.5,
+    "issues": [
+      "[médio]{paint} Título 'THE WORK BEHIND THE WORK': espaço entre 'BEHIND' e 'THE' desaparece na quebra de linha ('BEHINDTHE'); a Blitz CPU mostra o espaço corretamente",
+      "[médio]{paint} Parágrafos de texto com espaçamento entre palavras irregular/esticado (aparência de justificação errada, ex. 'Dither  feel smoother', 'just  features'), ausente no Chromium e na Blitz CPU",
+      "[baixo]{layout} Imagem principal e imagem 'Feature' ligeiramente maiores, empurrando o conteúdo ~15–25px para baixo; seções seguintes deslocadas (~+1,5% de altura)",
+      "[baixo]{layout} Espaço vertical maior antes de 'Need help?' e no rodapé"
+    ],
+    "css_suspect": "posicionamento de glifos/whitespace por fragmento de texto no GPUI (espaço final de linha/word-spacing ao re-shapear runs); altura de imagens com width:100%/height:auto"
+  },
+  "re-amazon-review": {
+    "score": 6.5,
+    "issues": [
+      "[alto]{layout} Container principal mostra borda laranja nos quatro lados (esquerda, direita e base), enquanto no Chromium existe apenas a borda superior laranja; igual na Blitz CPU",
+      "[médio]{layout} Altura total ~9% maior (1022 vs 935px): mais espaço acima do título, ao redor da capa do livro e no rodapé",
+      "[baixo]{layout} Coluna de texto ao lado da capa mais estreita: 'Your reviews will be posted on Amazon...' quebra em 3 linhas com 'name.Check your public name.' em outra posição",
+      "[baixo]{layout} Capa do livro e faixa 'How about evaluating...' ligeiramente maiores/deslocadas"
+    ],
+    "css_suspect": "border shorthand seguido de border-left/right/bottom: none (ou border-top isolado) não aplicado corretamente; padding/width em células de tabela"
+  },
+  "re-google-play-policy-update": {
+    "score": 8.5,
+    "issues": [
+      "[baixo]{layout} Espaçamentos verticais um pouco maiores entre parágrafos e no bloco 'Thank you,'/'Connect with us' (~+4% de altura total)",
+      "[baixo]{layout} Quebras de linha diferentes nos parágrafos (texto da coluna se estende um pouco mais à direita, ex. 'bundled within the same package'), sem quebrar o layout",
+      "[baixo]{layout} Faixa decorativa azul do cabeçalho ligeiramente mais baixa/estreita que no Chromium"
+    ],
+    "css_suspect": "margens de <p> e line-height; dimensionamento de imagem decorativa do cabeçalho (height/width attr vs CSS)"
+  },
+  "re-papermark-year-in-review": {
+    "score": 7.5,
+    "issues": [
+      "[médio]{paint} Cartões com gradiente ('Viewers spent', 'Your top document', 'Your documents were viewed from', 'Your most active month') perdem o border-radius no lado direito/inferior onde o gradiente é pintado: cantos superiores/inferiores direitos ficam retos; a Blitz CPU arredonda corretamente",
+      "[baixo]{layout} Cartões e espaçamentos um pouco mais altos (~+2,5% de altura total), conteúdo deslocado ~30px para baixo no fim",
+      "[baixo]{layout} Linha 'You uploaded/You shared/You received' com números e rótulos ligeiramente mais espaçados verticalmente"
+    ],
+    "css_suspect": "background-image: linear-gradient não recortado pelo border-radius na pintura GPUI"
+  },
+  "re-plaid-verify-identity": {
+    "score": 8.0,
+    "issues": [
+      "[médio]{paint} Código '144833' sem letter-spacing (dígitos colados) e com fonte sans em vez da serifada espaçada do Chromium; a Blitz CPU aplica o espaçamento entre letras",
+      "[baixo]{layout} Pequenos acréscimos de espaçamento vertical (~+10px) no cartão e antes de 'SECURELY POWERED BY PLAID.'"
+    ],
+    "css_suspect": "letter-spacing não aplicado no shaping de texto do GPUI"
+  },
+  "re-twitch-reset-password": {
+    "score": 8.5,
+    "issues": [
+      "[baixo]{layout} Altura total ~8% maior (660 vs 612px): mais espaço abaixo do logo, entre parágrafos e no rodapé; igual na Blitz CPU",
+      "[baixo]{layout} Linha roxa sob o logo mais afastada do logo (~10px) que no Chromium",
+      "[baixo]{layout} Quebras de linha diferentes nos parágrafos (ex. 'reset your account password' cabe em uma linha), sem impacto no layout"
+    ],
+    "css_suspect": "line-height/margens de <p> e altura de célula com imagem (espaço de baseline abaixo de <img> inline)"
+  }
+}

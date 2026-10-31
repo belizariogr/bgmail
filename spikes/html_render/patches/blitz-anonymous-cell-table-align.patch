@@ -1,0 +1,183 @@
+diff --git i/packages/blitz-dom/src/layout/table.rs w/packages/blitz-dom/src/layout/table.rs
+index 50ae6f0..5fef9c8 100644
+--- i/packages/blitz-dom/src/layout/table.rs
++++ w/packages/blitz-dom/src/layout/table.rs
+@@ -288,6 +288,7 @@ pub(crate) fn build_table_context(
+                 &mut column_sizes,
+                 &mut first_cell_border,
+                 &mut percent_columns,
++                false,
+             );
+         }
+     }
+@@ -526,6 +527,7 @@ fn collect_table_cells(
+     columns: &mut Vec<TrackSizingFunction>,
+     first_cell_border: &mut Option<ServoArc<Border>>,
+     percent_columns: &mut Vec<(u16, f32, f32)>,
++    in_row: bool,
+ ) {
+     let node = &mut doc.nodes[node_id];
+ 
+@@ -552,7 +554,23 @@ fn collect_table_cells(
+         return;
+     }
+ 
+-    match display.inside() {
++    // CSS 2.2 §17.2.1: a non-table-internal child of a table row is wrapped in an
++    // anonymous table-cell. HTML e-mail relies on this (`<td style="display:block">`
++    // in responsive templates); ignoring such children made their content vanish.
++    // The box itself is placed as the cell, keeping its own margins/size so it
++    // behaves like a block inside a borderless, padding-less anonymous cell.
++    let treat_as_anonymous_cell = in_row
++        && matches!(
++            display.inside(),
++            DisplayInside::Flow | DisplayInside::FlowRoot | DisplayInside::Flex | DisplayInside::Grid
++        );
++    let inside = if treat_as_anonymous_cell {
++        DisplayInside::TableCell
++    } else {
++        display.inside()
++    };
++
++    match inside {
+         DisplayInside::TableRowGroup
+         | DisplayInside::TableHeaderGroup
+         | DisplayInside::TableFooterGroup
+@@ -576,6 +594,7 @@ fn collect_table_cells(
+                     columns,
+                     first_cell_border,
+                     percent_columns,
++                    false,
+                 );
+             }
+             doc.nodes[node_id].children = children;
+@@ -617,19 +636,23 @@ fn collect_table_cells(
+                     columns,
+                     first_cell_border,
+                     percent_columns,
++                    true,
+                 );
+             }
+             doc.nodes[node_id].children = children;
+         }
+         DisplayInside::TableCell => {
++            let anonymous = treat_as_anonymous_cell;
+             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+             let stylo_style = &node.primary_styles().unwrap();
+-            let colspan: u16 = node
+-                .attr(local_name!("colspan"))
++            let colspan: u16 = (!anonymous)
++                .then(|| node.attr(local_name!("colspan")))
++                .flatten()
+                 .and_then(|val| val.parse().ok())
+                 .unwrap_or(1);
+-            let rowspan: u16 = node
+-                .attr(local_name!("rowspan"))
++            let rowspan: u16 = (!anonymous)
++                .then(|| node.attr(local_name!("rowspan")))
++                .flatten()
+                 .and_then(|val| val.parse::<u16>().ok())
+                 .map(|v| v.clamp(1, 65534))
+                 .unwrap_or(1);
+@@ -638,7 +661,7 @@ fn collect_table_cells(
+ 
+             // In the collapsed borders model the borders are laid out as gutters between
+             // the cells (see the table's `gap`) rather than as part of the cells
+-            if border_collapse == BorderCollapse::Collapse {
++            if border_collapse == BorderCollapse::Collapse && !anonymous {
+                 style.border = taffy::Rect::ZERO.map(style_helpers::length);
+             }
+ 
+@@ -656,7 +679,7 @@ fn collect_table_cells(
+             // Column widths from `<col>` elements take precedence over cell widths
+             let col_needs_width =
+                 (col as usize) >= columns.len() || columns[col as usize].max.is_auto();
+-            if *row == 1 && col_needs_width {
++            if *row == 1 && col_needs_width && !anonymous {
+                 let column: TrackSizingFunction = match style.size.width.tag() {
+                     taffy::CompactLength::LENGTH_TAG => {
+                         let len = style.size.width.value();
+@@ -704,8 +727,11 @@ fn collect_table_cells(
+                 }
+             }
+ 
+-            // The margin properties do not apply to table-internal elements
+-            style.margin = taffy::Rect::ZERO.map(style_helpers::length);
++            // The margin properties do not apply to table-internal elements (an
++            // anonymously wrapped block keeps them: they apply inside its cell)
++            if !anonymous {
++                style.margin = taffy::Rect::ZERO.map(style_helpers::length);
++            }
+ 
+             // Let Taffy auto-place the column. Combined with
+             // `grid_auto_flow: RowDense` set on the table root, each cell
+@@ -726,7 +752,25 @@ fn collect_table_cells(
+                 }
+             }
+ 
+-            style.size.width = style_helpers::auto();
++            if !anonymous {
++                style.size.width = style_helpers::auto();
++            } else if style.size.width.is_auto() {
++                // A block with `width:auto` fills its (anonymous) cell like any block
++                // box; as a grid item with auto margins it would shrink-to-fit
++                // instead. Use 100% of the cell as a border-box, so max-width and
++                // auto margins still clamp and center it.
++                if style.box_sizing == taffy::BoxSizing::ContentBox {
++                    let padding = style.padding.resolve_or_zero(None, resolve_calc_value);
++                    let border = style.border.resolve_or_zero(None, resolve_calc_value);
++                    let extra = padding.left + padding.right + border.left + border.right;
++                    let max_width = style.max_size.width.into_raw();
++                    if max_width.tag() == taffy::CompactLength::LENGTH_TAG {
++                        style.max_size.width = style_helpers::length(max_width.value() + extra);
++                    }
++                    style.box_sizing = taffy::BoxSizing::BorderBox;
++                }
++                style.size.width = style_helpers::percent(1.0);
++            }
+             cells.push(TableCell {
+                 node_id,
+                 row: row.saturating_sub(1),
+diff --git i/packages/blitz-dom/src/stylo.rs w/packages/blitz-dom/src/stylo.rs
+index 30881e5..66e27fa 100644
+--- i/packages/blitz-dom/src/stylo.rs
++++ w/packages/blitz-dom/src/stylo.rs
+@@ -1052,13 +1052,32 @@ impl<'a> TElement for BlitzNode<'a> {
+                 }
+             }
+ 
+-            if *name == local_name!("align") {
++            if *name == local_name!("align") && *tag == local_name!("table") {
++                // `table align` positions the table itself, it does not align its
++                // contents: center maps to auto inline margins, left/right to float.
++                // https://html.spec.whatwg.org/multipage/rendering.html#tables-2
++                use style::values::generics::length::GenericMargin;
++                use style::values::specified::box_::Float;
++                if value.eq_ignore_ascii_case("center") {
++                    push_style(PropertyDeclaration::MarginLeft(GenericMargin::Auto));
++                    push_style(PropertyDeclaration::MarginRight(GenericMargin::Auto));
++                } else if value.eq_ignore_ascii_case("left") {
++                    push_style(PropertyDeclaration::Float(Float::Left));
++                } else if value.eq_ignore_ascii_case("right") {
++                    push_style(PropertyDeclaration::Float(Float::Right));
++                }
++            } else if *name == local_name!("align") {
+                 use style::values::specified::TextAlign;
+-                let keyword = match value {
+-                    "left" => Some(StyloTextAlign::MozLeft),
+-                    "right" => Some(StyloTextAlign::MozRight),
+-                    "center" => Some(StyloTextAlign::MozCenter),
+-                    _ => None,
++                let keyword = if value.eq_ignore_ascii_case("left") {
++                    Some(StyloTextAlign::MozLeft)
++                } else if value.eq_ignore_ascii_case("right") {
++                    Some(StyloTextAlign::MozRight)
++                } else if value.eq_ignore_ascii_case("center")
++                    || value.eq_ignore_ascii_case("middle")
++                {
++                    Some(StyloTextAlign::MozCenter)
++                } else {
++                    None
+                 };
+ 
+                 if let Some(keyword) = keyword {

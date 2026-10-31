@@ -1,0 +1,62 @@
+[
+  {
+    "email": "client-apple-mail",
+    "summary_pt": "Mensagem simples do Apple Mail com imagem inline e citação recuada (blockquote).",
+    "blitz": { "score": 10, "issues": [], "css_suspect": "" },
+    "litehtml": { "score": 9, "issues": ["[baixo] Espaçamentos verticais um pouco maiores (altura total ~4% maior), sem impacto visual relevante"], "css_suspect": "" }
+  },
+  {
+    "email": "client-gmail-reply",
+    "summary_pt": "Resposta do Gmail com lista, destaque em amarelo, assinatura em cinza/fonte pequena e citação com borda à esquerda.",
+    "blitz": { "score": 7, "issues": ["[médio] Assinatura perde a hierarquia: cargo 'Gerente de Projetos · Acme Ltda' sai em preto em vez de cinza e o telefone sai em tamanho normal em vez de fonte pequena"], "css_suspect": "color/font-size em <font> ou estilo inline herdado na assinatura" },
+    "litehtml": { "score": 9, "issues": ["[baixo] Texto quebra em mais linhas por métricas de fonte maiores, aumentando levemente a altura da citação"], "css_suspect": "" }
+  },
+  {
+    "email": "mjml-newsletter",
+    "summary_pt": "Newsletter MJML com seções coloridas, colunas imagem+texto, screenshot de código e rodapé com ícones sociais.",
+    "blitz": { "score": 9, "issues": ["[baixo] Pequenos acréscimos de espaçamento vertical entre seções"], "css_suspect": "" },
+    "litehtml": { "score": 8, "issues": ["[baixo] Logo do cabeçalho alinhado à esquerda em vez de centralizado"], "css_suspect": "align=center / text-align em td com imagem" }
+  },
+  {
+    "email": "postmark-receipt",
+    "summary_pt": "Recibo Postmark com cupom em caixa tracejada, tabela de itens, botões CTA e rodapé cinza.",
+    "blitz": { "score": 7, "issues": ["[médio] Corpo branco não ocupa a largura toda: aparece uma faixa cinza nas laterais do conteúdo", "[baixo] Padding das células da tabela de itens e espaçamentos verticais maiores (altura ~5% maior)"], "css_suspect": "width:100% em tabela aninhada / padding de td" },
+    "litehtml": { "score": 9, "issues": ["[baixo] Linha divisória acima do rodapé interno um pouco mais curta que a largura do conteúdo"], "css_suspect": "" }
+  },
+  {
+    "email": "re-04-arcane-newsletter",
+    "summary_pt": "Newsletter escura (React Email) com container de 600px, imagens full-bleed, lista numerada, depoimento e rodapé.",
+    "blitz": { "score": 7, "issues": ["[médio] Imagens hero e do produto aparecem recuadas com uma borda clara em vez de sangrar até a borda do container", "[baixo] Link 'See what's new' com fonte maior que no Chromium", "[baixo] Espaçamentos verticais maiores (altura ~5% maior) e pequena faixa branca no topo"], "css_suspect": "padding/border em img ou td de imagem; font-size em link" },
+    "litehtml": { "score": 4, "issues": ["[alto] Container de 600px ignorado: fundo escuro e conteúdo ocupam os 800px inteiros", "[alto] Imagens não preenchem a largura: faixa de cor diferente à direita da hero e da imagem do produto", "[médio] Texto e colunas da lista numerada esticados pela largura total, mudando a composição"], "css_suspect": "max-width em tabela container; width:100% em img" }
+  },
+  {
+    "email": "re-05-studio-abandoned-cart",
+    "summary_pt": "Carrinho abandonado com bloco cinza central, card de produto, depoimento, três colunas de benefícios e rodapé centralizado.",
+    "blitz": { "score": 6, "issues": ["[médio] Botões 'Return to cart' alinhados à esquerda em vez de centralizados", "[médio] Título 'Don't take it from us' e textos do rodapé alinhados à esquerda em vez de centralizados", "[baixo] Espaçamentos verticais maiores (altura ~7% maior) com área branca extra no final"], "css_suspect": "text-align:center herdado / margin:auto em tabela de botão" },
+    "litehtml": { "score": 5, "issues": ["[alto] Container de 600px ignorado: bloco cinza ocupa os 800px inteiros", "[médio] Botões, título 'Don't take it from us' e rodapé alinhados à esquerda em vez de centralizados", "[baixo] Parágrafo de introdução renderizado em fonte monoespaçada e título em serifa, quebrando a hierarquia tipográfica"], "css_suspect": "max-width em tabela; text-align/margin:auto; font-family com lista de fallback" }
+  },
+  {
+    "email": "re-apple-receipt",
+    "summary_pt": "Recibo da Apple com tabelas aninhadas de dados, linha de item com ícone, total, bloco promocional Apple Card e rodapé longo.",
+    "blitz": { "score": 5, "issues": ["[alto] Bloco promocional sem o logo 'Card' e sem o título 'Save 3% on all your Apple purchases.' — só aparece o link 'Apply and use in minutes'", "[médio] Tabela de dados (Apple ID/Billed to) com células centralizadas verticalmente e padding excessivo, desalinhando as colunas", "[baixo] Linha do total e seções com espaçamentos maiores; separador entre 'Write a Review' e 'Report a Problem' sem espaçamento"], "css_suspect": "vertical-align em td; display/height em elementos do bloco Apple Card" },
+    "litehtml": { "score": 6, "issues": ["[médio] Linha de TOTAL quebrada: rótulo deslocado à esquerda e borda vertical se estende para baixo da tabela", "[médio] Logo 'Card' alinhado à esquerda em vez de centralizado acima do título", "[baixo] Espaçamentos verticais maiores (altura ~8% maior)"], "css_suspect": "border em td com rowspan/height; text-align em td" }
+  },
+  {
+    "email": "re-koala-welcome",
+    "summary_pt": "Boas-vindas simples com logo, parágrafo, botão de largura total do container e rodapé.",
+    "blitz": { "score": 9, "issues": ["[baixo] Container ligeiramente mais largo e espaçamentos um pouco maiores"], "css_suspect": "" },
+    "litehtml": { "score": 6, "issues": ["[alto] Container de ~580px ignorado: texto, botão e divisória ocupam os 800px inteiros"], "css_suspect": "max-width em container" }
+  },
+  {
+    "email": "re-raycast-magic-link",
+    "summary_pt": "Magic link com fundo em gradiente, título com emoji, link destacado e rodapé com logo em cinza.",
+    "blitz": { "score": 7, "issues": ["[médio] Emojis ausentes (varinha no título e mãos apontando no link), deixando espaços vazios", "[baixo] Logo do rodapé sai colorido em vez de acinzentado"], "css_suspect": "fallback de fonte de emoji; filter:grayscale/opacity em img" },
+    "litehtml": { "score": 6, "issues": ["[alto] Container de 600px ignorado: card com gradiente ocupa os 800px inteiros", "[baixo] Logo do rodapé sai colorido em vez de acinzentado"], "css_suspect": "max-width em container; filter:grayscale em img" }
+  },
+  {
+    "email": "re-vercel-invite-user",
+    "summary_pt": "Convite Vercel em card com borda, avatares circulares ligados por seta, botão preto e rodapé de segurança.",
+    "blitz": { "score": 8, "issues": ["[baixo] Avatares e seta mais espaçados entre si; espaçamentos verticais um pouco maiores"], "css_suspect": "width em td de colunas" },
+    "litehtml": { "score": 5, "issues": ["[alto] Container de ~465px ignorado: card ocupa os 800px inteiros", "[médio] Avatares alinhados à esquerda em vez de centralizados e sem border-radius (quadrados)", "[baixo] Texto do botão 'Join the team' em fonte serifada"], "css_suspect": "max-width em container; border-radius em img; align em td" }
+  }
+]

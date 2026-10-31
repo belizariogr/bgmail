@@ -1,0 +1,12 @@
+{
+  "cerberus-hybrid": {"score": 8.0, "issues": ["[médio]{layout} Segundo bloco 'Class aptent taciti sociosqu' (seg. 1) não inverte a ordem das colunas: imagem 200x200 fica à esquerda e o texto/botão à direita, enquanto no Chromium o texto fica à esquerda e a imagem à direita", "[baixo]{layout} Rodapé (Company Name/endereço/unsubscribe) e faixa verde ~2-4px mais baixos que no Chromium"], "css_suspect": "dir=\"rtl\" em td/div (inversão de colunas inline-block/table-cell com direction:rtl) não suportado"},
+  "client-outlook-desktop": {"score": 8.4, "issues": ["[médio]{layout} Linhas da tabela de indicadores ~20px de altura vs ~17px no Chromium (tabela 61px vs 52px)", "[médio]{layout} Espaçamento vertical geral maior: margens entre parágrafos, lista e assinatura mais altas; último parágrafo 'Ricardo, pode consolidar...' em y≈418 vs y≈372 no Chromium (+46px, ~12%)", "[baixo]{layout} Linhas do cabeçalho de resposta (De/Enviada em/Para/Assunto) com espaçamento ~20px vs ~18px"], "css_suspect": "line-height normal / margens de p.MsoNormal (margin:0 + mso-line-height) e altura de linha de células de tabela com font-size em pt"},
+  "mjml-real-estate": {"score": 9.7, "issues": ["[baixo]{layout} Altura total levemente maior (~1-2%), conteúdo inferior desloca poucos px"], "css_suspect": ""},
+  "mjml-ticketshop": {"score": 9.8, "issues": [], "css_suspect": ""},
+  "postmark-welcome": {"score": 9.8, "issues": [], "css_suspect": ""},
+  "re-05-studio-promo": {"score": 9.6, "issues": ["[baixo]{layout} Estrelas '★★★★★' do depoimento renderizadas maiores/mais escuras que no Chromium (glifo de fallback com métrica diferente)"], "css_suspect": "fallback de fonte para U+2605 com font-size pequeno"},
+  "re-aws-verify-email": {"score": 9.8, "issues": [], "css_suspect": ""},
+  "re-linear-login-code": {"score": 9.8, "issues": [], "css_suspect": ""},
+  "re-slack-confirm": {"score": 9.8, "issues": [], "css_suspect": ""},
+  "re-yelp-recent-login": {"score": 9.8, "issues": [], "css_suspect": ""}
+}

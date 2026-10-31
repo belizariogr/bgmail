@@ -1,0 +1,100 @@
+diff --git i/litehtml/src/pixbuf.rs w/litehtml/src/pixbuf.rs
+index a6ba50c..ee3cb0c 100644
+--- i/litehtml/src/pixbuf.rs
++++ w/litehtml/src/pixbuf.rs
+@@ -13,6 +13,7 @@ use tiny_skia::{
+     Transform,
+ };
+ 
++use crate::BackgroundRepeat;
+ use crate::{
+     BackgroundLayer, BorderRadiuses, BorderStyle, Borders, Color, ColorPoint, ConicGradient,
+     DocumentContainer, DrawContext, FontDescription, FontHandle, FontMetrics, FontStyle,
+@@ -834,54 +835,47 @@ impl DocumentContainer for PixbufContainer {
+         let Some(img) = self.images.get(url) else {
+             return;
+         };
++        // Spike patch: scale the image to litehtml's computed origin box and
++        // tile it per background-repeat (upstream draws at natural size).
+         let clip = layer.clip_box();
+-        let border = layer.border_box();
++        let origin = layer.origin_box();
+         let s = self.scale_factor;
+-
+-        let dst_x = (border.x * s) as i32;
+-        let dst_y = (border.y * s) as i32;
+-
++        let (iw, ih) = (img.width() as f32, img.height() as f32);
++        let (ow, oh) = (
++            if origin.width > 0.0 { origin.width } else { iw },
++            if origin.height > 0.0 { origin.height } else { ih },
++        );
+         let img_paint = tiny_skia::PixmapPaint {
+             opacity: 1.0,
+             blend_mode: tiny_skia::BlendMode::SourceOver,
+             quality: tiny_skia::FilterQuality::Bilinear,
+         };
+-
+-        if clip.width > 0.0 && clip.height > 0.0 {
+-            let w = self.pixmap.width();
+-            let h = self.pixmap.height();
+-            if let Some(mut m) = tiny_skia::Mask::new(w, h) {
+-                if let Some(rect) =
+-                    Rect::from_xywh(clip.x * s, clip.y * s, clip.width * s, clip.height * s)
+-                {
+-                    m.fill_path(
+-                        &PathBuilder::from_rect(rect),
+-                        FillRule::Winding,
+-                        true,
+-                        Transform::identity(),
+-                    );
+-                }
+-                if let Some(ref existing) = self.cached_clip_mask {
+-                    intersect_masks(&mut m, existing);
+-                }
+-                self.pixmap.draw_pixmap(
+-                    dst_x,
+-                    dst_y,
+-                    img.as_ref(),
+-                    &img_paint,
+-                    Transform::identity(),
+-                    Some(&m),
+-                );
++        let (w, h) = (self.pixmap.width(), self.pixmap.height());
++        let Some(mut m) = tiny_skia::Mask::new(w, h) else { return };
++        if let Some(rect) = Rect::from_xywh(clip.x * s, clip.y * s, clip.width.max(0.0) * s, clip.height.max(0.0) * s) {
++            m.fill_path(&PathBuilder::from_rect(rect), FillRule::Winding, true, Transform::identity());
++        }
++        if let Some(ref existing) = self.cached_clip_mask {
++            intersect_masks(&mut m, existing);
++        }
++        let (rx, ry) = match layer.repeat() {
++            BackgroundRepeat::Repeat => (true, true),
++            BackgroundRepeat::RepeatX => (true, false),
++            BackgroundRepeat::RepeatY => (false, true),
++            BackgroundRepeat::NoRepeat => (false, false),
++        };
++        let span = |start: f32, len: f32, c0: f32, c1: f32, rep: bool| -> Vec<f32> {
++            if !rep { return vec![start]; }
++            let mut x = start - ((start - c0) / len).ceil().max(0.0) * len;
++            let mut v = Vec::new();
++            while x < c1 && v.len() < 400 { v.push(x); x += len; }
++            v
++        };
++        for ty in span(origin.y, oh, clip.y, clip.y + clip.height, ry) {
++            for tx in span(origin.x, ow, clip.x, clip.x + clip.width, rx) {
++                let t = Transform::from_row(ow / iw * s, 0.0, 0.0, oh / ih * s, tx * s, ty * s);
++                self.pixmap.draw_pixmap(0, 0, img.as_ref(), &img_paint, t, Some(&m));
+             }
+-        } else {
+-            self.pixmap.draw_pixmap(
+-                dst_x,
+-                dst_y,
+-                img.as_ref(),
+-                &img_paint,
+-                Transform::identity(),
+-                self.cached_clip_mask.as_ref(),
+-            );
+         }
+     }
+ 

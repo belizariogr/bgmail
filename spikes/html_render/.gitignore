@@ -1,0 +1,11 @@
+# Generated / large artifacts of the spike: only sources, reviews and the report are kept.
+corpus_build/node_modules/
+corpus_build/emails/
+corpus_raw/
+corpus/assets/
+engines/target/
+out/*
+!out/reviews/
+!out/reviews_hv/
+!out/reviews_widths/
+out_*/

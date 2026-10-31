@@ -1,0 +1,9 @@
+{
+  "cerberus-hybrid": {"score": 9.5, "issues": ["[baixo]{layout} Rodapé (View as a Web Page / Company Name / unsubscribe) e faixa verde final ~3-5px mais baixos que no Chromium (altura total 2605 vs 2600px)"], "css_suspect": "line-height/strut de texto pequeno no rodapé (font-size reduzido dentro de td)"},
+  "client-outlook-desktop": {"score": 9.6, "issues": ["[baixo]{layout} Linhas da tabela de indicadores ~1-2px mais altas (tabela termina em y≈141 vs y≈137); conteúdo abaixo (lista, assinatura, cabeçalho de resposta, último parágrafo) deslocado ~4px para baixo"], "css_suspect": "altura de linha das células td (line-height normal / padding de células em tabela com border-collapse)"},
+  "client-gmail-reply": {"score": 9.9, "issues": [], "css_suspect": ""},
+  "client-apple-mail": {"score": 9.9, "issues": [], "css_suspect": ""},
+  "re-apple-receipt": {"score": 9.7, "issues": ["[baixo]{layout} Pequenos desvios verticais de ~1-2px no bloco Apple Card e rodapé (altura total 1397 vs 1398px); não perceptível"], "css_suspect": "métricas de line-height"},
+  "re-stack-overflow-tips": {"score": 9.8, "issues": [], "css_suspect": ""},
+  "re-netlify-welcome": {"score": 9.9, "issues": [], "css_suspect": ""}
+}

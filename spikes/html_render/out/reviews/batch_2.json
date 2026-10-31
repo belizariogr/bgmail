@@ -1,0 +1,181 @@
+[
+  {
+    "email": "cerberus-responsive",
+    "summary_pt": "Template Cerberus responsivo: hero, bloco com background-image, grades de 2 e 3 colunas, cards imagem+texto alternados e rodapé com faixa verde.",
+    "blitz": {
+      "score": 9,
+      "issues": [
+        "[baixo] Espaçamentos verticais ligeiramente maiores entre blocos (botões e cards um pouco mais altos)"
+      ],
+      "css_suspect": "line-height/padding em td"
+    },
+    "litehtml": {
+      "score": 6,
+      "issues": [
+        "[médio] Card 'imagem à direita' (dir=rtl) renderizado com imagem à esquerda, igual ao card anterior",
+        "[médio] Espaçador entre a seção de cards e o bloco de texto seguinte sumiu: os dois cartões brancos ficam colados, separados só por uma linha",
+        "[baixo] Links do rodapé ('View as a Web Page', 'unsubscribe') sem sublinhado",
+        "[baixo] Texto sobre o background-image quebra em 5 linhas em vez de 4 (padding/largura levemente diferentes)"
+      ],
+      "css_suspect": "dir=rtl em td/table; altura de td espaçador (font-size/line-height 0); text-decoration em links"
+    }
+  },
+  {
+    "email": "leemunroe-responsive",
+    "summary_pt": "E-mail transacional simples com card branco arredondado, botão CTA azul e rodapé centralizado.",
+    "blitz": {
+      "score": 9,
+      "issues": [
+        "[baixo] Botão e parágrafos com espaçamento vertical um pouco maior que no Chromium"
+      ],
+      "css_suspect": ""
+    },
+    "litehtml": {
+      "score": 8,
+      "issues": [
+        "[baixo] Link 'Unsubscribe' do rodapé sem sublinhado",
+        "[baixo] Botão levemente mais largo e card com padding ligeiramente diferente"
+      ],
+      "css_suspect": "text-decoration em links"
+    }
+  },
+  {
+    "email": "mjml-recast",
+    "summary_pt": "Newsletter MJML com ilustração no topo, lista de artigos com miniatura à direita, banners e ícones sociais.",
+    "blitz": {
+      "score": 9,
+      "issues": [
+        "[baixo] Espaçamentos verticais ligeiramente maiores entre artigos"
+      ],
+      "css_suspect": ""
+    },
+    "litehtml": {
+      "score": 8,
+      "issues": [
+        "[baixo] Texto do corpo em cinza bem mais claro que no Chromium (contraste menor)",
+        "[baixo] Link 'Recast.AI' sem sublinhado",
+        "[baixo] Títulos dos artigos quebram em mais linhas (coluna de texto um pouco mais estreita)"
+      ],
+      "css_suspect": "color herdada em mj-text/div; text-decoration em links"
+    }
+  },
+  {
+    "email": "mjml-welcome-email",
+    "summary_pt": "Boas-vindas MJML com imagem de cabeçalho, bloco azul com título, texto e botão 'Login' arredondado.",
+    "blitz": {
+      "score": 10,
+      "issues": [],
+      "css_suspect": ""
+    },
+    "litehtml": {
+      "score": 10,
+      "issues": [],
+      "css_suspect": ""
+    }
+  },
+  {
+    "email": "re-04-arcane-order-confirmation",
+    "summary_pt": "Confirmação de pedido com fundo bordô, título serifado grande, itens com miniatura, tabela de totais e rodapé com ícones.",
+    "blitz": {
+      "score": 8,
+      "issues": [
+        "[baixo] Paddings verticais maiores (linhas da tabela de totais e itens mais altas; altura total ~5% maior)",
+        "[baixo] Pequena margem branca no topo antes do container bordô"
+      ],
+      "css_suspect": "padding/line-height em td"
+    },
+    "litehtml": {
+      "score": 5,
+      "issues": [
+        "[alto] Largura máxima do container ignorada: fundo bordô ocupa os 800px inteiros, sem as margens brancas laterais",
+        "[médio] Tabela de totais e divisores se estendem por toda a largura, desalinhados do texto",
+        "[baixo] Título 'Your order has been placed' quebra em 3 linhas em vez de 2"
+      ],
+      "css_suspect": "max-width em tabela/container"
+    }
+  },
+  {
+    "email": "re-codepen-challengers",
+    "summary_pt": "Newsletter CodePen com banner, caixas amarelas, imagem grande, bloco PRO, grade de cards em 2 colunas e botão CTA.",
+    "blitz": {
+      "score": 7,
+      "issues": [
+        "[médio] Emojis inline ausentes (cubo de gelo, mão, braço, óculos escuros): deixam lacunas no texto",
+        "[médio] Cards de IDEAS/RESOURCES com padding interno muito maior e texto deslocado para baixo, ficando bem mais altos",
+        "[baixo] Espaçamentos verticais gerais um pouco maiores"
+      ],
+      "css_suspect": "fallback de fonte emoji; padding/vertical-align em td dos cards"
+    },
+    "litehtml": {
+      "score": 8,
+      "issues": [
+        "[baixo] Links do rodapé ('email preferences', 'instantly opt out', 'support') sem sublinhado",
+        "[baixo] Textos quebram um pouco diferente, cards levemente mais altos"
+      ],
+      "css_suspect": "text-decoration em links"
+    }
+  },
+  {
+    "email": "re-dropbox-reset-password",
+    "summary_pt": "Redefinição de senha Dropbox: card branco centralizado com logo, texto e botão azul.",
+    "blitz": {
+      "score": 9,
+      "issues": [
+        "[baixo] Card levemente mais largo/alto e deslocado alguns pixels"
+      ],
+      "css_suspect": ""
+    },
+    "litehtml": {
+      "score": 6,
+      "issues": [
+        "[médio] Largura do card ignorada: ocupa quase os 800px em vez de ~600px",
+        "[baixo] Texto em cinza mais claro que no Chromium",
+        "[baixo] Link 'more security tips' sem sublinhado"
+      ],
+      "css_suspect": "max-width/width em tabela"
+    }
+  },
+  {
+    "email": "re-netlify-welcome",
+    "summary_pt": "Boas-vindas Netlify com logo, card branco com lista de passos, botão CTA, links de navegação e rodapé.",
+    "blitz": {
+      "score": 9,
+      "issues": [
+        "[baixo] Espaçamentos verticais um pouco maiores (altura ~6% maior)"
+      ],
+      "css_suspect": ""
+    },
+    "litehtml": {
+      "score": 6,
+      "issues": [
+        "[médio] Largura máxima do card ignorada: conteúdo ocupa quase os 800px",
+        "[médio] Rodapé ('Unsubscribe', 'Manage Preferences') alinhado à esquerda e dentro da área branca, em vez de centralizado sobre o fundo cinza",
+        "[baixo] Links 'Visit the forums', 'Read the docs', 'Contact an expert' sem sublinhado"
+      ],
+      "css_suspect": "max-width em tabela/div; text-align em td do rodapé"
+    }
+  },
+  {
+    "email": "re-stack-overflow-tips",
+    "summary_pt": "Dicas Stack Overflow: cabeçalho com logo, hero azul com ilustração, seções de texto com lista, botão CTA e rodapé.",
+    "blitz": {
+      "score": 5,
+      "issues": [
+        "[alto] Botão 'I need a break' perdeu padding/fundo: aparece como texto inline com realce azul, não como botão",
+        "[médio] Coluna de texto do hero mais estreita: título e subtítulo quebram em mais linhas e o hero fica mais alto",
+        "[baixo] Caixa '<3' do rodapé esticada por toda a largura",
+        "[baixo] Borda clara visível ao redor da área do logo no topo"
+      ],
+      "css_suspect": "display:inline-block/padding em <a> de botão; width em td do hero"
+    },
+    "litehtml": {
+      "score": 8,
+      "issues": [
+        "[baixo] Caixa '<3' do rodapé esticada por toda a largura",
+        "[baixo] Links do rodapé sem sublinhado",
+        "[baixo] Itens da lista com espaçamento vertical maior"
+      ],
+      "css_suspect": "display:inline-block; text-decoration em links"
+    }
+  }
+]

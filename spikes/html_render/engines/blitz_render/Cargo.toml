@@ -1,0 +1,18 @@
+[package]
+name = "blitz_render"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Pinned to the Blitz commit evaluated in the spike (main, 2026-10-30).
+[dependencies]
+blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "e42ee1f2577f968e29ea148a75d2d4f0d2cf19cc", features = ["default", "floats"] }
+blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "e42ee1f2577f968e29ea148a75d2d4f0d2cf19cc" }
+blitz-net = { git = "https://github.com/DioxusLabs/blitz", rev = "e42ee1f2577f968e29ea148a75d2d4f0d2cf19cc" }
+blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "e42ee1f2577f968e29ea148a75d2d4f0d2cf19cc" }
+blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "e42ee1f2577f968e29ea148a75d2d4f0d2cf19cc" }
+anyrender = "0.14.0"
+anyrender_vello_cpu = { version = "0.18.0", features = ["multithreading"] }
+peniko = "0.6.0"
+png = "0.18"
+tokio = { version = "1.42", features = ["rt-multi-thread"] }

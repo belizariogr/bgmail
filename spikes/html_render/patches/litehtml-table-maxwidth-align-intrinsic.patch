@@ -1,0 +1,86 @@
+diff --git i/src/el_table.cpp w/src/el_table.cpp
+index c3ce2a9f..a7d66ed7 100644
+--- i/src/el_table.cpp
++++ w/src/el_table.cpp
+@@ -1,4 +1,5 @@
+ #include "el_table.h"
++#include "html.h"
+ #include "document.h"
+ 
+ namespace litehtml
+@@ -41,6 +42,33 @@ namespace litehtml
+ 		str = get_attr("bgcolor");
+ 		if(str) { m_style.add_property(_background_color_, str, "", false, get_document()->container()); }
+ 
++		// https://html.spec.whatwg.org/multipage/rendering.html#tables-2:attr-table-align
++		// align=center centers the table via auto margins; left/right float it.
++		str = get_attr("align");
++		if(str)
++		{
++			if(!t_strcasecmp(str, "center") || !t_strcasecmp(str, "middle"))
++			{
++				m_style.add_property(_margin_left_, "auto", "", false, get_document()->container());
++				m_style.add_property(_margin_right_, "auto", "", false, get_document()->container());
++			}
++			else if(!t_strcasecmp(str, "left") || !t_strcasecmp(str, "right"))
++			{
++				m_style.add_property(_float_, str, "", false, get_document()->container());
++			}
++		}
++		else if(auto p = parent())
++		{
++			// Browsers center block children of <center> and align=center
++			// containers (-webkit-center); e-mail buttons/images depend on it.
++			const char* pa = p->get_attr("align");
++			if((pa && (!t_strcasecmp(pa, "center") || !t_strcasecmp(pa, "middle"))) ||
++			   !t_strcasecmp(p->get_tagName(), "center"))
++			{
++				m_style.add_property(_margin_left_, "auto", "", false, get_document()->container());
++				m_style.add_property(_margin_right_, "auto", "", false, get_document()->container());
++			}
++		}
+ 		html_tag::parse_attributes();
+ 	}
+ 
+diff --git i/src/render_block.cpp w/src/render_block.cpp
+index 359c0832..27ae1250 100644
+--- i/src/render_block.cpp
++++ w/src/render_block.cpp
+@@ -234,6 +234,13 @@ litehtml::pixel_t litehtml::render_item_block::_render(pixel_t x, pixel_t y, con
+ 			m_pos.width = self_size.max_width;
+ 			requires_rerender = true;
+ 		}
++		// The returned (intrinsic) width feeds table column sizing and
++		// inline-block line layout; it must honor max-width too, or hybrid
++		// e-mail columns (width:100%; max-width:220px) inflate their table.
++		if(ret_width > self_size.max_width)
++		{
++			ret_width = self_size.max_width;
++		}
+ 	}
+ 
+ 	// Fix width with min-width attribute
+diff --git i/src/render_table.cpp w/src/render_table.cpp
+index 1e7463ad..7c546da2 100644
+--- i/src/render_table.cpp
++++ w/src/render_table.cpp
+@@ -16,6 +16,19 @@ litehtml::pixel_t litehtml::render_item_table::_render(pixel_t x, pixel_t y, con
+ 
+ 	containing_block_context self_size = calculate_containing_block_context(containing_block_size);
+ 
++	// max-width applies to tables too (CSS 2.2 §17.5.2 leaves it undefined, but
++	// every browser clamps the used width; e-mail containers rely on it).
++	if (self_size.max_width.type != containing_block_context::cbc_value_type_none &&
++		self_size.render_width > self_size.max_width)
++	{
++		self_size.render_width = (pixel_t) self_size.max_width;
++		if (self_size.width.type != containing_block_context::cbc_value_type_auto &&
++			self_size.width > self_size.max_width)
++		{
++			self_size.width.value = self_size.max_width;
++		}
++	}
++
+     // Calculate table spacing
+     pixel_t table_width_spacing = 0;
+     if (src_el()->css().get_border_collapse() == border_collapse_separate)
