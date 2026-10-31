@@ -1465,6 +1465,9 @@ impl ElementCx<'_, '_> {
                 x_offset.px(),
                 y_offset.px(),
                 |scene| {
+                    if let Some(animation) = &image.animation {
+                        scene.register_animation(image.data.id(), animation.clone());
+                    }
                     scene.draw_image(to_peniko_image(image, quality).as_ref(), transform);
                 },
             );

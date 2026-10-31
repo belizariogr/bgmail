@@ -100,6 +100,12 @@ positions Blitz computed.
   `LinkActivated`, `ContextMenu`) and handles `Copy`, `SelectAll` and
   scrolling keys in the `HtmlView` key context (`html_view::init` binds them;
   call it once at startup).
+- **Animated GIFs:** Blitz keeps every frame (≤400 frames, ≤64 MiB; past
+  that the GIF stays still) as `RasterImageData::animation`; the painter
+  registers animated images in the display list, replay draws the frame
+  due by each animation's clock (started when first painted), and the view
+  repaints only when the next frame of a painted animation is due (one
+  pending timer; nothing runs for still mail or hidden views).
 - **Zoom:** `HtmlDocument::set_zoom` is Blitz's scale factor (layout at
   `width / zoom` CSS px, text shaped at the zoomed size, so text reflows and
   stays sharp); the API stays in pixels. `HtmlView` keeps the zoom across

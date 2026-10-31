@@ -510,7 +510,7 @@
          system's family names; "<Family> Black" is drawn as the family at
          weight 900 (Arial Black filed under Arial gets its black face);
        - CJK/RTL and multi-MB mail are still missing from the corpus.
-  5. 🔄 Zoom, print, animated GIF.
+  5. ✅ Zoom, print, animated GIF.
      - ✅ Zoom: page zoom as Blitz's scale factor (text reflows and stays
        sharp); Ctrl/Cmd `+`/`-`/`0` and Ctrl/Cmd + wheel over the reader,
        Chromium's levels (25%–500%), kept across messages; the status bar
@@ -522,7 +522,10 @@
        and its own nonce'd `print()` script), written to a private temp
        file (0600 in a 0700 dir; stale pages removed on the next print).
        Later: a native "Save as PDF" from the display list if needed.
-     - ⬜ Animated GIF.
+     - ✅ Animated GIF: Blitz keeps the frames (capped), replay draws the
+       current one and the view repaints only when a painted animation's
+       next frame is due (GIF `background-image` too). Loop counts are not
+       honoured (always loops, like most mail GIFs); APNG/WebP stay still.
 - ⬜ Stage 3 — remote content on request: HTTP image fetcher behind
       `html_view::Resources` (per-message/per-image unblock, cache, size/time
       limits, no cookies/referrer, optional privacy proxy); restore the

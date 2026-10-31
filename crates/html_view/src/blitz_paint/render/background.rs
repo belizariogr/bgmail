@@ -572,6 +572,9 @@ impl ElementCx<'_, '_> {
             });
         let tile_rect = Rect::new(0.0, 0.0, x.rect_len, y.rect_len);
 
+        if let Some(animation) = &image_data.animation {
+            scene.register_animation(image_data.data.id(), animation.clone());
+        }
         for hc in 0..y.count {
             for wc in 0..x.count {
                 let transform = transform.then_translate(Vec2 {

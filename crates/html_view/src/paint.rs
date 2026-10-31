@@ -17,6 +17,7 @@ use peniko::{Color, Extend, GradientKind, ImageAlphaType, ImageBrush, ImageForma
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Per-view caches that survive across frames.
 #[derive(Default)]
@@ -29,6 +30,35 @@ pub struct PaintCache {
     color_glyphs: HashMap<(u64, u32, u32, u32), Option<ColorGlyphImage>>,
     known_families: Option<HashSet<String>>,
     registered_fonts: HashSet<u64>,
+    /// Animated images of the list being replayed (see
+    /// [`DisplayList::animations`]) and when each started playing.
+    animations: HashMap<u64, Arc<blitz_dom::node::AnimationFrames>>,
+    animation_starts: HashMap<u64, Instant>,
+    /// Time until the next frame change among the images just painted.
+    next_frame: Option<Duration>,
+}
+
+impl PaintCache {
+    /// How long until an animated image painted by the last replay changes
+    /// frame (`None`: nothing animates); the host repaints then.
+    pub fn next_animation_frame(&self) -> Option<Duration> {
+        self.next_frame
+    }
+}
+
+/// The frame of an animated image to show now (`None` for still images),
+/// recording when its next frame is due in `cache`.
+fn animated_frame(cache: &mut PaintCache, brush: &ImageBrush, now: Instant) -> Option<ImageBrush> {
+    let id = brush.image.data.id();
+    let frames = cache.animations.get(&id)?.clone();
+    let start = *cache.animation_starts.entry(id).or_insert(now);
+    let elapsed = now.saturating_duration_since(start).as_millis() as u64;
+    let (frame, until_next) = frames.frame_at(elapsed)?;
+    let until_next = Duration::from_millis(until_next.max(1));
+    cache.next_frame = Some(cache.next_frame.map_or(until_next, |d| d.min(until_next)));
+    let mut current = brush.clone();
+    current.image.data = frame.clone();
+    Some(current)
 }
 
 /// A decoded colour glyph bitmap and its placement metrics (strike units).
@@ -609,6 +639,8 @@ fn paint_image_fill(
         return;
     }
     let scale = window.scale_factor() as f64;
+    let frame = animated_frame(cache, brush, Instant::now());
+    let brush = frame.as_ref().unwrap_or(brush);
     let Some(image) = render_image(cache, brush, (tile.width() * scale, tile.height() * scale))
     else {
         return;
@@ -747,6 +779,8 @@ pub fn paint_display_list(
     window: &mut Window,
     cx: &mut App,
 ) {
+    cache.animations.clone_from(&list.animations);
+    cache.next_frame = None;
     let mut index = 0;
     while index < list.commands.len() {
         // A stray Pop at top level is skipped instead of ending the replay.
@@ -764,6 +798,46 @@ pub fn paint_display_list(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn animated_images_show_the_frame_for_the_time() {
+        use super::{animated_frame, PaintCache};
+        use blitz_dom::node::AnimationFrames;
+        use peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let blob = |byte: u8| Blob::new(Arc::new(vec![byte; 4]));
+        let first = blob(1);
+        let frames = AnimationFrames {
+            frames: vec![(first.clone(), 100), (blob(2), 100)],
+        };
+        let brush = ImageBrush::new(ImageData {
+            data: first.clone(),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 1,
+            height: 1,
+        });
+        let mut cache = PaintCache::default();
+        // Still images aren't swapped.
+        assert!(animated_frame(&mut cache, &brush, Instant::now()).is_none());
+        cache.animations.insert(first.id(), Arc::new(frames));
+        let start = Instant::now();
+        let shown = |cache: &mut PaintCache, ms| {
+            animated_frame(cache, &brush, start + Duration::from_millis(ms))
+                .unwrap()
+                .image
+                .data
+                .data()[0]
+        };
+        assert_eq!(shown(&mut cache, 0), 1);
+        assert_eq!(
+            cache.next_animation_frame(),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(shown(&mut cache, 150), 2);
+        assert_eq!(shown(&mut cache, 250), 1);
+    }
 
     #[test]
     fn downscales_only_large_reductions() {

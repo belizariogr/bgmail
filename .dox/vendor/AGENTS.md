@@ -143,6 +143,13 @@ repository instead of living in someone's checkout.
       - image `align`, `hspace`, `vspace` (`legacy_image_align_css`, exported);
       - `<body link>`;
       - `align=justify` → `text-align: justify`;
+    - `net.rs` (`decode_gif_animation`) + `node/element.rs`
+      (`AnimationFrames`, `RasterImageData::animation`) + `document.rs`:
+      - animated GIFs keep every composited frame with its delay (under 20ms
+        plays at 100ms);
+      - capped at 400 frames / 64 MiB;
+      - `Resource::Image` carries them;
+      - `AnimationFrames::frame_at` picks the frame for a time (looping).
       - `<hr color/noshade/size/width/align>`.
 - `taffy`:
   - `compute/block.rs`: compressible replaced items with percentage

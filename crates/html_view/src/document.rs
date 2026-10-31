@@ -2307,4 +2307,38 @@ mod tests {
         doc.set_zoom(100.0);
         assert_eq!(doc.zoom(), 5.0);
     }
+
+    /// `data:` URL of a 20×20 GIF animating through `colors`, 100ms each.
+    fn animated_gif_url(colors: &[[u8; 4]]) -> String {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            encoder.set_repeat(Repeat::Infinite).unwrap();
+            for color in colors {
+                let buffer = image::RgbaImage::from_pixel(20, 20, image::Rgba(*color));
+                let delay = image::Delay::from_numer_denom_ms(100, 1);
+                encoder
+                    .encode_frame(image::Frame::from_parts(buffer, 0, 0, delay))
+                    .unwrap();
+            }
+        }
+        let encoded: String = bytes.iter().map(|b| format!("%{b:02X}")).collect();
+        format!("data:image/gif,{encoded}")
+    }
+
+    #[test]
+    fn animated_gifs_are_recorded_for_replay() {
+        let gif = animated_gif_url(&[[255, 0, 0, 255], [0, 0, 255, 255]]);
+        let still = animated_gif_url(&[[0, 255, 0, 255]]);
+        let mut doc = laid_out(&format!(
+            "<!DOCTYPE html><body><img src=\"{gif}\"><div style=\"width:20px;height:20px;background:url('{gif}')\"></div><img src=\"{still}\"></body>"
+        ));
+        let list = doc.display_list();
+        // One animation (the same GIF twice), the still one isn't.
+        assert_eq!(list.animations.len(), 1);
+        let frames = list.animations.values().next().unwrap();
+        assert_eq!(frames.frames.len(), 2);
+        assert_eq!(frames.duration_ms(), 200);
+    }
 }

@@ -13,6 +13,7 @@
 use anyrender::{Glyph, NormalizedCoord, Paint, PaintRef, PaintScene, RenderContext};
 use kurbo::{Affine, BezPath, PathEl, Point, Rect, RoundedRectRadii, Shape};
 use peniko::{BlendMode, Color, Fill, FontData, Gradient, ImageBrush, StyleRef};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Flattening tolerance (CSS px) used when a shape has to become a path.
@@ -150,11 +151,23 @@ pub enum Command {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DisplayList {
     pub commands: Vec<Command>,
+    /// Animated images, by the id of their first frame's data (what the
+    /// commands draw): replay shows the current frame instead.
+    pub animations: HashMap<u64, Arc<blitz_dom::node::AnimationFrames>>,
 }
 
 impl DisplayList {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Notes that images drawing `first_frame` animate through `frames`.
+    pub fn register_animation(
+        &mut self,
+        first_frame: u64,
+        frames: Arc<blitz_dom::node::AnimationFrames>,
+    ) {
+        self.animations.insert(first_frame, frames);
     }
 
     /// Records colour-bitmap glyphs (emoji).

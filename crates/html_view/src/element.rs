@@ -11,10 +11,11 @@ use gpui::{
     GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement,
     KeyBinding, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent,
-    StatefulInteractiveElement, Style, Styled, WeakEntity, Window,
+    StatefulInteractiveElement, Style, Styled, Task, WeakEntity, Window,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 actions!(
     html_view,
@@ -283,6 +284,14 @@ impl Element for HtmlElement {
                 cx,
             );
         });
+        // Animated images (GIFs): repaint when the next frame is due.
+        let next_frame = self.cache.borrow().next_animation_frame();
+        if let Some(delay) = next_frame {
+            match self.view.as_ref().and_then(|view| view.upgrade()) {
+                Some(view) => view.update(cx, |view, cx| view.schedule_frame(delay, cx)),
+                None => window.request_animation_frame(),
+            }
+        }
         if let Some(view) = self.view.clone() {
             paint_input_listeners(view, bounds.origin, hitbox.clone(), window, cx);
         }
@@ -364,6 +373,8 @@ pub struct HtmlView {
     dragging: bool,
     /// Page zoom, kept across documents like a browser tab's.
     zoom: f32,
+    /// Pending repaint for animated images, and when it fires.
+    frame_timer: Option<(Instant, Task<()>)>,
 }
 
 impl EventEmitter<HtmlViewEvent> for HtmlView {}
@@ -385,6 +396,7 @@ impl HtmlView {
             hovered_link: None,
             dragging: false,
             zoom: 1.0,
+            frame_timer: None,
         }
     }
 
@@ -397,6 +409,27 @@ impl HtmlView {
         self.cursor = CursorStyle::Arrow;
         self.set_hovered_link(None, cx);
         cx.notify();
+    }
+
+    /// Repaints after `delay` (an animated image's next frame), unless an
+    /// earlier repaint is already pending.
+    fn schedule_frame(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        let due = Instant::now() + delay;
+        if self
+            .frame_timer
+            .as_ref()
+            .is_some_and(|(pending, _)| *pending <= due)
+        {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                this.frame_timer = None;
+                cx.notify();
+            });
+        });
+        self.frame_timer = Some((due, task));
     }
 
     /// The page zoom (1 = 100%).

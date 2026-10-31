@@ -1387,9 +1387,11 @@ impl BaseDocument {
                 self.stylist
                     .force_stylesheet_origins_dirty(style::stylesheets::OriginSet::all());
             }
-            Resource::Image(_kind, width, height, image_data) => {
+            Resource::Image(_kind, width, height, image_data, animation) => {
                 // Create the ImageData and cache it
-                let image = ImageData::Raster(RasterImageData::new(width, height, image_data));
+                let mut raster = RasterImageData::new(width, height, image_data);
+                raster.animation = animation;
+                let image = ImageData::Raster(raster);
 
                 let Some(url) = res.resolved_url.as_ref() else {
                     return;

@@ -56,7 +56,14 @@ pub struct FontFaceOverrides {
 
 #[derive(Clone, Debug)]
 pub enum Resource {
-    Image(ImageType, u32, u32, Arc<Vec<u8>>),
+    /// BGMail: plus the frames of an animated image.
+    Image(
+        ImageType,
+        u32,
+        u32,
+        Arc<Vec<u8>>,
+        Option<Arc<crate::node::AnimationFrames>>,
+    ),
     #[cfg(feature = "svg")]
     Svg(ImageType, crate::node::SvgImageData),
     Css(DocumentStyleSheet),
@@ -545,6 +552,45 @@ fn stylo_to_fontique_style(style: &FontStyleRange) -> parley::fontique::FontStyl
     }
 }
 
+/// BGMail: most frames kept of an animated GIF, and most decoded bytes for
+/// all of them; past either the image stays still (its first frame).
+const MAX_ANIMATION_FRAMES: usize = 400;
+const MAX_ANIMATION_BYTES: usize = 64 << 20;
+
+/// BGMail: the frames of an animated GIF (more than one frame), composited
+/// to full canvases by the decoder, as (width, height, frames). Delays under
+/// 20ms play at 100ms, like browsers.
+pub(crate) fn decode_gif_animation(
+    bytes: &[u8],
+) -> Option<(u32, u32, crate::node::AnimationFrames)> {
+    use image::AnimationDecoder;
+    if !bytes.starts_with(b"GIF8") {
+        return None;
+    }
+    let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
+    let mut frames = Vec::new();
+    let mut size = None;
+    let mut total = 0usize;
+    for frame in decoder.into_frames() {
+        let frame = frame.ok()?;
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        let delay = if denom == 0 { 0 } else { numer / denom };
+        let delay = if delay < 20 { 100 } else { delay };
+        let buffer = frame.into_buffer();
+        size.get_or_insert((buffer.width(), buffer.height()));
+        total += buffer.as_raw().len();
+        if frames.len() >= MAX_ANIMATION_FRAMES || total > MAX_ANIMATION_BYTES {
+            return None;
+        }
+        frames.push((
+            linebender_resource_handle::Blob::new(Arc::new(buffer.into_raw())),
+            delay,
+        ));
+    }
+    let (width, height) = size?;
+    (frames.len() > 1).then_some((width, height, crate::node::AnimationFrames { frames }))
+}
+
 /// Handles HTML fetched for an `<iframe>` element's `src`
 pub(crate) struct DocumentSrcHandler;
 
@@ -573,6 +619,17 @@ impl NetHandler for ResourceHandler<ImageHandler> {
 
 impl ImageHandler {
     fn parse(&self, bytes: Bytes) -> Result<Resource, String> {
+        if let Some((width, height, animation)) = decode_gif_animation(&bytes) {
+            let first = animation.frames[0].0.clone();
+            let data = Arc::new(first.data().to_vec());
+            return Ok(Resource::Image(
+                self.kind,
+                width,
+                height,
+                data,
+                Some(Arc::new(animation)),
+            ));
+        }
         let image_err = match image::ImageReader::new(Cursor::new(&bytes))
             .with_guessed_format()
             .expect("IO errors impossible with Cursor")
@@ -587,6 +644,7 @@ impl ImageHandler {
                     width,
                     height,
                     Arc::new(raw_rgba8_data),
+                    None,
                 ));
             }
             Err(e) => e.to_string(),
@@ -613,6 +671,57 @@ impl ImageHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A GIF of `frames` 2×1 frames (solid colors) shown `delay_ms` each.
+    pub(crate) fn gif(frames: &[[u8; 4]], delay_ms: u32) -> Vec<u8> {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            encoder.set_repeat(Repeat::Infinite).unwrap();
+            for color in frames {
+                let buffer = image::RgbaImage::from_pixel(2, 1, image::Rgba(*color));
+                let delay = image::Delay::from_numer_denom_ms(delay_ms, 1);
+                encoder
+                    .encode_frame(image::Frame::from_parts(buffer, 0, 0, delay))
+                    .unwrap();
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn animated_gifs_keep_every_frame() {
+        let bytes = gif(&[[255, 0, 0, 255], [0, 0, 255, 255]], 50);
+        let (width, height, animation) = decode_gif_animation(&bytes).unwrap();
+        assert_eq!((width, height), (2, 1));
+        assert_eq!(animation.frames.len(), 2);
+        assert_eq!(animation.frames[1].0.data()[..4], [0, 0, 255, 255]);
+        assert_eq!(animation.frames[0].1, 50);
+        // Too-short delays play at 100ms, like browsers; still GIFs aren't animations.
+        let fast = decode_gif_animation(&gif(&[[0; 4], [255; 4]], 0))
+            .unwrap()
+            .2;
+        assert_eq!(fast.frames[0].1, 100);
+        assert!(decode_gif_animation(&gif(&[[0; 4]], 50)).is_none());
+        assert!(decode_gif_animation(b"\x89PNG").is_none());
+    }
+
+    #[test]
+    fn animation_frames_follow_the_clock() {
+        let bytes = gif(&[[1; 4], [2; 4], [3; 4]], 100);
+        let animation = decode_gif_animation(&bytes).unwrap().2;
+        assert_eq!(animation.duration_ms(), 300);
+        let frame = |ms| {
+            let (frame, next) = animation.frame_at(ms).unwrap();
+            (frame.data()[0], next)
+        };
+        assert_eq!(frame(0), (1, 100));
+        assert_eq!(frame(150), (2, 50));
+        assert_eq!(frame(299), (3, 1));
+        // Loops forever.
+        assert_eq!(frame(300), (1, 100));
+    }
     use parley::fontique::FontStyle as Fq;
     use style::values::specified::Angle;
 

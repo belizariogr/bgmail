@@ -875,6 +875,8 @@ pub struct RasterImageData {
     pub height: u32,
     /// The raw image data in RGBA8 format
     pub data: Blob<u8>,
+    /// BGMail: the frames of an animated image (`data` is the first one).
+    pub animation: Option<Arc<AnimationFrames>>,
 }
 impl RasterImageData {
     pub fn new(width: u32, height: u32, data: Arc<Vec<u8>>) -> Self {
@@ -882,7 +884,40 @@ impl RasterImageData {
             width,
             height,
             data: Blob::new(data),
+            animation: None,
         }
+    }
+}
+
+/// BGMail: the frames of an animated image, each a full RGBA8 canvas of the
+/// image's size shown for `delay_ms`, looping forever.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationFrames {
+    pub frames: Vec<(Blob<u8>, u32)>,
+}
+
+impl AnimationFrames {
+    /// Total duration of one loop (ms).
+    pub fn duration_ms(&self) -> u64 {
+        self.frames.iter().map(|(_, delay)| *delay as u64).sum()
+    }
+
+    /// The frame shown `elapsed_ms` after the animation started, and how long
+    /// until the next frame (ms).
+    pub fn frame_at(&self, elapsed_ms: u64) -> Option<(&Blob<u8>, u64)> {
+        let total = self.duration_ms();
+        if total == 0 {
+            return self.frames.first().map(|(frame, _)| (frame, u64::MAX));
+        }
+        let mut t = elapsed_ms % total;
+        for (frame, delay) in &self.frames {
+            let delay = *delay as u64;
+            if t < delay {
+                return Some((frame, delay - t));
+            }
+            t -= delay;
+        }
+        None
     }
 }
 

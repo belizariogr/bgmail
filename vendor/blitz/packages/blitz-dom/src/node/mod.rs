@@ -19,9 +19,9 @@ pub use custom_widget::{
 };
 pub(crate) use element::parse_classes;
 pub use element::{
-    CanvasData, DocumentData, ElementData, ImageData, ImageResourceData, LayoutData,
-    ListItemLayout, ListItemLayoutPosition, Marker, RasterImageData, SpecialElementData,
-    SpecialElementType, Status,
+    AnimationFrames, CanvasData, DocumentData, ElementData, ImageData, ImageResourceData,
+    LayoutData, ListItemLayout, ListItemLayoutPosition, Marker, RasterImageData,
+    SpecialElementData, SpecialElementType, Status,
 };
 pub use node::*;
 pub use scrollbar::{ScrollbarColor, ScrollbarRef, ScrollbarWidth};

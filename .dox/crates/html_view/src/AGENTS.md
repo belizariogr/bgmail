@@ -233,6 +233,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   underlined, plain `<hr>` bevel, `align=justify`, "Arial Black" drawn at
   900 when filed under Arial, rowspan heights and overlapping colspans,
   small quirks alt boxes showing only text, zoom scaling layout/paint/input,
+  animated GIFs recorded for replay,
   root background filling a requested height, relative URLs neither panicking
   nor counted as remote, XHTML mail keeps block `<p>`, blocked remote image
   recording, text runs carry ordered words + face.
@@ -278,8 +279,11 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `struct ColorGlyphRun { font, font_size, glyphs: Vec<(id, x, baseline)> }`.
 - `enum Command { PushLayer { clip, radii, alpha, grayscale }, Pop, Fill, Stroke,
   BoxShadow, Text, Glyphs, ColorGlyphs }`: document-coordinate commands.
-- `struct DisplayList { commands }`; `new()`; `push_text(run)` and
-  `push_color_glyphs(run)` record non-empty runs.
+- `struct DisplayList { commands, animations }`; `new()`; `push_text(run)` and
+  `push_color_glyphs(run)` record non-empty runs;
+  `register_animation(first_frame_id, frames)`: images drawing that data
+  animate through `frames` (the painter calls it for animated `<img>` and
+  backgrounds).
 - `fn is_axis_aligned(transform)`: no rotation/skew.
 - `fn transform_geometry(shape, transform) -> Geometry`: keeps rects and rounded
   rects (radii scaled by the smaller axis factor) under axis-aligned transforms;
@@ -361,7 +365,13 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 
 ### `paint.rs`
 - `struct PaintCache`: per-view caches (images, sampled gradients, colour
-  glyph bitmaps, known font families, fonts registered with GPUI).
+  glyph bitmaps, known font families, fonts registered with GPUI), plus the
+  replayed list's animations, when each started and the next frame delay;
+  `next_animation_frame()`: time until an animated image painted by the last
+  replay changes frame (`None` when nothing animates).
+- `fn animated_frame(cache, brush, now)` (private): for an animated image,
+  a brush showing the frame due `now` (each animation's clock starts when
+  first painted), recording the next frame delay.
 - `struct ColorGlyphImage` (private): decoded glyph bitmap + strike metrics.
 - `fn color_glyph_rect(x, baseline, font_size, ppem, bearing_x, bearing_y,
   width, height, bottom_origin)`: document rect of a colour glyph bitmap.
@@ -405,17 +415,19 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   scale_factor)`: device-size texture capped at 512 px per side.
 - `fn paint_sampled_gradient(...)` (private): cached sampled gradient image.
 - `fn paint_image_fill(area, corner_radii, brush, transform, origin, layer,
-  cache, window)` (private): repeat-aware tiles clipped to the fill area,
+  cache, window)` (private): the current frame of animated images;
+  repeat-aware tiles clipped to the fill area,
   uploaded at device size when much smaller than the image, rounded when
   covering the box or on the rounded clip's corners, grayscale per layer.
 - `fn tile_starts(start, len, from, to, repeat)`: tile origins covering a span.
 - `fn paint_commands(...)` (private): recursive replay; layers become content
   masks with multiplied alpha, inherited rounded clip and grayscale.
-- `fn paint_display_list(list, origin, cache, window, cx)`: replays a whole list
-  (tolerates stray `Pop`).
+- `fn paint_display_list(list, origin, cache, window, cx)`: takes the list's
+  animations, replays the whole list (tolerates stray `Pop`).
 - Tests: colour glyph placement, cluster placement threshold, `same_box`,
   `clip_corners`, CSS angles, color alpha, gradient texture cap, tiles,
-  RGBA→BGRA, unpremultiply, downscale sizes, premultiplied resizing.
+  RGBA→BGRA, unpremultiply, downscale sizes, premultiplied resizing, animated
+  frames by time.
 
 ### `element.rs`
 - `actions!(html_view, [Copy, SelectAll, ScrollUp, ScrollDown, PageUp,
@@ -441,15 +453,19 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `new(document, cache)`; `interactive(view)` routes input to an `HtmlView`.
   `impl Element`: measured layout (pane width, content height); `prepaint`
   refreshes on content width change and inserts the hitbox (content width);
-  `paint` replays the display list (`canvas_height`, content width) and, when
-  interactive, `paint_input_listeners`.
+  `paint` replays the display list (`canvas_height`, content width), asks
+  for a repaint when an animated image's next frame is due (the view's
+  `schedule_frame`, else `request_animation_frame`) and, when interactive,
+  `paint_input_listeners`.
 - `fn paint_input_listeners(view, origin, hitbox, window, cx)` (private): sets
   the view's cursor on the hitbox; window-level mouse down (over the hitbox),
   move and up listeners converting to document coordinates; a capture-phase
   wheel listener that, with Ctrl/Cmd held over the hitbox, zooms one step
   per event instead of scrolling.
 - `struct HtmlView { document, cache, scroll, focus, cursor, hovered_link,
-  dragging, zoom }` (`EventEmitter<HtmlViewEvent>`, `Focusable`);
+  dragging, zoom, frame_timer }` (`EventEmitter<HtmlViewEvent>`,
+  `Focusable`); private `schedule_frame(delay, cx)` (one pending repaint
+  for animated images, the earliest wins);
   `new(document, cx)`; `set_document` (applies the view's zoom; resets
   scroll, drag, cursor, hovered link); `zoom()`; `set_zoom(zoom, cx)`
   (clamped; scales the scroll offset to keep the same content at the top,

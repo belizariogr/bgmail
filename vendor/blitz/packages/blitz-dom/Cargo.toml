@@ -89,7 +89,8 @@ tracing = { workspace = true, optional = true }
 rayon = { workspace = true }
 
 # Media & Decoding
-image = { workspace = true }
+# BGMail: animated GIF frames (`net::decode_gif_animation`).
+image = { workspace = true, features = ["gif"] }
 usvg = { workspace = true, optional = true }
 svgtypes = { workspace = true, optional = true }
 wuff = { workspace = true, optional = true }

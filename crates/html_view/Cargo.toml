@@ -63,5 +63,5 @@ fontconfig = { version = "0.11", default-features = false, features = ["dlopen"]
 
 [dev-dependencies]
 url = "2.5.0"
-# The viewer example stitches full-page captures into PNGs.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# The viewer example stitches full-page captures into PNGs; tests encode GIFs.
+image = { version = "0.25", default-features = false, features = ["png", "gif"] }
