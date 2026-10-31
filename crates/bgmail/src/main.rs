@@ -7,8 +7,6 @@
 
 mod actions;
 mod app_menus;
-#[cfg(feature = "cef-osr")]
-mod cef_osr;
 mod command_palette;
 mod command_palette_overlay;
 mod commands;
@@ -17,10 +15,10 @@ mod config;
 mod data;
 mod db_seed;
 mod locale;
+mod mail_html;
 mod root;
 mod shortcuts;
 mod startup;
-mod web_view;
 mod window_drag;
 mod window_frame;
 
@@ -101,7 +99,8 @@ fn schedule_compose_close(cx: &mut App) {
     });
 }
 
-/// Global handlers keep macOS menu items enabled when a native webview holds focus.
+/// Global handlers keep macOS menu items enabled when focus is outside the main
+/// view tree (compose/settings windows).
 fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &ComposeNew, cx| schedule_menu_command(CommandId::ComposeNew, cx));
     cx.on_action(|_: &OpenSettings, cx| schedule_menu_command(CommandId::OpenSettings, cx));
@@ -133,28 +132,6 @@ fn register_global_menu_actions(cx: &mut App) {
     });
 }
 
-/// The HTML reader is Chromium via CEF windowless off-screen rendering on every
-/// platform, composited by GPUI as a texture. Initialize CEF once up front; the
-/// reader drives its message pump each frame and it is shut down on quit.
-#[cfg(feature = "cef-osr")]
-fn init_cef_osr() {
-    if !cef_osr::initialize() {
-        eprintln!("BGMail: CEF initialization failed; HTML reader disabled");
-    }
-}
-
-#[cfg(not(feature = "cef-osr"))]
-fn init_cef_osr() {}
-
-/// Shuts the CEF runtime down on exit. No-op when the feature is disabled.
-#[cfg(feature = "cef-osr")]
-fn shutdown_cef_osr() {
-    cef_osr::shutdown_cef();
-}
-
-#[cfg(not(feature = "cef-osr"))]
-fn shutdown_cef_osr() {}
-
 /// Builds the macOS application menu. The first menu's name becomes the bold
 /// "app menu" in the global menu bar, so it carries the application name.
 /// Full menus are refreshed from [`RootView`] as selection changes.
@@ -179,18 +156,8 @@ fn register_command_palette_shortcuts(cx: &mut App) {
 }
 
 fn main() {
-    // CEF re-executes this binary for each of its sub-processes (renderer, GPU,
-    // utility, …), passing a `--type=` switch. Those must run CEF's sub-process
-    // logic and exit before we bring up GPUI.
-    #[cfg(feature = "cef-osr")]
-    if cef_osr::run_if_subprocess() {
-        return;
-    }
-
     startup::mark_start();
     startup::log_milestone("main entered");
-
-    init_cef_osr();
 
     Application::new()
         .with_assets(ui::Assets)
@@ -376,9 +343,6 @@ fn main() {
 
             cx.activate(true);
         });
-
-    // `run` blocks until the app exits; tear CEF down cleanly afterward.
-    shutdown_cef_osr();
 }
 
 #[cfg(test)]

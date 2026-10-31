@@ -12,40 +12,23 @@ default-run = "BGMail"
 name = "BGMail"
 path = "src/main.rs"
 
-[features]
-# CEF windowless OSR for the HTML reader on every platform. Disable with:
-# cargo run --no-default-features
-default = ["cef-osr"]
-cef-osr = ["dep:cef", "dep:open", "dep:image", "dep:smallvec", "dep:urlencoding"]
-# Back-compat alias for the former Linux-only feature name.
-linux-webview = ["cef-osr"]
-
 [dependencies]
 gpui.workspace = true
 theme.workspace = true
 ui.workspace = true
 storage.workspace = true
-# Carries link-hover URLs from the webview's IPC callback (any thread) to the
-# GPUI view, which drains them asynchronously to update the status bar.
-async-channel = "2"
+# Native HTML mail rendering (Blitz layout painted by GPUI).
+html_view.workspace = true
 
 # Persisted settings (window/column sizes) serialized as JSON under
 # ~/.config/BGMail/config.json on every platform.
 serde.workspace = true
 serde_json.workspace = true
 
-# Sanitizes e-mail HTML before it reaches the OS web engine: a real streaming
-# parser (not regex) so malformed markup can't smuggle through the elements a
-# reader must never render (scripts, frames, media, editable controls).
+# Sanitizes e-mail HTML before it reaches the renderer: a real streaming parser
+# (not regex) so malformed markup can't smuggle through the elements a reader
+# must never render (scripts, frames, media, editable controls).
 lol_html = "3.0.0"
-
-# Chromium Embedded Framework — windowless OSR composited by GPUI. Optional so
-# `--no-default-features` still builds without downloading the CEF runtime.
-cef = { version = "=150.2.1", optional = true, default-features = false }
-open = { version = "5", optional = true }
-image = { version = "0.25", optional = true, default-features = false }
-smallvec = { version = "1", optional = true }
-urlencoding = { version = "2", optional = true }
 
 # macOS-only: GPUI 0.2 doesn't implement `start_window_move` on macOS, so we
 # drag the window via AppKit's `performWindowDragWithEvent:` using the native

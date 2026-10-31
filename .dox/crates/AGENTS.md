@@ -53,4 +53,4 @@ isolated tests, and shorter incremental compiles.
 | `crates/ui/` | [`.dox/crates/ui/AGENTS.md`](ui/AGENTS.md) | Reusable GPUI components and semantic `Color` |
 | `crates/storage/` | [`.dox/crates/storage/AGENTS.md`](storage/AGENTS.md) | SQLite mail store, schema, seed, search |
 | `crates/html_view/` | [`.dox/crates/html_view/AGENTS.md`](html_view/AGENTS.md) | Native GPUI HTML rendering (Blitz layout, GPUI paint/text) |
-| `crates/bgmail/` | [`.dox/crates/bgmail/AGENTS.md`](bgmail/AGENTS.md) | App binary: windows, layout, webview, i18n |
+| `crates/bgmail/` | [`.dox/crates/bgmail/AGENTS.md`](bgmail/AGENTS.md) | App binary: windows, layout, reader, i18n |

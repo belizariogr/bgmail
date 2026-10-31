@@ -70,8 +70,6 @@ pub enum Key {
     RemoteImagesLabel,
     RemoteImagesHint,
     BlockedElements,
-    UnblockRemote,
-    RemoteContentLoaded,
 
     SearchPlaceholder,
     SearchClear,
@@ -111,14 +109,6 @@ pub enum Key {
     ComposeCcBcc,
     ComposeFieldPlaceholder,
     ComposeBodyPlaceholder,
-
-    CtxOpenImage,
-    CtxDownloadImage,
-    CtxShowImage,
-    CtxOpenLink,
-    CtxCopyLink,
-    CtxCopy,
-    ImageDownloaded,
 }
 
 impl Key {
@@ -184,20 +174,16 @@ impl Key {
             (Disabled, E) => "Disabled",
             (Disabled, P) => "Desativado",
 
-            (RemoteImagesLabel, E) => "Load remote images",
-            (RemoteImagesLabel, P) => "Carregar imagens remotas",
+            (RemoteImagesLabel, E) => "Remote images",
+            (RemoteImagesLabel, P) => "Imagens remotas",
             (RemoteImagesHint, E) => {
-                "Off by default. Remote images can track when and where you open a message."
+                "Blocked: remote images can track when and where you open a message. Loading them on request will come with account sync."
             }
             (RemoteImagesHint, P) => {
-                "Desativado por padrão. Imagens remotas podem rastrear quando e onde você abre uma mensagem."
+                "Bloqueadas: imagens remotas podem rastrear quando e onde você abre uma mensagem. Carregá-las sob demanda chegará com a sincronização de contas."
             }
             (BlockedElements, E) => "Blocked images: {}",
             (BlockedElements, P) => "Imagens bloqueadas: {}",
-            (UnblockRemote, E) => "Unblock all remote content",
-            (UnblockRemote, P) => "Desbloquear todo conteúdo remoto",
-            (RemoteContentLoaded, E) => "Remote content loaded",
-            (RemoteContentLoaded, P) => "Conteúdo remoto carregado",
 
             (SearchPlaceholder, E) => "Search",
             (SearchPlaceholder, P) => "Buscar",
@@ -273,20 +259,6 @@ impl Key {
             (ComposeBodyPlaceholder, E) => "Write your message…",
             (ComposeBodyPlaceholder, P) => "Escreva sua mensagem…",
 
-            (CtxOpenImage, E) => "Open image",
-            (CtxOpenImage, P) => "Abrir imagem",
-            (CtxDownloadImage, E) => "Download image",
-            (CtxDownloadImage, P) => "Baixar imagem",
-            (CtxShowImage, E) => "Show remote image",
-            (CtxShowImage, P) => "Mostrar imagem remota",
-            (CtxOpenLink, E) => "Open in browser",
-            (CtxOpenLink, P) => "Abrir no navegador",
-            (CtxCopyLink, E) => "Copy link",
-            (CtxCopyLink, P) => "Copiar link",
-            (CtxCopy, E) => "Copy",
-            (CtxCopy, P) => "Copiar",
-            (ImageDownloaded, E) => "Image saved to your Downloads folder",
-            (ImageDownloaded, P) => "Imagem salva na pasta Downloads",
         }
     }
 }
@@ -362,7 +334,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 64] = [
+    const ALL_KEYS: [Key; 55] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -392,8 +364,6 @@ mod tests {
         Key::RemoteImagesLabel,
         Key::RemoteImagesHint,
         Key::BlockedElements,
-        Key::UnblockRemote,
-        Key::RemoteContentLoaded,
         Key::SearchPlaceholder,
         Key::SearchClear,
         Key::SearchActiveTitle,
@@ -420,13 +390,6 @@ mod tests {
         Key::ComposeCcBcc,
         Key::ComposeFieldPlaceholder,
         Key::ComposeBodyPlaceholder,
-        Key::CtxOpenImage,
-        Key::CtxDownloadImage,
-        Key::CtxShowImage,
-        Key::CtxOpenLink,
-        Key::CtxCopyLink,
-        Key::CtxCopy,
-        Key::ImageDownloaded,
     ];
 
     #[test]

@@ -10,7 +10,7 @@ use gpui::SharedString;
 use crate::locale::{Key, Language};
 
 /// Raw bytes of the image embedded in the first sample message, baked into the
-/// binary so the message is self-contained: the webview renders it from a
+/// binary so the message is self-contained: the reader renders it from a
 /// `data:` URI (see [`embedded_image_data_uri`]), which avoids file-access
 /// quirks on a page loaded from an HTML string. Must be a real raster image a
 /// browser engine can decode (PNG/JPEG).
@@ -560,7 +560,7 @@ fn base64_encode(input: &[u8]) -> String {
     out
 }
 
-/// The embedded image as a self-contained `data:` URI the webview can render.
+/// The embedded image as a self-contained `data:` URI the reader can render.
 fn embedded_image_data_uri() -> String {
     format!(
         "data:image/png;base64,{}",
@@ -691,12 +691,12 @@ mod tests {
             panic!("first message should be HTML");
         };
         // The image is baked into the body as a self-contained data URI so the
-        // webview renders it without any file access.
+        // reader renders it without any file access.
         assert!(
             html.contains("data:image/png;base64,"),
             "HTML body must embed the image as a data URI"
         );
-        // Explicit dimensions let us verify the webview honors width/height.
+        // Explicit dimensions let us verify the reader honors width/height.
         assert!(html.contains(&format!("width=\"{EMBEDDED_IMAGE_WIDTH}\"")));
         assert!(html.contains(&format!("height=\"{EMBEDDED_IMAGE_HEIGHT}\"")));
     }
@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn embedded_image_is_a_decodable_raster() {
         // A WebP-in-.png (or any non-raster) would silently fail to render in the
-        // webview. Guard the magic bytes for PNG/JPEG.
+        // reader. Guard the magic bytes for PNG/JPEG.
         let bytes = EMBEDDED_IMAGE_BYTES;
         let is_png = bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
         let is_jpeg = bytes.starts_with(&[0xFF, 0xD8, 0xFF]);

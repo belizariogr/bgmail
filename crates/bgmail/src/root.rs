@@ -10,12 +10,11 @@ use std::time::Duration;
 use std::f32::consts::FRAC_PI_2;
 
 use gpui::{
-    anchored, canvas, deferred, ease_in_out, point, radians, size, svg, Animation,
-    AnimationExt as _, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Corner,
-    CursorStyle, DragMoveEvent, Empty, Entity, FocusHandle, Focusable, FontWeight, Hsla,
-    KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point,
-    ScrollDelta, ScrollHandle, ScrollWheelEvent, Size, Svg, TitlebarOptions, Transformation,
-    WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
+    ease_in_out, point, radians, size, svg, Animation, AnimationExt as _, App, AppContext as _,
+    Bounds, Context, DragMoveEvent, Empty, Entity, Focusable, FontWeight, Hsla, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Point, ScrollHandle, Size, Svg, TitlebarOptions,
+    Transformation, WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle,
+    WindowOptions,
 };
 
 use crate::command_palette_overlay;
@@ -35,11 +34,9 @@ use crate::config::{self, Config};
 use crate::data::{self, GlobalMailbox, MailboxKind};
 use crate::db_seed;
 use crate::locale::{self, ActiveLanguage, Key, Language};
+use crate::mail_html::{email_document, DocumentColors};
 use crate::shortcuts;
-use crate::web_view::{
-    email_document, ContextMenuLabels, DocumentColors, EmailWebView, HostEvent, WebviewCursor,
-    WebviewMouseButton, COMPOSITES_IN_GPUI, WEBVIEW_SUPPORTED,
-};
+use html_view::{Appearance as PageAppearance, DocumentOptions, HtmlDocument, HtmlView};
 use storage::{MailListQuery, MessageDetail, MessageListItem};
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
@@ -99,40 +96,6 @@ pub(crate) const READER_LIGHT_TEXT: Hsla = Hsla {
     l: 0.13,
     a: 1.0,
 };
-/// Pixels scrolled per wheel "line" when forwarding line-based scroll deltas to
-/// the OSR browser (only the Linux backend consumes this).
-const READER_LINE_SCROLL: f32 = 40.0;
-
-/// Maps a GPUI mouse button to the webview backend's button. Navigation buttons
-/// (back/forward) have no meaning inside an e-mail body, so they are dropped.
-fn reader_mouse_button(button: MouseButton) -> Option<WebviewMouseButton> {
-    match button {
-        MouseButton::Left => Some(WebviewMouseButton::Left),
-        MouseButton::Right => Some(WebviewMouseButton::Right),
-        MouseButton::Middle => Some(WebviewMouseButton::Middle),
-        _ => None,
-    }
-}
-
-/// Maps the page's requested cursor onto a GPUI style for the OSR reader pane.
-fn webview_cursor_style(cursor: WebviewCursor) -> CursorStyle {
-    match cursor {
-        WebviewCursor::Arrow => CursorStyle::Arrow,
-        WebviewCursor::IBeam => CursorStyle::IBeam,
-        WebviewCursor::Hand => CursorStyle::PointingHand,
-        WebviewCursor::Crosshair => CursorStyle::Crosshair,
-        WebviewCursor::NotAllowed => CursorStyle::OperationNotAllowed,
-        WebviewCursor::Grab => CursorStyle::OpenHand,
-        WebviewCursor::Grabbing => CursorStyle::ClosedHand,
-        WebviewCursor::ColResize => CursorStyle::ResizeLeftRight,
-        WebviewCursor::RowResize => CursorStyle::ResizeUpDown,
-        WebviewCursor::VerticalText => CursorStyle::IBeamCursorForVerticalLayout,
-        WebviewCursor::ContextMenu => CursorStyle::ContextualMenu,
-        WebviewCursor::Alias => CursorStyle::DragLink,
-        WebviewCursor::Copy => CursorStyle::DragCopy,
-        WebviewCursor::None => CursorStyle::None,
-    }
-}
 /// Width of the collapsed search button (icon only), in pixels.
 const SEARCH_ICON_WIDTH: f32 = 28.0;
 /// When the container that holds the reader's toolbar buttons (compose, action
@@ -278,16 +241,13 @@ fn chevron_svg(color: Hsla, angle: f32) -> Svg {
         .with_transformation(Transformation::rotate(radians(angle)))
 }
 
-/// Memoization key for the reader webview: the set of inputs that affect the
-/// rendered HTML document. When unchanged between renders (e.g. across animation
-/// frames) the expensive HTML rebuild + diff is skipped.
+/// Memoization key for the reader: the inputs that affect the rendered HTML
+/// document. When unchanged between renders (e.g. across animation frames)
+/// the body is not re-sanitized nor re-parsed.
 #[derive(Clone, Copy, PartialEq)]
-struct WebviewSignature {
+struct ReaderSignature {
     selected: i64,
     colors: DocumentColors,
-    language: Language,
-    load_remote: bool,
-    reader_white_background: bool,
 }
 
 /// Application state.
@@ -364,8 +324,8 @@ pub struct RootView {
     /// drag where the cursor barely moves relative to the window), which also
     /// triggers the drag/un-maximize even if the cursor threshold wasn't reached.
     drag_anchor: Point<Pixels>,
-    /// Destination URL of the link currently under the cursor in the reader's
-    /// webview (empty when none). Shown centered in the status bar.
+    /// Destination URL of the link currently under the cursor in the reader
+    /// (empty when none). Shown centered in the status bar.
     hovered_link: String,
     /// Handle to the separate settings window while it is open (like Zed, the
     /// preferences live in their own window). `None` when it has never been
@@ -384,31 +344,15 @@ pub struct RootView {
     /// Scroll handle + scrollbar state for the sidebar.
     sidebar_scroll: ScrollHandle,
     sidebar_scrollbar: Option<Entity<ScrollbarState>>,
-    /// Native webview that renders the selected message's HTML body. Scrolling,
-    /// text selection and copy are handled by the OS engine. `None` on targets
-    /// without a webview backend or until it has been created.
-    email_webview: Option<EmailWebView>,
-    /// Last laid-out reader body rectangle (window-relative, logical pixels), set
-    /// during the reader's canvas paint. On the Linux OSR backend the mouse-event
-    /// handlers use it to translate window coordinates into view-relative ones.
-    webview_bounds: Option<gpui::Bounds<gpui::Pixels>>,
-    /// Focus target for the Linux OSR reader so Ctrl+C / arrows reach CEF. Created
-    /// lazily on first paint of a composited reader.
-    reader_focus: Option<FocusHandle>,
-    /// Cursor style requested by the OSR page (`on_cursor_change`).
-    reader_cursor: WebviewCursor,
-    /// Whether the Linux CEF OSR tick task is running. While an OSR webview
-    /// exists we must call `do_message_loop_work` even when GPUI is not painting
-    /// (window inactive beside another app); otherwise Chromium freezes and the
-    /// next message switch waits seconds for the first paint.
-    cef_osr_tick_running: bool,
-    /// Inputs that last produced the webview document (selected message index and
-    /// the theme colors it was themed with). Used to skip rebuilding the HTML on
-    /// every render — e.g. on every frame of an animation — when nothing that
-    /// affects the document has changed.
-    last_webview_sig: Option<WebviewSignature>,
-    /// Whether to load remote content (e.g. images) in e-mail bodies. Persisted;
-    /// off by default to block tracking pixels until the user opts in.
+    /// Native HTML view showing the selected message's body (`html_view`:
+    /// Blitz layout painted by GPUI). Created on first use.
+    reader_view: Option<Entity<HtmlView>>,
+    /// Inputs that last produced the reader document (selected message and the
+    /// colors it was themed with). Used to skip re-parsing the body on every
+    /// render when nothing that affects the document has changed.
+    last_reader_sig: Option<ReaderSignature>,
+    /// Persisted "load remote content" preference. Remote content needs
+    /// networking (Stage 3), so it is kept but not offered or applied yet.
     load_remote_images: bool,
     /// Whether the reader always paints the message body on a white background
     /// (dark text), ignoring the app theme. Persisted; off by default.
@@ -416,24 +360,9 @@ pub struct RootView {
     /// Whether the compose message body uses a white background. Persisted; off
     /// by default.
     compose_white_background: bool,
-    /// Whether the currently displayed message contains remote images. Drives
-    /// whether the privacy shield appears. Recomputed when the document rebuilds.
-    content_has_remote: bool,
-    /// How many remote images are still blocked in the current message. Red
-    /// shield while non-zero, green once it reaches zero. Recomputed on rebuild
-    /// and decremented as the user reveals individual images.
+    /// How many remote images were blocked in the current message (the privacy
+    /// shield shows while non-zero). Recomputed when the document rebuilds.
     content_blocked_count: usize,
-    /// Indices of messages the user fully unblocked via the shield menu.
-    /// Unblocking is per message (not the global setting).
-    unblocked_messages: HashSet<i64>,
-    /// Per message, the remote image URLs the user revealed one at a time (via
-    /// the in-body "Show remote image" menu). Kept so those images stay shown
-    /// across re-renders (theme/language switches, reselecting the message).
-    shown_images: HashMap<i64, HashSet<String>>,
-    /// Whether the privacy menu (offering to unblock remote content) is open,
-    /// and the window-space anchor where it was summoned.
-    privacy_menu_open: bool,
-    privacy_menu_pos: Point<Pixels>,
     /// Toolbar search field. Created lazily on first render.
     search_input: Option<Entity<TextInput>>,
     /// When the toolbar is narrow the search field collapses to an icon; this
@@ -446,15 +375,11 @@ pub struct RootView {
     search_debounce_seq: u64,
     /// Sidebar selection restored when the search box is cleared.
     pre_search_mailbox: Option<Selection>,
-    /// Set when a webview click should drop search focus on the next frame.
-    search_blur_requested: bool,
     /// Command palette state (rendered as an in-window overlay — see
     /// [`command_palette_overlay`]).
     pub(crate) command_palette: Option<CommandPaletteState>,
     /// Focus the palette search field once after open.
     command_palette_focus_pending: bool,
-    /// Set when the webview asks for the palette; handled on the next main-window frame.
-    command_palette_toggle_requested: bool,
 }
 
 /// Adapts stored accounts for compose/settings views that still use [`data::Account`].
@@ -556,30 +481,19 @@ impl RootView {
             list_scrollbar: None,
             sidebar_scroll: ScrollHandle::new(),
             sidebar_scrollbar: None,
-            email_webview: None,
-            webview_bounds: None,
-            reader_focus: None,
-            reader_cursor: WebviewCursor::Arrow,
-            cef_osr_tick_running: false,
-            last_webview_sig: None,
+            reader_view: None,
+            last_reader_sig: None,
             load_remote_images: settings.load_remote_images,
             reader_white_background: settings.reader_white_background,
             compose_white_background: settings.compose_white_background,
-            content_has_remote: false,
             content_blocked_count: 0,
-            unblocked_messages: HashSet::new(),
-            shown_images: HashMap::new(),
-            privacy_menu_open: false,
-            privacy_menu_pos: point(px(0.0), px(0.0)),
             search_input: None,
             search_force_expanded: false,
             last_search_query: String::new(),
             search_debounce_seq: 0,
             pre_search_mailbox: None,
-            search_blur_requested: false,
             command_palette: None,
             command_palette_focus_pending: false,
-            command_palette_toggle_requested: false,
         }
     }
 
@@ -605,7 +519,7 @@ impl RootView {
     fn clear_message_selection(&mut self) {
         self.selected_message_id = None;
         self.selected_detail = None;
-        self.last_webview_sig = None;
+        self.last_reader_sig = None;
     }
 
     fn reload_selected_detail(&mut self) {
@@ -698,7 +612,7 @@ impl RootView {
     fn refresh_after_message_action(&mut self, cx: &mut Context<Self>) {
         self.reload_message_list();
         self.sync_app_menus(cx);
-        self.last_webview_sig = None;
+        self.last_reader_sig = None;
         cx.notify();
     }
 
@@ -743,11 +657,6 @@ impl RootView {
 
     pub(crate) fn toggle_command_palette(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.toggle_command_palette_internal(window, cx);
-    }
-
-    fn toggle_command_palette_from_webview(&mut self, cx: &mut Context<Self>) {
-        self.command_palette_toggle_requested = true;
-        cx.notify();
     }
 
     fn toggle_command_palette_internal(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -1258,399 +1167,59 @@ impl RootView {
         }
     }
 
-    /// Wakes the Linux OSR reader after the window was backgrounded: Chromium
-    /// throttles soft OSR when we stop pumping, which otherwise makes the next
-    /// message switch wait for a late paint.
+    /// Refreshes the custom caption layout when the main window is activated.
     pub(crate) fn on_main_window_activated(&mut self, cx: &mut Context<Self>) {
         crate::window_frame::refresh_caption_layout();
-        crate::web_view::pump_platform_events();
-        if let Some(webview) = &mut self.email_webview {
-            webview.on_window_activated();
-        }
-        self.ensure_cef_osr_tick(cx);
         cx.notify();
     }
 
-    /// Starts a persistent CEF message-loop tick while an OSR webview exists.
-    /// GPUI often stops painting when the window is inactive; without this, CEF's
-    /// external pump stalls and the next email switch can take seconds.
-    fn ensure_cef_osr_tick(&mut self, cx: &mut Context<Self>) {
-        if !COMPOSITES_IN_GPUI || self.cef_osr_tick_running || self.email_webview.is_none() {
-            return;
-        }
-        self.cef_osr_tick_running = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(8))
-                    .await;
-                let keep_going = this
-                    .update(cx, |root, cx| {
-                        if root.email_webview.is_none() {
-                            root.cef_osr_tick_running = false;
-                            return false;
-                        }
-                        // Always advance CEF, even when GPUI is not painting.
-                        crate::web_view::pump_platform_events();
-                        let needs_frame = root
-                            .email_webview
-                            .as_mut()
-                            .is_some_and(|wv| wv.on_osr_tick());
-                        if needs_frame {
-                            cx.notify();
-                        }
-                        true
-                    })
-                    .unwrap_or(false);
-                if !keep_going {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Creates (on first use) and updates the embedded webview to reflect the
-    /// selected message and the current theme. Hides it when the reader is not
-    /// on screen so it doesn't float over other views.
-    fn sync_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        crate::web_view::pump_platform_events();
+    /// Keeps the reader document in sync with the selected message and theme:
+    /// sanitizes and themes the body, parses it with `html_view` and hands it
+    /// to the reader view, which lays it out at the pane width.
+    fn sync_reader(&mut self, cx: &mut Context<Self>) {
         let Some(detail) = self.selected_detail.as_ref() else {
-            self.last_webview_sig = None;
-            if let Some(webview) = &mut self.email_webview {
-                webview.hide();
-            }
+            self.last_reader_sig = None;
             return;
         };
-        let message_id = detail.id;
         let colors = cx.theme().colors();
-        let language = cx.language();
-        let load_remote = self.load_remote_images || self.unblocked_messages.contains(&message_id);
         // Force a white page (dark text) when the user keeps the reader light,
         // regardless of the app theme; otherwise follow the theme.
-        let (body_bg, body_text) = if self.reader_white_background {
+        let (background, text) = if self.reader_white_background {
             (gpui::white(), READER_LIGHT_TEXT)
         } else {
             (colors.background, colors.text)
         };
-        // Context-menu popups always follow the app theme (dark in dark mode),
-        // even when the page is forced white.
         let doc_colors = DocumentColors {
-            background: body_bg,
-            text: body_text,
+            background,
+            text,
             accent: colors.accent,
-            menu_bg: colors.background,
-            menu_text: colors.text,
         };
-        let signature = WebviewSignature {
-            selected: message_id,
+        let signature = ReaderSignature {
+            selected: detail.id,
             colors: doc_colors,
-            language,
-            load_remote,
-            reader_white_background: self.reader_white_background,
         };
-        if self.email_webview.is_some() && self.last_webview_sig == Some(signature) {
+        if self.reader_view.is_some() && self.last_reader_sig == Some(signature) {
             return;
         }
-
-        let empty_shown: HashSet<String> = HashSet::new();
-        let body = db_seed::message_body_from_detail(detail);
-        let rendered = email_document(
-            doc_colors,
-            &body,
-            ContextMenuLabels {
-                image_open: Key::CtxOpenImage.tr(language),
-                image_download: Key::CtxDownloadImage.tr(language),
-                image_show: Key::CtxShowImage.tr(language),
-                link_open: Key::CtxOpenLink.tr(language),
-                link_copy: Key::CtxCopyLink.tr(language),
-                selection_copy: Key::CtxCopy.tr(language),
-                // ⌘ (U+2318) is the macOS Command symbol; Ctrl elsewhere.
-                copy_shortcut: if cfg!(target_os = "macos") {
-                    "\u{2318}C"
-                } else {
-                    "Ctrl+C"
-                },
-            },
-            load_remote,
-            self.shown_images.get(&message_id).unwrap_or(&empty_shown),
-        );
-        self.content_has_remote = rendered.has_remote;
+        let rendered = email_document(doc_colors, &db_seed::message_body_from_detail(detail));
         self.content_blocked_count = rendered.blocked_images;
-        // The unblock menu only makes sense while the shield is in its blocked
-        // (red) state; close it once nothing is blocked for this message.
-        if !self.shield_is_blocked() {
-            self.privacy_menu_open = false;
-        }
-        let document = rendered.html;
-        let notify_body = Key::ImageDownloaded.tr(language).to_string();
-
-        match &mut self.email_webview {
-            Some(webview) => {
-                // Same browser instance: navigate only (never create another CEF browser).
-                if let Some(previous) = webview.set_html(&document) {
-                    let _ = window.drop_image(previous);
-                }
-                webview.set_notify_text(notify_body);
-                self.last_webview_sig = Some(signature);
-            }
-            None => {
-                // Create once. If CEF is not ready yet, leave the signature unset
-                // so the next frame retries — and do not spawn a dead IPC task.
-                let (tx, rx) = async_channel::unbounded::<HostEvent>();
-                if let Some(webview) = EmailWebView::new(window, &document, tx, notify_body) {
-                    self.email_webview = Some(webview);
-                    self.last_webview_sig = Some(signature);
-                    cx.spawn(async move |this, cx| {
-                        while let Ok(event) = rx.recv().await {
-                            if this
-                                .update(cx, |root, cx| root.handle_host_event(event, cx))
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    })
-                    .detach();
-                }
-            }
-        }
-        self.ensure_cef_osr_tick(cx);
-    }
-
-    /// Applies an action requested by the webview on the GPUI foreground.
-    fn handle_host_event(&mut self, event: HostEvent, cx: &mut Context<Self>) {
-        match event {
-            HostEvent::HoverLink(url) => self.set_hovered_link(url, cx),
-            HostEvent::CopyToClipboard(text) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
-            HostEvent::ImageShown(url) => self.image_shown(url, cx),
-            HostEvent::BodyMouseDown => {
-                // A click inside the webview never reaches the GPUI overlay's
-                // outside-click catcher, so close the privacy dropdown here.
-                if self.privacy_menu_open {
-                    self.privacy_menu_open = false;
-                }
-                self.search_blur_requested = true;
-                cx.notify();
-            }
-            HostEvent::CommandPalette => self.toggle_command_palette_from_webview(cx),
-            HostEvent::CursorChanged(cursor) => {
-                if self.reader_cursor != cursor {
-                    self.reader_cursor = cursor;
-                    cx.notify();
-                }
-            }
-            HostEvent::OsrNeedsRedraw => {
-                if let Some(webview) = &mut self.email_webview {
-                    webview.note_load_progress();
-                }
-                cx.notify();
-            }
-        }
-    }
-
-    /// Translates a window-relative pointer position into coordinates relative to
-    /// the reader body (where the OSR page is laid out). `None` before the body
-    /// has been laid out at least once.
-    fn reader_relative_position(&self, position: Point<gpui::Pixels>) -> Option<(f32, f32)> {
-        let bounds = self.webview_bounds?;
-        Some((
-            f32::from(position.x - bounds.origin.x),
-            f32::from(position.y - bounds.origin.y),
-        ))
-    }
-
-    /// Forwards pointer motion to the OSR browser (Linux). Drives hover reporting
-    /// and drag-based text selection inside the page.
-    fn on_reader_mouse_move(
-        &mut self,
-        event: &MouseMoveEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((x, y)) = self.reader_relative_position(event.position) else {
-            return;
+        let appearance = if doc_colors.is_dark() {
+            PageAppearance::Dark
+        } else {
+            PageAppearance::Light
         };
-        let Some(webview) = self.email_webview.as_mut() else {
-            return;
-        };
-        webview.handle_mouse_move(
-            x,
-            y,
-            event.modifiers.shift,
-            event.modifiers.control,
-            event.modifiers.alt,
-            event.modifiers.platform,
+        let document = HtmlDocument::parse(
+            &rendered.html,
+            DocumentOptions {
+                appearance,
+                ..Default::default()
+            },
         );
-        // While dragging a selection the page paints continuously; keep GPUI
-        // in lockstep with CEF's soft OSR frames. Prefer `notify` over
-        // `request_animation_frame` — the latter panics outside paint/prepaint.
-        if webview.has_mouse_capture() {
-            crate::web_view::pump_platform_events();
-            cx.notify();
+        match &self.reader_view {
+            Some(view) => view.update(cx, |view, cx| view.set_document(document, cx)),
+            None => self.reader_view = Some(cx.new(|_| HtmlView::new(document))),
         }
-    }
-
-    /// Forwards a mouse press to the OSR browser (Linux).
-    fn on_reader_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((x, y)) = self.reader_relative_position(event.position) else {
-            return;
-        };
-        let Some(button) = reader_mouse_button(event.button) else {
-            return;
-        };
-        // Keyboard shortcuts (Ctrl+C, …) only reach CEF while the reader is focused.
-        if let Some(focus) = self.ensure_reader_focus(cx).as_ref() {
-            window.focus(focus);
-        }
-        let Some(webview) = self.email_webview.as_mut() else {
-            return;
-        };
-        webview.set_focused(true);
-        webview.handle_mouse_button(x, y, button, true, event.click_count as i32);
-        crate::web_view::pump_platform_events();
-        cx.notify();
-    }
-
-    /// Forwards a mouse release to the OSR browser (Linux).
-    fn on_reader_mouse_up(
-        &mut self,
-        event: &MouseUpEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((x, y)) = self.reader_relative_position(event.position) else {
-            return;
-        };
-        let Some(button) = reader_mouse_button(event.button) else {
-            return;
-        };
-        let Some(webview) = self.email_webview.as_mut() else {
-            return;
-        };
-        webview.handle_mouse_button(x, y, button, false, event.click_count as i32);
-        crate::web_view::pump_platform_events();
-        cx.notify();
-    }
-
-    /// Forwards scroll-wheel input to the OSR browser (Linux).
-    fn on_reader_scroll(
-        &mut self,
-        event: &ScrollWheelEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((x, y)) = self.reader_relative_position(event.position) else {
-            return;
-        };
-        let Some(webview) = self.email_webview.as_mut() else {
-            return;
-        };
-        let (delta_x, delta_y) = match event.delta {
-            ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
-            ScrollDelta::Lines(delta) => {
-                (delta.x * READER_LINE_SCROLL, delta.y * READER_LINE_SCROLL)
-            }
-        };
-        webview.handle_scroll(x, y, delta_x, delta_y);
-        // Wheel is coalesced until paint; notify so flush_input runs next frame.
-        cx.notify();
-    }
-
-    /// Forwards a key press into the OSR browser (Linux).
-    fn on_reader_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(webview) = self.email_webview.as_mut() else {
-            return;
-        };
-        webview.handle_key(
-            true,
-            &event.keystroke.key,
-            event.keystroke.key_char.as_deref(),
-            event.keystroke.modifiers.shift,
-            event.keystroke.modifiers.control,
-            event.keystroke.modifiers.alt,
-            event.keystroke.modifiers.platform,
-        );
-        crate::web_view::pump_platform_events();
-        cx.notify();
-    }
-
-    /// Forwards a key release into the OSR browser (Linux).
-    fn on_reader_key_up(
-        &mut self,
-        event: &KeyUpEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(webview) = self.email_webview.as_mut() else {
-            return;
-        };
-        webview.handle_key(
-            false,
-            &event.keystroke.key,
-            event.keystroke.key_char.as_deref(),
-            event.keystroke.modifiers.shift,
-            event.keystroke.modifiers.control,
-            event.keystroke.modifiers.alt,
-            event.keystroke.modifiers.platform,
-        );
-        crate::web_view::pump_platform_events();
-        cx.notify();
-    }
-
-    /// Focus handle for the composited reader; created once on first use.
-    fn ensure_reader_focus(&mut self, cx: &mut Context<Self>) -> Option<&FocusHandle> {
-        if !COMPOSITES_IN_GPUI {
-            return None;
-        }
-        if self.reader_focus.is_none() {
-            self.reader_focus = Some(cx.focus_handle());
-        }
-        self.reader_focus.as_ref()
-    }
-
-    /// Records that the user revealed one blocked remote image in the body. The
-    /// image is kept in this message's allowlist (so it stays shown across
-    /// re-renders) and the blocked count drops; when it hits zero the shield
-    /// flips to its loaded (green) state. The webview already swapped the image
-    /// in place, so no document rebuild is needed here.
-    fn image_shown(&mut self, url: String, cx: &mut Context<Self>) {
-        if let Some(id) = self.selected_message_id {
-            self.shown_images.entry(id).or_default().insert(url);
-        }
-        self.content_blocked_count = self.content_blocked_count.saturating_sub(1);
-        cx.notify();
-    }
-
-    /// Updates the hovered-link URL shown in the status bar, re-rendering only
-    /// when it actually changes.
-    fn set_hovered_link(&mut self, url: String, cx: &mut Context<Self>) {
-        if self.hovered_link != url {
-            self.hovered_link = url;
-            cx.notify();
-        }
-    }
-
-    /// Toggles whether remote content loads in e-mail bodies, persisting the new
-    /// preference and re-rendering so the open message is re-sanitized.
-    fn set_load_remote_images(&mut self, value: bool, cx: &mut Context<Self>) {
-        if self.load_remote_images != value {
-            self.load_remote_images = value;
-            self.request_save(cx);
-            cx.notify();
-        }
+        self.last_reader_sig = Some(signature);
     }
 
     /// Toggles whether the reader forces a white background, persisting the
@@ -2939,81 +2508,27 @@ impl RootView {
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected_message_id = Some(message_id);
-                this.last_webview_sig = None;
+                this.last_reader_sig = None;
                 this.on_message_selection_changed(cx);
             }))
     }
 
     // ----- Reading pane ---------------------------------------------------
 
-    /// Whether the reader should show the *blocked* (red) privacy shield for the
-    /// current message: blocking is globally on, the message has remote content,
-    /// and the user hasn't unblocked this specific message yet.
-    fn shield_is_blocked(&self) -> bool {
-        !self.load_remote_images && self.content_has_remote && self.content_blocked_count > 0
-    }
-
-    /// Whether the reader should show the *loaded* (green) privacy shield: the
-    /// message has remote images and none remain blocked, because the user
-    /// unblocked them — all at once via the menu, or one by one in the body.
-    fn shield_is_loaded(&self) -> bool {
-        !self.load_remote_images && self.content_has_remote && self.content_blocked_count == 0
-    }
-
-    /// Privacy affordance shown on the subject line. A same-sized empty slot is
-    /// reserved when there is nothing to show, so the header keeps an identical
-    /// height either way. When the message has remote content it shows either a
-    /// red shield (blocked — click to open the unblock menu) or a green
-    /// shield-with-check (this message was unblocked).
+    /// Privacy affordance shown on the subject line: a red shield whose tooltip
+    /// counts the remote images blocked in the message. A same-sized empty
+    /// slot is reserved otherwise, so the header keeps its height. (Loading
+    /// remote content needs networking, Stage 3.)
     fn render_privacy_shield(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let slot = div().flex_shrink_0().size(px(20.0));
-        let language = cx.language();
-        let colors = cx.theme().colors();
-
-        if self.shield_is_loaded() {
-            // Green shield with a check overlaid in the center, signaling that
-            // this message's remote content is now loaded.
-            return slot
-                .id("privacy-shield")
-                .relative()
-                .flex()
-                .items_center()
-                .justify_center()
-                .tooltip(Tooltip::text(Key::RemoteContentLoaded.tr(language)))
-                .child(
-                    Icon::new(IconName::ShieldSolid)
-                        .size(IconSize::Medium)
-                        .color(Color::Success),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div().relative().top(px(-1.0)).child(
-                                Icon::new(IconName::Check)
-                                    .size(IconSize::XXSmall)
-                                    .color(Color::Custom(colors.background)),
-                            ),
-                        ),
-                )
-                .into_any_element();
-        }
-
-        if !self.shield_is_blocked() {
+        if self.content_blocked_count == 0 {
             return slot.into_any_element();
         }
-
+        let language = cx.language();
         slot.id("privacy-shield")
             .flex()
             .items_center()
             .justify_center()
-            .rounded_md()
-            .cursor_pointer()
-            .hover(|el| el.bg(colors.element_hover))
             .tooltip(Tooltip::text(
                 Key::BlockedElements
                     .tr(language)
@@ -3024,83 +2539,10 @@ impl RootView {
                     .size(IconSize::Small)
                     .color(Color::Error),
             )
-            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                this.privacy_menu_pos = event.position();
-                this.privacy_menu_open = !this.privacy_menu_open;
-                cx.notify();
-            }))
             .into_any_element()
     }
 
-    /// The dropdown summoned by the privacy shield. Anchored to the click and
-    /// deferred so it paints above everything; the embedded webview is hidden
-    /// while it is open (a native child view would otherwise occlude it).
-    fn render_privacy_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors();
-        let language = cx.language();
-        let menu = v_flex()
-            .occlude()
-            .min_w(px(240.0))
-            .p_1()
-            .bg(colors.elevated_surface_background)
-            .border_1()
-            .border_color(colors.border)
-            .rounded_md()
-            .shadow_lg()
-            .child(
-                h_flex()
-                    .id("unblock-remote")
-                    .w_full()
-                    .gap_2()
-                    .px_2()
-                    .py_1p5()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|el| el.bg(colors.element_hover))
-                    .child(
-                        Icon::new(IconName::Shield)
-                            .size(IconSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(Label::new(Key::UnblockRemote.tr(language)).size(LabelSize::Small))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.privacy_menu_open = false;
-                        if let Some(id) = this.selected_message_id {
-                            this.unblocked_messages.insert(id);
-                        }
-                        cx.notify();
-                    })),
-            );
-
-        // Full-window catcher closes the menu on any outside click; the menu
-        // itself occludes so its own clicks don't fall through to it.
-        div()
-            .absolute()
-            .inset_0()
-            .occlude()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.privacy_menu_open = false;
-                    cx.notify();
-                }),
-            )
-            .child(
-                deferred(
-                    anchored()
-                        .position(self.privacy_menu_pos)
-                        .anchor(Corner::TopRight)
-                        .snap_to_window_with_margin(px(8.0))
-                        .child(menu),
-                )
-                .with_priority(1),
-            )
-    }
-
     fn render_reader(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Create before borrowing theme colors from `cx`.
-        let reader_focus = self.ensure_reader_focus(cx).cloned();
-        let reader_cursor = webview_cursor_style(self.reader_cursor);
         let colors = cx.theme().colors();
         let bg = colors.background;
         let border = colors.border;
@@ -3108,7 +2550,6 @@ impl RootView {
         let on_accent = colors.text_on_accent;
 
         let Some(message) = self.selected_detail.as_ref() else {
-            let _ = (reader_focus, reader_cursor);
             let language = cx.language();
             return v_flex()
                 .flex_1()
@@ -3203,62 +2644,16 @@ impl RootView {
                     ),
             );
 
-        // The body is rendered by the native webview, which we lay out over this
-        // region on every paint (the webview engine handles scrolling, text
-        // selection and copy). On targets without a webview backend we fall back
-        // to a simple text view so the app still works.
-        let body_area = if WEBVIEW_SUPPORTED {
-            let view = cx.weak_entity();
-            div()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                // Match the forced-white body so no themed background shows behind
-                // the webview while it loads or at sub-pixel edges.
-                .when(self.reader_white_background, |el| el.bg(gpui::white()))
-                // CEF OSR is composited by GPUI, so overlays (privacy menu, command
-                // palette) stack above the reader texture without hiding it.
-                .when(COMPOSITES_IN_GPUI, |el| {
-                    let focus = reader_focus
-                        .clone()
-                        .expect("reader focus exists when OSR composites");
-                    el.track_focus(&focus)
-                        .cursor(reader_cursor)
-                        .on_mouse_move(cx.listener(Self::on_reader_mouse_move))
-                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_reader_mouse_down))
-                        .on_mouse_down(MouseButton::Right, cx.listener(Self::on_reader_mouse_down))
-                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_reader_mouse_up))
-                        .on_mouse_up(MouseButton::Right, cx.listener(Self::on_reader_mouse_up))
-                        .on_scroll_wheel(cx.listener(Self::on_reader_scroll))
-                        .on_key_down(cx.listener(Self::on_reader_key_down))
-                        .on_key_up(cx.listener(Self::on_reader_key_up))
-                })
-                .child(
-                    canvas(
-                        |_, _, _| {},
-                        move |bounds, _, window, cx| {
-                            let _ = view.update(cx, |this, cx| {
-                                this.webview_bounds = Some(bounds);
-                                if let Some(webview) = &mut this.email_webview {
-                                    webview.position(bounds);
-                                    // Soft OSR may need follow-up frames; notify
-                                    // instead of request_animation_frame (which
-                                    // panics outside paint of the element tree's
-                                    // current_view in some paths, and is unsafe
-                                    // from input handlers).
-                                    if webview.paint(bounds, window, cx) {
-                                        cx.notify();
-                                    }
-                                }
-                            });
-                        },
-                    )
-                    .size_full(),
-                )
-                .into_any_element()
-        } else {
-            self.render_text_fallback(message, cx).into_any_element()
-        };
+        // The body is rendered natively by `html_view` (scrolls on both axes;
+        // laid out at the pane width).
+        let body_area = div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            // Match the forced-white page so no themed background shows at
+            // sub-pixel edges.
+            .when(self.reader_white_background, |el| el.bg(gpui::white()))
+            .when_some(self.reader_view.clone(), |el, view| el.child(view));
 
         v_flex()
             .flex_1()
@@ -3268,31 +2663,6 @@ impl RootView {
             .child(header)
             .child(body_area)
             .into_any_element()
-    }
-
-    /// Plain-text reader used where the embedded webview isn't available.
-    fn render_text_fallback(
-        &self,
-        message: &MessageDetail,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let colors = cx.theme().colors();
-        let text = if message.raw_format == "text" {
-            message.raw_content.clone().into()
-        } else {
-            SharedString::from("HTML preview is unavailable on this platform.")
-        };
-
-        div()
-            .id("reader-fallback")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .px_6()
-            .py_4()
-            .text_size(px(14.0))
-            .text_color(colors.text)
-            .child(text)
     }
 
     // ----- Status bar -----------------------------------------------------
@@ -3553,44 +2923,15 @@ impl SettingsView {
                     Key::Disabled.tr(language),
                 ))
                 .into_any_element(),
-            SettingsSection::Privacy => {
-                let load_remote = self
-                    .root
-                    .upgrade()
-                    .map(|root| root.read(cx).load_remote_images)
-                    .unwrap_or(false);
-                v_flex()
-                    .gap_2()
-                    .child(
-                        Label::new(Key::RemoteImagesLabel.tr(language))
-                            .weight(FontWeight::SEMIBOLD),
-                    )
-                    .child(
-                        Label::new(Key::RemoteImagesHint.tr(language))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .pt_1()
-                            .child(self.remote_images_button(
-                                "remote-on",
-                                Key::Enabled.tr(language),
-                                load_remote,
-                                true,
-                                cx,
-                            ))
-                            .child(self.remote_images_button(
-                                "remote-off",
-                                Key::Disabled.tr(language),
-                                !load_remote,
-                                false,
-                                cx,
-                            )),
-                    )
-                    .into_any_element()
-            }
+            SettingsSection::Privacy => v_flex()
+                .gap_2()
+                .child(Label::new(Key::RemoteImagesLabel.tr(language)).weight(FontWeight::SEMIBOLD))
+                .child(
+                    Label::new(Key::RemoteImagesHint.tr(language))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .into_any_element(),
         };
 
         v_flex()
@@ -3628,31 +2969,6 @@ impl SettingsView {
             );
         }
         row
-    }
-
-    /// One button of the remote-images on/off segmented control. `selected` marks
-    /// the active choice (filled); clicking sets the preference to `value` on the
-    /// main view.
-    fn remote_images_button(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        selected: bool,
-        value: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        Button::new(id, label)
-            .style(if selected {
-                ButtonStyle::Filled
-            } else {
-                ButtonStyle::Subtle
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let _ = this
-                    .root
-                    .update(cx, |root, cx| root.set_load_remote_images(value, cx));
-                cx.notify();
-            }))
     }
 }
 
@@ -3720,14 +3036,6 @@ impl Render for RootView {
         // Make sure the scrollbar state entities exist before the panels render.
         self.ensure_scrollbar_states(cx);
         self.ensure_search_input(cx.language(), window, cx);
-        if self.search_blur_requested {
-            self.search_blur_requested = false;
-            self.blur_search_if_focused(window, cx);
-        }
-        if self.command_palette_toggle_requested {
-            self.command_palette_toggle_requested = false;
-            self.toggle_command_palette_internal(window, cx);
-        }
         if self.command_palette_focus_pending {
             self.command_palette_focus_pending = false;
             if let Some(input) = self
@@ -3744,8 +3052,8 @@ impl Render for RootView {
         if !self.search_is_compact() {
             self.search_force_expanded = false;
         }
-        // Keep the embedded e-mail webview in sync with the selection and theme.
-        self.sync_webview(window, cx);
+        // Keep the reader document in sync with the selection and theme.
+        self.sync_reader(cx);
 
         let background = cx.theme().colors().background;
         let text = cx.theme().colors().text;
@@ -3851,23 +3159,12 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
-            // Dismiss the in-page context menu only when the click is *outside*
-            // the reader. OSR forwards the same click into CEF; closing the menu
-            // here would race ahead of the item's mousedown (Copy / Show image).
-            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                if should_dismiss_webview_context_menu(event.position, this.webview_bounds) {
-                    if let Some(webview) = &this.email_webview {
-                        webview.dismiss_context_menu();
-                    }
-                }
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.blur_search_if_focused(window, cx);
             }))
             .child(self.render_toolbar(window, cx))
             .child(body)
             .child(self.render_status_bar(cx))
-            .when(self.privacy_menu_open, |el| {
-                el.child(self.render_privacy_menu(cx))
-            })
             .when(
                 self.command_palette
                     .as_ref()
@@ -3895,18 +3192,6 @@ impl Render for RootView {
     }
 }
 
-/// Whether a GPUI click should close the in-page webview context menu.
-///
-/// Clicks inside the reader bounds are left to the page (CEF OSR forwards them
-/// into Chromium). Clicks on chrome (toolbar, list, sidebar) never reach the DOM,
-/// so we dismiss from the host.
-pub(crate) fn should_dismiss_webview_context_menu(
-    click: Point<Pixels>,
-    webview_bounds: Option<Bounds<Pixels>>,
-) -> bool {
-    !webview_bounds.is_some_and(|bounds| bounds.contains(&click))
-}
-
 /// The command palette may only be opened while the main window is key.
 pub(crate) fn can_open_command_palette(main_window_active: bool) -> bool {
     main_window_active
@@ -3932,44 +3217,9 @@ mod tests {
     }
 
     #[test]
-    fn sync_webview_reuses_osr_browser_on_message_switch() {
-        // Structural guard: the Some-arm navigates; only the None-arm constructs.
-        let src = include_str!("root.rs");
-        assert!(src.contains("Same browser instance: navigate only"));
-        assert!(src.contains("if let Some(webview) = EmailWebView::new"));
-        assert!(
-            src.contains("leave the signature unset"),
-            "failed CEF creates must retry without stamping last_webview_sig"
-        );
-    }
-
-    #[test]
     fn command_palette_only_opens_when_main_window_is_focused() {
         assert!(can_open_command_palette(true));
         assert!(!can_open_command_palette(false));
-    }
-
-    #[test]
-    fn webview_context_menu_dismiss_skips_clicks_inside_reader() {
-        let bounds = Bounds {
-            origin: point(px(100.0), px(50.0)),
-            size: size(px(400.0), px(300.0)),
-        };
-        // Inside the reader: leave the menu to the page (Linux OSR forwards the click).
-        assert!(!should_dismiss_webview_context_menu(
-            point(px(120.0), px(80.0)),
-            Some(bounds)
-        ));
-        // Outside (toolbar / list): host must dismiss — DOM never sees the click.
-        assert!(should_dismiss_webview_context_menu(
-            point(px(10.0), px(10.0)),
-            Some(bounds)
-        ));
-        // No layout yet: dismiss is the safe default.
-        assert!(should_dismiss_webview_context_menu(
-            point(px(120.0), px(80.0)),
-            None
-        ));
     }
 
     #[test]

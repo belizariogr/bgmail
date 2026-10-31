@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Fixture HTML/text messages and images used by the mock/seed path and CEF reader
+Fixture HTML/text messages and images used by the mock/seed path and the reader
 tests — not product branding assets.
 
 ## Ownership

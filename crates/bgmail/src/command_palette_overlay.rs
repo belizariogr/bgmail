@@ -1,8 +1,8 @@
 //! In-window command palette overlay.
 //!
-//! The HTML reader is CEF soft OSR composited by GPUI, so a normal elevated
-//! surface in the main window stacks above the reader texture. A separate
-//! `WindowKind::PopUp` is not required (and breaks under Wayland compositors).
+//! Like Zed's modals, the palette is an elevated surface inside the main
+//! window (everything, the reader included, is GPUI-drawn), so no separate
+//! `WindowKind::PopUp` is needed (those also misbehave under Wayland).
 
 use gpui::{Context, Entity, KeyDownEvent, MouseButton};
 use theme::ActiveTheme;

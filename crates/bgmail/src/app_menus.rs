@@ -3,8 +3,8 @@
 //! GPUI 0.2 does not expose a `disabled` flag on [`MenuItem`]; unavailable message
 //! actions are omitted from the Message menu rather than shown greyed out. Menu items
 //! are validated with [`App::is_action_available`], which requires a global
-//! [`App::on_action`] handler when focus is outside the main view tree (e.g. the
-//! native e-mail webview). Keyboard shortcuts are registered in [`crate::shortcuts`]
+//! [`App::on_action`] handler when focus is outside the main view tree (e.g. a
+//! compose or settings window). Keyboard shortcuts are registered in [`crate::shortcuts`]
 //! and appear in the menu bar automatically via GPUI's keymap integration.
 //!
 //! When a compose window is key, [`MenuSurface::Compose`] menus replace the mail

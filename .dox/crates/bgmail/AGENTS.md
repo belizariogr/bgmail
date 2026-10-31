@@ -3,13 +3,14 @@
 ## Purpose
 
 BGMail executable (`BGMail`): windows, macOS Mail–style layout, UI state,
-localization, settings/compose, HTML reader (CEF OSR), and wiring to `storage`.
+localization, settings/compose, the HTML reader (native, via `html_view`), and
+wiring to `storage`.
 
 ## Ownership
 
 - Owns: `main`, `RootView`, compose/settings windows, toolbar/sidebar/list/
-  reader chrome, locale catalog, persisted `config.json`, CEF/HTML sanitization
-  pipeline, command palette, menus/shortcuts, window drag/CSD helpers, DB seed
+  reader chrome, locale catalog, persisted `config.json`, mail HTML
+  sanitization/theming (`mail_html`), command palette, menus/shortcuts, window drag/CSD helpers, DB seed
   bridge.
 - Does not own: theme palettes (`theme`), reusable widgets (`ui`), SQLite
   schema/API (`storage`), shared icon SVG sources (`assets/icons`).
@@ -18,8 +19,9 @@ localization, settings/compose, HTML reader (CEF OSR), and wiring to `storage`.
 
 - Binary name is `BGMail` (menu title on unbundled macOS). Package crate name
   is `bgmail`.
-- Default feature `cef-osr` enables CEF windowless HTML reader; plain-text
-  fallback with `--no-default-features`.
+- The reader shows bodies with `html_view::HtmlView` (sanitized + themed by
+  `mail_html`); remote content is always blocked until Stage 3 (the
+  `load_remote_images` preference is persisted but not offered).
 - **Modules (flat under `src/`):**
   - `root` — main three-column UI + selection/layout state.
   - `data` — mock/sample structures (keep isolated for replacement).
@@ -27,8 +29,8 @@ localization, settings/compose, HTML reader (CEF OSR), and wiring to `storage`.
   - `locale` — `Language` + string keys (EN default, PT-BR); no hardcoded
     user-facing strings in views.
   - `config` — `~/.config/BGMail/config.json` (window/columns/privacy prefs).
-  - `web_view` / `cef_osr` — HTML document build, sanitize (`lol_html`), remote
-    image policy, OSR paint/input; platform details stay behind portable APIs.
+  - `mail_html` — e-mail HTML sanitizing (`lol_html`), remote image policy and
+    the themed document handed to `html_view`.
   - `compose`, `command_palette*`, `commands`, `actions`, `shortcuts`,
     `app_menus` — app actions and overlays.
   - `window_drag` / `window_frame` — portable window move/CSD; OS code behind
@@ -51,9 +53,8 @@ localization, settings/compose, HTML reader (CEF OSR), and wiring to `storage`.
 
 ## Verification
 
-- `cargo test -p bgmail` (sanitize, config, locale, layout helpers, IPC parsers,
-  …).
-- `cargo run -p bgmail` (and `--no-default-features` for text-only reader).
+- `cargo test -p bgmail` (sanitize, config, locale, layout helpers, …).
+- `cargo run -p bgmail`.
 - Workspace `fmt` / `clippy -D warnings` / `test --workspace`.
 
 ## Child DOX Index

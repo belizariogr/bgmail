@@ -430,17 +430,18 @@
 - ⬜ GPUI 0.2.2 renders CBDT colour emoji as monochrome masks on Linux (whole
       app, not just mail); `html_view` works around it; upstream/upgrade later.
 - ⬜ **Reader roadmap (agreed order, after the fidelity block):**
-  1. ⬜ `html_view` milestone 2 — integrate in the reader **and clean up the
-     CEF era**: show mail through `HtmlView` (keep the `lol_html` sanitiser,
-     remote-content toggle, "Open in browser"; dark mode via
-     `DocumentOptions`; per-message layout cache; pane resize). Remove what
-     only existed to fit CEF/webviews: `cef_osr.rs`, `web_view.rs`, the
-     `cef`/`cef-osr`/`linux-webview` features and deps, CEF init/shutdown in
-     `main.rs`, the OSR tick/focus/`pump_platform_events` plumbing in
-     `root.rs`; re-check designs justified by the webview (e.g.
-     `command_palette_overlay.rs`, window/focus workarounds) and keep only
-     what still pays for itself; update README, `.dox/crates/bgmail/**`,
-     `.dox/.cargo` and `.dox/crates/AGENTS.md`.
+  1. ✅ `html_view` milestone 2 — reader integrated and CEF era removed: the
+     reader shows bodies through `HtmlView` (sanitized + themed by the new
+     `mail_html` module, dark/light page, forced-white option, per-message
+     document cache via `ReaderSignature`). Removed `cef_osr.rs`,
+     `web_view.rs` (~3.3k lines), the `cef`/`cef-osr`/`linux-webview`
+     features and deps (`cef`, `open`, `image`, `smallvec`, `urlencoding`,
+     `async-channel`), CEF init/shutdown/sub-process handling, the OSR tick,
+     focus, input forwarding and IPC plumbing, the text fallback, and the
+     remote-content unblock UI (decided with two opposing reviews: no
+     networking before Stage 3; the shield now only reports blocked images,
+     Settings ▸ Privacy explains it). Palette overlay, global menu handlers and
+     the palette key interceptor kept (still needed without a webview).
   2. ⬜ Milestone 3 — interaction: hover/cursor + link clicks (URL preview,
      open in browser), text selection painted with the theme color + copy,
      native context menu (link/image/text) via `doc.hit`, find in message,
@@ -452,7 +453,13 @@
      (Outlook/Word-generated, long forwarded threads, malformed HTML,
      newsletters of MBs, CJK/RTL, plain text → HTML) through the
      `spikes/html_render` loop at several widths.
-  5. ⬜ Later: zoom, print, animated GIF, remote-content loading (Stage 3).
+  5. ⬜ Later: zoom, print, animated GIF.
+- ⬜ Stage 3 — remote content on request: HTTP image fetcher behind
+      `html_view::Resources` (per-message/per-image unblock, cache, size/time
+      limits, no cookies/referrer, optional privacy proxy); restore the
+      shield's unblock menu and the Settings ▸ Privacy toggle
+      (`load_remote_images` is still persisted; `mail_html` keeps the
+      `load_remote`/`shown` policy).
 - ⬜ Upstream the `vendor/blitz` and `vendor/taffy` fixes (each is marked
       `BGMail`), then drop the vendored copies. Either way: behind a `crates/html_view` API, with
       "Open in browser" as the escape hatch.
