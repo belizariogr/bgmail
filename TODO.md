@@ -372,24 +372,42 @@
 - ⬜ Persist rotated OAuth refresh tokens (kept in memory today)
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
-- ⬜ Read / mark read-unread
-- ⬜ Compose / reply / reply all / forward
-- ⬜ Send (SMTP + Gmail)
-- ✅ Move / delete / archive / junk (SQLite folder membership + toolbar/menus)
-- ✅ Star / flag (toggle starred + `sys:flagged` folder)
+- ✅ Read / mark read-unread (opening marks read on the server; toggle via
+      toolbar, menu, palette, Cmd/Ctrl+Shift+U · Ctrl+Shift+M)
+- ✅ Compose / reply / reply all / forward (real fields, From picker,
+      `ui::TextArea` body, quoting, forwarded attachments, address validation)
+- ✅ Send (SMTP + Gmail XOAUTH2) through the outbox; copy APPENDed to Sent
+      unless the server files it (Gmail)
+- ⬜ Drafts (save/resume) and HTML composing (plain text only today)
+- ⬜ Set `\\Answered` on the original after a reply is sent
+- ✅ Move / delete / archive / junk, reflected on the server (optimistic
+      local change + queued op, MOVE or COPY/EXPUNGE)
+- ✅ Star / flag (`\\Flagged` on the server + `sys:flagged` folder)
 - ✅ Command palette (Ctrl/Cmd+Shift+P) with contextual message commands — in-window
       GPUI overlay (no `WindowKind::PopUp`; OSR composites under it on all platforms)
 - ✅ macOS menu bar (File/Edit/View/Message; unavailable actions omitted on GPUI 0.2)
-- ⬜ Attachments (view, download, attach)
-- ⬜ Search (UI mock done — DB-backed accent-insensitive search in Stage 2;
-      full IMAP/search scope in Stage 4)
+- ✅ Attachments: reader chips (Open / Save As… / Save to Downloads,
+      sanitized private temp files), attach in compose (picker, drag & drop,
+      25 MB cap), `cid:` images inlined
+- ✅ Search: local FTS5 trigram over every synced message (accent-insensitive)
+- ⬜ Server-side search for mail outside the sync window (IMAP SEARCH)
+- ✅ Accounts: welcome screen, Settings ▸ Accounts (presets, autoconfig,
+      manual servers, connection test, Google sign-in, update password,
+      remove), secrets in the platform keychain
+- ✅ Status bar sync state (Updating… / Updated at / Offline / sign-in
+      failed), message list virtualized (`uniform_list`), keyboard navigation
+- ✅ Validated end to end: `mail_sync/tests/greenmail_e2e.rs` (engine +
+      real IMAP/SMTP + SQLite) and the running app against GreenMail (add
+      account in the UI, read, reply, trash, IDLE notification, attachment,
+      search, remove account)
+- ⬜ Threads/conversations view (thread ids are stored; list is flat)
 
 ## Stage 5 — Polish
 - ✅ Rename product to **BGMail** (binary, window/menu titles, themes, docs;
       config/db under `~/.config/BGMail/`)
 - 🔄 Keyboard shortcuts (command palette + Cmd+Q; per-action bindings still TODO)
 - ⬜ Accessibility
-- ⬜ Native notifications
+- ✅ Native notifications (`notify-rust`, bursts summarized, Settings switch)
 - ⬜ Packaging (macOS `.app`, Linux, Windows)
 
 ## Notes / open decisions

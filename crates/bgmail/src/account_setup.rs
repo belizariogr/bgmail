@@ -95,7 +95,7 @@ pub(crate) fn is_valid_email(email: &str) -> bool {
         .all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'));
     !local.is_empty()
         && !domain.contains('@')
-        && domain.contains('.')
+        // Dotless domains are legal (`localhost`, intranet hosts, test servers).
         && labels_ok
         && !email.chars().any(|c| c.is_whitespace() || c.is_control())
 }
@@ -522,7 +522,12 @@ mod tests {
 
     #[test]
     fn email_shape() {
-        for ok in ["me@example.com", " a.b+c@sub.example.com.br ", "x@y.io"] {
+        for ok in [
+            "me@example.com",
+            " a.b+c@sub.example.com.br ",
+            "x@y.io",
+            "alice@localhost",
+        ] {
             assert!(is_valid_email(ok), "{ok}");
         }
         for bad in [
@@ -530,7 +535,6 @@ mod tests {
             "me",
             "me@",
             "@example.com",
-            "me@example",
             "me@@example.com",
             "me@exa mple.com",
             "me@example..com",

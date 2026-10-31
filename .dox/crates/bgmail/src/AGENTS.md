@@ -60,7 +60,7 @@ network calls are injected as closures so the job bodies are unit-tested.
 - **`ManualFields::from_config(config)`**: fields prefilled from a preset/discovered config (ports as text).
 - **`ManualFields::is_blank()`**: no IMAP and no SMTP host typed (Connect must discover).
 - **`FormError::key()`**: localized message key per error.
-- **`is_valid_email(email)`**: loose shape check — one `@`, non-empty local part, dotted domain with non-empty labels not starting/ending in `-`, no whitespace/control chars.
+- **`is_valid_email(email)`**: loose shape check — one `@`, non-empty local part, domain (dotless allowed: `localhost`, intranet hosts) with non-empty labels not starting/ending in `-`, no whitespace/control chars.
 - **`parse_port(text)`**: trimmed `1..=65535`, else `None`.
 - **`port_after_security_change(current, old, new, imap)`**: new conventional port when the field is empty or holds `old`'s default (IMAP or SMTP table); `None` keeps a custom port.
 - **`is_duplicate(email, existing)`**: case-insensitive, trimmed match against stored addresses.
@@ -1031,7 +1031,21 @@ _(None at module top level — conversion helpers only.)_
   - Behavior: Strips tags from sample HTML and retains visible text content.
 
 
+### `src/dates.rs`
+
+Message dates in the local zone (chrono `clock`); the formatting core takes explicit `NaiveDateTime`s so tests don't depend on the machine's zone.
+- **`local(unix)`** (private): local wall-clock time; `None` for `<= 0`/out of range.
+- **`format_list_date(time, now, language)`** (pub): today → `HH:MM`; 1 day → "Yesterday"/"Ontem"; 2–6 days → weekday; older/future → short date (`Mar 4` / `04/03`, other years `3/4/24` / `04/03/24`).
+- **`format_full_date(time, language)`** (pub): reader date (`Oct 31, 2026 at 14:07` / `31/10/2026 14:07`).
+- **`short_date`**, **`weekday`** (private): helpers above (weekday index clamped to Sunday).
+- **`list_date(unix, fallback, language)`** / **`full_date(...)`** (pub): local formatting, or `fallback` (legacy `received_at` text of local/demo rows) when the time is unknown.
+- **`clock_time(unix)`** (pub): local `HH:MM` (empty when unknown) — status bar "Updated at".
+- **`now_unix()`** (pub): current unix seconds (Date header of sent mail).
+- Tests: today/yesterday/weekday/short/future dates per language, full dates, fallbacks, live formatting, clock time, weekday clamp.
+
 ### `src/locale.rs`
+
+- **`reply_attribution(language, date, sender)`** (pub): "On {date}, {sender} wrote:" / "Em {date}, {sender} escreveu:".
 
 #### Types / constants
 
@@ -1180,6 +1194,25 @@ _(None at module top level — conversion helpers only.)_
 - **`is_dangerous_url`** / **`is_remote_url`** / **`style_has_script_vector`** (private): URL scheme and CSS vector checks.
 - **`escape_html`** (private): Escapes `& < > " '`.
 - Tests: HTML escaping, plain text (structure, entities, broken markup, multi-byte characters at entity/tag cuts, case-insensitive skipped blocks), openable links, colors, document wrapping (HTML verbatim, plain text escaped, color scheme), disallowed elements, SVG scriptable parts, event handlers, dangerous schemes, legacy style vectors, safe markup kept, remote detection and blocking (attributes, `href` kept, CSS urls), remote image policy (`load_remote`, `shown`), documents always blocking remote images.
+
+### `src/mail_service.rs`
+
+Bridge between the UI and `mail_sync::Engine` (plain Rust; the event loop lives in `RootView`).
+- **enum `StartError { NotRemote, MissingSecret, OAuthUnavailable(provider) }`** — why an account couldn't start.
+- **`credential_for(config, secret)`** (pub): keychain bytes → `protocols::Credential` (password, or OAuth refresh token + provider from `oauth_provider`); empty/non-UTF-8 → `MissingSecret`.
+- **`connector_for(config_json, secret)`** (pub): `AccountConfig` JSON + secret → `Arc<dyn MailConnector>` (`ImapSmtpConnector`, default `ConnectOptions`); local `{}` → `NotRemote`.
+- **enum `OverallStatus { None, Syncing, UpToDate(ts), Offline(msg), AuthFailed(id), Error(msg) }`** and **`overall_status(statuses)`** (pub): folds per-account statuses, most urgent first (auth → error → offline → syncing → up to date, newest `last_sync`).
+- **struct `MailService`**: `new(db_path) -> (Self, Receiver<SyncEvent>)` (unbounded channel, default `EngineOptions`); `engine()`; `start_account(id, connector)` (status `Connecting`); `stop_account(id)` (stops threads, forgets status); `set_status(id, status)` (ignored for accounts not running); `status(id)`; `overall()`; `process_queue(id)` (`Command::ProcessQueue`).
+- Tests: password credential, missing/invalid secret, unknown OAuth provider, local accounts, status folding order, statuses only for running accounts.
+
+### `src/notifications.rs`
+
+Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT behind one API), always shown off the UI thread.
+- **struct `Notice { summary, body }`**.
+- **`notices_for(account, messages, language)`** (pub): one notice per message (sender or account name; subject or "(no subject)"/"(sem assunto)") up to 3; a burst becomes one "N new messages" summary.
+- **`notify_new_mail(account, messages, language)`** (pub): spawns a short-lived thread showing the notices (errors logged).
+- **`show(notice)`** (private): `notify_rust::Notification` with app name "BGMail".
+- Tests: empty, per-message notices with fallbacks, burst summary.
 
 ### `src/main.rs`
 
@@ -2097,6 +2130,36 @@ _(None at module top level — conversion helpers only.)_
   - Behavior: After trash move, message_in_trash true in context.
 
 - **`sidebar_orders_system_folders_then_user_folders_alphabetically`** / **`adjacent_index_clamps_and_starts_from_the_ends`** / **`keyboard_selection_moves_through_the_list`** / **`attachments_follow_the_selected_message_body`** (tests): sidebar folder order and ranks; row-step clamping; arrow-key selection over the seeded list (no wrap); chips list only non-inline attachments, none for headers-only bodies, cleared with the selection.
+
+#### Sync engine, accounts, reply/send (added with Stage 3)
+
+- **`start_mail(cx)`** (pub(crate)): creates `MailService` once (engine on `db_path`), spawns the task awaiting `SyncEvent`s into `on_sync_event`, and starts every remote account. Called from `main` after the window exists (never blocks the first frame).
+- **`start_account(account, cx)`** (private): skips `local` accounts; reads the secret with `cx.read_credentials(config.secret_key())` asynchronously, then `start_account_with_secret`.
+- **`start_account_with_secret(id, config_json, secret, cx)`** (private): builds the connector (`mail_service::connector_for`) and starts it, or records a `StartError` (status bar / settings show it).
+- **`on_sync_event(event, cx)`** (private): `Status` → service status; `MailboxChanged`/`FoldersChanged`/`BodyReady`/`Sent` → `schedule_reload` (BodyReady also re-renders the open message); `NewMail` → desktop notifications when `notifications_enabled`; `BodyFailed`/`Sent`/`SendFailed` → status notes.
+- **`set_status_note(note, cx)`** (private): shows a note in the status bar for 6 s (token-guarded timer).
+- **`schedule_reload(cx)`** (private): coalesces event bursts into one `reload_from_database` 250 ms later.
+- **`reload_from_database()`** (pub(crate)): re-reads accounts, folders and the current list.
+- **`sync_now(cx)`** (pub(crate)): `Command::Reconnect` for every account (clears back-off/auth failure and syncs).
+- **`accounts()`**, **`account_status(id)`**, **`account_start_error(id)`** (pub(crate)): read access for the settings window.
+- **`add_remote_account(name, config, secret, cx)`** (pub(crate)): creates the account (`imap`/`gmail` provider), writes the secret to the keychain (`store_secret`), reloads, starts syncing at once with the in-memory secret and requests `SyncNow`.
+- **`update_account_secret(id, secret, cx)`** (pub(crate)): rewrites the keychain secret and restarts the account.
+- **`store_secret(config, secret, cx)`** (private): `cx.write_credentials` on a background task (errors logged).
+- **`remove_account(id, cx)`** (pub(crate)): stops the worker, deletes the keychain secret and the account's local data, fixes selection/mailbox, reloads.
+- **`open_selected_message()`** (private): marks the opened message read (`mail_sync::actions::set_read` + queue) and asks for its body (`Command::FetchBody`) when only headers are stored.
+- **`after_action(account_id, outcome)`** (private): wakes the account's worker when an action queued server work.
+- **`run_message_action(cx, action)`** (private): runs a `mail_sync::actions` function on the selected message, reloads the list and selects the message that took its place (opening it).
+- **`toggle_message_read(cx)`** (pub(crate)): read ↔ unread for the selected message (stays selected).
+- Message actions `delete_message_to_trash`, `restore_message`, `archive_message`, `mark_message_junk`, `toggle_message_flag`, `move_message_to_folder`, `delete_message_permanently` (only in Trash) all go through `run_message_action` (local change now, server op queued).
+- **`compose_accounts()`** (pub(crate)): `ComposeAccount`s (sending accounts first; local ones `can_send = false`).
+- **`reply_to_selected(kind, window, cx)`** (pub(crate)): parses the stored raw message (or `parsed_from_detail`), builds a `mail_core::prepare_reply` draft with localized quote labels (`locale::reply_attribution`, `Key::Quote*`, `Key::ForwardHeader`), carries attachments on forward, opens compose with it.
+- **`send_draft(account_id, draft, cx)`** (pub(crate)): refuses local accounts / no recipients (localized errors), builds the RFC 822 message (`new_message_id` + `unique_token`, `build_message`), enqueues it in the outbox and wakes the worker.
+- **`open_settings_section(section, window, cx)`** (pub(crate)): focuses the open settings window on `section`, or opens a new one **deferred** (`cx.defer`) — the settings view reads `RootView` while rendering and GPUI renders a new window synchronously, which would re-enter the entity being updated (panic found in the GUI run).
+- **`render_recipients(message, cx)`** (private): "To:"/"Cc:" lines under the sender (hidden when empty).
+- **`sync_status_text(language)`** (private): status bar sync text: a recent note, else start errors, else `OverallStatus` (Updating… / Updated at HH:MM / Offline / Sign-in failed: email / Sync error).
+- **`render_welcome(cx)`** (private): shown instead of list + reader while no account exists; "Add account…" opens Settings ▸ Accounts.
+- Module helpers: **`parsed_from_detail(detail)`** (stored detail → minimal `ParsedMessage` for reply/forward of local/demo mail), **`forwarded_attachments(raw, parsed)`** (non-inline parts as `OutgoingAttachment`s), **`unique_token()`** (random-seeded hash of a counter + time for Message-IDs).
+- Tests (existing, still contracts): `find_steps_wrap_around`, `plain_text_reasons_follow_crash_size_and_override`, `reader_selection_is_a_translucent_accent`, plus the layout/selection/action tests listed above.
 
 ### `src/settings.rs`
 

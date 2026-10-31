@@ -531,6 +531,9 @@ impl Worker {
         if let Some(folder) = self.db.folder_by_id(folder_id)? {
             if folder.account_id == self.account_id && folder.remote_name.is_some() {
                 self.sync_folder(&folder)?;
+                // An IDLE-triggered Inbox refresh is the freshest check the
+                // user cares about; the status bar shows its time.
+                self.last_sync = unix_now();
             }
         }
         self.idle_status();

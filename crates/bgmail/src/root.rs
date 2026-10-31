@@ -2391,27 +2391,39 @@ impl RootView {
             ..Default::default()
         };
 
-        if let Ok(handle) = cx.open_window(options, |window, cx| {
+        // Opened after this update returns: the settings view reads `RootView`
+        // while rendering, and GPUI renders a new window synchronously, which
+        // would otherwise re-enter the entity being updated (panic).
+        cx.defer(move |cx| {
             let root_for_close = root.clone();
-            let view = cx.new(|_| {
-                let mut view = SettingsView::new(accounts, root);
-                view.section = section;
+            let root_for_handle = root.clone();
+            let Ok(handle) = cx.open_window(options, |window, cx| {
+                let view = cx.new(|_| {
+                    let mut view = SettingsView::new(accounts, root);
+                    view.section = section;
+                    view
+                });
+                window.on_window_should_close(cx, move |_, cx| {
+                    if let Some(root) = root_for_close.upgrade() {
+                        root.update(cx, |root, cx| {
+                            root.on_settings_window_closed(cx);
+                        });
+                    }
+                    true
+                });
                 view
-            });
-            window.on_window_should_close(cx, move |_, cx| {
-                if let Some(root) = root_for_close.upgrade() {
-                    root.update(cx, |root, cx| {
-                        root.on_settings_window_closed(cx);
-                    });
-                }
-                true
-            });
-            view
-        }) {
+            }) else {
+                return;
+            };
             let _ = handle.update(cx, |_, window, _| window.activate_window());
-            self.settings_window = Some(handle);
-            cx.notify();
-        }
+            if let Some(root) = root_for_handle.upgrade() {
+                root.update(cx, |root, cx| {
+                    root.settings_window = Some(handle);
+                    root.sync_app_menus(cx);
+                    cx.notify();
+                });
+            }
+        });
     }
 
     /// Opens an empty compose window, or focuses it if it is already open.

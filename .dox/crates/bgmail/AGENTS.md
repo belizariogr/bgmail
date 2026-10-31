@@ -85,6 +85,24 @@ wiring to `storage`.
     `notifications_enabled` (persisted).
   - `account_setup` — GPUI-free form/validation/config building, account
     health, and error/preset-note → locale key mapping for `settings`.
+  - `mail_service` — owns the `mail_sync::Engine`, builds connectors from
+    `AccountConfig` + keychain secret, folds account statuses for the status
+    bar. `RootView::start_mail` (called from `main` after the window opens)
+    awaits engine events in a GPUI task; secrets are read with
+    `cx.read_credentials` asynchronously (GPUI keychain: Keychain /
+    Credential Manager / Secret Service), never on the startup path.
+  - `dates` — local-time list/reader dates (chrono `clock`).
+  - `notifications` — desktop notifications (`notify-rust`) on a short-lived
+    thread; bursts summarized.
+- Mail data flow: real profiles start empty (welcome screen → Settings ▸
+  Accounts); sample mail is seeded only with `BGMAIL_DEMO`/`BGMAIL_SAMPLE_DIR`.
+  Message actions call `mail_sync::actions` (local change + queued server
+  op) and then `Command::ProcessQueue`; opening a message marks it read and
+  fetches a missing body (`Command::FetchBody`). Sending enqueues the built
+  message in the outbox (`RootView::send_draft`).
+- Windows that read `RootView` while rendering (settings) are opened with
+  `cx.defer`, outside `RootView`'s update (GPUI renders new windows
+  synchronously; re-entering the entity panics).
 - Message list: virtualized with GPUI `uniform_list` (uniform row height;
   only visible rows are built) and the `ui::Scrollbar` on the list handle's
   `base_handle`. It owns a focus handle with key context `MessageList`

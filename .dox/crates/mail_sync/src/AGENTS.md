@@ -173,7 +173,7 @@ All take the UI's `&storage::Database`, return `rusqlite::Result<ActionOutcome>`
 - **`rm`** — the live remote or a Network error.
 - **`check_interrupts`** — cancel/`Shutdown` → `Abort::Shutdown`; drains the channel and serves queued `FetchBody` immediately.
 - **`full_cycle`** — reads `sync_window` from `AccountConfig` (default 2000), `process_queue`, `process_outbox`, `sync_folder_list`, every folder in `sync_order` (non-connection folder errors → `Status Error`, continue), `purge_orphans`, `Idle`, `ensure_idle_thread`.
-- **`folder_cycle`** — connect, queue, `sync_folder` for that account's server folder, `Idle`.
+- **`folder_cycle`** — connect, queue, `sync_folder` for that account's server folder (refreshes `last_sync`), `Idle`.
 - **`queue_cycle`** — only when ops or retryable outbox rows exist: connect, queue, outbox, `Idle`.
 - **`process_queue`** — per op (oldest first): undecodable → dropped; `store_flags` / `move_messages` / `delete_messages`; success → `complete_op`, and a Move with COPYUID → `attach_location` + `retarget_later_ops`; connection errors abort; others → `fail_op`, dropped at 3 attempts with `mark_for_resync`. Returns whether anything completed/dropped.
 - **`retarget_later_ops`** — later ops of the same message at the old `(folder, uid)` move to the new location (`update_op`).
