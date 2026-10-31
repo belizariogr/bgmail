@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Source for the `storage` crate: local SQLite schema, queries, folder conventions, message mutations, search helpers, and seed import.
+Source for the `storage` crate: SQLite schema + migrations, queries, folder conventions, message mutations, server-location/membership bookkeeping, sync-facing writes, queues, search helpers, and seed import.
 
 ## Ownership
 
@@ -16,7 +16,9 @@ Source for the `storage` crate: local SQLite schema, queries, folder conventions
 - Prefer rustdoc on public items; DOX purpose/behavior should stay aligned with
   rustdoc.
 - Visibility in entries (`pub` / `private`) reflects the source item.
-- No networking or remote sync; all persistence is local SQLite only.
+- No networking: sync-facing functions only persist what a caller fetched.
+- Multi-statement writes go through `Database::write_transaction` (`BEGIN IMMEDIATE`); helpers that must run inside a caller's transaction take `&Connection` (`*_in` suffix / `membership.rs`).
+- Unit tests share fixtures from `test_support.rs` (`remote_db`, `remote_message`).
 
 ## Work Guidance
 
@@ -36,131 +38,190 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ## API Catalog
 
-_68 functions/methods documented._
+Signatures are authoritative; `Lnn` anchors (where present) are approximate.
 
 ### `src/lib.rs`
 
+- Module declarations (`test_support` only under `cfg(test)`) and re-exports: `Database`, `database_path`, `global_folder_path`, folder helpers, `SCHEMA_VERSION`, search helpers, seed API, `BODY_STATE_FULL` / `BODY_STATE_HEADERS`, and every type in `types.rs` plus `PROVIDER_LOCAL` / `PROVIDER_IMAP` / `PROVIDER_GMAIL`. No functions.
+
+### `src/types.rs`
+
 #### Types / constants
 
-- _(Re-exports only — no local types or functions.)_
-
-#### Functions / methods
+- **const `PROVIDER_LOCAL` / `PROVIDER_IMAP` / `PROVIDER_GMAIL`**: `"local"`, `"imap"`, `"gmail"` — values of `accounts.provider`.
+- **struct `Account`**: `id`, `name`, `email`, `provider`, `config_json` (opaque caller JSON, `{}` default).
+- **struct `Folder`**: `id`, `account_id`, storage `path`, `display_name` (empty for system folders), `remote_name: Option<String>` (server mailbox; `None` = local folder), `role: Option<String>` (special-use role or `None`).
+- **struct `MessageListItem`**: list row without body — ids, sender, subject, `preview`, `received_at` display string, `date_ts` (unix seconds, 0 for mock), `thread_id`, `unread`/`starred`/`has_attachment`.
+- **struct `MessageDetail`**: reader row — list fields plus `plain_text`, `raw_content`, `raw_format` (`html`/`text`), `to_addrs`/`cc_addrs`/`reply_to` (opaque display lists), `message_id_hdr`, `in_reply_to`, `references_hdr` (space-separated), `thread_id`, `body_state` (0 headers only, 1 body present), `answered`, live `folders_csv`.
+- **enum `MailListQuery`**: `GlobalSystemFolder(path)` (all accounts), `AccountFolder { account_id, folder_path }`, `Search(text)`.
+- **struct `FolderSyncState`** (`Default`, `Copy`): `uid_validity: Option<u32>`, `uid_next: Option<u32>`, `highest_modseq: Option<u64>`, `synced_at: Option<i64>`.
+- **struct `MessageLocation`**: one server location — `folder_id`, folder `remote_name`, folder `path`, `uid`.
+- **struct `NewRemoteMessage`** (`Default`): headers + flags discovered on the server: sender/email/subject/preview/plain_text, `to_addrs`, `cc_addrs`, `reply_to`, `message_id_hdr`, `in_reply_to`, `references_hdr`, `thread_id`, `date_ts`, `received_at`, `unread`, `starred`, `answered`, `has_attachment`, `size`, `gm_msgid`.
+- **struct `NewAttachment`** (`Default`): `part_index`, `filename`, `mime_type`, `size`, `content_id`, `inline`.
+- **struct `AttachmentRow`**: stored attachment metadata (`id`, `message_id` + `NewAttachment` fields).
+- **struct `PendingOp`**: queued server action — `id`, `account_id`, `kind`, `message_id`, `payload` (opaque JSON), `attempts`, `last_error`, `created_at` (unix s).
+- **struct `OutgoingRow`**: outbox row — `id`, `account_id`, `sender`, `recipients: Vec<String>`, `raw` bytes, `message_id_hdr`, `attempts`, `last_error`, `created_at`.
 
 _(No functions.)_
+
+### `src/schema.rs`
+
+- **const `SCHEMA_VERSION`**: `2`.
+- **const `CREATE_ACCOUNTS` / `CREATE_FOLDERS` / `CREATE_MESSAGES` / `CREATE_META`**: v1 base DDL (`IF NOT EXISTS`), the starting point of every database.
+- **const `INDEX_MESSAGES_SEARCH` / `INDEX_MESSAGES_ACCOUNT` / `INDEX_MESSAGES_FOLDERS`**: v1 indexes.
+- **const `V2_COLUMNS`**: `(table, column, definition)` list added in place by the v1→v2 step (accounts: provider/config_json/sort_order; folders: remote_name/role/uid_validity/uid_next/highest_modseq/synced_at; messages: message_id_hdr/in_reply_to/references_hdr/thread_id/to_addrs/cc_addrs/reply_to/date_ts/answered/body_state/gm_msgid/size).
+- **const `V2_OBJECTS`**: idempotent DDL for `message_locations` (+ index on message_id), `message_bodies`, `attachments` (+ index), `pending_ops` (+ index), `outbox`, message indexes `(account_id, message_id_hdr)`, `(account_id, gm_msgid)`, `(thread_id)`, `(date_ts)`, the `messages_fts` FTS5 trigram external-content table and its insert/delete/update-of-search_text triggers.
+
+_(No functions.)_
+
+### `src/migration.rs`
+
+- **`migrate`** (pub(crate)) — `fn migrate(conn: &Connection) -> rusqlite::Result<()>`
+  - Purpose: bring any database to `SCHEMA_VERSION`.
+  - Behavior: one `IMMEDIATE` transaction: runs v1 base DDL, reads `schema_version` (missing → 1), runs `migrate_v1_to_v2` when < 2, upserts `meta.schema_version` when it changed or was missing, commits. Newer versions are left untouched.
+- **`schema_version`** (pub(crate)) — `fn schema_version(conn: &Connection) -> rusqlite::Result<Option<i64>>`
+  - Reads and parses `meta.schema_version`; `None` when absent or not an integer.
+- **`migrate_v1_to_v2`** (private) — `fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()>`
+  - Adds every `V2_COLUMNS` entry via `add_column_if_missing`, executes `V2_OBJECTS`, then `INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')` so pre-existing rows are searchable.
+- **`add_column_if_missing`** (private) — `fn add_column_if_missing(conn, table, column, definition) -> rusqlite::Result<()>`
+  - `ALTER TABLE {table} ADD COLUMN {column} {definition}` unless `column_exists`.
+- **`column_exists`** (pub(crate)) — `fn column_exists(conn, table, column) -> rusqlite::Result<bool>`
+  - Scans `PRAGMA table_info(table)` names.
+- Tests: `v1_database` (fixture: v1 DDL + one account/folder/message, version 1), `v1_database_migrates_in_place_preserving_data` (provider `local`, `config_json {}`, folder role/remote `None`, message fields kept, `body_state 1`, `date_ts 0`, FTS finds old row), `migration_is_idempotent_across_reopens`, `fresh_database_starts_at_current_version`, `add_column_if_missing_tolerates_existing_columns`, `schema_version_is_none_without_row`.
 
 ### `src/database.rs`
 
 #### Types / constants
 
-- **struct `Database`**: Owns an open `rusqlite::Connection` to the local mail store; all query and mutation methods hang off this type.
+- **struct `Database`**: owns one `rusqlite::Connection`; every query/mutation hangs off it.
+- **const `BUSY_TIMEOUT`**: 5000 ms.
+- **const `LIST_COLUMNS` / `LIST_ORDER`**: list-row column set and `ORDER BY date_ts DESC, sort_order ASC, id DESC`.
+- **const `FTS_MIN_CHARS`**: 3 — shorter folded queries use `LIKE`.
 
 #### Functions / methods
 
-##### Context: `module`
+- **`database_path`** (pub) — `pub fn database_path() -> PathBuf`: `config_dir()/mail.db` (typically `~/.config/BGMail/mail.db`). No I/O.
+- **`config_dir`** (private) — `fn config_dir() -> PathBuf`: `$HOME` or `$USERPROFILE` + `.config/BGMail`; relative `.config/BGMail` fallback. No directory creation.
+- **`global_folder_path`** (pub) — `pub fn global_folder_path(name: &str) -> Option<&'static str>`: `inbox`/`flagged`/`drafts`/`sent` → `sys:` path; else `None`.
+- **`Database::open`** (pub) — `pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self>`: creates parent dirs (errors ignored), opens, sets busy timeout, `PRAGMA journal_mode = WAL`, `foreign_keys = ON`, runs `migrate()`.
+- **`Database::open_default`** (pub) — `pub fn open_default() -> rusqlite::Result<Self>`: `open(database_path())`.
+- **`Database::conn`** (pub) — `pub fn conn(&self) -> &Connection`: raw connection (seeding, low-level use).
+- **`Database::write_transaction`** (pub(crate)) — `fn write_transaction(&self) -> rusqlite::Result<Transaction<'_>>`: `BEGIN IMMEDIATE` transaction so concurrent writers wait on the busy timeout instead of failing on lock upgrade.
+- **`Database::migrate`** (private) — `fn migrate(&self) -> rusqlite::Result<()>`: `migration::migrate`, then `repair_starred_folder_membership`.
+- **`Database::repair_starred_folder_membership`** (private): appends `sys:flagged` to `folders_csv` of starred rows missing it (sorted/deduped). No-op when nothing to fix.
+- **`Database::unread_in_folder`** (pub) — `pub fn unread_in_folder(&self, account_id: Option<i64>, folder_path: &str) -> rusqlite::Result<usize>`: unread rows whose `folders_csv` contains the path, optionally per account.
+- **`Database::global_unread`** (pub) — `pub fn global_unread(&self, folder_path: &str) -> rusqlite::Result<usize>`: `unread_in_folder(None, path)`.
+- **`Database::unread_count_total`** (pub) — `pub fn unread_count_total(&self) -> rusqlite::Result<usize>`: all unread messages, every account and folder.
+- **`Database::list_messages`** (pub) — `pub fn list_messages(&self, query: &MailListQuery) -> rusqlite::Result<Vec<MessageListItem>>`: `SELECT LIST_COLUMNS … WHERE query_filter … LIST_ORDER`; blank search → empty vec.
+- **`Database::get_message`** (pub) — `pub fn get_message(&self, id: i64) -> rusqlite::Result<Option<MessageDetail>>`: full reader row incl. v2 header fields; `None` when absent.
+- **`Database::message_count_for_query`** (pub) — `pub fn message_count_for_query(&self, query: &MailListQuery) -> rusqlite::Result<usize>`: `SELECT COUNT(*)` with the same filter as `list_messages` (no row loading); blank search → 0.
+- **`Database::message_count_all`** (pub) — `pub fn message_count_all(&self) -> rusqlite::Result<usize>`: `COUNT(*)` of messages.
+- **`query_filter`** (private) — `fn query_filter(query: &MailListQuery) -> Option<(&'static str, Vec<Value>)>`: WHERE clause + params per query kind (`folders_csv LIKE`, optional `account_id`, or `search_filter`).
+- **`search_filter`** (private) — `fn search_filter(query: &str) -> Option<(&'static str, Vec<Value>)>`: folds trimmed query; empty → `None`; ≥3 chars → `id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH fts_phrase)`; else `search_text LIKE %folded%`.
+- **`fts_phrase`** (private) — `fn fts_phrase(text: &str) -> String`: wraps in `"…"` doubling inner quotes so input never parses as FTS syntax.
+- **`list_item_from_row`** (private): maps a `LIST_COLUMNS` row to `MessageListItem`.
+- Tests: `database_path_uses_dot_config_bgmail`, `account_folder_lists_only_that_account`, helpers `search_ids` (also asserts count == list length) / `like_ids` (v1 LIKE oracle), `fts_search_matches_like_semantics` (accents, case, substrings, <3 chars, quotes, FTS keywords), `message_count_for_query_counts_without_loading`, `unread_count_total_spans_accounts`, `open_enables_wal`, `two_connections_read_and_write_concurrently` (sync thread inserts while the UI connection reads and writes).
 
-- **`database_path`** (pub, L16)
-  - Signature: `pub fn database_path() -> PathBuf`
-  - Purpose: Returns the default on-disk location for `mail.db`.
-  - Behavior: Joins `config_dir()` with `"mail.db"`. Typically `~/.config/BGMail/mail.db` when `HOME` or `USERPROFILE` is set. No I/O.
+### `src/accounts.rs`
 
-- **`config_dir`** (private, L20)
-  - Signature: `fn config_dir() -> PathBuf`
-  - Purpose: Resolves the BGMail config directory across platforms.
-  - Behavior: Uses `$HOME/.config/BGMail` or `$USERPROFILE/.config/BGMail`; falls back to `.config/BGMail` relative path when neither env var exists. No directory creation.
+- **`account_from_row`** / **`folder_from_row`** (private): map `ACCOUNT_COLUMNS` / `FOLDER_COLUMNS` rows.
+- **`Database::list_accounts`** (pub) — `pub fn list_accounts(&self) -> rusqlite::Result<Vec<Account>>`: all accounts by `sort_order, id`.
+- **`Database::get_account`** (pub) — `pub fn get_account(&self, id: i64) -> rusqlite::Result<Option<Account>>`.
+- **`Database::create_account`** (pub) — `pub fn create_account(&self, name: &str, email: &str, provider: &str, config_json: &str) -> rusqlite::Result<i64>`: inserts with `sort_order = max + 1`; errors on duplicate email. Creates no folders.
+- **`Database::update_account`** (pub) — `pub fn update_account(&self, id: i64, name: &str, config_json: &str) -> rusqlite::Result<()>`: updates name + config; no-op for unknown id.
+- **`Database::delete_account`** (pub) — `pub fn delete_account(&self, id: i64) -> rusqlite::Result<()>`: one write tx: deletes the account's messages (FTS triggers, cascades to locations/bodies/attachments), then the account (cascades folders, pending_ops, outbox).
+- **`Database::list_folders`** (pub) — `pub fn list_folders(&self, account_id: i64) -> rusqlite::Result<Vec<Folder>>`: by id.
+- **`Database::folder_by_id`** (pub) — `pub fn folder_by_id(&self, folder_id: i64) -> rusqlite::Result<Option<Folder>>`.
+- **`Database::folder_by_remote_name`** (pub) — `pub fn folder_by_remote_name(&self, account_id: i64, remote_name: &str) -> rusqlite::Result<Option<Folder>>`: lowest id match.
+- **`Database::folder_for_role`** (pub) — `pub fn folder_for_role(&self, account_id: i64, role: &str) -> rusqlite::Result<Option<Folder>>`: lowest id with that role.
+- **`Database::upsert_remote_folder`** (pub) — `pub fn upsert_remote_folder(&self, account_id: i64, path: &str, display_name: &str, remote_name: &str, role: Option<&str>) -> rusqlite::Result<i64>`: insert or update display/remote/role keyed by `(account_id, path)`; keeps sync checkpoints; returns id (`RETURNING`).
+- **`Database::delete_folder`** (pub) — `pub fn delete_folder(&self, folder_id: i64) -> rusqlite::Result<()>`: write tx: collects messages located there, deletes the folder (cascade locations), `settle_after_location_loss`. Location-less messages keep their csv.
+- **`Database::folder_sync_state`** (pub) — `pub fn folder_sync_state(&self, folder_id: i64) -> rusqlite::Result<FolderSyncState>`: stored checkpoint; all `None` for unknown/never-synced folders. Modseq is bit-cast from i64.
+- **`Database::set_folder_sync_state`** (pub) — `pub fn set_folder_sync_state(&self, folder_id: i64, state: &FolderSyncState) -> rusqlite::Result<()>`: overwrites all four columns.
+- Tests: `create_get_update_account`, `delete_account_cascades_everything` (all child tables empty, FTS integrity-check passes, other account kept), `upsert_remote_folder_is_keyed_by_path`, `folder_lookups`, `folder_sync_state_round_trips` (u32::MAX / 63-bit modseq), `delete_folder_drops_remote_orphans_and_refreshes_others`.
 
-- **`global_folder_path`** (pub, L301)
-  - Signature: `pub fn global_folder_path(name: &str) -> Option<&'static str>`
-  - Purpose: Maps UI global-mailbox keys to canonical system folder paths.
-  - Behavior: `"inbox" → sys:inbox`, `"flagged" → sys:flagged`, `"drafts" → sys:drafts`, `"sent" → sys:sent`; any other name returns `None`. No I/O.
+### `src/membership.rs`
 
-##### Context: `Database`
+- **`refresh_membership_in`** (pub(crate)) — `fn refresh_membership_in(conn: &Connection, message_id: i64) -> rusqlite::Result<()>`: when the message has locations, sets `folders_csv` = sorted/deduped location folder paths + `sys:flagged` if starred; no-op without locations or for unknown ids.
+- **`settle_after_location_loss`** (pub(crate)) — `fn settle_after_location_loss(conn: &Connection, message_ids: &[i64]) -> rusqlite::Result<()>`: per id, deletes the message if it has no location and its account's provider is not `local`; otherwise `refresh_membership_in`.
+- **`message_ids_in_folder`** (pub(crate)) — `fn message_ids_in_folder(conn: &Connection, folder_id: i64) -> rusqlite::Result<Vec<i64>>`: distinct message ids located in the folder.
+- **`Database::refresh_membership`** (pub) — `pub fn refresh_membership(&self, message_id: i64) -> rusqlite::Result<()>`: public wrapper of `refresh_membership_in`.
+- Tests: `membership_follows_locations_and_starred`, `membership_without_locations_is_left_alone`, `refresh_membership_of_missing_message_is_noop`.
 
-- **`open`** (pub, L38)
-  - Signature: `pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self>`
-  - Purpose: Opens or creates a SQLite database and brings schema to current version.
-  - Behavior: Creates parent directories (errors ignored), opens the file, enables `PRAGMA foreign_keys = ON`, runs `migrate()`, returns `Database`. Propagates SQLite errors; does not panic.
+### `src/sync.rs`
 
-- **`open_default`** (pub, L50)
-  - Signature: `pub fn open_default() -> rusqlite::Result<Self>`
-  - Purpose: Convenience opener for the standard user config path.
-  - Behavior: Delegates to `Self::open(database_path())`.
+#### Types / constants
 
-- **`conn`** (pub, L54)
-  - Signature: `pub fn conn(&self) -> &Connection`
-  - Purpose: Exposes the underlying SQLite connection for seeding and low-level use.
-  - Behavior: Returns `&self.conn`. No side effects.
+- **const `BODY_STATE_HEADERS`** (`0`) / **`BODY_STATE_FULL`** (`1`): `messages.body_state` values.
 
-- **`migrate`** (private, L58)
-  - Signature: `fn migrate(&self) -> rusqlite::Result<()>`
-  - Purpose: Applies DDL and one-time schema bookkeeping on open.
-  - Behavior: Executes `CREATE_META`, `CREATE_ACCOUNTS`, `CREATE_FOLDERS`, `CREATE_MESSAGES`, and index DDL from `schema`. Inserts `schema_version` into `meta` when missing. Calls `repair_starred_folder_membership()`. Propagates SQL errors.
+#### Functions / methods
 
-- **`repair_starred_folder_membership`** (private, L86)
-  - Signature: `fn repair_starred_folder_membership(&self) -> rusqlite::Result<()>`
-  - Purpose: Backfills flagged-folder membership for starred messages missing `sys:flagged` in `folders_csv`.
-  - Behavior: Selects starred rows whose `folders_csv` does not match the flagged LIKE pattern; parses paths, appends `sys:flagged` when absent, re-serializes via `folders_csv`, and updates each row. No-op when nothing to fix.
+- **`find_merge_target`** (private): same `gm_msgid` in the account (lowest id) → else same `message_id_hdr` in the account among messages with **no** locations → else `None`.
+- **`insert_message_row`** (private): inserts a headers-only row (`raw_content ''`, `raw_format 'text'`, `body_state 0`, csv `,,`, `search_text` from sender/email/subject/plain text).
+- **`location_message_id`** (private): message id at `(folder_id, uid)`.
+- **`message_locations_in`** (private): locations of a message joined with folder path/remote name, by location id.
+- **`Database::insert_remote_message`** (pub) — `pub fn insert_remote_message(&self, account_id: i64, folder_id: i64, uid: u32, message: &NewRemoteMessage) -> rusqlite::Result<i64>`: write tx; existing `(folder, uid)` → its id (nothing written); else merge target or new row, insert location, refresh membership. Merges do not update fields/flags.
+- **`Database::folder_uids`** (pub) — `pub fn folder_uids(&self, folder_id: i64) -> rusqlite::Result<Vec<(u32, i64)>>`: `(uid, message_id)` ascending.
+- **`Database::max_uid`** (pub) — `pub fn max_uid(&self, folder_id: i64) -> rusqlite::Result<Option<u32>>`.
+- **`Database::remove_locations`** (pub) — `pub fn remove_locations(&self, folder_id: i64, uids: &[u32]) -> rusqlite::Result<()>`: write tx; deletes known locations, then `settle_after_location_loss` on affected messages. Unknown uids ignored.
+- **`Database::clear_folder_locations`** (pub) — `pub fn clear_folder_locations(&self, folder_id: i64) -> rusqlite::Result<()>`: same as above for every location of the folder (UIDVALIDITY reset).
+- **`Database::apply_remote_flags`** (pub) — `pub fn apply_remote_flags(&self, folder_id: i64, uid: u32, unread: bool, starred: bool, answered: bool) -> rusqlite::Result<bool>`: updates flags only if different, refreshes membership when changed; `false` for unknown location or no change.
+- **`Database::store_body`** (pub) — `pub fn store_body(&self, message_id: i64, raw: &[u8], content: &str, format: &str, plain_text: &str, preview: &str, attachments: &[NewAttachment]) -> rusqlite::Result<()>`: write tx; upserts `message_bodies.raw`, sets raw_content/raw_format (`html`|`text`, CHECK-enforced)/plain_text/preview/search_text (recomputed)/`has_attachment` (any non-inline)/`body_state 1`, replaces attachments. No-op for a deleted message.
+- **`Database::message_raw`** (pub) — `pub fn message_raw(&self, message_id: i64) -> rusqlite::Result<Option<Vec<u8>>>`.
+- **`Database::list_attachments`** (pub) — `pub fn list_attachments(&self, message_id: i64) -> rusqlite::Result<Vec<AttachmentRow>>`: non-inline first, then by `part_index`, id.
+- **`Database::message_locations`** (pub) — `pub fn message_locations(&self, message_id: i64) -> rusqlite::Result<Vec<MessageLocation>>`.
+- **`Database::messages_without_body`** (pub) — `pub fn messages_without_body(&self, account_id: i64, limit: usize) -> rusqlite::Result<Vec<i64>>`: `body_state 0` messages **with at least one location** (fetchable), newest first (`date_ts DESC, id DESC`).
+- **`Database::detach_locations`** (pub) — `pub fn detach_locations(&self, message_id: i64) -> rusqlite::Result<Vec<MessageLocation>>`: write tx; returns then deletes all locations; csv untouched (message is now in flight).
+- Tests: `insert_creates_headers_only_message_with_location`, `insert_same_location_twice_returns_existing`, `gm_msgid_merges_locations` (no cross-account merge), `message_id_merges_only_in_flight_messages`, `detach_keeps_csv_and_returns_nothing_twice`, `folder_uids_and_max_uid`, `remove_locations_deletes_remote_orphans_only`, `clear_folder_locations_uses_orphan_rules`, `apply_remote_flags_updates_and_reports_change`, `store_body_fills_message_and_attachments`, `store_body_for_missing_message_is_noop`, `messages_without_body_newest_first_with_locations`, `list_order_is_date_then_sort_order`; helper `count`.
 
-- **`list_accounts`** (pub, L123)
-  - Signature: `pub fn list_accounts(&self) -> rusqlite::Result<Vec<Account>>`
-  - Purpose: Loads all accounts ordered by id.
-  - Behavior: `SELECT id, name, email FROM accounts ORDER BY id ASC`; maps rows to `Account`. Returns empty vec when none.
+### `src/queue.rs`
 
-- **`list_folders`** (pub, L137)
-  - Signature: `pub fn list_folders(&self, account_id: i64) -> rusqlite::Result<Vec<Folder>>`
-  - Purpose: Lists folders belonging to one account.
-  - Behavior: Filters `folders` by `account_id`, orders by id, maps to `Folder` (path + display_name).
+- **`unix_now`** (pub(crate)) — `fn unix_now() -> i64`: current unix seconds (0 before epoch).
+- **`Database::enqueue_op`** (pub) — `pub fn enqueue_op(&self, account_id: i64, kind: &str, message_id: Option<i64>, payload: &str) -> rusqlite::Result<i64>`: inserts with `created_at = now`; returns id.
+- **`Database::pending_ops`** (pub) — `pub fn pending_ops(&self, account_id: i64) -> rusqlite::Result<Vec<PendingOp>>`: oldest first (by id).
+- **`Database::complete_op`** (pub) — `pub fn complete_op(&self, id: i64) -> rusqlite::Result<()>`: deletes the op.
+- **`Database::fail_op`** (pub) — `pub fn fail_op(&self, id: i64, error: &str) -> rusqlite::Result<()>`: `attempts + 1`, `last_error = error`.
+- **`Database::drop_ops_for_message`** (pub) — `pub fn drop_ops_for_message(&self, message_id: i64) -> rusqlite::Result<()>`: deletes ops targeting the message.
+- **`Database::enqueue_outgoing`** (pub) — `pub fn enqueue_outgoing(&self, account_id: i64, sender: &str, recipients: &[String], raw: &[u8], message_id_hdr: Option<&str>) -> rusqlite::Result<i64>`: recipients stored newline-separated.
+- **`Database::outbox`** (pub) — `pub fn outbox(&self, account_id: i64) -> rusqlite::Result<Vec<OutgoingRow>>`: oldest first; recipients split on lines (empty lines dropped).
+- **`Database::outbox_count`** (pub) — `pub fn outbox_count(&self) -> rusqlite::Result<usize>`: all accounts.
+- **`Database::complete_outgoing`** (pub) — `pub fn complete_outgoing(&self, id: i64) -> rusqlite::Result<()>`: deletes the row.
+- **`Database::fail_outgoing`** (pub) — `pub fn fail_outgoing(&self, id: i64, error: &str) -> rusqlite::Result<()>`: `attempts + 1`, `last_error`.
+- Tests: `unix_now_is_after_2020`, `pending_ops_lifecycle`, `outbox_lifecycle`.
 
-- **`unread_in_folder`** (pub, L153)
-  - Signature: `pub fn unread_in_folder(&self, account_id: Option<i64>, folder_path: &str) -> rusqlite::Result<usize>`
-  - Purpose: Counts unread messages in a folder, optionally scoped to one account.
-  - Behavior: Builds a `folders_csv` LIKE pattern via `folder_like_pattern`. With `Some(account_id)`, counts unread rows for that account and folder; with `None`, counts across all accounts. Returns `usize` count (cast from SQLite integer).
+### `src/message_ops.rs`
 
-- **`global_unread`** (pub, L176)
-  - Signature: `pub fn global_unread(&self, folder_path: &str) -> rusqlite::Result<usize>`
-  - Purpose: Unread count for a system folder aggregated over every account.
-  - Behavior: Calls `unread_in_folder(None, folder_path)`.
+#### Functions / methods (module)
 
-- **`list_messages`** (pub, L180)
-  - Signature: `pub fn list_messages(&self, query: &MailListQuery) -> rusqlite::Result<Vec<MessageListItem>>`
-  - Purpose: Primary list-column query dispatcher.
-  - Behavior: `MailListQuery::Search` → `search_messages`; `GlobalSystemFolder(path)` → `messages_in_folder(None, path)`; `AccountFolder { account_id, folder_path }` → `messages_in_folder(Some(account_id), folder_path)`.
+- **`parse_folders_csv`** (pub) — `pub fn parse_folders_csv(csv: &str) -> Vec<String>`: split on commas, drop empties.
+- **`message_has_folder`** (pub) — `pub fn message_has_folder(csv: &str, folder_path: &str) -> bool`: exact segment match.
+- **`is_virtual_flagged_folder`** (pub) — `pub fn is_virtual_flagged_folder(path: &str) -> bool`: `path == sys:flagged`.
+- **`replace_primary_folder`** (pub) — `pub fn replace_primary_folder(paths: &[String], primary: &str) -> Vec<String>`: keeps only flagged, adds `primary`, sorted/deduped.
+- **`folders_csv_from_paths`** (pub) — `pub fn folders_csv_from_paths(paths: &[String]) -> String`.
 
-- **`messages_in_folder`** (private, L191)
-  - Signature: `fn messages_in_folder(&self, account_id: Option<i64>, folder_path: &str) -> rusqlite::Result<Vec<MessageListItem>>`
-  - Purpose: Lists messages whose `folders_csv` contains the given folder path.
-  - Behavior: Uses LIKE pattern matching on comma-wrapped CSV. Optional account filter. Orders by `sort_order ASC, id ASC`. Maps SQLite integer flags to `bool` for unread/starred/has_attachment.
+#### `Database` methods
 
-- **`search_messages`** (private, L234)
-  - Signature: `fn search_messages(&self, query: &str) -> rusqlite::Result<Vec<MessageListItem>>`
-  - Purpose: Accent/case-insensitive search over precomputed `search_text`.
-  - Behavior: Returns empty vec immediately when `search_like_pattern` yields `None` (blank/whitespace query). Otherwise `WHERE search_text LIKE ?` with folded partial pattern, same ordering and row mapping as folder lists.
+These edit `folders_csv` directly and work for every message. For a remote message with locations, callers must `detach_locations` first or the next membership refresh restores the server folders.
 
-- **`get_message`** (pub, L262)
-  - Signature: `pub fn get_message(&self, id: i64) -> rusqlite::Result<Option<MessageDetail>>`
-  - Purpose: Loads one message for the reader pane, including body and folder membership.
-  - Behavior: Selects full row by primary key. Returns `Ok(None)` when id absent; `Ok(Some(detail))` when found. Converts integer flags to bool.
+- **`load_message_folders`** (private): `(paths, starred)` or `None`.
+- **`set_message_folders`** (private): writes serialized csv.
+- **`set_primary_folder`** (private): `replace_primary_folder` + write; no-op for unknown id.
+- **`move_message_to_trash`** (pub) — `pub fn move_message_to_trash(&self, id: i64) -> rusqlite::Result<()>`: primary → `sys:trash`.
+- **`restore_message_from_trash`** (pub) — `pub fn restore_message_from_trash(&self, id: i64) -> rusqlite::Result<()>`: if in trash, primary → inbox.
+- **`delete_message_permanently`** (pub) — `pub fn delete_message_permanently(&self, id: i64) -> rusqlite::Result<bool>`: only when in trash; row delete cascades locations/body/attachments and updates FTS.
+- **`archive_message`** / **`mark_message_junk`** (pub) — `(&self, id: i64) -> rusqlite::Result<()>`: primary → archive / junk.
+- **`move_message_to_folder`** (pub) — `pub fn move_message_to_folder(&self, id: i64, folder_path: &str) -> rusqlite::Result<()>`: no-op for forbidden targets.
+- **`toggle_message_starred`** (pub) — `pub fn toggle_message_starred(&self, id: i64) -> rusqlite::Result<bool>`: flips `starred` + `sys:flagged` in csv, then `refresh_membership_in` (write tx); returns new state (`false` if missing).
+- **`set_message_unread`** (pub) — `pub fn set_message_unread(&self, id: i64, unread: bool) -> rusqlite::Result<bool>`: whether the row changed.
+- **`set_messages_unread`** (pub) — `pub fn set_messages_unread(&self, ids: &[i64], unread: bool) -> rusqlite::Result<usize>`: write tx; number of rows changed.
+- **`message_is_in_trash`** (pub) — `pub fn message_is_in_trash(&self, id: i64) -> rusqlite::Result<bool>`.
+- Tests: fixtures `seeded_db`, `message_csv`, `message_id`; `replace_primary_folder_keeps_flagged`, `move_to_trash_keeps_flagged_membership`, `restore_from_trash_moves_to_inbox`, `permanent_delete_only_from_trash`, `archive_and_junk_replace_primary`, `toggle_starred_updates_flagged_folder`, `move_to_custom_folder`, `set_message_unread_reports_change`, `set_messages_unread_counts_changes`, `toggle_starred_on_remote_message_keeps_location_membership`, `move_to_sent_is_noop`.
 
-- **`message_count_for_query`** (pub, L289)
-  - Signature: `pub fn message_count_for_query(&self, query: &MailListQuery) -> rusqlite::Result<usize>`
-  - Purpose: Counts messages matching a list query (via full list fetch).
-  - Behavior: Returns `list_messages(query)?.len()`. Note: loads all matching rows — acceptable for mock/seed scale.
+### `src/test_support.rs` (`cfg(test)`)
 
-- **`message_count_all`** (pub, L292)
-  - Signature: `pub fn message_count_all(&self) -> rusqlite::Result<usize>`
-  - Purpose: Total message row count in the database.
-  - Behavior: `SELECT COUNT(*) FROM messages`; returns as `usize`.
-
-##### Context: `tests` (`#[cfg(test)]`)
-
-- **`database_path_uses_dot_config_bgmail`** (private, L318)
-  - Signature: `fn database_path_uses_dot_config_bgmail()`
-  - Purpose: Smoke test for default path naming.
-  - Behavior: Asserts path contains `"BGMail"` and file name is `mail.db`. Panics on failure.
-
-- **`account_folder_lists_only_that_account`** (private, L325)
-  - Signature: `fn account_folder_lists_only_that_account()`
-  - Purpose: Ensures per-account folder queries do not leak cross-account messages.
-  - Behavior: Seeds two accounts with one inbox message each; lists inbox for account A and asserts exactly one message with subject `"A only"`. Uses `unwrap` on setup — panics if seed/open fails.
+- **struct `Fixture`**: ids of an `imap` account (inbox/archive/trash folders) and a `local` account (inbox).
+- **`remote_db`** (pub(crate)) — `fn remote_db() -> (NamedTempFile, Database, Fixture)`: temp DB with both accounts and their folders (remote names `INBOX`/`Archive`/`Trash`, roles set).
+- **`remote_message`** (pub(crate)) — `fn remote_message(subject: &str, gm_msgid: Option<u64>) -> NewRemoteMessage`: minimal headers with Message-ID `<{subject}@test>`.
 
 ### `src/folder.rs`
 
@@ -221,171 +282,6 @@ _(No functions.)_
   - Purpose: Verifies forbidden vs allowed move destinations.
   - Behavior: Asserts sent/drafts/flagged forbidden; inbox and user folder allowed.
 
-### `src/message_ops.rs`
-
-#### Types / constants
-
-- _(None at module top-level.)_
-
-#### Functions / methods
-
-##### Context: `module`
-
-- **`parse_folders_csv`** (pub, L11)
-  - Signature: `pub fn parse_folders_csv(csv: &str) -> Vec<String>`
-  - Purpose: Deserializes a `folders_csv` column into path segments.
-  - Behavior: Splits on commas, drops empty segments, collects owned strings. Order preserved from storage.
-
-- **`message_has_folder`** (pub, L19)
-  - Signature: `pub fn message_has_folder(csv: &str, folder_path: &str) -> bool`
-  - Purpose: Tests folder membership in a CSV value.
-  - Behavior: Parses CSV and returns true if any segment equals `folder_path` exactly.
-
-- **`is_virtual_flagged_folder`** (pub, L26)
-  - Signature: `pub fn is_virtual_flagged_folder(path: &str) -> bool`
-  - Purpose: Identifies the starred/flagged virtual mailbox path.
-  - Behavior: True only when `path == sys:flagged`. Flagged membership is also driven by the `starred` column.
-
-- **`replace_primary_folder`** (pub, L31)
-  - Signature: `pub fn replace_primary_folder(paths: &[String], primary: &str) -> Vec<String>`
-  - Purpose: Swaps the message's primary mailbox while preserving flagged membership.
-  - Behavior: Keeps only virtual flagged paths from input, appends `primary` if not already present, sorts and deduplicates. Non-flagged primaries (inbox, trash, etc.) are dropped from the kept set.
-
-- **`folders_csv_from_paths`** (pub, L46)
-  - Signature: `pub fn folders_csv_from_paths(paths: &[String]) -> String`
-  - Purpose: Convenience wrapper to serialize a path slice for DB storage.
-  - Behavior: Delegates to `folders_csv(paths.iter().map(String::as_str))`.
-
-##### Context: `Database` (`message_ops` impl block)
-
-- **`load_message_folders`** (private, L51)
-  - Signature: `fn load_message_folders(&self, id: i64) -> rusqlite::Result<Option<(Vec<String>, bool)>>`
-  - Purpose: Reads parsed folder paths and starred flag for one message.
-  - Behavior: `SELECT folders_csv, starred WHERE id = ?`. Returns `Ok(None)` when id missing; otherwise `Ok(Some((paths, starred)))` with parsed paths.
-
-- **`set_message_folders`** (private, L64)
-  - Signature: `fn set_message_folders(&self, id: i64, paths: &[String]) -> rusqlite::Result<()>`
-  - Purpose: Persists an updated folder membership list.
-  - Behavior: Serializes paths to CSV and `UPDATE messages SET folders_csv = ?`. Returns `Ok(())` on success.
-
-- **`set_primary_folder`** (private, L74)
-  - Signature: `fn set_primary_folder(&self, id: i64, primary: &str) -> rusqlite::Result<()>`
-  - Purpose: Changes primary mailbox while keeping flagged membership when present.
-  - Behavior: No-op (`Ok(())`) when message id not found. Otherwise applies `replace_primary_folder` and calls `set_message_folders`.
-
-- **`move_message_to_trash`** (pub, L83)
-  - Signature: `pub fn move_message_to_trash(&self, id: i64) -> rusqlite::Result<()>`
-  - Purpose: Moves a message to Trash.
-  - Behavior: Sets primary folder to `sys:trash`; retains `sys:flagged` when starred.
-
-- **`restore_message_from_trash`** (pub, L88)
-  - Signature: `pub fn restore_message_from_trash(&self, id: i64) -> rusqlite::Result<()>`
-  - Purpose: Undeletes a trashed message back to Inbox.
-  - Behavior: No-op when message missing or not currently in trash. Otherwise sets primary to `sys:inbox`.
-
-- **`delete_message_permanently`** (pub, L99)
-  - Signature: `pub fn delete_message_permanently(&self, id: i64) -> rusqlite::Result<bool>`
-  - Purpose: Hard-deletes a message from SQLite.
-  - Behavior: Returns `Ok(false)` when id missing or message is not in trash. When in trash, `DELETE FROM messages WHERE id = ?` and returns `Ok(true)` if a row was removed.
-
-- **`archive_message`** (pub, L113)
-  - Signature: `pub fn archive_message(&self, id: i64) -> rusqlite::Result<()>`
-  - Purpose: Archives a message.
-  - Behavior: Sets primary folder to `sys:archive` via `set_primary_folder`.
-
-- **`mark_message_junk`** (pub, L118)
-  - Signature: `pub fn mark_message_junk(&self, id: i64) -> rusqlite::Result<()>`
-  - Purpose: Marks a message as junk/spam.
-  - Behavior: Sets primary folder to `sys:junk` via `set_primary_folder`.
-
-- **`move_message_to_folder`** (pub, L123)
-  - Signature: `pub fn move_message_to_folder(&self, id: i64, folder_path: &str) -> rusqlite::Result<()>`
-  - Purpose: User-initiated move to an allowed folder path.
-  - Behavior: No-op (`Ok(())`) when destination is forbidden (flagged, drafts, sent). Otherwise updates primary folder to `folder_path`.
-
-- **`toggle_message_starred`** (pub, L131)
-  - Signature: `pub fn toggle_message_starred(&self, id: i64) -> rusqlite::Result<bool>`
-  - Purpose: Flips starred state and syncs flagged-folder membership.
-  - Behavior: Returns `Ok(false)` when message missing. Toggles `starred`, adds or removes `sys:flagged` in paths, sorts/dedups, updates both `starred` and `folders_csv` in one statement. Returns the new starred value.
-
-- **`message_is_in_trash`** (pub, L153)
-  - Signature: `pub fn message_is_in_trash(&self, id: i64) -> rusqlite::Result<bool>`
-  - Purpose: Checks whether a message's `folders_csv` includes trash.
-  - Behavior: Counts rows matching id and trash LIKE pattern; returns whether count > 0.
-
-##### Context: `tests` (`#[cfg(test)]`)
-
-- **`seeded_db`** (private, L170)
-  - Signature: `fn seeded_db() -> (NamedTempFile, Database)`
-  - Purpose: Test fixture with one account, custom folder, inbox+trashed messages.
-  - Behavior: Creates temp DB, seeds mailboxes and two messages (one starred inbox, one in trash). Panics on setup failure.
-
-- **`message_csv`** (private, L245)
-  - Signature: `fn message_csv(db: &Database, subject: &str) -> String`
-  - Purpose: Test helper to read `folders_csv` by subject.
-  - Behavior: Single-row query; panics if subject not found.
-
-- **`message_id`** (private, L255)
-  - Signature: `fn message_id(db: &Database, subject: &str) -> i64`
-  - Purpose: Test helper to resolve message id by subject.
-  - Behavior: Single-row query; panics if subject not found.
-
-- **`replace_primary_folder_keeps_flagged`** (private, L266)
-  - Signature: `fn replace_primary_folder_keeps_flagged()`
-  - Purpose: Unit test for primary-folder replacement logic.
-  - Behavior: Moving from inbox+flagged to trash yields `[flagged, trash]`.
-
-- **`move_to_trash_keeps_flagged_membership`** (private, L276)
-  - Signature: `fn move_to_trash_keeps_flagged_membership()`
-  - Purpose: Integration test for trash + starred coexistence.
-  - Behavior: After trashing starred inbox message, CSV contains trash and flagged, not inbox.
-
-- **`restore_from_trash_moves_to_inbox`** (private, L287)
-  - Signature: `fn restore_from_trash_moves_to_inbox()`
-  - Purpose: Integration test for restore from trash.
-  - Behavior: Restored message has inbox, not trash.
-
-- **`permanent_delete_only_from_trash`** (private, L297)
-  - Signature: `fn permanent_delete_only_from_trash()`
-  - Purpose: Ensures hard delete is trash-gated.
-  - Behavior: Inbox message delete returns false; trashed message delete returns true and leaves one row.
-
-- **`archive_and_junk_replace_primary`** (private, L312)
-  - Signature: `fn archive_and_junk_replace_primary()`
-  - Purpose: Verifies archive then junk primary transitions.
-  - Behavior: After archive, CSV has archive; after junk, CSV has junk.
-
-- **`toggle_starred_updates_flagged_folder`** (private, L326)
-  - Signature: `fn toggle_starred_updates_flagged_folder()`
-  - Purpose: Verifies star toggle syncs flagged folder.
-  - Behavior: Toggle off removes flagged; toggle on re-adds flagged.
-
-- **`move_to_custom_folder`** (private, L341)
-  - Signature: `fn move_to_custom_folder()`
-  - Purpose: Verifies move to user folder replaces inbox primary.
-  - Behavior: After move to `user:Clients`, CSV has custom path, not inbox.
-
-- **`move_to_sent_is_noop`** (private, L352)
-  - Signature: `fn move_to_sent_is_noop()`
-  - Purpose: Verifies manual move to sent is blocked.
-  - Behavior: After attempted move to sent, message remains in inbox only.
-
-### `src/schema.rs`
-
-#### Types / constants
-
-- **const `SCHEMA_VERSION`**: Current schema version integer (`1`); written to `meta` on first migrate.
-- **const `CREATE_ACCOUNTS`**: DDL for `accounts` table (id, name, unique email).
-- **const `CREATE_FOLDERS`**: DDL for `folders` table with FK to accounts and unique `(account_id, path)`.
-- **const `CREATE_MESSAGES`**: DDL for `messages` table (headers, bodies, search blob, flags, `folders_csv`; `raw_format` constrained to `html` or `text`).
-- **const `CREATE_META`**: DDL for key/value `meta` table (schema version storage).
-- **const `INDEX_MESSAGES_SEARCH`**: Index on `messages.search_text` for search queries.
-- **const `INDEX_MESSAGES_ACCOUNT`**: Index on `messages.account_id` for per-account lists.
-- **const `INDEX_MESSAGES_FOLDERS`**: Index on `messages.folders_csv` for folder LIKE filters.
-
-#### Functions / methods
-
-_(No functions.)_
 
 ### `src/search.rs`
 
@@ -424,6 +320,7 @@ _(No functions.)_
   - Purpose: Regression test for pattern trimming and emptiness.
   - Behavior: Whitespace-padded `"Git"` → `Some("%git%")`; whitespace-only → `None`.
 
+
 ### `src/seed.rs`
 
 #### Types / constants
@@ -444,7 +341,7 @@ _(No functions.)_
 - **`seed`** (pub, L58)
   - Signature: `pub fn seed(conn: &Connection, accounts: &[SeedAccount], messages: &[SeedMessage]) -> rusqlite::Result<()>`
   - Purpose: Bulk-inserts accounts, folders, and messages into an empty database.
-  - Behavior: Runs in one unchecked transaction. Inserts each account and its mailboxes (skips mailboxes with neither system path nor custom name). For each message, resolves account id by email (returns `InvalidParameterName` error if email unknown), builds default inbox + optional flagged + extra folders CSV, computes `search_text`, inserts full message row. Commits on success; rolls back on error.
+  - Behavior: Runs in one `BEGIN IMMEDIATE` transaction (waits on the busy timeout instead of failing when another connection writes). Inserts each account and its mailboxes (skips mailboxes with neither system path nor custom name). For each message, resolves account id by email (returns `InvalidParameterName` error if email unknown), builds default inbox + optional flagged + extra folders CSV, computes `search_text`, inserts full message row (v2 columns take their defaults: `date_ts 0`, `body_state 1`, no locations). Commits on success; rolls back on error.
 
 - **`preview_from_plain`** (pub, L143)
   - Signature: `pub fn preview_from_plain(plain: &str, max_chars: usize) -> String`
@@ -472,17 +369,3 @@ _(No functions.)_
   - Signature: `fn search_finds_accent_insensitive_match()`
   - Purpose: End-to-end test linking seed search blobs to list search.
   - Behavior: Seeds sample data, searches `"portugues"`, expects one hit whose folded subject contains `"ola"`.
-
-### `src/types.rs`
-
-#### Types / constants
-
-- **struct `Account`**: Connected mail account row (`id`, `name`, `email`).
-- **struct `Folder`**: Per-account folder row (`id`, `account_id`, storage `path`, UI `display_name` — empty for system folders localized elsewhere).
-- **struct `MessageListItem`**: Middle-column list row without body fields (`preview` excerpt, flags, metadata).
-- **struct `MessageDetail`**: Reader-pane row with `plain_text`, `raw_content`, `raw_format`, and live `folders_csv`.
-- **enum `MailListQuery`**: List dispatcher — `GlobalSystemFolder(String)` (all accounts), `AccountFolder { account_id, folder_path }`, or `Search(String)`.
-
-#### Functions / methods
-
-_(No functions.)_

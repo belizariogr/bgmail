@@ -1,0 +1,20 @@
+[package]
+name = "mail_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Exposes `fake::{FakeRemote, FakeSender}` to other crates' tests (sync engine).
+fake = []
+
+[dependencies]
+# 0.11 is the newest line that builds on the pinned toolchain (1.x needs Rust 1.98).
+mail-parser = "0.11"
+# No default features: we always set Message-ID and Date ourselves, so the
+# hostname lookup (`gethostname`) is never needed.
+mail-builder = { version = "~2.0", default-features = false }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

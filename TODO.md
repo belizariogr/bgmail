@@ -331,7 +331,17 @@
       account cycling are interactive mocks; compose window position/size persist
       in `config.json` (default 790×720, centered on first open)
 ## Stage 2 — Domain layer
-- ⬜ `mail_core` crate: `Account`, `Mailbox`, `Message`, `Thread`, `Attachment`
+- ✅ `mail_core` crate: addresses, flags, folder roles (special-use + names,
+      IMAP UTF-7), MIME parse/build (`mail-parser`/`mail-builder`),
+      reply/forward, threading keys, remote traits (`MailRemote`/`MailSender`)
+      + in-memory `FakeRemote`/`FakeSender` (feature `fake`)
+- ✅ `storage` schema v2: remote folders/UIDs (`message_locations`), raw
+      bodies (BLOB), attachments, pending server ops, outbox, FTS5 trigram
+      search, WAL; v1 databases migrate in place (accounts become `local`)
+- ✅ `ui::TextArea`: multi-line editor (soft wrap, selection, undo/redo, IME)
+      for the compose body; `TextInput`/`TextArea` emit `Changed`
+- ⬜ GPUI `TestAppContext` tests for `TextArea`'s element code (needs gpui
+      `test-support`)
 - ✅ `storage` crate: SQLite persistence (`accounts`, `folders`, `messages` with
       `plain_text` + `raw_content`, `folders_csv` multi-folder membership,
       accent-insensitive `search_text` + tests)
@@ -340,7 +350,7 @@
 - ✅ `RootView` wired to SQLite: folder selection, global mailboxes, list
       preview from plain text, reader from raw HTML/text, search mode
       ("Searching" / "Buscando") across all accounts
-- 🔄 Synchronization state machine
+- 🔄 Synchronization state machine (`mail_sync`: pure planner + engine)
 
 ## Stage 3 — Connectivity
 - ⬜ `protocols` crate: generic traits (Fetch/Send) + IMAP/POP3/SMTP
@@ -369,6 +379,22 @@
 - ⬜ Packaging (macOS `.app`, Linux, Windows)
 
 ## Notes / open decisions
+- ✅ **Mail stack decided** (two opposing reviews, 2026-10-31):
+      sync std threads per account (IDLE + command thread, IDLE cancelled by
+      `shutdown()` on a cloned socket) pushing events over `async-channel`;
+      `imap` 3.0.0-alpha.15 without default features over our own rustls 0.23
+      stream; `lettre` 0.11 as SMTP transport only (`send_raw`);
+      `mail-parser` 0.11 (1.0 needs Rust 1.98) + `mail-builder` 2.0; Gmail =
+      IMAP/SMTP with XOAUTH2 (hand-written PKCE loopback OAuth on `ureq`),
+      deduped by `X-GM-MSGID`; secrets through GPUI's credential API
+      (Keychain / Credential Manager / oo7) — so **no `accounts` crate**
+      (config in `storage`, OAuth/presets in `protocols`); crates `mail_core`,
+      `protocols`, `mail_sync`; storage v2 = `messages` + `message_locations`
+      + BLOB bodies + FTS5; **POP3 postponed** (no flags/folders/IDLE; would
+      bend the remote traits around the weakest protocol); packaging with
+      `cargo-packager` in a GitHub Actions matrix; GreenMail (docker) for
+      env-gated integration tests. Risk noted: Google's restricted
+      `mail.google.com` scope needs app verification beyond 100 test users.
 - ✅ Spike: native HTML engine to replace CEF (`spikes/html_render/REPORT.md`).
       47 e-mails, Chromium as reference. Mean fidelity: **Blitz 7.9/10**
       (31/47 ≥ 8), **litehtml 6.6/10** (15/47 ≥ 8). Blitz bugs found:

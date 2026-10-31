@@ -81,6 +81,7 @@ BGMail/
     ├── theme/ ← themes and colors (light/dark)
     ├── ui/ ← reusable visual components
     ├── storage/ ← SQLite persistence (mail.db)
+    ├── mail_core/ ← mail domain: addresses, MIME, reply/forward, remote traits
     ├── html_view/ ← native GPUI HTML (mail body) rendering on Blitz
     └── bgmail/ ← binary (window + layout + state + localization)
 ```

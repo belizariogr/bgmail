@@ -6,6 +6,7 @@ members = [
     "crates/theme",
     "crates/ui",
     "crates/storage",
+    "crates/mail_core",
     "crates/html_view",
     "crates/bgmail",
 ]
@@ -28,6 +29,7 @@ serde_json = "1"
 theme = { path = "crates/theme" }
 ui = { path = "crates/ui" }
 storage = { path = "crates/storage" }
+mail_core = { path = "crates/mail_core" }
 html_view = { path = "crates/html_view" }
 
 [profile.dev]

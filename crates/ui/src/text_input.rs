@@ -7,15 +7,16 @@ use std::ops::Range;
 
 use gpui::{
     actions, fill, point, px, relative, App, Bounds, ClipboardItem, Context, CursorStyle, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable,
-    GlobalElementId, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
-    UnderlineStyle, Window,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, GlobalElementId, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun,
+    UTF16Selection, Window,
 };
 use theme::ActiveTheme;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::prelude::*;
+use crate::text_area::marked_text_runs;
 
 #[cfg(target_os = "windows")]
 pub fn set_native_text_focus(window: &Window) {
@@ -68,7 +69,7 @@ actions!(
 );
 
 /// Byte offset of the previous word start (Windows-style Ctrl+Left).
-fn previous_word_start(content: &str, offset: usize) -> usize {
+pub(crate) fn previous_word_start(content: &str, offset: usize) -> usize {
     if offset == 0 {
         return 0;
     }
@@ -95,7 +96,7 @@ fn previous_word_start(content: &str, offset: usize) -> usize {
 }
 
 /// Byte offset of the next word start (Windows-style Ctrl+Right).
-fn next_word_start(content: &str, offset: usize) -> usize {
+pub(crate) fn next_word_start(content: &str, offset: usize) -> usize {
     let len = content.len();
     if offset >= len {
         return len;
@@ -178,6 +179,14 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// Events emitted by [`TextInput`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextInputEvent {
+    /// The user changed the text (typing, IME, paste, cut, delete).
+    /// Programmatic `clear` does not emit it.
+    Changed,
+}
+
 /// Single-line editable text field.
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -190,6 +199,8 @@ pub struct TextInput {
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
 }
+
+impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl TextInput {
     /// Creates an empty field with the given placeholder.
@@ -520,6 +531,9 @@ impl EntityInputHandler for TextInput {
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range = None;
+        if !(range.is_empty() && new_text.is_empty()) {
+            cx.emit(TextInputEvent::Changed);
+        }
         cx.notify();
     }
 
@@ -550,6 +564,9 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .map(|new_range| new_range.start + range.start..new_range.end + range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        if !(range.is_empty() && new_text.is_empty()) {
+            cx.emit(TextInputEvent::Changed);
+        }
         cx.notify();
     }
 
@@ -660,32 +677,7 @@ impl Element for TextInputElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
-            vec![
-                TextRun {
-                    len: marked_range.start,
-                    ..run.clone()
-                },
-                TextRun {
-                    len: marked_range.end - marked_range.start,
-                    underline: Some(UnderlineStyle {
-                        color: Some(run.color),
-                        thickness: px(1.0),
-                        wavy: false,
-                    }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: display_text.len() - marked_range.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect()
-        } else {
-            vec![run]
-        };
+        let runs = marked_text_runs(display_text.len(), input.marked_range.as_ref(), run);
 
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window

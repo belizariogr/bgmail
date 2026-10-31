@@ -5,6 +5,7 @@ use rusqlite::params;
 use crate::folder::{
     folder_like_pattern, folders_csv, is_manual_move_destination_forbidden, system,
 };
+use crate::membership::refresh_membership_in;
 use crate::Database;
 
 /// Parses a `folders_csv` column into folder paths (without empty segments).
@@ -142,11 +143,38 @@ impl Database {
         }
         paths.sort();
         paths.dedup();
-        self.conn().execute(
+        let tx = self.write_transaction()?;
+        tx.execute(
             "UPDATE messages SET starred = ?1, folders_csv = ?2 WHERE id = ?3",
             params![new_starred as i64, folders_csv_from_paths(&paths), id],
         )?;
+        // Messages with server locations derive membership from them.
+        refresh_membership_in(&tx, id)?;
+        tx.commit()?;
         Ok(new_starred)
+    }
+
+    /// Sets the unread flag; returns whether the row changed.
+    pub fn set_message_unread(&self, id: i64, unread: bool) -> rusqlite::Result<bool> {
+        let changed = self.conn().execute(
+            "UPDATE messages SET unread = ?1 WHERE id = ?2 AND unread != ?1",
+            params![unread as i64, id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Sets the unread flag on many messages at once; returns how many changed.
+    pub fn set_messages_unread(&self, ids: &[i64], unread: bool) -> rusqlite::Result<usize> {
+        let tx = self.write_transaction()?;
+        let mut changed = 0;
+        for &id in ids {
+            changed += tx.execute(
+                "UPDATE messages SET unread = ?1 WHERE id = ?2 AND unread != ?1",
+                params![unread as i64, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
     }
 
     /// Returns whether the message currently lives in Trash.
@@ -346,6 +374,50 @@ mod tests {
         let csv = message_csv(&db, "Inbox");
         assert!(message_has_folder(&csv, &custom));
         assert!(!message_has_folder(&csv, system::INBOX));
+    }
+
+    #[test]
+    fn set_message_unread_reports_change() {
+        let (_file, db) = seeded_db();
+        let id = message_id(&db, "Inbox");
+        assert!(!db.set_message_unread(id, true).unwrap());
+        assert!(db.set_message_unread(id, false).unwrap());
+        assert!(!db.get_message(id).unwrap().unwrap().unread);
+        assert!(!db.set_message_unread(9999, true).unwrap());
+    }
+
+    #[test]
+    fn set_messages_unread_counts_changes() {
+        let (_file, db) = seeded_db();
+        let inbox = message_id(&db, "Inbox");
+        let trashed = message_id(&db, "Trashed");
+        assert_eq!(db.set_messages_unread(&[inbox, trashed], true).unwrap(), 1);
+        assert_eq!(db.unread_count_total().unwrap(), 2);
+        assert_eq!(db.set_messages_unread(&[inbox, trashed], false).unwrap(), 2);
+        assert_eq!(db.unread_count_total().unwrap(), 0);
+    }
+
+    #[test]
+    fn toggle_starred_on_remote_message_keeps_location_membership() {
+        let (_file, db, fx) = crate::test_support::remote_db();
+        let id = db
+            .insert_remote_message(
+                fx.account,
+                fx.archive,
+                1,
+                &crate::test_support::remote_message("r", None),
+            )
+            .unwrap();
+        assert!(db.toggle_message_starred(id).unwrap());
+        assert_eq!(
+            db.get_message(id).unwrap().unwrap().folders_csv,
+            ",sys:archive,sys:flagged,"
+        );
+        assert!(!db.toggle_message_starred(id).unwrap());
+        assert_eq!(
+            db.get_message(id).unwrap().unwrap().folders_csv,
+            ",sys:archive,"
+        );
     }
 
     #[test]

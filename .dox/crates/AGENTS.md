@@ -14,14 +14,16 @@ isolated tests, and shorter incremental compiles.
 
 ## Local Contracts
 
-- Members (see root `Cargo.toml`): `theme`, `ui`, `storage`, `html_view`,
-  `bgmail`.
+- Members (see root `Cargo.toml`): `theme`, `ui`, `storage`, `mail_core`,
+  `html_view`, `bgmail`.
 - **Dependency direction:** UI depends on domain/storage, never the reverse.
   Domain and protocols must not know about GPUI. Today: `bgmail` → `ui` →
   `theme`; `bgmail` → `storage`; `storage` has no GPUI/`ui`/`theme` deps.
   `html_view` depends on `gpui` + Blitz only (no `ui`/`theme`/`storage`).
-- Future crates (planned, not members yet): `mail_core`, `protocols`,
-  `accounts` — see `docs/PLANEJAMENTO.md` §4.
+  `mail_core` is a leaf domain crate (no GPUI/`ui`/`theme`/`storage`, no I/O);
+  sync/protocol/storage adapters depend on it, never the reverse.
+- Future crates (planned, not members yet): `protocols`, `accounts` — see
+  `docs/PLANEJAMENTO.md` §4.
 - Prefer published `gpui` from crates.io (`0.2.2` workspace pin). Local Zed
   (`~/dev/zed`) is read-only reference only.
 - Empty / unused directories under `crates/` are not workspace members and must
@@ -52,5 +54,6 @@ isolated tests, and shorter incremental compiles.
 | `crates/theme/` | [`.dox/crates/theme/AGENTS.md`](theme/AGENTS.md) | Theme colors, appearance, `ActiveTheme` |
 | `crates/ui/` | [`.dox/crates/ui/AGENTS.md`](ui/AGENTS.md) | Reusable GPUI components and semantic `Color` |
 | `crates/storage/` | [`.dox/crates/storage/AGENTS.md`](storage/AGENTS.md) | SQLite mail store, schema, seed, search |
+| `crates/mail_core/` | [`.dox/crates/mail_core/AGENTS.md`](mail_core/AGENTS.md) | Mail domain types, MIME parse/build, reply/thread helpers, `MailRemote`/`MailSender` + fakes |
 | `crates/html_view/` | [`.dox/crates/html_view/AGENTS.md`](html_view/AGENTS.md) | Native GPUI HTML rendering (Blitz layout, GPUI paint/text) |
 | `crates/bgmail/` | [`.dox/crates/bgmail/AGENTS.md`](bgmail/AGENTS.md) | App binary: windows, layout, reader, i18n |
