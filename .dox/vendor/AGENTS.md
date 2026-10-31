@@ -126,6 +126,7 @@ repository instead of living in someone's checkout.
       - `valign` on table parts;
       - image `align`, `hspace`, `vspace` (`legacy_image_align_css`, exported);
       - `<body link>`;
+      - `align=justify` → `text-align: justify`;
       - `<hr color/noshade/size/width/align>`.
 - `taffy`:
   - `compute/block.rs`: compressible replaced items with percentage

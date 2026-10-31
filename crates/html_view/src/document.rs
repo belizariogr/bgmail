@@ -2142,4 +2142,24 @@ mod tests {
             .iter()
             .all(|c| *c == [128, 128, 128, 255]));
     }
+
+    #[test]
+    fn align_justify_justifies_text() {
+        let first_line_end = |attr: &str| {
+            let mut doc = laid_out(&format!("<!DOCTYPE html><body style=\"margin:0\"><div style=\"width:200px\"><p {attr}>aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm nnn</p></div>"));
+            let list = doc.display_list();
+            let run = list
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    crate::display_list::Command::Text(run) => Some(run.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            let last = run.words.last().unwrap();
+            last.x + last.width
+        };
+        assert!(first_line_end("") < 195.0);
+        assert!((first_line_end("align=\"justify\"") - 200.0).abs() < 1.0);
+    }
 }

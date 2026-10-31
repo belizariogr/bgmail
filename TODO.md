@@ -469,9 +469,10 @@
      current templates.
      - Body heights against Chromium at 800px: mean deviation 0.51% over 89
        mails, counting the template corpus.
-     - Capture 6 SSIM (375/600/800/1280): 0.679 / 0.723 / 0.776 / 0.837, up
+     - Capture 7 SSIM (375/600/800/1280): 0.689 / 0.739 / 0.788 / 0.846, up
        from 0.584 / 0.590 / 0.658 / 0.744 (capture 3).
-     - Agent review average: 8.78, up from about 7.3.
+     - Agent review average: 9.06 (capture 7), up from 8.78 (capture 6) and
+       about 7.3 before the round.
      - Fixed:
        - broken-image rendering (alt text keeping the image's font, frames
          only from 18px, floats, spacing, width-only blocks);
@@ -493,11 +494,16 @@
        - `<select>` (closed drop-down with its option and ▾) and
          `<input size>` with Chromium's metrics;
        - Windows-1252 C1 characters;
+       - `align=justify`;
        - the reader keeping the message's doctype.
      - Next:
        - recapture and re-review;
-       - remaining drift in ham-01, ham-16 and ham-05 (iframe ads, listbox
-         `<select size>`);
+       - ham-17 (4.5): rowspan cells with a declared height push their
+         extra height into constrained rows (Taffy's spanning-item
+         distribution); Chromium gives it to unconstrained rows;
+       - remaining drift in ham-01, ham-16 and ham-05 (fonts missing here,
+         iframe ads, listbox `<select size>`);
+       - alt text of fixed-size images isn't clipped to the image box;
        - fonts registered under another family (Arial Black as "Arial"
          Black);
        - CJK/RTL and multi-MB mail are still missing from the corpus.

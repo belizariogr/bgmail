@@ -1,0 +1,85 @@
+{
+  "rge-ollama-mistral-large-open-source": {
+    "score": 10,
+    "issues": [],
+    "css_suspect": ""
+  },
+  "rge-organic-valley-thanksgiving-giveaway": {
+    "score": 8.5,
+    "issues": [
+      "[médio] Título do hero ('Your Thanksgiving feast just got a little more exciting!') e links do rodapé 'UNSUBSCRIBE'/'PRIVACY' usam font-family:'arial black'; no Chromium saem com peso pesado/extra-bold, no html_view caem num fallback de peso normal (400) — perda clara da hierarquia visual, além de quebras de linha diferentes no título (3 linhas em ambos, mas cortes distintos).",
+      "[baixo] Imagens sem alt (logo do cabeçalho, 3 imagens empilhadas entre os blocos verdes e 6 ícones sociais) não mostram nada no html_view; o espaço é preservado e o layout bate, só não há marcador."
+    ],
+    "css_suspect": "font-family:'arial black' sem mapeamento para uma face Black/Heavy (fallback de fonte ignora o peso implícito na família)"
+  },
+  "rge-pacaso-owner-spotlight-seasonal-homes": {
+    "score": 9.5,
+    "issues": [
+      "[baixo] Alt text dentro das caixas de imagem dos cards (Charles Street, Pacific Shores, Glen Abbey, Morningside) quebra em pontos diferentes: no Chromium a primeira linha começa recuada após o ícone; no html_view o texto ocupa a largura toda com o quadradinho sobreposto. Layout dos cards idêntico."
+    ],
+    "css_suspect": "layout inline do alt text de <img> quebrada (ícone não participa do fluxo inline)"
+  },
+  "rge-pillsbury-halloween-costume-recipes": {
+    "score": 7.5,
+    "issues": [
+      "[médio] Alt text do logo ('Pillsbury Logo', fonte grande azul) é cortado na base no html_view (a segunda linha 'Logo' aparece pela metade); no Chromium as duas linhas aparecem inteiras.",
+      "[médio] Alt texts das imagens dentro de <a> (receitas, 'See the Full Week', 'Explore More Pies', 'Pizza Crescent Loaf' etc.) aparecem sem sublinhado no html_view; no Chromium herdam text-decoration:underline do link.",
+      "[médio] Caixas de imagem quebrada com alt são alguns px mais altas no html_view (ícone 16px em linha própria/maior line-height), acumulando deslocamento: blocos creme/azul crescem ~5–14 px cada e a página termina ~21 px mais alta; a grade 'Trending Easy Dinners' e o rodapé ficam deslocados.",
+      "[baixo] Alt texts curtos no Chromium ficam centralizados na largura da imagem com o ícone à esquerda; no html_view o alt colapsa junto ao quadradinho, centralizado como bloco inline estreito."
+    ],
+    "css_suspect": "renderização do alt text de <img> quebrada: overflow/clipping para height fixo, herança de text-decoration do <a>, altura da linha da caixa de alt"
+  },
+  "rge-primal-kitchen-halloween-bogo-collagen": {
+    "score": 8.8,
+    "issues": [
+      "[baixo] Grade de produtos (4 itens): na célula 'Unflavored Collagen Peptides' o ícone e o texto ficam centralizados verticalmente em relação à célula vizinha de 2 linhas no html_view (~8 px mais baixos); no Chromium ficam alinhados ao topo.",
+      "[baixo] Todo o conteúdo abaixo do primeiro bloco fica ~2–3 px mais baixo (alt de imagens com altura ligeiramente maior).",
+      "[baixo] Imagem sem alt acima de 'Made For Real Food™' e ícones sociais: sem marcador (ignorável), espaço preservado."
+    ],
+    "css_suspect": "vertical-align/valign padrão de <td> (middle vs top herdado) na grade de produtos; altura da caixa de alt"
+  },
+  "rge-promise-gluten-free-fall-brioche-toast": {
+    "score": 9.6,
+    "issues": [
+      "[baixo] Faixas de imagem quebrada (topo do hero e acima da receita) têm borda roxa de link no Chromium e moldura prateada no html_view; espaço e posição idênticos."
+    ],
+    "css_suspect": "borda de <img> dentro de <a> (cor do link) vs moldura de imagem quebrada"
+  },
+  "rge-pure-halloween-dog-food-education": {
+    "score": 9.7,
+    "issues": [
+      "[baixo] Alt text 'Logo' e 'Human score' sem sublinhado/com quadradinho em vez do ícone; resto idêntico."
+    ],
+    "css_suspect": ""
+  },
+  "rge-reverb-halloween-gear-deals": {
+    "score": 9.0,
+    "issues": [
+      "[baixo] Alt texts de imagens dentro de links (hero 'A yellow Electro-Harmonix…', produtos Fender/Yamaha/Crate/Gretsch, 'Halloween deals are on', 'Download the Reverb App') aparecem sem sublinhado no html_view; no Chromium herdam o underline do <a>.",
+      "[baixo] Alt do hero: no Chromium é cortado na largura da imagem (texto 'cobwe…'/'spid…' truncado), no html_view quebra e mostra o texto completo; alt dos produtos fica centralizado no html_view e alinhado com recuo do ícone no Chromium."
+    ],
+    "css_suspect": "text-decoration herdado do <a> não aplicado ao alt text; overflow:hidden na caixa de alt"
+  },
+  "rge-rspca-autumn-newsletter": {
+    "score": 9.0,
+    "issues": [
+      "[baixo] Deslocamento vertical cumulativo de ~2–3 px por seção (página termina 11 px mais alta) — vem das caixas de alt/ícone de imagem quebrada um pouco mais altas (cabeçalho, 'A tortoiseshell cat…', 'Two grey seals…').",
+      "[baixo] Alt texts dos links (gatos, focas, Facebook/TikTok/YouTube/Instagram/X no rodapé) sem sublinhado no html_view; no Chromium sublinhados."
+    ],
+    "css_suspect": "altura da caixa de alt de <img> quebrada; text-decoration herdado do <a>"
+  },
+  "rge-starbucks-black-cat-frappuccino-halloween": {
+    "score": 9.7,
+    "issues": [
+      "[baixo] Somente diferenças de marcador de imagem quebrada (quadradinho vs ícone) no hero, 'Order now', ícones da barra verde e sociais; layout e texto idênticos."
+    ],
+    "css_suspect": ""
+  },
+  "rge-thira-brief-art-design-newsletter": {
+    "score": 9.8,
+    "issues": [
+      "[baixo] Alt 'thira' do logo do rodapé sem o espaço/ícone do Chromium; resto idêntico."
+    ],
+    "css_suspect": ""
+  }
+}

@@ -1076,6 +1076,9 @@ impl<'a> TElement for BlitzNode<'a> {
                     || value.eq_ignore_ascii_case("middle")
                 {
                     Some(StyloTextAlign::MozCenter)
+                } else if value.eq_ignore_ascii_case("justify") {
+                    // BGMail: `align=justify` (HTML rendering §15.3.3).
+                    Some(StyloTextAlign::Justify)
                 } else {
                     None
                 };

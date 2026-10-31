@@ -223,7 +223,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   unavailable images framed only from 18px, width-only block images,
   inline alt text keeping the image's font, collapsed borders per cell, C1
   controls repaired, collapsed tables without padding, alt text in links
-  underlined, plain `<hr>` bevel,
+  underlined, plain `<hr>` bevel, `align=justify`,
   root background filling a requested height, relative URLs neither panicking
   nor counted as remote, XHTML mail keeps block `<p>`, blocked remote image
   recording, text runs carry ordered words + face.
