@@ -350,12 +350,26 @@
 - ✅ `RootView` wired to SQLite: folder selection, global mailboxes, list
       preview from plain text, reader from raw HTML/text, search mode
       ("Searching" / "Buscando") across all accounts
-- 🔄 Synchronization state machine (`mail_sync`: pure planner + engine)
+- ✅ Synchronization state machine (`mail_sync`): per-account worker + IDLE
+      threads, pure planner (folder mapping, UIDVALIDITY reset, windowed
+      header fetch, CONDSTORE flag refresh), optimistic actions + server-op
+      queue, outbox (send then APPEND to Sent unless Gmail), body prefetch,
+      `cid:` images inlined, orphan purge; tested against `FakeRemote`
 
 ## Stage 3 — Connectivity
-- ⬜ `protocols` crate: generic traits (Fetch/Send) + IMAP/POP3/SMTP
-- ⬜ Gmail via OAuth2 + API
-- ⬜ `accounts` crate: account and credential management (per-platform keychain)
+- ✅ `protocols` crate: IMAP (`imap` 3.0-alpha + raw commands parsed with
+      `imap-proto`: X-GM-*, COPYUID, HIGHESTMODSEQ), STARTTLS/TLS on one
+      rustls 0.23 + platform verifier, SMTP (`lettre` transport), IDLE with
+      prompt cancellation; GreenMail + Dovecot integration tests
+      (`tests/greenmail.sh`, env-gated)
+- ✅ Gmail via OAuth2 (PKCE loopback, refresh, id_token e-mail) + XOAUTH2 on
+      IMAP/SMTP; client id from `BGMAIL_GOOGLE_CLIENT_ID`/`_SECRET`
+- ✅ Provider presets (Gmail, Outlook, Yahoo, iCloud, Fastmail, UOL, …) +
+      Mozilla autoconfig/ISPDB + guess
+- ✅ ~~`accounts` crate~~ dropped (decision above); keychain via GPUI
+- ⬜ POP3 (postponed, see decision)
+- ⬜ Microsoft OAuth (Outlook.com requires it; presets flag it)
+- ⬜ Persist rotated OAuth refresh tokens (kept in memory today)
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
 - ⬜ Read / mark read-unread

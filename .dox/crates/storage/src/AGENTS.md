@@ -42,7 +42,7 @@ Signatures are authoritative; `Lnn` anchors (where present) are approximate.
 
 ### `src/lib.rs`
 
-- Module declarations (`test_support` only under `cfg(test)`) and re-exports: `Database`, `database_path`, `global_folder_path`, folder helpers, `SCHEMA_VERSION`, search helpers, seed API, `BODY_STATE_FULL` / `BODY_STATE_HEADERS`, and every type in `types.rs` plus `PROVIDER_LOCAL` / `PROVIDER_IMAP` / `PROVIDER_GMAIL`. No functions.
+- Module declarations (`test_support` only under `cfg(test)`) and re-exports: `Database`, `database_path`, `global_folder_path`, folder helpers, `SCHEMA_VERSION`, search helpers, seed API, `BODY_STATE_FULL` / `BODY_STATE_HEADERS`, and every type in `types.rs` (incl. `RemoteInsert`) plus `PROVIDER_LOCAL` / `PROVIDER_IMAP` / `PROVIDER_GMAIL`. No functions.
 
 ### `src/types.rs`
 
@@ -57,6 +57,7 @@ Signatures are authoritative; `Lnn` anchors (where present) are approximate.
 - **struct `FolderSyncState`** (`Default`, `Copy`): `uid_validity: Option<u32>`, `uid_next: Option<u32>`, `highest_modseq: Option<u64>`, `synced_at: Option<i64>`.
 - **struct `MessageLocation`**: one server location — `folder_id`, folder `remote_name`, folder `path`, `uid`.
 - **struct `NewRemoteMessage`** (`Default`): headers + flags discovered on the server: sender/email/subject/preview/plain_text, `to_addrs`, `cc_addrs`, `reply_to`, `message_id_hdr`, `in_reply_to`, `references_hdr`, `thread_id`, `date_ts`, `received_at`, `unread`, `starred`, `answered`, `has_attachment`, `size`, `gm_msgid`.
+- **struct `RemoteInsert`** (`Copy`): `message_id`, `created` (new row vs. known location / merge) — result of `record_remote_message`.
 - **struct `NewAttachment`** (`Default`): `part_index`, `filename`, `mime_type`, `size`, `content_id`, `inline`.
 - **struct `AttachmentRow`**: stored attachment metadata (`id`, `message_id` + `NewAttachment` fields).
 - **struct `PendingOp`**: queued server action — `id`, `account_id`, `kind`, `message_id`, `payload` (opaque JSON), `attempts`, `last_error`, `created_at` (unix s).
@@ -160,7 +161,8 @@ _(No functions.)_
 - **`insert_message_row`** (private): inserts a headers-only row (`raw_content ''`, `raw_format 'text'`, `body_state 0`, csv `,,`, `search_text` from sender/email/subject/plain text).
 - **`location_message_id`** (private): message id at `(folder_id, uid)`.
 - **`message_locations_in`** (private): locations of a message joined with folder path/remote name, by location id.
-- **`Database::insert_remote_message`** (pub) — `pub fn insert_remote_message(&self, account_id: i64, folder_id: i64, uid: u32, message: &NewRemoteMessage) -> rusqlite::Result<i64>`: write tx; existing `(folder, uid)` → its id (nothing written); else merge target or new row, insert location, refresh membership. Merges do not update fields/flags.
+- **`Database::insert_remote_message`** (pub) — `pub fn insert_remote_message(&self, account_id: i64, folder_id: i64, uid: u32, message: &NewRemoteMessage) -> rusqlite::Result<i64>`: `record_remote_message(..).message_id`.
+- **`Database::record_remote_message`** (pub) — `pub fn record_remote_message(&self, account_id: i64, folder_id: i64, uid: u32, message: &NewRemoteMessage) -> rusqlite::Result<RemoteInsert>`: write tx; existing `(folder, uid)` → its id, `created: false` (nothing written); else merge target (`created: false`) or new row (`created: true`), insert location, refresh membership. Merges do not update fields/flags.
 - **`Database::folder_uids`** (pub) — `pub fn folder_uids(&self, folder_id: i64) -> rusqlite::Result<Vec<(u32, i64)>>`: `(uid, message_id)` ascending.
 - **`Database::max_uid`** (pub) — `pub fn max_uid(&self, folder_id: i64) -> rusqlite::Result<Option<u32>>`.
 - **`Database::remove_locations`** (pub) — `pub fn remove_locations(&self, folder_id: i64, uids: &[u32]) -> rusqlite::Result<()>`: write tx; deletes known locations, then `settle_after_location_loss` on affected messages. Unknown uids ignored.
@@ -172,7 +174,11 @@ _(No functions.)_
 - **`Database::message_locations`** (pub) — `pub fn message_locations(&self, message_id: i64) -> rusqlite::Result<Vec<MessageLocation>>`.
 - **`Database::messages_without_body`** (pub) — `pub fn messages_without_body(&self, account_id: i64, limit: usize) -> rusqlite::Result<Vec<i64>>`: `body_state 0` messages **with at least one location** (fetchable), newest first (`date_ts DESC, id DESC`).
 - **`Database::detach_locations`** (pub) — `pub fn detach_locations(&self, message_id: i64) -> rusqlite::Result<Vec<MessageLocation>>`: write tx; returns then deletes all locations; csv untouched (message is now in flight).
-- Tests: `insert_creates_headers_only_message_with_location`, `insert_same_location_twice_returns_existing`, `gm_msgid_merges_locations` (no cross-account merge), `message_id_merges_only_in_flight_messages`, `detach_keeps_csv_and_returns_nothing_twice`, `folder_uids_and_max_uid`, `remove_locations_deletes_remote_orphans_only`, `clear_folder_locations_uses_orphan_rules`, `apply_remote_flags_updates_and_reports_change`, `store_body_fills_message_and_attachments`, `store_body_for_missing_message_is_noop`, `messages_without_body_newest_first_with_locations`, `list_order_is_date_then_sort_order`; helper `count`.
+- **`Database::attach_location`** (pub) — `pub fn attach_location(&self, message_id: i64, folder_id: i64, uid: u32) -> rusqlite::Result<bool>`: write tx; inserts the location and refreshes membership; `false` (nothing written) when the message is gone or `(folder, uid)` already belongs to a message.
+- **`Database::detach_location`** (pub) — `pub fn detach_location(&self, message_id: i64, folder_id: i64) -> rusqlite::Result<Option<MessageLocation>>`: write tx; removes the message's first location in that folder and returns it; membership refreshed (no-op when no location remains → in flight, csv kept); `None` when it had none there.
+- **`Database::purge_orphans`** (pub) — `pub fn purge_orphans(&self, account_id: i64) -> rusqlite::Result<usize>`: write tx; deletes the account's messages with no location and no `pending_ops` row referencing them, only for non-`local` providers; returns the count.
+- **`Database::folder_messages_without_body`** (pub) — `pub fn folder_messages_without_body(&self, folder_id: i64, limit: usize, max_size: u64) -> rusqlite::Result<Vec<(i64, u32)>>`: among the folder's `limit` newest located messages (`date_ts DESC, uid DESC`), the `body_state 0` ones with `size <= max_size`, as `(message_id, uid)` newest first (body prefetch).
+- Tests: `insert_creates_headers_only_message_with_location`, `insert_same_location_twice_returns_existing`, `gm_msgid_merges_locations` (no cross-account merge), `message_id_merges_only_in_flight_messages`, `detach_keeps_csv_and_returns_nothing_twice`, `folder_uids_and_max_uid`, `remove_locations_deletes_remote_orphans_only`, `clear_folder_locations_uses_orphan_rules`, `apply_remote_flags_updates_and_reports_change`, `store_body_fills_message_and_attachments`, `store_body_for_missing_message_is_noop`, `messages_without_body_newest_first_with_locations`, `record_remote_message_reports_creation`, `attach_location_adds_and_refreshes_membership`, `detach_location_removes_one_folder_only`, `purge_orphans_spares_located_queued_and_local_mail`, `folder_messages_without_body_limits_to_newest_and_size`, `list_order_is_date_then_sort_order`; helper `count`.
 
 ### `src/queue.rs`
 
@@ -181,13 +187,14 @@ _(No functions.)_
 - **`Database::pending_ops`** (pub) — `pub fn pending_ops(&self, account_id: i64) -> rusqlite::Result<Vec<PendingOp>>`: oldest first (by id).
 - **`Database::complete_op`** (pub) — `pub fn complete_op(&self, id: i64) -> rusqlite::Result<()>`: deletes the op.
 - **`Database::fail_op`** (pub) — `pub fn fail_op(&self, id: i64, error: &str) -> rusqlite::Result<()>`: `attempts + 1`, `last_error = error`.
+- **`Database::update_op`** (pub) — `pub fn update_op(&self, id: i64, kind: &str, payload: &str) -> rusqlite::Result<()>`: rewrites kind + payload in place (id, attempts, order kept).
 - **`Database::drop_ops_for_message`** (pub) — `pub fn drop_ops_for_message(&self, message_id: i64) -> rusqlite::Result<()>`: deletes ops targeting the message.
 - **`Database::enqueue_outgoing`** (pub) — `pub fn enqueue_outgoing(&self, account_id: i64, sender: &str, recipients: &[String], raw: &[u8], message_id_hdr: Option<&str>) -> rusqlite::Result<i64>`: recipients stored newline-separated.
 - **`Database::outbox`** (pub) — `pub fn outbox(&self, account_id: i64) -> rusqlite::Result<Vec<OutgoingRow>>`: oldest first; recipients split on lines (empty lines dropped).
 - **`Database::outbox_count`** (pub) — `pub fn outbox_count(&self) -> rusqlite::Result<usize>`: all accounts.
 - **`Database::complete_outgoing`** (pub) — `pub fn complete_outgoing(&self, id: i64) -> rusqlite::Result<()>`: deletes the row.
 - **`Database::fail_outgoing`** (pub) — `pub fn fail_outgoing(&self, id: i64, error: &str) -> rusqlite::Result<()>`: `attempts + 1`, `last_error`.
-- Tests: `unix_now_is_after_2020`, `pending_ops_lifecycle`, `outbox_lifecycle`.
+- Tests: `unix_now_is_after_2020`, `pending_ops_lifecycle` (incl. `update_op`), `outbox_lifecycle`.
 
 ### `src/message_ops.rs`
 
@@ -209,13 +216,14 @@ These edit `folders_csv` directly and work for every message. For a remote messa
 - **`move_message_to_trash`** (pub) — `pub fn move_message_to_trash(&self, id: i64) -> rusqlite::Result<()>`: primary → `sys:trash`.
 - **`restore_message_from_trash`** (pub) — `pub fn restore_message_from_trash(&self, id: i64) -> rusqlite::Result<()>`: if in trash, primary → inbox.
 - **`delete_message_permanently`** (pub) — `pub fn delete_message_permanently(&self, id: i64) -> rusqlite::Result<bool>`: only when in trash; row delete cascades locations/body/attachments and updates FTS.
+- **`delete_message`** (pub) — `pub fn delete_message(&self, id: i64) -> rusqlite::Result<bool>`: unconditional row delete (cascades, FTS follows); whether a row was deleted. Callers queue the server delete first.
 - **`archive_message`** / **`mark_message_junk`** (pub) — `(&self, id: i64) -> rusqlite::Result<()>`: primary → archive / junk.
 - **`move_message_to_folder`** (pub) — `pub fn move_message_to_folder(&self, id: i64, folder_path: &str) -> rusqlite::Result<()>`: no-op for forbidden targets.
 - **`toggle_message_starred`** (pub) — `pub fn toggle_message_starred(&self, id: i64) -> rusqlite::Result<bool>`: flips `starred` + `sys:flagged` in csv, then `refresh_membership_in` (write tx); returns new state (`false` if missing).
 - **`set_message_unread`** (pub) — `pub fn set_message_unread(&self, id: i64, unread: bool) -> rusqlite::Result<bool>`: whether the row changed.
 - **`set_messages_unread`** (pub) — `pub fn set_messages_unread(&self, ids: &[i64], unread: bool) -> rusqlite::Result<usize>`: write tx; number of rows changed.
 - **`message_is_in_trash`** (pub) — `pub fn message_is_in_trash(&self, id: i64) -> rusqlite::Result<bool>`.
-- Tests: fixtures `seeded_db`, `message_csv`, `message_id`; `replace_primary_folder_keeps_flagged`, `move_to_trash_keeps_flagged_membership`, `restore_from_trash_moves_to_inbox`, `permanent_delete_only_from_trash`, `archive_and_junk_replace_primary`, `toggle_starred_updates_flagged_folder`, `move_to_custom_folder`, `set_message_unread_reports_change`, `set_messages_unread_counts_changes`, `toggle_starred_on_remote_message_keeps_location_membership`, `move_to_sent_is_noop`.
+- Tests: fixtures `seeded_db`, `message_csv`, `message_id`; `delete_message_works_outside_trash`, `replace_primary_folder_keeps_flagged`, `move_to_trash_keeps_flagged_membership`, `restore_from_trash_moves_to_inbox`, `permanent_delete_only_from_trash`, `archive_and_junk_replace_primary`, `toggle_starred_updates_flagged_folder`, `move_to_custom_folder`, `set_message_unread_reports_change`, `set_messages_unread_counts_changes`, `toggle_starred_on_remote_message_keeps_location_membership`, `move_to_sent_is_noop`.
 
 ### `src/test_support.rs` (`cfg(test)`)
 

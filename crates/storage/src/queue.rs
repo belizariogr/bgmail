@@ -70,6 +70,17 @@ impl Database {
         Ok(())
     }
 
+    /// Rewrites a queued action in place (keeps its id, so replay order and
+    /// attempts are preserved). Used when a later UI action or a completed
+    /// move changes what an older op must do.
+    pub fn update_op(&self, id: i64, kind: &str, payload: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE pending_ops SET kind = ?1, payload = ?2 WHERE id = ?3",
+            params![kind, payload, id],
+        )?;
+        Ok(())
+    }
+
     /// Drops every queued action that targets `message_id`.
     pub fn drop_ops_for_message(&self, message_id: i64) -> rusqlite::Result<()> {
         self.conn().execute(
@@ -192,6 +203,12 @@ mod tests {
         let op = &db.pending_ops(fx.account).unwrap()[0];
         assert_eq!(op.attempts, 2);
         assert_eq!(op.last_error.as_deref(), Some("refused"));
+
+        db.update_op(first, "delete", r#"{"x":1}"#).unwrap();
+        let op = &db.pending_ops(fx.account).unwrap()[0];
+        assert_eq!((op.id, op.kind.as_str()), (first, "delete"));
+        assert_eq!(op.payload, r#"{"x":1}"#);
+        assert_eq!(op.attempts, 2, "update keeps the attempt count");
 
         db.complete_op(second).unwrap();
         assert_eq!(db.pending_ops(fx.account).unwrap().len(), 1);

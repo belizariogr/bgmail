@@ -145,6 +145,15 @@ pub struct NewRemoteMessage {
     pub gm_msgid: Option<u64>,
 }
 
+/// Result of [`crate::Database::record_remote_message`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteInsert {
+    pub message_id: i64,
+    /// `true` when a new message row was created (not a merge or a known
+    /// location).
+    pub created: bool,
+}
+
 /// Attachment metadata extracted from a downloaded body.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewAttachment {

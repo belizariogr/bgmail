@@ -110,6 +110,16 @@ impl Database {
         Ok(changed > 0)
     }
 
+    /// Deletes the message row wherever it lives (cascades locations, body,
+    /// attachments; FTS follows). Callers queue the server-side delete first.
+    /// Returns whether a row was deleted.
+    pub fn delete_message(&self, id: i64) -> rusqlite::Result<bool> {
+        let changed = self
+            .conn()
+            .execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
+    }
+
     /// Archives the message (primary folder becomes Archive).
     pub fn archive_message(&self, id: i64) -> rusqlite::Result<()> {
         self.set_primary_folder(id, system::ARCHIVE)
@@ -288,6 +298,15 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn delete_message_works_outside_trash() {
+        let (_file, db) = seeded_db();
+        let id = message_id(&db, "Inbox");
+        assert!(db.delete_message(id).unwrap());
+        assert!(db.get_message(id).unwrap().is_none());
+        assert!(!db.delete_message(id).unwrap());
     }
 
     #[test]

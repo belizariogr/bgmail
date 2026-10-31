@@ -15,6 +15,5 @@ mail-parser = "0.11"
 # hostname lookup (`gethostname`) is never needed.
 mail-builder = { version = "~2.0", default-features = false }
 serde = { workspace = true }
-
-[dev-dependencies]
+# Account configs are stored as JSON (`AccountConfig::to_json`).
 serde_json = { workspace = true }

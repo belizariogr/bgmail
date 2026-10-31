@@ -2,19 +2,23 @@
 
 ## Purpose
 
-Pure, storage-agnostic mail domain types and logic shared by the future sync
+Pure, storage-agnostic mail domain types and logic shared by the `mail_sync`
 engine, storage adapters and protocol clients: addresses, IMAP flags, folder
 roles + modified UTF-7, MIME parsing (`mail-parser`) and building
 (`mail-builder`), reply/forward drafts, thread keys, and the blocking
-`MailRemote` / `MailSender` contracts with in-memory fakes.
+`MailRemote` / `MailSender` / `MailConnector` contracts with in-memory
+fakes, account server settings (`AccountConfig`) and cooperative
+cancellation (`CancelToken`).
 
 ## Ownership
 
 - Owns: `Address`, `MessageFlags`, `FolderRole` / `RemoteFolder`,
   `ParsedMessage` / `AttachmentInfo`, `Draft` / `OutgoingAttachment`,
-  reply/thread helpers, `remote` traits and value types, `fake` test doubles.
+  reply/thread helpers, `AccountConfig` (JSON in `accounts.config_json`),
+  `CancelToken`, `remote` traits and value types, `fake` test doubles
+  (remote, sender, connector).
 - Does not own: persistence (`storage`), sync orchestration, real IMAP/SMTP
-  implementations (future `protocols`), credentials (future `accounts`), UI
+  implementations (`protocols`), secrets (GPUI keychain in `bgmail`), UI
   text/i18n and date formatting (`bgmail` passes pre-formatted `QuoteLabels`).
 
 ## Local Contracts
@@ -23,8 +27,7 @@ roles + modified UTF-7, MIME parsing (`mail-parser`) and building
   (`#![forbid(unsafe_code)]`). Only the clock is read (`new_message_id`).
 - Dependencies: `mail-parser = "0.11"` (1.x needs Rust 1.98; toolchain is
   1.95), `mail-builder = "~2.0"` with `default-features = false` (no
-  `gethostname`; we always set Message-ID/Date), `serde` (workspace). Dev:
-  `serde_json`. Add nothing else without a real need.
+  `gethostname`; we always set Message-ID/Date), `serde` + `serde_json` (workspace; account JSON). Add nothing else without a real need.
 - Message-IDs are stored and passed **without** angle brackets everywhere;
   `build_message` adds them.
 - `ParsedMessage.html` / `.text` are the message's own parts only (never
@@ -33,10 +36,18 @@ roles + modified UTF-7, MIME parsing (`mail-parser`) and building
   bytes; feed it to `attachment_content`.
 - Bcc never appears in built headers; it only travels via
   `envelope_recipients`.
-- `MailRemote` / `MailSender` are blocking, object-safe and `Send`. IDLE lives
-  in the protocols crate, not in the trait (`IdleOutcome` is shared vocabulary).
-- Feature `fake` exposes `fake::{FakeRemote, FakeSender}` to other crates'
-  tests; it is always on for this crate's own tests. Clones share server state.
+- `MailRemote` / `MailSender` / `MailConnector` are blocking, object-safe and
+  `Send`. `MailRemote::idle` defaults to `Unsupported` (the engine then
+  polls). Blocking IO is interrupted through `CancelToken` hooks (e.g. a
+  socket `shutdown`), never by killing threads.
+- `AccountConfig` never holds a secret; the keychain key is
+  `AccountConfig::secret_key()` (`bgmail://<username>@<imap host>`).
+- Feature `fake` exposes `fake::{FakeRemote, FakeSender, FakeConnector}` to
+  other crates' tests (the `mail_sync` engine tests); it is always on for this
+  crate's own tests. Clones share server state. `FakeRemote::idle` blocks on a
+  `Condvar` until its folder changes, the timeout passes or the `CancelToken`
+  fires (prompt); Gmail mode (`capabilities.gmail`) reports a stable
+  `gm_msgid` per raw message.
 - Serde derives only where JSON persistence is expected: `Address`,
   `MessageFlags`, `FolderRole` (lowercase strings), `RemoteFolder`,
   `AttachmentInfo`, `Draft`, `OutgoingAttachment`.

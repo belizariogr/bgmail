@@ -9,7 +9,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::membership::{message_ids_in_folder, refresh_membership_in, settle_after_location_loss};
 use crate::search::build_search_text;
-use crate::types::{AttachmentRow, MessageLocation, NewAttachment, NewRemoteMessage};
+use crate::types::{
+    AttachmentRow, MessageLocation, NewAttachment, NewRemoteMessage, RemoteInsert, PROVIDER_LOCAL,
+};
 use crate::Database;
 
 /// `messages.body_state` while only headers are known.
@@ -134,13 +136,30 @@ impl Database {
         uid: u32,
         message: &NewRemoteMessage,
     ) -> rusqlite::Result<i64> {
+        self.record_remote_message(account_id, folder_id, uid, message)
+            .map(|insert| insert.message_id)
+    }
+
+    /// [`Self::insert_remote_message`] that also reports whether a new row
+    /// was created (the sync engine only announces genuinely new mail, not
+    /// merges of moved or multi-label messages).
+    pub fn record_remote_message(
+        &self,
+        account_id: i64,
+        folder_id: i64,
+        uid: u32,
+        message: &NewRemoteMessage,
+    ) -> rusqlite::Result<RemoteInsert> {
         let tx = self.write_transaction()?;
         if let Some(existing) = location_message_id(&tx, folder_id, uid)? {
-            return Ok(existing);
+            return Ok(RemoteInsert {
+                message_id: existing,
+                created: false,
+            });
         }
-        let message_id = match find_merge_target(&tx, account_id, message)? {
-            Some(id) => id,
-            None => insert_message_row(&tx, account_id, message)?,
+        let (message_id, created) = match find_merge_target(&tx, account_id, message)? {
+            Some(id) => (id, false),
+            None => (insert_message_row(&tx, account_id, message)?, true),
         };
         tx.execute(
             "INSERT INTO message_locations (message_id, folder_id, uid) VALUES (?1, ?2, ?3)",
@@ -148,7 +167,10 @@ impl Database {
         )?;
         refresh_membership_in(&tx, message_id)?;
         tx.commit()?;
-        Ok(message_id)
+        Ok(RemoteInsert {
+            message_id,
+            created,
+        })
     }
 
     /// `(uid, message_id)` pairs of the folder, ascending by uid.
@@ -382,6 +404,114 @@ impl Database {
         )?;
         tx.commit()?;
         Ok(locations)
+    }
+}
+
+impl Database {
+    /// Records that the message now also lives at `(folder_id, uid)` (e.g. the
+    /// COPYUID of a server-side move) and refreshes its membership. Returns
+    /// `false` when the message is gone or the location already belongs to a
+    /// message (nothing written then).
+    pub fn attach_location(
+        &self,
+        message_id: i64,
+        folder_id: i64,
+        uid: u32,
+    ) -> rusqlite::Result<bool> {
+        let tx = self.write_transaction()?;
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM messages WHERE id = ?1",
+                params![message_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists || location_message_id(&tx, folder_id, uid)?.is_some() {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO message_locations (message_id, folder_id, uid) VALUES (?1, ?2, ?3)",
+            params![message_id, folder_id, uid],
+        )?;
+        refresh_membership_in(&tx, message_id)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Removes the message's (first) location in `folder_id` and returns it so
+    /// the caller can queue the server-side move. Membership is refreshed
+    /// when other locations remain; a message left without any is "in
+    /// flight" and keeps its `folders_csv` (like [`Self::detach_locations`]).
+    pub fn detach_location(
+        &self,
+        message_id: i64,
+        folder_id: i64,
+    ) -> rusqlite::Result<Option<MessageLocation>> {
+        let tx = self.write_transaction()?;
+        let Some(location) = message_locations_in(&tx, message_id)?
+            .into_iter()
+            .find(|location| location.folder_id == folder_id)
+        else {
+            return Ok(None);
+        };
+        tx.execute(
+            "DELETE FROM message_locations WHERE folder_id = ?1 AND uid = ?2",
+            params![folder_id, location.uid],
+        )?;
+        refresh_membership_in(&tx, message_id)?;
+        tx.commit()?;
+        Ok(Some(location))
+    }
+
+    /// Deletes the account's messages that no longer exist anywhere: no
+    /// server location and no queued op referencing them (an op means a move
+    /// is still in flight). `local` accounts are never purged. Returns how
+    /// many rows were deleted.
+    pub fn purge_orphans(&self, account_id: i64) -> rusqlite::Result<usize> {
+        let tx = self.write_transaction()?;
+        let deleted = tx.execute(
+            "DELETE FROM messages
+             WHERE account_id = ?1
+               AND account_id IN (SELECT id FROM accounts WHERE provider != ?2)
+               AND NOT EXISTS (SELECT 1 FROM message_locations l WHERE l.message_id = messages.id)
+               AND NOT EXISTS (SELECT 1 FROM pending_ops p WHERE p.message_id = messages.id)",
+            params![account_id, PROVIDER_LOCAL],
+        )?;
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    /// Body-prefetch candidates of a folder: among its `limit` newest
+    /// messages, the headers-only ones no bigger than `max_size` bytes, as
+    /// `(message_id, uid)` newest first.
+    pub fn folder_messages_without_body(
+        &self,
+        folder_id: i64,
+        limit: usize,
+        max_size: u64,
+    ) -> rusqlite::Result<Vec<(i64, u32)>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, uid FROM (
+                 SELECT m.id, l.uid, m.body_state, m.size, m.date_ts
+                 FROM message_locations l JOIN messages m ON m.id = l.message_id
+                 WHERE l.folder_id = ?1
+                 ORDER BY m.date_ts DESC, l.uid DESC
+                 LIMIT ?2
+             )
+             WHERE body_state = ?3 AND size <= ?4
+             ORDER BY date_ts DESC, uid DESC",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                folder_id,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                BODY_STATE_HEADERS as i64,
+                i64::try_from(max_size).unwrap_or(i64::MAX)
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        rows.collect()
     }
 }
 
@@ -744,6 +874,138 @@ mod tests {
             vec![new, old]
         );
         assert_eq!(db.messages_without_body(fx.account, 1).unwrap(), vec![new]);
+    }
+
+    #[test]
+    fn record_remote_message_reports_creation() {
+        let (_file, db, fx) = remote_db();
+        let first = db
+            .record_remote_message(fx.account, fx.inbox, 1, &remote_message("a", Some(9)))
+            .unwrap();
+        assert!(first.created);
+        let again = db
+            .record_remote_message(fx.account, fx.inbox, 1, &remote_message("a", Some(9)))
+            .unwrap();
+        assert_eq!(again.message_id, first.message_id);
+        assert!(!again.created, "known location");
+        let merged = db
+            .record_remote_message(fx.account, fx.archive, 5, &remote_message("a", Some(9)))
+            .unwrap();
+        assert_eq!(merged.message_id, first.message_id);
+        assert!(!merged.created, "gm_msgid merge");
+    }
+
+    #[test]
+    fn attach_location_adds_and_refreshes_membership() {
+        let (_file, db, fx) = remote_db();
+        let id = db
+            .insert_remote_message(fx.account, fx.inbox, 1, &remote_message("a", None))
+            .unwrap();
+        db.detach_locations(id).unwrap();
+        assert!(db.attach_location(id, fx.archive, 7).unwrap());
+        assert_eq!(db.folder_uids(fx.archive).unwrap(), vec![(7, id)]);
+        assert_eq!(
+            db.get_message(id).unwrap().unwrap().folders_csv,
+            ",sys:archive,"
+        );
+        assert!(!db.attach_location(id, fx.archive, 7).unwrap(), "taken");
+        assert!(
+            !db.attach_location(9999, fx.archive, 8).unwrap(),
+            "missing message"
+        );
+    }
+
+    #[test]
+    fn detach_location_removes_one_folder_only() {
+        let (_file, db, fx) = remote_db();
+        let id = db
+            .insert_remote_message(fx.account, fx.inbox, 1, &remote_message("a", Some(3)))
+            .unwrap();
+        db.insert_remote_message(fx.account, fx.archive, 2, &remote_message("a", Some(3)))
+            .unwrap();
+        let removed = db.detach_location(id, fx.inbox).unwrap().unwrap();
+        assert_eq!((removed.folder_id, removed.uid), (fx.inbox, 1));
+        assert_eq!(removed.remote_name.as_deref(), Some("INBOX"));
+        assert_eq!(
+            db.get_message(id).unwrap().unwrap().folders_csv,
+            ",sys:archive,"
+        );
+        assert_eq!(db.detach_location(id, fx.inbox).unwrap(), None);
+        // Last location: message becomes in flight and keeps its csv.
+        assert!(db.detach_location(id, fx.archive).unwrap().is_some());
+        assert_eq!(
+            db.get_message(id).unwrap().unwrap().folders_csv,
+            ",sys:archive,"
+        );
+        assert!(db.message_locations(id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn purge_orphans_spares_located_queued_and_local_mail() {
+        let (_file, db, fx) = remote_db();
+        let located = db
+            .insert_remote_message(fx.account, fx.inbox, 1, &remote_message("a", None))
+            .unwrap();
+        let orphan = db
+            .insert_remote_message(fx.account, fx.inbox, 2, &remote_message("b", None))
+            .unwrap();
+        let queued = db
+            .insert_remote_message(fx.account, fx.inbox, 3, &remote_message("c", None))
+            .unwrap();
+        let local = db
+            .insert_remote_message(
+                fx.local_account,
+                fx.local_inbox,
+                1,
+                &remote_message("d", None),
+            )
+            .unwrap();
+        for id in [orphan, queued, local] {
+            db.detach_locations(id).unwrap();
+        }
+        db.enqueue_op(fx.account, "move", Some(queued), "{}")
+            .unwrap();
+        assert_eq!(db.purge_orphans(fx.account).unwrap(), 1);
+        assert!(db.get_message(orphan).unwrap().is_none());
+        for id in [located, queued] {
+            assert!(db.get_message(id).unwrap().is_some());
+        }
+        assert_eq!(db.purge_orphans(fx.local_account).unwrap(), 0);
+        assert!(db.get_message(local).unwrap().is_some());
+    }
+
+    #[test]
+    fn folder_messages_without_body_limits_to_newest_and_size() {
+        let (_file, db, fx) = remote_db();
+        let mut ids = Vec::new();
+        for (uid, (date, size)) in [(100, 10), (200, 10), (300, 5_000), (400, 10)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut message = remote_message(&format!("m{uid}"), None);
+            message.date_ts = date;
+            message.size = size;
+            ids.push(
+                db.insert_remote_message(fx.account, fx.inbox, uid as u32 + 1, &message)
+                    .unwrap(),
+            );
+        }
+        db.store_body(ids[3], b"x", "x", "text", "x", "x", &[])
+            .unwrap();
+        // Newest 3 = ids[3] (has body), ids[2] (too big), ids[1].
+        assert_eq!(
+            db.folder_messages_without_body(fx.inbox, 3, 1_000).unwrap(),
+            vec![(ids[1], 2)]
+        );
+        assert_eq!(
+            db.folder_messages_without_body(fx.inbox, 10, 10_000)
+                .unwrap(),
+            vec![(ids[2], 3), (ids[1], 2), (ids[0], 1)]
+        );
+        assert!(db
+            .folder_messages_without_body(fx.archive, 10, 10_000)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

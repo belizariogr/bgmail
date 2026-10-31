@@ -7,6 +7,9 @@
 //! in [`crate::fake::FakeRemote`].
 
 use std::fmt;
+use std::time::Duration;
+
+use crate::cancel::CancelToken;
 
 use crate::flags::MessageFlags;
 use crate::folder::RemoteFolder;
@@ -164,6 +167,36 @@ pub trait MailRemote: Send {
     fn noop(&mut self) -> RemoteResult<()>;
     /// Best effort; never fails.
     fn logout(&mut self);
+    /// Waits for changes in `folder` (IMAP IDLE) until something changes,
+    /// `timeout` passes or `cancel` fires. Servers without IDLE return
+    /// `Unsupported`, and the engine falls back to polling.
+    fn idle(
+        &mut self,
+        folder: &str,
+        timeout: Duration,
+        cancel: &CancelToken,
+    ) -> RemoteResult<IdleOutcome> {
+        let _ = (folder, timeout, cancel);
+        Err(RemoteError::new(
+            RemoteErrorKind::Unsupported,
+            "IDLE is not supported",
+        ))
+    }
+}
+
+/// Opens connections for one account. Implemented by the protocol clients
+/// (IMAP/SMTP, with password or OAuth); the sync engine only sees this trait.
+pub trait MailConnector: Send + Sync {
+    /// Connects and authenticates an IMAP-like session. `cancel` interrupts
+    /// blocking reads on the connection for its whole lifetime.
+    fn connect(&self, cancel: &CancelToken) -> RemoteResult<Box<dyn MailRemote>>;
+    /// Connects an SMTP-like submission session.
+    fn connect_sender(&self, cancel: &CancelToken) -> RemoteResult<Box<dyn MailSender>>;
+    /// Whether the server files sent mail itself (Gmail), so the client must
+    /// not APPEND a copy to the Sent folder.
+    fn saves_sent_copy(&self) -> bool {
+        false
+    }
 }
 
 /// Message submission (SMTP-shaped). `raw` is sent as-is; `recipients` is the
@@ -175,6 +208,73 @@ pub trait MailSender: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_idle_is_unsupported() {
+        struct Minimal;
+        impl MailRemote for Minimal {
+            fn capabilities(&self) -> Capabilities {
+                Capabilities::default()
+            }
+            fn list_folders(&mut self) -> RemoteResult<Vec<RemoteFolder>> {
+                Ok(Vec::new())
+            }
+            fn select(&mut self, _: &str) -> RemoteResult<FolderStatus> {
+                Ok(FolderStatus::default())
+            }
+            fn uids(&mut self, _: &str) -> RemoteResult<Vec<u32>> {
+                Ok(Vec::new())
+            }
+            fn fetch_headers(&mut self, _: &str, _: &[u32]) -> RemoteResult<Vec<RemoteHeader>> {
+                Ok(Vec::new())
+            }
+            fn fetch_flags(
+                &mut self,
+                _: &str,
+                _: &[u32],
+                _: Option<u64>,
+            ) -> RemoteResult<Vec<RemoteFlags>> {
+                Ok(Vec::new())
+            }
+            fn fetch_body(&mut self, _: &str, _: u32) -> RemoteResult<Vec<u8>> {
+                Ok(Vec::new())
+            }
+            fn store_flags(
+                &mut self,
+                _: &str,
+                _: &[u32],
+                _: MessageFlags,
+                _: MessageFlags,
+            ) -> RemoteResult<()> {
+                Ok(())
+            }
+            fn move_messages(
+                &mut self,
+                _: &str,
+                _: &[u32],
+                _: &str,
+            ) -> RemoteResult<Option<Vec<u32>>> {
+                Ok(None)
+            }
+            fn delete_messages(&mut self, _: &str, _: &[u32]) -> RemoteResult<()> {
+                Ok(())
+            }
+            fn append(&mut self, _: &str, _: MessageFlags, _: &[u8]) -> RemoteResult<()> {
+                Ok(())
+            }
+            fn create_folder(&mut self, _: &str) -> RemoteResult<()> {
+                Ok(())
+            }
+            fn noop(&mut self) -> RemoteResult<()> {
+                Ok(())
+            }
+            fn logout(&mut self) {}
+        }
+        let err = Minimal
+            .idle("INBOX", Duration::from_secs(1), &CancelToken::new())
+            .unwrap_err();
+        assert_eq!(err.kind, RemoteErrorKind::Unsupported);
+    }
 
     #[test]
     fn error_display_and_source() {

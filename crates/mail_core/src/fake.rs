@@ -3,16 +3,20 @@
 //! Clones share one server state (`Arc<Mutex<..>>`): a test keeps a handle to
 //! mutate the "server" (deliver mail, flip flags, reset UIDVALIDITY) while the
 //! engine owns another as its `Box<dyn MailRemote>` connection.
+//! [`FakeConnector`] hands such clones out as a [`MailConnector`].
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+use crate::cancel::CancelToken;
 
 use crate::flags::MessageFlags;
 use crate::folder::RemoteFolder;
 use crate::parse::{has_attachments, parse_message};
 use crate::remote::{
-    Capabilities, FolderStatus, MailRemote, MailSender, RemoteError, RemoteErrorKind, RemoteFlags,
-    RemoteHeader, RemoteResult,
+    Capabilities, FolderStatus, IdleOutcome, MailConnector, MailRemote, MailSender, RemoteError,
+    RemoteErrorKind, RemoteFlags, RemoteHeader, RemoteResult,
 };
 
 /// Hierarchy delimiter the fake server reports for every folder.
@@ -34,6 +38,8 @@ struct FakeFolder {
     uid_validity: u32,
     uid_next: u32,
     messages: BTreeMap<u32, FakeMessage>,
+    /// Bumped by every change inside the folder; `idle` waits on it.
+    version: u64,
 }
 
 #[derive(Debug)]
@@ -74,6 +80,7 @@ impl ServerState {
         let folder = self.folder_mut(folder)?;
         let uid = folder.uid_next;
         folder.uid_next += 1;
+        folder.version += 1;
         folder.messages.insert(
             uid,
             FakeMessage {
@@ -91,6 +98,18 @@ fn not_found(folder: &str) -> RemoteError {
     RemoteError::new(RemoteErrorKind::NotFound, format!("no folder {folder}"))
 }
 
+/// Stand-in for Gmail's `X-GM-MSGID`: stable for the same raw bytes, so a
+/// message keeps its id across labels and moves (FNV-1a, 63 bits so it fits
+/// SQLite's signed integers).
+pub fn fake_gm_msgid(raw: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in raw {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash >> 1
+}
+
 fn uid_list(uids: &[u32]) -> String {
     uids.iter()
         .map(u32::to_string)
@@ -102,6 +121,8 @@ fn uid_list(uids: &[u32]) -> String {
 #[derive(Clone, Debug)]
 pub struct FakeRemote {
     state: Arc<Mutex<ServerState>>,
+    /// Signalled after every mutation (and on cancellation) to wake `idle`.
+    changed: Arc<Condvar>,
 }
 
 impl Default for FakeRemote {
@@ -132,7 +153,13 @@ impl FakeRemote {
                 selected: None,
                 logged_out: false,
             })),
+            changed: Arc::new(Condvar::new()),
         }
+    }
+
+    /// Wakes `idle` waiters; called after every mutation.
+    fn notify(&self) {
+        self.changed.notify_all();
     }
 
     fn lock(&self) -> MutexGuard<'_, ServerState> {
@@ -169,6 +196,7 @@ impl FakeRemote {
             uid_validity,
             uid_next: 1,
             messages: BTreeMap::new(),
+            version: 0,
         });
         uid_validity
     }
@@ -178,9 +206,12 @@ impl FakeRemote {
     /// # Panics
     /// If `folder` does not exist (test setup error).
     pub fn deliver(&self, folder: &str, raw: &[u8], flags: MessageFlags) -> u32 {
-        self.lock()
+        let uid = self
+            .lock()
             .insert(folder, raw.to_vec(), flags)
-            .unwrap_or_else(|e| panic!("deliver: {e}"))
+            .unwrap_or_else(|e| panic!("deliver: {e}"));
+        self.notify();
+        uid
     }
 
     /// Replaces a message's flags (another client changed them). Returns false
@@ -191,22 +222,33 @@ impl FakeRemote {
         let Ok(folder) = state.folder_mut(folder) else {
             return false;
         };
-        match folder.messages.get_mut(&uid) {
+        let found = match folder.messages.get_mut(&uid) {
             Some(message) => {
                 message.flags = flags;
                 message.modseq = modseq;
                 true
             }
             None => false,
+        };
+        if found {
+            folder.version += 1;
+            drop(state);
+            self.notify();
         }
+        found
     }
 
     /// Removes a message server-side (another client expunged it).
     pub fn expunge(&self, folder: &str, uid: u32) -> bool {
         let mut state = self.lock();
-        state
-            .folder_mut(folder)
-            .is_ok_and(|f| f.messages.remove(&uid).is_some())
+        let removed = state.folder_mut(folder).is_ok_and(|f| {
+            let removed = f.messages.remove(&uid).is_some();
+            f.version += u64::from(removed);
+            removed
+        });
+        drop(state);
+        self.notify();
+        removed
     }
 
     /// Simulates a UIDVALIDITY change: new validity and every message
@@ -221,11 +263,14 @@ impl FakeRemote {
         let messages = std::mem::take(&mut folder.messages);
         folder.uid_validity = uid_validity;
         folder.uid_next = 1;
+        folder.version += 1;
         for (_, mut message) in messages {
             message.uid = folder.uid_next;
             folder.messages.insert(folder.uid_next, message);
             folder.uid_next += 1;
         }
+        drop(state);
+        self.notify();
         uid_validity
     }
 
@@ -333,6 +378,7 @@ impl MailRemote for FakeRemote {
     fn fetch_headers(&mut self, folder: &str, uids: &[u32]) -> RemoteResult<Vec<RemoteHeader>> {
         let state = self.enter(format!("fetch_headers {folder} {}", uid_list(uids)))?;
         let condstore = state.capabilities.condstore;
+        let gmail = state.capabilities.gmail;
         let f = state.folder(folder)?;
         Ok(uids
             .iter()
@@ -341,7 +387,7 @@ impl MailRemote for FakeRemote {
                 uid: m.uid,
                 flags: m.flags,
                 size: m.raw.len() as u32,
-                gm_msgid: None,
+                gm_msgid: gmail.then(|| fake_gm_msgid(&m.raw)),
                 gm_thrid: None,
                 modseq: condstore.then_some(m.modseq),
                 header: header_block(&m.raw),
@@ -408,6 +454,9 @@ impl MailRemote for FakeRemote {
                 m.modseq = modseq;
             }
         }
+        f.version += 1;
+        drop(state);
+        self.notify();
         Ok(())
     }
 
@@ -422,6 +471,7 @@ impl MailRemote for FakeRemote {
         let uidplus = state.capabilities.uidplus;
         let moved: Vec<FakeMessage> = {
             let source = state.folder_mut(from)?;
+            source.version += 1;
             uids.iter()
                 .filter_map(|uid| source.messages.remove(uid))
                 .collect()
@@ -430,6 +480,8 @@ impl MailRemote for FakeRemote {
         for message in moved {
             new_uids.push(state.insert(to, message.raw, message.flags)?);
         }
+        drop(state);
+        self.notify();
         Ok(uidplus.then_some(new_uids))
     }
 
@@ -439,12 +491,18 @@ impl MailRemote for FakeRemote {
         for uid in uids {
             f.messages.remove(uid);
         }
+        f.version += 1;
+        drop(state);
+        self.notify();
         Ok(())
     }
 
     fn append(&mut self, folder: &str, flags: MessageFlags, raw: &[u8]) -> RemoteResult<()> {
         let mut state = self.enter(format!("append {folder}"))?;
-        state.insert(folder, raw.to_vec(), flags).map(|_| ())
+        state.insert(folder, raw.to_vec(), flags)?;
+        drop(state);
+        self.notify();
+        Ok(())
     }
 
     fn create_folder(&mut self, name: &str) -> RemoteResult<()> {
@@ -468,6 +526,53 @@ impl MailRemote for FakeRemote {
         let mut state = self.lock();
         state.calls.push("logout".into());
         state.logged_out = true;
+    }
+
+    /// Blocks until something changes in `folder` (any mutation through any
+    /// handle), `timeout` passes or `cancel` fires (→ `Stopped`). Without the
+    /// IDLE capability returns `Unsupported`, like a real server.
+    fn idle(
+        &mut self,
+        folder: &str,
+        timeout: Duration,
+        cancel: &CancelToken,
+    ) -> RemoteResult<IdleOutcome> {
+        let start = {
+            let state = self.enter(format!("idle {folder}"))?;
+            if !state.capabilities.idle {
+                return Err(RemoteError::new(
+                    RemoteErrorKind::Unsupported,
+                    "IDLE is not supported",
+                ));
+            }
+            state.folder(folder)?.version
+        };
+        // Taking the lock before notifying means a waiter can never miss the
+        // wake-up between its `is_cancelled` check and `wait_timeout`.
+        let (state_ref, changed) = (self.state.clone(), self.changed.clone());
+        let _hook = cancel.on_cancel(move || {
+            let _state = state_ref.lock().unwrap_or_else(|e| e.into_inner());
+            changed.notify_all();
+        });
+        let deadline = Instant::now() + timeout;
+        let mut state = self.lock();
+        loop {
+            if cancel.is_cancelled() {
+                return Ok(IdleOutcome::Stopped);
+            }
+            if state.folder(folder).map(|f| f.version).ok() != Some(start) {
+                return Ok(IdleOutcome::Changed);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(IdleOutcome::Timeout);
+            }
+            state = self
+                .changed
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
     }
 }
 
@@ -523,6 +628,103 @@ impl MailSender for FakeSender {
             raw: raw.to_vec(),
         });
         Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct ConnectorState {
+    failures: VecDeque<RemoteErrorKind>,
+    persistent_failure: Option<RemoteErrorKind>,
+    connects: usize,
+    sender_connects: usize,
+    saves_sent_copy: bool,
+}
+
+/// [`MailConnector`] handing out clones of one [`FakeRemote`] /
+/// [`FakeSender`] pair (so every connection sees the same server). Clones
+/// share connection counters and failure injection.
+#[derive(Clone, Debug, Default)]
+pub struct FakeConnector {
+    remote: FakeRemote,
+    sender: FakeSender,
+    state: Arc<Mutex<ConnectorState>>,
+}
+
+impl FakeConnector {
+    pub fn new(remote: FakeRemote, sender: FakeSender) -> Self {
+        Self {
+            remote,
+            sender,
+            state: Arc::default(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ConnectorState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The shared server handle (mutate it to simulate other clients).
+    pub fn remote(&self) -> FakeRemote {
+        self.remote.clone()
+    }
+
+    /// The shared submission log.
+    pub fn sender(&self) -> FakeSender {
+        self.sender.clone()
+    }
+
+    /// Makes the next `connect` / `connect_sender` fail with `kind` (FIFO).
+    pub fn fail_next_connect(&self, kind: RemoteErrorKind) {
+        self.lock().failures.push_back(kind);
+    }
+
+    /// Makes every connection attempt fail with `kind` until cleared with
+    /// `None` (server down, password revoked).
+    pub fn set_connect_failure(&self, kind: Option<RemoteErrorKind>) {
+        self.lock().persistent_failure = kind;
+    }
+
+    /// Whether the "server" files sent mail itself (Gmail behaviour).
+    pub fn set_saves_sent_copy(&self, saves: bool) {
+        self.lock().saves_sent_copy = saves;
+    }
+
+    /// Successful `connect` calls so far.
+    pub fn connects(&self) -> usize {
+        self.lock().connects
+    }
+
+    /// Successful `connect_sender` calls so far.
+    pub fn sender_connects(&self) -> usize {
+        self.lock().sender_connects
+    }
+
+    /// Cancellation, then queued failures, then the persistent failure.
+    fn check(&self, cancel: &CancelToken) -> RemoteResult<MutexGuard<'_, ConnectorState>> {
+        if cancel.is_cancelled() {
+            return Err(RemoteError::new(RemoteErrorKind::Cancelled, "cancelled"));
+        }
+        let mut state = self.lock();
+        match state.failures.pop_front().or(state.persistent_failure) {
+            Some(kind) => Err(RemoteError::new(kind, "injected connect failure")),
+            None => Ok(state),
+        }
+    }
+}
+
+impl MailConnector for FakeConnector {
+    fn connect(&self, cancel: &CancelToken) -> RemoteResult<Box<dyn MailRemote>> {
+        self.check(cancel)?.connects += 1;
+        Ok(Box::new(self.remote.clone()))
+    }
+
+    fn connect_sender(&self, cancel: &CancelToken) -> RemoteResult<Box<dyn MailSender>> {
+        self.check(cancel)?.sender_connects += 1;
+        Ok(Box::new(self.sender.clone()))
+    }
+
+    fn saves_sent_copy(&self) -> bool {
+        self.lock().saves_sent_copy
     }
 }
 
@@ -720,6 +922,160 @@ mod tests {
     fn header_block_variants() {
         assert_eq!(header_block(b"A: b\n\nbody"), b"A: b\n\n");
         assert_eq!(header_block(b"A: b\r\n"), b"A: b\r\n");
+    }
+
+    #[test]
+    fn gmail_mode_reports_stable_gm_msgid() {
+        let mut conn = server();
+        let uid = conn.deliver("INBOX", MAIL, MessageFlags::default());
+        assert_eq!(
+            conn.fetch_headers("INBOX", &[uid]).unwrap()[0].gm_msgid,
+            None
+        );
+        conn.set_capabilities(Capabilities {
+            gmail: true,
+            ..conn.capabilities()
+        });
+        let first = conn.fetch_headers("INBOX", &[uid]).unwrap()[0].gm_msgid;
+        assert_eq!(first, Some(fake_gm_msgid(MAIL)));
+        let copy = conn.deliver("Sent", MAIL, MessageFlags::default());
+        assert_eq!(
+            conn.fetch_headers("Sent", &[copy]).unwrap()[0].gm_msgid,
+            first
+        );
+        assert_ne!(fake_gm_msgid(b"other"), fake_gm_msgid(MAIL));
+        assert!(fake_gm_msgid(MAIL) <= i64::MAX as u64);
+    }
+
+    #[test]
+    fn idle_wakes_on_change_in_its_folder_only() {
+        let server = server();
+        let mut conn = server.clone();
+        let cancel = CancelToken::new();
+        let handle = std::thread::spawn(move || {
+            conn.idle("INBOX", Duration::from_secs(10), &cancel)
+                .unwrap()
+        });
+        // Wait until the idle call is registered, then poke another folder
+        // (ignored) and the idled one (wakes it).
+        while !server.calls().iter().any(|c| c == "idle INBOX") {
+            std::thread::yield_now();
+        }
+        server.deliver("Sent", MAIL, MessageFlags::default());
+        server.deliver("INBOX", MAIL, MessageFlags::default());
+        assert_eq!(handle.join().unwrap(), IdleOutcome::Changed);
+    }
+
+    #[test]
+    fn idle_times_out_stops_on_cancel_and_needs_capability() {
+        let mut conn = server();
+        let cancel = CancelToken::new();
+        assert_eq!(
+            conn.idle("INBOX", Duration::from_millis(5), &cancel)
+                .unwrap(),
+            IdleOutcome::Timeout
+        );
+        let mut waiting = conn.clone();
+        let token = cancel.clone();
+        let started = Instant::now();
+        let handle = std::thread::spawn(move || {
+            waiting
+                .idle("INBOX", Duration::from_secs(30), &token)
+                .unwrap()
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        cancel.cancel();
+        assert_eq!(handle.join().unwrap(), IdleOutcome::Stopped);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(
+            conn.idle("INBOX", Duration::from_secs(1), &cancel).unwrap(),
+            IdleOutcome::Stopped,
+            "already cancelled"
+        );
+        assert_eq!(
+            conn.idle("Nope", Duration::from_secs(1), &CancelToken::new())
+                .unwrap_err()
+                .kind,
+            RemoteErrorKind::NotFound
+        );
+        conn.set_capabilities(Capabilities::default());
+        assert_eq!(
+            conn.idle("INBOX", Duration::from_secs(1), &CancelToken::new())
+                .unwrap_err()
+                .kind,
+            RemoteErrorKind::Unsupported
+        );
+    }
+
+    #[test]
+    fn mutations_bump_folder_version() {
+        let mut conn = server();
+        let version = |c: &FakeRemote| c.lock().folder("INBOX").unwrap().version;
+        let mut last = version(&conn);
+        let mut step = |c: &FakeRemote, what: &str| {
+            let now = version(c);
+            assert!(now > last, "{what} must bump the version");
+            last = now;
+        };
+        let uid = conn.deliver("INBOX", MAIL, MessageFlags::default());
+        step(&conn, "deliver");
+        conn.set_flags("INBOX", uid, seen());
+        step(&conn, "set_flags");
+        conn.store_flags("INBOX", &[uid], seen(), MessageFlags::default())
+            .unwrap();
+        step(&conn, "store_flags");
+        conn.append("INBOX", seen(), MAIL).unwrap();
+        step(&conn, "append");
+        conn.move_messages("INBOX", &[uid], "Sent").unwrap();
+        step(&conn, "move");
+        conn.expunge("INBOX", 2);
+        step(&conn, "expunge");
+        conn.deliver("INBOX", MAIL, MessageFlags::default());
+        step(&conn, "deliver");
+        conn.delete_messages("INBOX", &[3]).unwrap();
+        step(&conn, "delete");
+        conn.reset_uid_validity("INBOX");
+        step(&conn, "reset");
+    }
+
+    #[test]
+    fn connector_hands_out_shared_connections_and_injects_failures() {
+        let connector = FakeConnector::new(server(), FakeSender::new());
+        let cancel = CancelToken::new();
+        let mut conn = connector.connect(&cancel).unwrap();
+        connector.remote().deliver("INBOX", MAIL, seen());
+        assert_eq!(conn.uids("INBOX").unwrap(), vec![1]);
+        let mut sender = connector.connect_sender(&cancel).unwrap();
+        sender.send("a@x", &["b@x".into()], MAIL).unwrap();
+        assert_eq!(connector.sender().sent().len(), 1);
+        assert_eq!((connector.connects(), connector.sender_connects()), (1, 1));
+
+        connector.fail_next_connect(RemoteErrorKind::Auth);
+        assert_eq!(
+            connector.connect(&cancel).err().unwrap().kind,
+            RemoteErrorKind::Auth
+        );
+        connector.set_connect_failure(Some(RemoteErrorKind::Network));
+        for _ in 0..2 {
+            assert_eq!(
+                connector.connect_sender(&cancel).err().unwrap().kind,
+                RemoteErrorKind::Network
+            );
+        }
+        connector.set_connect_failure(None);
+        assert!(connector.clone().connect(&cancel).is_ok());
+        assert_eq!(connector.connects(), 2);
+
+        assert!(!connector.saves_sent_copy());
+        connector.set_saves_sent_copy(true);
+        assert!(connector.saves_sent_copy());
+
+        cancel.cancel();
+        assert_eq!(
+            connector.connect(&cancel).err().unwrap().kind,
+            RemoteErrorKind::Cancelled
+        );
+        assert!(FakeConnector::default().remote().folder_names().is_empty());
     }
 
     #[test]

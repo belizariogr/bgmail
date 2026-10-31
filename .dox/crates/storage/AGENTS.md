@@ -15,7 +15,7 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
   location/membership bookkeeping, sync-facing writes, `pending_ops` / `outbox`
   queues, search text folding + FTS, `seed` / `seed_if_empty`.
 - Does not own: UI selection/state (`bgmail`), protocol code / the sync engine
-  (`mail_core` and later crates), credentials/keychain, the meaning of
+  (`mail_core`, `protocols`, `mail_sync`), credentials/keychain, the meaning of
   `accounts.config_json`, `pending_ops.kind/payload` (opaque, caller-owned).
 
 ## Local Contracts
@@ -51,16 +51,21 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
 - **Orphans:** when locations are removed (`remove_locations`,
   `clear_folder_locations`, `delete_folder`), messages of non-`local` accounts
   left with no location are deleted; `local` accounts never lose mail this way.
-- **Merge on insert** (`insert_remote_message`): existing `(folder, uid)` →
-  same `gm_msgid` in the account → same Message-ID **only if the candidate has
-  no locations** (in flight) → new headers-only row (`body_state = 0`). UI
-  moves of remote mail must call `detach_locations` (and queue the server op
-  from its result); the sync engine should replay `pending_ops` before
-  re-syncing so the source folder does not re-attach the message.
+  `purge_orphans(account)` (run by the sync engine after a full cycle) deletes
+  remaining location-less remote messages that no `pending_ops` row
+  references (a queued op means the message is in flight).
+- **Merge on insert** (`insert_remote_message` / `record_remote_message`,
+  which also reports `created`): existing `(folder, uid)` → same `gm_msgid` in
+  the account → same Message-ID **only if the candidate has no locations** (in
+  flight) → new headers-only row (`body_state = 0`). UI moves of remote mail
+  detach the moved locations (`detach_location` per folder, or
+  `detach_locations`) and queue the server op from the result; the sync engine
+  replays `pending_ops` before re-syncing so the source folder does not
+  re-attach the message, and `attach_location` records a move's COPYUID.
 - List order everywhere: `date_ts DESC, sort_order ASC, id DESC`.
 - Types returned to UI/sync: `Account`, `Folder`, `MessageListItem`,
   `MessageDetail`, `MailListQuery`, `FolderSyncState`, `MessageLocation`,
-  `NewRemoteMessage`, `NewAttachment`, `AttachmentRow`, `PendingOp`,
+  `NewRemoteMessage`, `RemoteInsert`, `NewAttachment`, `AttachmentRow`, `PendingOp`,
   `OutgoingRow` — UI-agnostic plain data owned by this crate (no `mail_core`
   dependency).
 - Folder paths: system (`sys:inbox`, …) vs user (`user:…`); helpers in

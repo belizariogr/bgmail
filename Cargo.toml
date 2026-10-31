@@ -7,6 +7,8 @@ members = [
     "crates/ui",
     "crates/storage",
     "crates/mail_core",
+    "crates/protocols",
+    "crates/mail_sync",
     "crates/html_view",
     "crates/bgmail",
 ]
@@ -30,6 +32,8 @@ theme = { path = "crates/theme" }
 ui = { path = "crates/ui" }
 storage = { path = "crates/storage" }
 mail_core = { path = "crates/mail_core" }
+protocols = { path = "crates/protocols" }
+mail_sync = { path = "crates/mail_sync" }
 html_view = { path = "crates/html_view" }
 
 [profile.dev]

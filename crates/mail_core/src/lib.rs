@@ -6,7 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod account;
 pub mod address;
+pub mod cancel;
 pub mod compose;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
@@ -17,7 +19,9 @@ pub mod remote;
 pub mod reply;
 pub mod thread;
 
+pub use account::{AccountConfig, AuthKind, Security, ServerConfig, DEFAULT_SYNC_WINDOW};
 pub use address::{format_address_list, parse_address_list, same_email, Address};
+pub use cancel::{CancelGuard, CancelToken};
 pub use compose::{
     build_message, envelope_recipients, guess_mime_type, new_message_id, Draft, OutgoingAttachment,
 };
@@ -31,8 +35,8 @@ pub use parse::{
     ParsedMessage,
 };
 pub use remote::{
-    Capabilities, FolderStatus, IdleOutcome, MailRemote, MailSender, RemoteError, RemoteErrorKind,
-    RemoteFlags, RemoteHeader, RemoteResult,
+    Capabilities, FolderStatus, IdleOutcome, MailConnector, MailRemote, MailSender, RemoteError,
+    RemoteErrorKind, RemoteFlags, RemoteHeader, RemoteResult,
 };
 pub use reply::{
     forward_subject, html_to_text, prepare_reply, quote_text, reply_subject, QuoteLabels, ReplyKind,

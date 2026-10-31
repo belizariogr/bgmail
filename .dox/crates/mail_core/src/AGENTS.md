@@ -45,6 +45,31 @@ _(none — modules are files; their APIs are cataloged below.)_
   `cfg(any(test, feature = "fake"))`) and re-exports the main types and
   functions of every module at the crate root. No functions.
 
+### `src/account.rs`
+
+- **enum `Security { Tls (default), StartTls, None }`** (serde lowercase).
+  - **`default_imap_port`** (pub) — 993 for Tls, 143 otherwise.
+  - **`default_smtp_port`** (pub) — 465 Tls, 587 StartTls, 25 None.
+- **struct `ServerConfig { host, port, security }`**.
+- **enum `AuthKind { Password (default), OAuth2 { provider } }`** — serde tagged by `kind`.
+- **struct `AccountConfig { email, username, imap, smtp, auth, sync_window }`** — `auth`/`sync_window` default when absent (`DEFAULT_SYNC_WINDOW` = 2000).
+  - **`from_json`** (pub) — `None` for invalid or local (`{}`) configs.
+  - **`to_json`** (pub) — serde JSON (falls back to `{}`).
+  - **`secret_key`** (pub) — `bgmail://<username>@<imap host>`; keychain key of the password/refresh token.
+  - **`uses_oauth`** (pub) — whether `auth` is `OAuth2`.
+- Tests: `json_round_trips`, `invalid_or_local_json_is_none`, `missing_auth_and_window_use_defaults`, `oauth_serializes_with_a_kind_tag`, `secret_key_depends_on_login_and_host`, `default_ports_follow_security`.
+
+### `src/cancel.rs`
+
+- **struct `CancelToken`** (Clone shares state, Default, Debug shows the flag).
+  - **`new`** (pub) — not cancelled.
+  - **`cancel`** (pub) — sets the flag once and runs every registered hook once (later calls no-op).
+  - **`is_cancelled`** (pub).
+  - **`on_cancel(hook) -> CancelGuard`** (pub) — registers a hook (runs at once when already cancelled); the guard unregisters it on drop.
+  - `lock_hooks` / `remove` (private) — poison-tolerant hook list access; removal by id.
+- **struct `CancelGuard`** — `Drop` unregisters its hook.
+- Tests: `cancel_sets_flag_and_runs_hooks_once`, `dropped_guard_unregisters_hook`, `hook_registered_after_cancel_runs_immediately`, `debug_shows_state`.
+
 ### `src/address.rs`
 
 #### Types / constants
@@ -255,7 +280,11 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 #### Trait `MailRemote: Send` (object-safe, blocking)
 
-- `capabilities(&self) -> Capabilities`; `list_folders(&mut self) -> RemoteResult<Vec<RemoteFolder>>`; `select(&mut self, folder) -> RemoteResult<FolderStatus>` (EXAMINE/SELECT); `uids(&mut self, folder) -> RemoteResult<Vec<u32>>` (ascending); `fetch_headers(&mut self, folder, uids) -> RemoteResult<Vec<RemoteHeader>>` (unknown UIDs skipped); `fetch_flags(&mut self, folder, uids, changed_since: Option<u64>) -> RemoteResult<Vec<RemoteFlags>>` (only modseq > since when given); `fetch_body(&mut self, folder, uid) -> RemoteResult<Vec<u8>>` (BODY.PEEK[], never sets `\Seen`); `store_flags(&mut self, folder, uids, add, remove) -> RemoteResult<()>` (only `true` fields applied); `move_messages(&mut self, from, uids, to) -> RemoteResult<Option<Vec<u32>>>` (new UIDs when COPYUID known); `delete_messages(&mut self, folder, uids) -> RemoteResult<()>` (`\Deleted` + expunge); `append(&mut self, folder, flags, raw) -> RemoteResult<()>`; `create_folder(&mut self, name) -> RemoteResult<()>`; `noop(&mut self) -> RemoteResult<()>`; `logout(&mut self)` (infallible).
+- `capabilities(&self) -> Capabilities`; `list_folders(&mut self) -> RemoteResult<Vec<RemoteFolder>>`; `select(&mut self, folder) -> RemoteResult<FolderStatus>` (EXAMINE/SELECT); `uids(&mut self, folder) -> RemoteResult<Vec<u32>>` (ascending); `fetch_headers(&mut self, folder, uids) -> RemoteResult<Vec<RemoteHeader>>` (unknown UIDs skipped); `fetch_flags(&mut self, folder, uids, changed_since: Option<u64>) -> RemoteResult<Vec<RemoteFlags>>` (only modseq > since when given); `fetch_body(&mut self, folder, uid) -> RemoteResult<Vec<u8>>` (BODY.PEEK[], never sets `\Seen`); `store_flags(&mut self, folder, uids, add, remove) -> RemoteResult<()>` (only `true` fields applied); `move_messages(&mut self, from, uids, to) -> RemoteResult<Option<Vec<u32>>>` (new UIDs when COPYUID known); `delete_messages(&mut self, folder, uids) -> RemoteResult<()>` (`\Deleted` + expunge); `append(&mut self, folder, flags, raw) -> RemoteResult<()>`; `create_folder(&mut self, name) -> RemoteResult<()>`; `noop(&mut self) -> RemoteResult<()>`; `logout(&mut self)` (infallible); `idle(&mut self, folder, timeout, cancel) -> RemoteResult<IdleOutcome>` (default: `Unsupported`).
+
+#### Trait `MailConnector: Send + Sync`
+
+- `connect(&self, cancel) -> RemoteResult<Box<dyn MailRemote>>`; `connect_sender(&self, cancel) -> RemoteResult<Box<dyn MailSender>>`; `saves_sent_copy(&self) -> bool` (default false; Gmail files sent mail itself).
 
 #### Trait `MailSender: Send`
 
@@ -263,7 +292,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 #### Tests
 
-- `error_display_and_source`, `kind_names_are_distinct`, `traits_are_object_safe_and_send`.
+- `default_idle_is_unsupported`, `error_display_and_source`, `kind_names_are_distinct`, `traits_are_object_safe_and_send`.
 
 ### `src/fake.rs` (`cfg(any(test, feature = "fake"))`)
 
@@ -271,9 +300,10 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 - **const `FAKE_DELIMITER = "/"`**: delimiter reported for every folder.
 - **struct `FakeMessage { uid, raw, flags, modseq }`**: server-side message snapshot.
-- **struct `FakeRemote`** (Clone shares `Arc<Mutex<ServerState>>`; Default = `new()`).
+- **struct `FakeRemote`** (Clone shares `Arc<Mutex<ServerState>>` + an `Arc<Condvar>` signalled after every mutation; Default = `new()`).
 - **struct `SentMail { from, recipients, raw }`**; **struct `FakeSender`** (Clone shares log; Default).
-- Private: `FakeFolder` (name, attributes, uid_validity, uid_next, `BTreeMap` messages), `ServerState` (folders, capabilities, global modseq, next UIDVALIDITY, failure queue, call log, selected, logged_out), `SenderState`.
+- **struct `FakeConnector`** (Clone shares counters/failure injection; Default = empty server + sender): `MailConnector` handing out clones of one `FakeRemote` / `FakeSender`.
+- Private: `FakeFolder` (name, attributes, uid_validity, uid_next, `BTreeMap` messages, `version` bumped by every change in the folder), `ServerState` (folders, capabilities, global modseq, next UIDVALIDITY, failure queue, call log, selected, logged_out), `SenderState`, `ConnectorState` (queued failures, persistent failure, connect counters, saves_sent_copy).
 
 #### Functions / methods
 
@@ -289,11 +319,13 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`uid_list`** — comma-joined UIDs for the call log.
 - **`header_block`** — raw bytes through the first blank line (`\r\n\r\n` or `\n\n`), else all.
 - **`apply`** — sets/clears the flags whose mask field is `true`.
+- **`fake_gm_msgid`** (pub) — `fn fake_gm_msgid(raw: &[u8]) -> u64`: FNV-1a of the raw bytes shifted to 63 bits (fits SQLite); stand-in `X-GM-MSGID`, stable across folders/moves.
 
 ##### Context: `FakeRemote`
 
 - **`new`** (pub) — empty server; capabilities idle/move/uidplus/condstore/special_use = true, gmail = false.
 - **`lock`** (private) — locks state, recovering from poison.
+- **`notify`** (private) — `notify_all` on the change condvar (wakes `idle`).
 - **`enter`** (private) — logs the call, then pops a queued failure (→ `Err(kind, "injected failure")`) or returns the guard.
 - **`set_capabilities`** (pub) — replaces advertised capabilities (affects modseq reporting and COPYUID).
 - **`add_folder`** (pub) — `(name, attributes: &[&str]) -> u32`; creates with a new UIDVALIDITY (1, 2, …) and uid_next 1; existing folder untouched; returns its UIDVALIDITY.
@@ -312,12 +344,27 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 - All fallible methods go through `enter` (logged + failure injection); unknown folders → `NotFound`.
 - `capabilities` (not logged); `list_folders` (`RemoteFolder::new` with `/`); `select` (status with `highest_modseq` = max message modseq when CONDSTORE; records selection); `uids`; `fetch_headers` (header block, size, modseq when CONDSTORE, `has_attachments` from `parse_message`); `fetch_flags` (filters by `changed_since`); `fetch_body` (raw, flags untouched; missing UID → `NotFound`); `store_flags` (one new modseq for the batch); `move_messages` (removes from source, inserts into target with new UIDs/modseqs; `Some(new_uids)` only with UIDPLUS); `delete_messages`; `append`; `create_folder` (existing → `Protocol`); `noop`; `logout` (logged, sets flag, never fails).
+- `fetch_headers` reports `gm_msgid = fake_gm_msgid(raw)` only when `capabilities.gmail`.
+- Every mutation (test-side `deliver`/`set_flags`/`expunge`/`reset_uid_validity` and `store_flags`/`move_messages` (source + target)/`delete_messages`/`append`) bumps the affected folder's `version` and calls `notify`.
+- **`idle`** — `(folder, timeout, cancel) -> RemoteResult<IdleOutcome>`: logged as `"idle {folder}"` through `enter` (failure injection applies); no IDLE capability → `Unsupported`; unknown folder → `NotFound`. Snapshots the folder `version`, registers a cancel hook that locks state and notifies (no lost wake-up), then waits on the condvar: cancelled → `Stopped`, version changed (or folder gone) → `Changed`, deadline → `Timeout`.
 
 ##### Context: `FakeSender`
 
 - **`new`** (pub), **`lock`** (private), **`sent`** (pub, oldest first), **`fail_next`** (pub, FIFO queue).
 - **`MailSender::send`** — pops a queued failure or records `SentMail`.
 
+##### Context: `FakeConnector`
+
+- **`new`** (pub) — `(remote: FakeRemote, sender: FakeSender) -> Self`.
+- **`lock`** (private) — connector state, poison-tolerant.
+- **`remote`** / **`sender`** (pub) — shared handles (clones).
+- **`fail_next_connect`** (pub) — `(kind)`: next `connect`/`connect_sender` fails (FIFO, shared by both).
+- **`set_connect_failure`** (pub) — `(Option<kind>)`: every attempt fails until cleared.
+- **`set_saves_sent_copy`** (pub) — value returned by `saves_sent_copy`.
+- **`connects`** / **`sender_connects`** (pub) — successful connection counts.
+- **`check`** (private) — cancelled token → `Cancelled`; else queued failure, else persistent failure, else the state guard.
+- **`MailConnector::connect`** / **`connect_sender`** — `check`, count, then `Box` a clone of the shared remote/sender. **`saves_sent_copy`** — configured flag (default `false`).
+
 #### Tests
 
-- `clones_share_state`, `list_and_select`, `headers_flags_and_body`, `flag_changes_bump_modseq_and_filter`, `store_flags_applies_only_true_fields`, `move_delete_append_create`, `server_side_expunge_and_uid_validity_reset`, `failure_injection_and_call_log`, `header_block_variants`, `sender_records_and_fails`.
+- `clones_share_state`, `list_and_select`, `headers_flags_and_body`, `flag_changes_bump_modseq_and_filter`, `store_flags_applies_only_true_fields`, `move_delete_append_create`, `server_side_expunge_and_uid_validity_reset`, `failure_injection_and_call_log`, `header_block_variants`, `sender_records_and_fails`, `gmail_mode_reports_stable_gm_msgid`, `idle_wakes_on_change_in_its_folder_only`, `idle_times_out_stops_on_cancel_and_needs_capability`, `mutations_bump_folder_version`, `connector_hands_out_shared_connections_and_injects_failures`.
