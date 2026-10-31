@@ -345,21 +345,27 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   brackets stripped); `allow_file_urls(bool)`; `blocked_urls()`;
   `resolve(url)`: `data:` decoded, `cid:` (percent-decoded) from attachments,
   `file:` only when allowed, `bgmail:` (message-relative) missing, everything
-  else blocked and recorded.
+  else blocked and recorded. Protocol-relative references (`//host/…`, which
+  the message base turns into `bgmail://host/…`) are treated as their
+  `https:` URL first.
 - `Resources::is_available(url)`: whether `resolve` would serve the URL
   (decodable `data:`, known `cid:`, allowed `file:`, `http(s):` when remote
   is allowed), without recording it.
 - `Resources::allow_remote(bool)`: fetch `http:`/`https:` (`Resolution::Remote`)
   instead of blocking; `remote_loads()`: the document's in-flight/arrived
   loads.
+- `fn protocol_relative_web_url(url)` (private): the `https:` URL of a
+  `bgmail://<host other than message>/…` URL (a resolved `//host/…`
+  reference), else `None`.
 - `fn percent_decode(input)` (private): `%XX` decoding, invalid sequences kept.
 - `struct ResourceProvider(Arc<Resources>)` (crate): `NetProvider` that answers
   Blitz synchronously (`bytes` or `error`).
 - Tests: data URLs, cid with/without brackets, percent-encoded cid, remote
   blocking + recording, message-relative URLs, file opt-in, percent decoding,
-  availability without recording, remote URLs fetched only when allowed.
-- `ResourceProvider::fetch`: serves, fails, or hands `Remote` URLs to
-  `remote::fetch`.
+  availability without recording, remote URLs fetched only when allowed,
+  protocol-relative URLs following the remote policy as `https:`.
+- `ResourceProvider::fetch`: maps protocol-relative URLs to `https:`, then
+  serves, fails, or hands `Remote` URLs to `remote::fetch`.
 
 ### `remote.rs`
 - Consts (private): `WORKERS` (4), `TIMEOUT` (15s), `MAX_BODY` (15 MB),
@@ -392,7 +398,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   glyph bitmaps, known font families, fonts registered with GPUI), plus the
   replayed list's animations, when each started and the next frame delay;
   `next_animation_frame()`: time until an animated image painted by the last
-  replay changes frame (`None` when nothing animates).
+  replay changes frame (`None` when nothing animates); `forget_document()`:
+  drops the previous document's images, gradients, colour glyphs and
+  animations (font registrations stay).
 - `fn animated_frame(cache, brush, now)` (private): for an animated image,
   a brush showing the frame due `now` (each animation's clock starts when
   first painted), recording the next frame delay.
@@ -451,7 +459,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - Tests: colour glyph placement, cluster placement threshold, `same_box`,
   `clip_corners`, CSS angles, color alpha, gradient texture cap, tiles,
   RGBA→BGRA, unpremultiply, downscale sizes, premultiplied resizing, animated
-  frames by time.
+  frames by time, `forget_document` dropping document images but not fonts.
 
 ### `element.rs`
 - `actions!(html_view, [Copy, SelectAll, ScrollUp, ScrollDown, PageUp,
@@ -492,8 +500,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `Focusable`); private `schedule_frame(delay, cx)` (one pending repaint
   for animated images or remote loads, the earliest wins; on firing,
   arrived remote resources invalidate the cached paint);
-  `new(document, cx)`; `set_document` (applies the view's zoom; resets
-  scroll, drag, cursor, hovered link); `zoom()`; `set_zoom(zoom, cx)`
+  `new(document, cx)`; `set_document` (applies the view's zoom; forgets the
+  paint cache's document images; resets scroll, drag, cursor, hovered link); `zoom()`; `set_zoom(zoom, cx)`
   (clamped; scales the scroll offset to keep the same content at the top,
   emits `ZoomChanged`); `zoom_by(steps, cx)`;
   `document()`; `scroll_handle()`; `has_selection()`; `copy_selection(cx)`;

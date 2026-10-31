@@ -1,9 +1,10 @@
 //! Resolves sub-resources (images, stylesheets) a mail body references.
 //!
 //! Mail is rendered offline: `data:` URLs and `cid:` attachments are served
-//! from memory, `file:` only when explicitly allowed (tests/tools), and every
-//! remote URL is blocked and recorded so the UI can offer "load remote content"
-//! later. Networking stays out of this crate (Stage 3).
+//! from memory, `file:` only when explicitly allowed (tests/tools), and
+//! remote URLs (also protocol-relative `//host/…` ones) are fetched only when
+//! the user allowed remote content ([`crate::remote`]); otherwise they are
+//! blocked and recorded.
 
 use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request};
 use std::collections::HashMap;
@@ -55,7 +56,6 @@ impl Resources {
         self
     }
 
-    /// Remote URLs that were requested and blocked, in request order.
     /// Fetches `http:`/`https:` resources from the network instead of
     /// blocking them (the user chose to show remote content).
     pub fn allow_remote(mut self, allow: bool) -> Self {
@@ -68,6 +68,7 @@ impl Resources {
         &self.loads
     }
 
+    /// Remote URLs that were requested and blocked, in request order.
     pub fn blocked_urls(&self) -> Vec<String> {
         self.blocked
             .lock()
@@ -79,6 +80,9 @@ impl Resources {
     /// blocked): decodable `data:`, known `cid:` attachments, and `file:`
     /// when allowed.
     pub fn is_available(&self, url: &url::Url) -> bool {
+        if let Some(web) = protocol_relative_web_url(url) {
+            return self.is_available(&web);
+        }
         match url.scheme() {
             "data" => data_url::DataUrl::process(url.as_str())
                 .is_ok_and(|data| data.decode_to_vec().is_ok()),
@@ -91,6 +95,9 @@ impl Resources {
 
     /// Resolves a URL according to the offline policy.
     pub fn resolve(&self, url: &url::Url) -> Resolution {
+        if let Some(web) = protocol_relative_web_url(url) {
+            return self.resolve(&web);
+        }
         match url.scheme() {
             "data" => match data_url::DataUrl::process(url.as_str()) {
                 Ok(data) => match data.decode_to_vec() {
@@ -128,6 +135,22 @@ impl Resources {
     }
 }
 
+/// The web URL a protocol-relative reference (`//host/path`, common in mail)
+/// stands for. Resolved against the message base URL it comes out as
+/// `bgmail://host/path`; mail clients load it over HTTPS. `None` for any
+/// other URL, including real message-relative ones (`bgmail://message/…`).
+fn protocol_relative_web_url(url: &url::Url) -> Option<url::Url> {
+    // `message` is the host of `MESSAGE_BASE_URL` (checked by the tests).
+    if url.scheme() != "bgmail" || url.host_str()? == "message" {
+        return None;
+    }
+    url::Url::parse(&format!(
+        "https://{}",
+        &url[url::Position::BeforeUsername..]
+    ))
+    .ok()
+}
+
 /// Minimal `%XX` decoding for Content-IDs.
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
@@ -153,12 +176,13 @@ pub(crate) struct ResourceProvider(pub Arc<Resources>);
 
 impl NetProvider for ResourceProvider {
     fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
-        let url = request.url.to_string();
-        match self.0.resolve(&request.url) {
+        let target = protocol_relative_web_url(&request.url).unwrap_or(request.url);
+        let url = target.to_string();
+        match self.0.resolve(&target) {
             Resolution::Served(bytes) => handler.bytes(url, Bytes::from(bytes)),
             Resolution::Blocked => handler.error(url, "blocked by offline policy".into()),
             Resolution::Missing => handler.error(url, "not found".into()),
-            Resolution::Remote => crate::remote::fetch(request.url, handler, self.0.loads.clone()),
+            Resolution::Remote => crate::remote::fetch(target, handler, self.0.loads.clone()),
         }
     }
 }
@@ -272,6 +296,30 @@ mod tests {
         assert!(!r.is_available(&url("https://tracker.example/p.gif")));
         assert!(!r.is_available(&url("file:///tmp/x.png")));
         assert!(r.blocked_urls().is_empty());
+    }
+
+    #[test]
+    fn protocol_relative_urls_are_web_urls() {
+        let base = url(crate::document::MESSAGE_BASE_URL);
+        let joined = base.join("//cdn.test/a.png?x=1").unwrap();
+        assert_eq!(
+            protocol_relative_web_url(&joined).map(|u| u.to_string()),
+            Some("https://cdn.test/a.png?x=1".to_string())
+        );
+        // Message-relative and other URLs are left alone.
+        assert_eq!(
+            protocol_relative_web_url(&base.join("a.png").unwrap()),
+            None
+        );
+        assert_eq!(protocol_relative_web_url(&url("https://cdn.test/a")), None);
+        // They follow the remote policy.
+        let allowed = Resources::new().allow_remote(true);
+        assert_eq!(allowed.resolve(&joined), Resolution::Remote);
+        assert!(allowed.is_available(&joined));
+        let blocked = Resources::new();
+        assert!(!blocked.is_available(&joined));
+        assert_eq!(blocked.resolve(&joined), Resolution::Blocked);
+        assert_eq!(blocked.blocked_urls(), ["https://cdn.test/a.png?x=1"]);
     }
 
     #[test]

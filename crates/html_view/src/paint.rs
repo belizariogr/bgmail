@@ -44,6 +44,18 @@ impl PaintCache {
     pub fn next_animation_frame(&self) -> Option<Duration> {
         self.next_frame
     }
+
+    /// Drops what belongs to the previous document (decoded images, sampled
+    /// gradients, colour glyphs, animations) so a long session doesn't keep
+    /// every message's pixels. Font registrations stay: GPUI keeps the fonts.
+    pub fn forget_document(&mut self) {
+        self.images.clear();
+        self.gradients.clear();
+        self.color_glyphs.clear();
+        self.animations.clear();
+        self.animation_starts.clear();
+        self.next_frame = None;
+    }
 }
 
 /// The frame of an animated image to show now (`None` for still images),
@@ -801,7 +813,7 @@ mod tests {
 
     #[test]
     fn animated_images_show_the_frame_for_the_time() {
-        use super::{animated_frame, PaintCache};
+        use super::{animated_frame, render_image, PaintCache};
         use blitz_dom::node::AnimationFrames;
         use peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
         use std::sync::Arc;
@@ -837,6 +849,15 @@ mod tests {
         );
         assert_eq!(shown(&mut cache, 150), 2);
         assert_eq!(shown(&mut cache, 250), 1);
+        // A new document drops the old one's images and animations.
+        assert!(render_image(&mut cache, &brush, (1.0, 1.0)).is_some());
+        assert!(!cache.images.is_empty());
+        cache.registered_fonts.insert(7);
+        cache.forget_document();
+        assert!(cache.images.is_empty() && cache.animations.is_empty());
+        assert!(cache.animation_starts.is_empty() && cache.next_animation_frame().is_none());
+        assert!(cache.registered_fonts.contains(&7));
+        assert!(animated_frame(&mut cache, &brush, Instant::now()).is_none());
     }
 
     #[test]

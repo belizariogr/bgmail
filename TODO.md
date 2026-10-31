@@ -353,7 +353,7 @@
 - ⬜ Send (SMTP + Gmail)
 - ✅ Move / delete / archive / junk (SQLite folder membership + toolbar/menus)
 - ✅ Star / flag (toggle starred + `sys:flagged` folder)
-- ✅ Command palette (Ctrl/Cmd+P) with contextual message commands — in-window
+- ✅ Command palette (Ctrl/Cmd+Shift+P) with contextual message commands — in-window
       GPUI overlay (no `WindowKind::PopUp`; OSR composites under it on all platforms)
 - ✅ macOS menu bar (File/Edit/View/Message; unavailable actions omitted on GPUI 0.2)
 - ⬜ Attachments (view, download, attach)
@@ -537,6 +537,18 @@
 - ✅ Bigger text: reader base font 16px (Chromium's default; was 14px);
       UI text scale from one `ui::UI_FONT_SIZE` (15px, was 14px), all UI
       sizes derived from it. Reader CSS no longer forces `img` to block.
+- ✅ Reader review fixes: plain-text fallback no longer panics on multi-byte
+      text at entity/tag cuts and skips blocks in linear time; the crash
+      guard is set before parsing; protocol-relative (`//host/…`) images load
+      as `https:` when remote content is allowed; the reader's paint cache
+      drops the previous message's images.
+- ✅ Ctrl/Cmd+P prints; the command palette moved to Ctrl/Cmd+Shift+P (as
+      in Zed), so the two no longer share a chord.
+- ✅ CSS `url(...)` is blanked only in `style` attributes and `<style>`
+      contents (lol_html handlers), never in the message's text.
+- ⬜ GPUI's sprite atlas still keeps textures of past messages (needs
+      `window.drop_image` when the paint cache forgets them); `HtmlDocument::
+      layout` re-resolves and walks the tree for overflow on every frame.
 - ⬜ Upstream the `vendor/blitz` and `vendor/taffy` fixes (each is marked
       `BGMail`), then drop the vendored copies. Either way: behind a `crates/html_view` API, with
       "Open in browser" as the escape hatch.

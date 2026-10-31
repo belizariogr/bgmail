@@ -1070,7 +1070,8 @@ _(None at module top level — conversion helpers only.)_
 
 - **`DocumentColors::is_dark`** (pub): `background.l < 0.5`.
 - **`plain_text`** (pub): Readable text of an HTML body for the plain-text fallback: one linear scan (no tree), drops tags/comments, skips `script`/`style`/`head`/`title` content, blank lines around paragraph blocks and line breaks at line blocks, tabs between cells, decoded entities, collapsed whitespace except in `<pre>`.
-- **`decode_entities`** (private): Named basics, `&nbsp;`, decimal/hex references; unknown entities kept.
+- **`find_ascii_ci`** (private): Byte index of the first ASCII-case-insensitive occurrence of an ASCII needle (no lower-cased copy of the haystack; used to skip `script`/`style`/`head`/`title` content in linear time).
+- **`decode_entities`** (private): Named basics, `&nbsp;`, decimal/hex references (`;` looked for in the next 12 bytes, never cutting a multi-byte character); unknown entities kept.
 - **`is_openable_link`** (pub): Whether a clicked link may be opened outside the app: `http(s)://` and `mailto:` only (case-insensitive, trimmed).
 - **`email_document`** (pub)
   - Signature: `pub fn email_document(colors: DocumentColors, body: &MessageBody, load_remote: bool) -> RenderedEmail`
@@ -1088,11 +1089,11 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn sanitize_html_inner(html: &str, load_remote: bool, shown: &HashSet<String>) -> (String, bool, usize)`
   - Purpose: Streaming `lol_html` sanitizer; returns (html, has remote `<img>`, blocked count).
   - Behavior: Drops `DISALLOWED_ELEMENTS` with content, neutralizes attributes on every element, and (remote loading off) blanks CSS `url(...)`. Rewrite failures drop the body.
-- **`strip_css_urls`** / **`find_url_open`** (private): Empty every CSS `url(...)` (case-insensitive `url(` detection).
+- **`strip_css_urls`** / **`find_url_open`** (private): Empty every CSS `url(...)` (case-insensitive `url(` detection); applied by `sanitize_html_inner` only to `style` attributes and `<style>` text (buffered across chunks) when remote content is blocked.
 - **`neutralize_attributes`** (private): Removes `on*`, `contenteditable`, dangerous-scheme URLs, scripted `style`, and (unless allowed) remote resource attributes / `srcset`; a blocked remote `<img src>` is kept as `data-rm-blocked-src`; returns the image's blocked state.
 - **`is_dangerous_url`** / **`is_remote_url`** / **`style_has_script_vector`** (private): URL scheme and CSS vector checks.
 - **`escape_html`** (private): Escapes `& < > " '`.
-- Tests: HTML escaping, plain text (structure, entities, broken markup), openable links, colors, document wrapping (HTML verbatim, plain text escaped, color scheme), disallowed elements, SVG scriptable parts, event handlers, dangerous schemes, legacy style vectors, safe markup kept, remote detection and blocking (attributes, `href` kept, CSS urls), remote image policy (`load_remote`, `shown`), documents always blocking remote images.
+- Tests: HTML escaping, plain text (structure, entities, broken markup, multi-byte characters at entity/tag cuts, case-insensitive skipped blocks), openable links, colors, document wrapping (HTML verbatim, plain text escaped, color scheme), disallowed elements, SVG scriptable parts, event handlers, dangerous schemes, legacy style vectors, safe markup kept, remote detection and blocking (attributes, `href` kept, CSS urls), remote image policy (`load_remote`, `shown`), documents always blocking remote images.
 
 ### `src/main.rs`
 
@@ -1107,7 +1108,7 @@ _(None at module top level — conversion helpers only.)_
 
 - **`is_command_palette_keystroke`** (private, L56)
   - Signature: `fn is_command_palette_keystroke(keystroke: &Keystroke) -> bool`
-  - Purpose: Detects Ctrl+P / Cmd+P command-palette shortcut.
+  - Purpose: Detects the Ctrl+Shift+P / Cmd+Shift+P command-palette shortcut (Ctrl/Cmd+P prints).
   - Behavior: Matches key P (case-insensitive) without Shift when Control or platform (Cmd) modifier is held.
 
 - **`toggle_command_palette`** (private, L62)
@@ -1148,7 +1149,7 @@ _(None at module top level — conversion helpers only.)_
 - **`register_command_palette_shortcuts`** (private, L168)
   - Signature: `fn register_command_palette_shortcuts(cx: &mut App)`
   - Purpose: Wires command palette toggle action and keystroke interceptor.
-  - Behavior: Registers `ToggleCommandPalette` handler and intercepts Ctrl/Cmd+P globally, stopping propagation.
+  - Behavior: Registers `ToggleCommandPalette` handler and intercepts Ctrl/Cmd+Shift+P globally, stopping propagation.
 
 - **`main`** (private, L181)
   - Signature: `fn main()`
@@ -1158,7 +1159,7 @@ _(None at module top level — conversion helpers only.)_
 - **`command_palette_shortcut_matches_ctrl_p_and_cmd_p`** (private, L391)
   - Signature: `fn command_palette_shortcut_matches_ctrl_p_and_cmd_p()`
   - Purpose: Test: palette shortcut detection.
-  - Behavior: Asserts Ctrl+P, Cmd+P, and uppercase P match; plain P does not.
+  - Behavior: Asserts Ctrl/Cmd+Shift+P (also uppercase) match; Ctrl/Cmd+P without Shift and plain P do not.
 
 ### `src/root.rs`
 
@@ -1554,7 +1555,7 @@ _(None at module top level — conversion helpers only.)_
 - **`sync_reader`** (private)
   - Signature: `fn sync_reader(&mut self, window: &mut Window, cx: &mut Context<Self>)`
   - Purpose: Keeps the reader document in sync with the selected message and theme.
-  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, picks plain text per `plain_text_reason` (`mail_html::plain_text`), builds the sanitized themed document (`mail_html::email_document`, remote content per `remote_allowed_for`, with `Resources::allow_remote` to match), parses it with `HtmlDocument::try_parse` (falling back to plain text, `Unrenderable`, when too deep; dark appearance for dark pages, `reader_selection_color`), records the blocked image count (0 for plain text) and the notice, marks formatted HTML renders in the `CrashGuard` until the next frame (`window.on_next_frame`), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
+  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, picks plain text per `plain_text_reason` (`mail_html::plain_text`), builds the sanitized themed document (`mail_html::email_document`, remote content per `remote_allowed_for`, with `Resources::allow_remote` to match), parses it with `HtmlDocument::try_parse` (falling back to plain text, `Unrenderable`, when too deep; dark appearance for dark pages, `reader_selection_color`), records the blocked image count (0 for plain text) and the notice, marks formatted HTML renders in the `CrashGuard` from before parsing until the next frame (`window.on_next_frame`), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
 
 - **`set_reader_white_background`** (private, L1658)
   - Signature: `fn set_reader_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
@@ -1992,7 +1993,7 @@ _(None at module top level — conversion helpers only.)_
 - **const `COMPOSE_MAC` / `COMPOSE_OTHER`**: GPUI binding strings for New Message (Cmd+N / Ctrl+N).
 - **const `SETTINGS_MAC` / `SETTINGS_OTHER`**: Binding strings for Settings (Cmd+, / Ctrl+,).
 - **const `TOGGLE_SIDEBAR_MAC` / `TOGGLE_SIDEBAR_OTHER`**: Binding strings for sidebar toggle.
-- **const `COMMAND_PALETTE_MAC` / `COMMAND_PALETTE_OTHER`**: Binding strings for command palette.
+- **const `COMMAND_PALETTE_MAC` / `COMMAND_PALETTE_OTHER`**: `cmd-shift-p` / `ctrl-shift-p`, the command palette (as in Zed).
 - **const `DELETE_MESSAGE_MAC` / `DELETE_MESSAGE_OTHER`**: Binding strings for move-to-trash.
 - **const `ARCHIVE_MAC` / `ARCHIVE_OTHER`**: Binding strings for archive.
 - **const `MARK_JUNK_MAC` / `MARK_JUNK_OTHER`**: Binding strings for mark junk.

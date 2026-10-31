@@ -21,8 +21,8 @@ pub const SETTINGS_OTHER: &str = "ctrl-,";
 pub const TOGGLE_SIDEBAR_MAC: &str = "cmd-ctrl-s";
 pub const TOGGLE_SIDEBAR_OTHER: &str = "ctrl-alt-s";
 
-pub const COMMAND_PALETTE_MAC: &str = "cmd-p";
-pub const COMMAND_PALETTE_OTHER: &str = "ctrl-p";
+pub const COMMAND_PALETTE_MAC: &str = "cmd-shift-p";
+pub const COMMAND_PALETTE_OTHER: &str = "ctrl-shift-p";
 
 pub const DELETE_MESSAGE_MAC: &str = "cmd-backspace";
 pub const DELETE_MESSAGE_OTHER: &str = "ctrl-backspace";

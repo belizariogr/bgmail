@@ -49,7 +49,9 @@ positions Blitz computed.
   shows its selected option with a ▾ and is as wide as its widest option;
   text inputs are `size` characters wide.
 - **Base URL:** defaults to `bgmail://message/` (Blitz panics resolving
-  relative URLs against `about:blank`); that scheme resolves to "missing".
+  relative URLs against `about:blank`); that scheme resolves to "missing",
+  except protocol-relative references (`//host/…` → `bgmail://host/…`),
+  which are treated as `https://host/…` remote content.
 - **Resources:** `data:` and `cid:` served from memory; `file:` only
   with `Resources::allow_file_urls(true)` (tools/tests); `http:`/`https:` only
   with `Resources::allow_remote(true)` (the user allowed remote content),

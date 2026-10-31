@@ -335,11 +335,15 @@ fn sanitize_html_inner(
     load_remote: bool,
     shown: &HashSet<String>,
 ) -> (String, bool, usize) {
-    use lol_html::{element, rewrite_str, RewriteStrSettings};
-    use std::cell::Cell;
+    use lol_html::html_content::ContentType;
+    use lol_html::{element, rewrite_str, text, RewriteStrSettings};
+    use std::cell::{Cell, RefCell};
 
     let has_remote = Cell::new(false);
     let blocked = Cell::new(0usize);
+    // `<style>` text arrives in chunks (a `url(` may straddle two): buffer it
+    // and emit it once, stripped, at the end of the text node.
+    let style_text = RefCell::new(String::new());
     let settings = RewriteStrSettings::new()
         .append_element_content_handler(element!(DISALLOWED_ELEMENTS, |el| {
             el.remove();
@@ -353,23 +357,40 @@ fn sanitize_html_inner(
                 }
             }
             Ok(())
+        }))
+        // CSS `url(...)` (background images, web fonts, `@import`) also fetches
+        // remote resources: blank it where CSS lives (inline `style` and
+        // `<style>` blocks), never in the message's text.
+        .append_element_content_handler(element!("[style]", |el| {
+            if !load_remote {
+                if let Some(style) = el.get_attribute("style") {
+                    el.set_attribute("style", &strip_css_urls(&style))?;
+                }
+            }
+            Ok(())
+        }))
+        .append_element_content_handler(text!("style", |chunk| {
+            if load_remote {
+                return Ok(());
+            }
+            style_text.borrow_mut().push_str(chunk.as_str());
+            if chunk.last_in_text_node() {
+                let css = strip_css_urls(&style_text.take());
+                chunk.replace(&css, ContentType::Html);
+            } else {
+                chunk.remove();
+            }
+            Ok(())
         }));
 
-    let sanitized = rewrite_str(html, settings).unwrap_or_default();
-    let html = if load_remote {
-        sanitized
-    } else {
-        // CSS `url(...)` (background images, web fonts, `@import`) also fetches
-        // remote resources, in both inline `style` and `<style>` blocks. Blank
-        // them too. By preference this is a blunt textual pass, not a CSS parser.
-        strip_css_urls(&sanitized)
-    };
+    let html = rewrite_str(html, settings).unwrap_or_default();
     (html, has_remote.get(), blocked.get())
 }
 
-/// Empties the contents of every CSS `url(...)` in `css` — `url(http://x.png)`
-/// becomes `url()` — so stylesheets can't fetch remote resources. This is a
-/// deliberately blunt textual pass (equivalent to the regex `url\([^)]*\)` →
+/// Empties the contents of every CSS `url(...)` in `css` (an inline `style`
+/// value or a `<style>` block) — `url(http://x.png)` becomes `url()` — so
+/// stylesheets can't fetch remote resources. This is a deliberately blunt
+/// textual pass (equivalent to the regex `url\([^)]*\)` →
 /// `url()`); it does not parse CSS and makes no attempt to tell remote from
 /// inline `data:` URLs, since when remote loading is off neither should fetch.
 fn strip_css_urls(css: &str) -> String {
@@ -592,9 +613,11 @@ pub fn plain_text(html: &str) -> String {
             continue;
         }
         if rest.starts_with('<') {
-            let end = rest.find('>').map_or(rest.len(), |i| i + 1);
-            let tag = &rest[1..end.saturating_sub(1).max(1)];
-            rest = &rest[end..];
+            // An unclosed tag runs to the end (its last character may be
+            // multi-byte, so never cut one byte short of the end).
+            let close = rest.find('>');
+            let tag = &rest[1..close.unwrap_or(rest.len())];
+            rest = &rest[close.map_or(rest.len(), |i| i + 1)..];
             let closing = tag.starts_with('/');
             let name: String = tag
                 .trim_start_matches('/')
@@ -603,9 +626,10 @@ pub fn plain_text(html: &str) -> String {
                 .collect::<String>()
                 .to_ascii_lowercase();
             if !closing && SKIPPED.contains(&name.as_str()) {
+                // Case-insensitive search without lower-casing the rest of
+                // the body per skipped tag (quadratic on huge mail).
                 let close = format!("</{name}");
-                let lower = rest.to_ascii_lowercase();
-                rest = lower.find(&close).map_or("", |at| {
+                rest = find_ascii_ci(rest, &close).map_or("", |at| {
                     let after = &rest[at..];
                     after.find('>').map_or("", |gt| &after[gt + 1..])
                 });
@@ -659,6 +683,15 @@ pub fn plain_text(html: &str) -> String {
         .to_string()
 }
 
+/// Byte index of the first ASCII-case-insensitive occurrence of `needle` (an
+/// ASCII string) in `haystack`; always a char boundary.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 /// Decodes the HTML entities mail text commonly uses: the named basics,
 /// `&nbsp;` and numeric references. Unknown entities are kept as written.
 fn decode_entities(text: &str) -> String {
@@ -667,7 +700,10 @@ fn decode_entities(text: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp..];
-        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+        // Searched as bytes: a 12-byte cut may fall inside a multi-byte
+        // character, and `;` is ASCII, so its index is a char boundary.
+        let window = &rest.as_bytes()[..rest.len().min(12)];
+        let Some(semi) = window.iter().position(|&b| b == b';') else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -1072,6 +1108,18 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_leaves_url_text_outside_css_alone() {
+        // Prose mentioning `url(` (no closing paren) used to lose the rest
+        // of the message.
+        let html = "<p>Call curl(1) or use url( to link</p><p>still here</p>\
+             <style>a{background:url(https://t.test/x.png)}</style>";
+        let clean = sanitize_html(html, false);
+        assert!(clean.contains("Call curl(1) or use url( to link"));
+        assert!(clean.contains("<p>still here</p>"));
+        assert!(!clean.contains("t.test"));
+    }
+
+    #[test]
     fn sanitize_keeps_css_url_resources_when_enabled() {
         let html = "<p style=\"background:url('https://cdn.test/bg.png')\">hi</p>";
         let clean = sanitize_html(html, true);
@@ -1137,6 +1185,25 @@ mod tests {
         assert_eq!(plain_text("text <b unclosed"), "text");
         assert_eq!(plain_text("<script>never closed"), "");
         assert_eq!(plain_text("a <!-- open comment"), "a");
+    }
+
+    #[test]
+    fn plain_text_never_cuts_multibyte_characters() {
+        // `&` followed by multi-byte text with no `;` in the first 12 bytes.
+        assert_eq!(decode_entities("R&aaaaaaaaaaé"), "R&aaaaaaaaaaé");
+        assert_eq!(plain_text("P&D çççççççç ok"), "P&D çççççççç ok");
+        // An unclosed tag ending in a multi-byte character.
+        assert_eq!(plain_text("1 < 2 é"), "1");
+        assert_eq!(plain_text("x <é"), "x");
+    }
+
+    #[test]
+    fn plain_text_skips_blocks_case_insensitively() {
+        assert_eq!(plain_text("a <STYLE>p{}</Style>b"), "a b");
+        assert_eq!(plain_text("<title>T</TITLE><p>é</p>"), "é");
+        assert_eq!(find_ascii_ci("xx</HeAd>", "</head"), Some(2));
+        assert_eq!(find_ascii_ci("é</p", "</p"), Some(2));
+        assert_eq!(find_ascii_ci("abc", "</p"), None);
     }
 
     #[test]

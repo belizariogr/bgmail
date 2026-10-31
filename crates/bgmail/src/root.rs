@@ -1403,6 +1403,13 @@ impl RootView {
         } else {
             body.clone()
         };
+        // A crash rendering formatted HTML must not repeat on every start:
+        // mark the message before parsing it (parsing can crash too) until a
+        // frame showing it was drawn.
+        let guarded = notice.is_none() && matches!(body, MessageBody::Html(_));
+        if guarded {
+            self.crash_guard.begin(id);
+        }
         let rendered = email_document(doc_colors, &shown, remote);
         let document = match HtmlDocument::try_parse(&rendered.html, options()) {
             Ok(document) => document,
@@ -1418,10 +1425,7 @@ impl RootView {
             rendered.blocked_images
         };
         self.reader_notice = notice;
-        // A crash rendering formatted HTML must not repeat on every start:
-        // mark the message until a frame showing it was drawn.
-        if notice.is_none() && matches!(body, MessageBody::Html(_)) {
-            self.crash_guard.begin(id);
+        if guarded {
             let guard = self.crash_guard.clone();
             window.on_next_frame(move |_, _| guard.finish());
         }

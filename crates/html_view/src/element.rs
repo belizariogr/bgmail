@@ -414,6 +414,9 @@ impl HtmlView {
     pub fn set_document(&mut self, mut document: HtmlDocument, cx: &mut Context<Self>) {
         document.set_zoom(self.zoom);
         self.document = Rc::new(RefCell::new(document));
+        // A new parse has new image ids: the old textures can never be hit
+        // again and would otherwise accumulate for the whole session.
+        self.cache.borrow_mut().forget_document();
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.dragging = false;
         self.cursor = CursorStyle::Arrow;

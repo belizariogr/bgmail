@@ -53,10 +53,11 @@ struct CommandPaletteShortcut {
 
 impl Global for CommandPaletteShortcut {}
 
-/// Whether `keystroke` is the command-palette shortcut (Ctrl+P / Cmd+P).
+/// Whether `keystroke` is the command-palette shortcut (Ctrl+Shift+P /
+/// Cmd+Shift+P, as in Zed; Ctrl/Cmd+P prints).
 fn is_command_palette_keystroke(keystroke: &Keystroke) -> bool {
     keystroke.key.eq_ignore_ascii_case("p")
-        && !keystroke.modifiers.shift
+        && keystroke.modifiers.shift
         && (keystroke.modifiers.control || keystroke.modifiers.platform)
 }
 
@@ -393,9 +394,19 @@ mod tests {
             key_char: None,
         };
         let plain_p = Keystroke::default();
-        assert!(is_command_palette_keystroke(&ctrl_p));
-        assert!(is_command_palette_keystroke(&cmd_p));
-        assert!(is_command_palette_keystroke(&uppercase_ctrl_p));
+        let shifted = |keystroke: &Keystroke| Keystroke {
+            modifiers: gpui::Modifiers {
+                shift: true,
+                ..keystroke.modifiers
+            },
+            ..keystroke.clone()
+        };
+        assert!(is_command_palette_keystroke(&shifted(&ctrl_p)));
+        assert!(is_command_palette_keystroke(&shifted(&cmd_p)));
+        assert!(is_command_palette_keystroke(&shifted(&uppercase_ctrl_p)));
+        // Ctrl/Cmd+P without Shift is Print.
+        assert!(!is_command_palette_keystroke(&ctrl_p));
+        assert!(!is_command_palette_keystroke(&cmd_p));
         assert!(!is_command_palette_keystroke(&plain_p));
     }
 }
