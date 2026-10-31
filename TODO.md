@@ -510,7 +510,13 @@
          system's family names; "<Family> Black" is drawn as the family at
          weight 900 (Arial Black filed under Arial gets its black face);
        - CJK/RTL and multi-MB mail are still missing from the corpus.
-  5. ⬜ Later: zoom, print, animated GIF.
+  5. 🔄 Zoom, print, animated GIF.
+     - ✅ Zoom: page zoom as Blitz's scale factor (text reflows and stays
+       sharp); Ctrl/Cmd `+`/`-`/`0` and Ctrl/Cmd + wheel over the reader,
+       Chromium's levels (25%–500%), kept across messages; the status bar
+       shows it when it isn't 100%. Not persisted between runs yet.
+     - ⬜ Print.
+     - ⬜ Animated GIF.
 - ⬜ Stage 3 — remote content on request: HTTP image fetcher behind
       `html_view::Resources` (per-message/per-image unblock, cache, size/time
       limits, no cookies/referrer, optional privacy proxy); restore the

@@ -158,6 +158,11 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   critical resources are pending, max 4 passes), records content width =
   max(width, `overflow_right`) and returns content height =
   max(root height, root scrollHeight).
+- `HtmlDocument::set_zoom(zoom)` / `zoom()`: page zoom (clamped 25%–500%,
+  non-finite → 100%), applied as Blitz's scale factor at the next `layout`.
+  Layout, paint and text shaping run at that scale; every coordinate the
+  type takes or returns (layout width, content size, display list, pointer
+  input, `hit_info`, `select_match`) is in zoomed pixels.
 - `HtmlDocument::content_width()`: width from the last layout (wider than the
   layout width when the mail overflows).
 - `HtmlDocument::content_height()`: height from the last layout.
@@ -186,7 +191,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `HtmlDocument::blocked_remote_urls()`: remote URLs requested and blocked.
 - `HtmlDocument::blitz()` / `blitz_mut()`: underlying `BaseDocument`; mutable
   access invalidates the display list.
-- `fn viewport(width, appearance)` (private): Blitz viewport at scale 1.
+- `fn viewport(width, appearance, zoom)` (private): Blitz viewport `width`
+  px wide at scale `zoom` (layout gets `width / zoom` CSS px).
 - `const WINDOWS_1252_C1` (private): windows-1252 characters for U+0080–U+009F.
 - `fn repair_c1_controls(html) -> Cow<str>` (private): maps C1 controls (from
   Windows-1252 mail decoded as strict ISO-8859-1) to their windows-1252
@@ -226,7 +232,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   controls repaired, collapsed tables without padding, alt text in links
   underlined, plain `<hr>` bevel, `align=justify`, "Arial Black" drawn at
   900 when filed under Arial, rowspan heights and overlapping colspans,
-  small quirks alt boxes showing only text,
+  small quirks alt boxes showing only text, zoom scaling layout/paint/input,
   root background filling a requested height, relative URLs neither panicking
   nor counted as remote, XHTML mail keeps block `<p>`, blocked remote image
   recording, text runs carry ordered words + face.
@@ -413,12 +419,16 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 
 ### `element.rs`
 - `actions!(html_view, [Copy, SelectAll, ScrollUp, ScrollDown, PageUp,
-  PageDown, ScrollToTop, ScrollToBottom])`; `const KEY_CONTEXT = "HtmlView"`;
-  `const LINE_SCROLL` (40px, private).
+  PageDown, ScrollToTop, ScrollToBottom, ZoomIn, ZoomOut, ResetZoom])`;
+  `const KEY_CONTEXT = "HtmlView"`; `const LINE_SCROLL` (40px, private).
+- `const ZOOM_LEVELS`: Chromium's zoom levels, 25%–500%.
+- `fn zoom_step(zoom, steps)`: the level `steps` away (from between two
+  levels, the next one in the step's direction), clamped to the range.
 - `fn init(cx)`: binds `secondary-c`/`secondary-a`, arrows, page keys,
-  space/shift-space, home/end in the `HtmlView` context.
-- `enum HtmlViewEvent { LinkHovered(Option<String>), LinkActivated(String),
-  ContextMenu { position, hit } }`.
+  space/shift-space, home/end, `secondary-=`/`secondary-+` (zoom in),
+  `secondary--` (out), `secondary-0` (100%) in the `HtmlView` context.
+- `enum HtmlViewEvent { ZoomChanged(f32), LinkHovered(Option<String>),
+  LinkActivated(String), ContextMenu { position, hit } }`.
 - `const FALLBACK_WIDTH` (private), `fn layout_width(known, available)`: known
   width, else definite available width, else 800.
 - `fn canvas_height(element_height, element_top, visible_bottom)`.
@@ -435,10 +445,15 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   interactive, `paint_input_listeners`.
 - `fn paint_input_listeners(view, origin, hitbox, window, cx)` (private): sets
   the view's cursor on the hitbox; window-level mouse down (over the hitbox),
-  move and up listeners converting to document coordinates.
+  move and up listeners converting to document coordinates; a capture-phase
+  wheel listener that, with Ctrl/Cmd held over the hitbox, zooms one step
+  per event instead of scrolling.
 - `struct HtmlView { document, cache, scroll, focus, cursor, hovered_link,
-  dragging }` (`EventEmitter<HtmlViewEvent>`, `Focusable`); `new(document,
-  cx)`; `set_document` (resets scroll, drag, cursor, hovered link);
+  dragging, zoom }` (`EventEmitter<HtmlViewEvent>`, `Focusable`);
+  `new(document, cx)`; `set_document` (applies the view's zoom; resets
+  scroll, drag, cursor, hovered link); `zoom()`; `set_zoom(zoom, cx)`
+  (clamped; scales the scroll offset to keep the same content at the top,
+  emits `ZoomChanged`); `zoom_by(steps, cx)`;
   `document()`; `scroll_handle()`; `has_selection()`; `copy_selection(cx)`;
   `select_all(cx)`; `find(query, cx)` (clears selection without matches);
   `select_match(index, cx)` (scrolls with `reveal_scroll`).

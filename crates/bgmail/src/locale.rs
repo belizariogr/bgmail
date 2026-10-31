@@ -335,6 +335,15 @@ pub fn status_unread(language: Language, unread: usize) -> String {
     }
 }
 
+/// Status bar note for the reader's page zoom (`zoom` = 1 for 100%).
+pub fn status_zoom(language: Language, zoom: f32) -> String {
+    let percent = (zoom * 100.0).round();
+    match language {
+        Language::English => format!("Zoom {percent}%"),
+        Language::Portuguese => format!("Zoom {percent}%"),
+    }
+}
+
 /// Global holding the active UI language.
 struct GlobalLanguage(Language);
 
@@ -474,5 +483,6 @@ mod tests {
         assert!(en.contains('2') && en.contains('8') && en.contains("accounts"));
         let pt = status_unread(Language::Portuguese, 9);
         assert!(pt.contains('9') && pt.contains("não lidas"));
+        assert_eq!(status_zoom(Language::English, 1.25), "Zoom 125%");
     }
 }

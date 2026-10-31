@@ -994,6 +994,10 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Status bar right segment with unread count and sync hint.
   - Behavior: English `"{unread} unread · Updated just now"`; Portuguese uses "não lidas · Atualizado agora".
 
+- **`status_zoom`** (pub)
+  - Signature: `pub fn status_zoom(language: Language, zoom: f32) -> String`
+  - Purpose: Status bar note for the reader's page zoom: `"Zoom {percent}%"` (both languages).
+
 - **`init`** (pub, L337)
   - Signature: `pub fn init(language: Language, cx: &mut App)`
   - Purpose: Initializes localization at app startup.
@@ -1503,7 +1507,7 @@ _(None at module top level — conversion helpers only.)_
 - **`on_reader_event`** (private)
   - Signature: `fn on_reader_event(&mut self, view: Entity<HtmlView>, event: &HtmlViewEvent, cx)`
   - Purpose: Handles reader events.
-  - Behavior: `LinkHovered` → status bar `hovered_link`; `LinkActivated` → `cx.open_url` when `is_openable_link`; `ContextMenu` → opens `ReaderMenu` (records whether text is selected).
+  - Behavior: `LinkHovered` → status bar `hovered_link`; `LinkActivated` → `cx.open_url` when `is_openable_link`; `ZoomChanged` → `reader_zoom` (status bar); `ContextMenu` → opens `ReaderMenu` (records whether text is selected).
 
 - **`open_find_bar`** (pub(crate))
   - Signature: `pub(crate) fn open_find_bar(&mut self, window, cx)`
@@ -1711,7 +1715,7 @@ _(None at module top level — conversion helpers only.)_
 - **`render_status_bar`** (private, L3300)
   - Signature: `fn render_status_bar(&self, cx) -> impl IntoElement`
   - Purpose: Bottom status bar.
-  - Behavior: Shows hovered link URL centered when present.
+  - Behavior: Counts on the left; on the right the reader zoom (`status_zoom`, only when not 100%) and the unread count; the hovered link URL centered when present.
 ##### Context: `SettingsView`
 
 - **`new`** (private, L3379)

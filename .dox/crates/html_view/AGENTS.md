@@ -100,6 +100,11 @@ positions Blitz computed.
   `LinkActivated`, `ContextMenu`) and handles `Copy`, `SelectAll` and
   scrolling keys in the `HtmlView` key context (`html_view::init` binds them;
   call it once at startup).
+- **Zoom:** `HtmlDocument::set_zoom` is Blitz's scale factor (layout at
+  `width / zoom` CSS px, text shaped at the zoomed size, so text reflows and
+  stays sharp); the API stays in pixels. `HtmlView` keeps the zoom across
+  documents and zooms with Ctrl/Cmd `+`/`-`/`0` and Ctrl/Cmd + wheel
+  (Chromium's levels), reporting `ZoomChanged`.
 - **Hostile input:** style/layout recurse per nesting level (~2,000 levels
   overflow an 8 MB stack). `try_parse` refuses trees deeper than
   `MAX_NESTING_DEPTH` (256) with `RenderError::TooDeep`, and `layout`/paint

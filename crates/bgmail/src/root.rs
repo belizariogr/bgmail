@@ -404,6 +404,8 @@ pub struct RootView {
     /// Destination URL of the link currently under the cursor in the reader
     /// (empty when none). Shown centered in the status bar.
     hovered_link: String,
+    /// The reader's page zoom (1 = 100%), shown in the status bar otherwise.
+    reader_zoom: f32,
     /// Handle to the separate settings window while it is open (like Zed, the
     /// preferences live in their own window). `None` when it has never been
     /// opened or was closed.
@@ -565,6 +567,7 @@ impl RootView {
             drag_start: point(px(0.0), px(0.0)),
             drag_anchor: point(px(0.0), px(0.0)),
             hovered_link: String::new(),
+            reader_zoom: 1.0,
             settings_window: None,
             compose_window: None,
             compose_origin,
@@ -1412,7 +1415,7 @@ impl RootView {
     }
 
     /// Reacts to the reader: link under the pointer (status bar), link clicks
-    /// (opened outside the app) and context menus.
+    /// (opened outside the app), page zoom (status bar) and context menus.
     fn on_reader_event(
         &mut self,
         view: Entity<HtmlView>,
@@ -1428,6 +1431,10 @@ impl RootView {
                 if is_openable_link(url) {
                     cx.open_url(url);
                 }
+            }
+            HtmlViewEvent::ZoomChanged(zoom) => {
+                self.reader_zoom = *zoom;
+                cx.notify();
             }
             HtmlViewEvent::ContextMenu { position, hit } => {
                 self.reader_menu = Some(ReaderMenu {
@@ -3156,9 +3163,20 @@ impl RootView {
                     .color(Color::Muted),
             )
             .child(
-                Label::new(locale::status_unread(language, total_unread))
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
+                h_flex()
+                    .gap_3()
+                    .when((self.reader_zoom - 1.0).abs() > 0.001, |this| {
+                        this.child(
+                            Label::new(locale::status_zoom(language, self.reader_zoom))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                    })
+                    .child(
+                        Label::new(locale::status_unread(language, total_unread))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
             )
             // Hovered link URL, centered over the bar (a chip-colored backing
             // keeps it legible above the side counters when it gets long).

@@ -646,6 +646,8 @@ pub struct HtmlDocument {
     find_matches: Vec<(NodeId, Range<usize>)>,
     /// Element nesting depth of the parsed tree.
     depth: usize,
+    /// Page zoom: CSS px are drawn this many pixels wide (see `set_zoom`).
+    zoom: f32,
 }
 
 impl HtmlDocument {
@@ -674,7 +676,7 @@ impl HtmlDocument {
             net_provider: Some(Arc::new(ResourceProvider(resources.clone()))),
             // Clicked links are reported to the host, never followed.
             navigation_provider: Some(links.clone()),
-            viewport: Some(viewport(800, options.appearance)),
+            viewport: Some(viewport(800, options.appearance, 1.0)),
             ua_stylesheets,
             font_ctx: Some(crate::fonts::font_context()),
             ..Default::default()
@@ -708,6 +710,7 @@ impl HtmlDocument {
             links,
             find_matches: Vec::new(),
             depth: 0,
+            zoom: 1.0,
         }
         .with_depth()
     }
@@ -745,7 +748,8 @@ impl HtmlDocument {
         }
         let width = width.max(1.0).round() as u32;
         if self.layout_width != Some(width) {
-            self.inner.set_viewport(viewport(width, self.appearance));
+            self.inner
+                .set_viewport(viewport(width, self.appearance, self.zoom));
             self.layout_width = Some(width);
             self.display_list = None;
         }
@@ -757,11 +761,37 @@ impl HtmlDocument {
             }
         }
         let root = self.inner.root_element();
-        self.content_height = root.final_layout().size.height.max(root.scroll_height());
+        // Layout is in CSS px; the host's coordinates are zoomed pixels.
+        let zoom = self.zoom;
+        self.content_height = root.final_layout().size.height.max(root.scroll_height()) * zoom;
         // Mail wider than the pane (fixed-width tables) overflows to the right
         // and scrolls horizontally, as in a browser; layout keeps the pane width.
-        self.content_width = (width as f32).max(overflow_right(&self.inner, root.id, 0.0));
+        self.content_width = (width as f32).max(overflow_right(&self.inner, root.id, 0.0) * zoom);
         self.content_height
+    }
+
+    /// Page zoom, like a browser's: the document lays out `1 / zoom` as many
+    /// CSS px across the pane and draws everything `zoom` times larger, so
+    /// text reflows instead of overflowing. Every coordinate this type takes
+    /// or returns (layout width, content size, pointer input, match lines)
+    /// stays in pixels. Clamped to 25%–500%; takes effect at the next
+    /// [`Self::layout`].
+    pub fn set_zoom(&mut self, zoom: f32) {
+        let zoom = if zoom.is_finite() {
+            zoom.clamp(0.25, 5.0)
+        } else {
+            1.0
+        };
+        if zoom != self.zoom {
+            self.zoom = zoom;
+            self.layout_width = None;
+            self.display_list = None;
+        }
+    }
+
+    /// The page zoom (1 = 100%).
+    pub fn zoom(&self) -> f32 {
+        self.zoom
     }
 
     /// Content width from the last [`HtmlDocument::layout`]: the layout width,
@@ -799,7 +829,7 @@ impl HtmlDocument {
         crate::blitz_paint::paint_scene(
             &mut list,
             &mut self.inner,
-            1.0,
+            self.zoom as f64,
             width,
             height as u32,
             0,
@@ -822,6 +852,11 @@ impl HtmlDocument {
     /// repainted. Only the primary button presses reach the document; other
     /// buttons are the host's (context menus).
     pub fn pointer(&mut self, input: PointerInput) -> bool {
+        let input = PointerInput {
+            x: input.x / self.zoom,
+            y: input.y / self.zoom,
+            ..input
+        };
         let before = (
             self.inner.get_hover_node_id(),
             self.inner.get_text_selection_ranges(),
@@ -897,7 +932,7 @@ impl HtmlDocument {
 
     /// What lies under a document point: link URL, image source, text.
     pub fn hit_info(&self, x: f32, y: f32) -> HitInfo {
-        let Some(hit) = self.inner.hit(x, y) else {
+        let Some(hit) = self.inner.hit(x / self.zoom, y / self.zoom) else {
             return HitInfo::default();
         };
         let mut info = HitInfo {
@@ -1001,7 +1036,11 @@ impl HtmlDocument {
             + layout.padding.top
             + layout.border.top
             + text.block_offset;
-        Some((top + caret.y0 as f32 / scale, top + caret.y1 as f32 / scale))
+        let zoom = self.zoom;
+        Some((
+            (top + caret.y0 as f32 / scale) * zoom,
+            (top + caret.y1 as f32 / scale) * zoom,
+        ))
     }
 
     /// Remote URLs the document asked for and that were blocked.
@@ -1059,12 +1098,15 @@ fn pointer_event(input: &PointerInput) -> BlitzPointerEvent {
     }
 }
 
-fn viewport(width: u32, appearance: Appearance) -> Viewport {
+/// A Blitz viewport `width` pixels wide at `zoom` (Blitz's scale factor:
+/// layout gets `width / zoom` CSS px).
+fn viewport(width: u32, appearance: Appearance, zoom: f32) -> Viewport {
     let scheme = match appearance {
         Appearance::Light => ColorScheme::Light,
         Appearance::Dark => ColorScheme::Dark,
     };
-    Viewport::new(width, VIEWPORT_HEIGHT, 1.0, scheme)
+    let height = (VIEWPORT_HEIGHT as f32 * zoom).round() as u32;
+    Viewport::new(width, height, zoom, scheme)
 }
 
 /// Windows-1252 characters for the C1 controls U+0080–U+009F (`None` where
@@ -2231,5 +2273,38 @@ mod tests {
         // Too small for the icon: just the (clipped) text; else icon + text.
         assert_eq!(children("s"), 1);
         assert_eq!(children("l"), 2);
+    }
+
+    #[test]
+    fn zoom_scales_layout_paint_and_input() {
+        let html = "<!DOCTYPE html><body style=\"margin:0\"><div style=\"width:100px;height:50px;background:red\"></div><a href=\"https://x.test/\" style=\"font-size:16px\">link</a>";
+        let mut doc = HtmlDocument::parse(html, DocumentOptions::default());
+        let normal = doc.layout(400.0);
+        doc.set_zoom(2.0);
+        assert_eq!(doc.zoom(), 2.0);
+        // 200 CSS px across a 400px pane, everything drawn twice as large.
+        let zoomed = doc.layout(400.0);
+        // (Line heights are rounded at the zoomed size, as in browsers.)
+        assert!((zoomed - normal * 2.0).abs() <= 4.0, "{zoomed} vs {normal}");
+        let list = doc.display_list();
+        let red = list.commands.iter().find_map(|c| match c {
+            crate::display_list::Command::Fill {
+                geometry: crate::display_list::Geometry::Rect(rect),
+                brush: crate::display_list::Brush::Solid(color),
+            } if color.to_rgba8().to_u8_array() == [255, 0, 0, 255] => Some(*rect),
+            _ => None,
+        });
+        assert_eq!(red.map(|r| (r.width(), r.height())), Some((200.0, 100.0)));
+        let size = list.commands.iter().find_map(|c| match c {
+            crate::display_list::Command::Text(run) => Some(run.font_size),
+            _ => None,
+        });
+        assert_eq!(size, Some(32.0));
+        // Pointer coordinates are zoomed pixels: the link sits below y=100.
+        assert!(doc.hit_info(10.0, 110.0).link.is_some());
+        assert!(doc.hit_info(10.0, 60.0).link.is_none());
+        // Out-of-range zooms are clamped.
+        doc.set_zoom(100.0);
+        assert_eq!(doc.zoom(), 5.0);
     }
 }

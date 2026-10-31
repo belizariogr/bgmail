@@ -1,6 +1,6 @@
 //! The GPUI element and view that display an [`HtmlDocument`], with pointer
-//! interaction (hover, links, text selection, context menus) and keyboard
-//! commands (copy, select all, scrolling).
+//! interaction (hover, links, text selection, context menus), keyboard
+//! commands (copy, select all, scrolling) and page zoom.
 
 use crate::document::HtmlDocument;
 use crate::interaction::{HitInfo, PointerButton, PointerInput, PointerModifiers, PointerPhase};
@@ -10,8 +10,8 @@ use gpui::{
     CursorStyle, DispatchPhase, Element, ElementId, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement,
     KeyBinding, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, ScrollHandle, StatefulInteractiveElement, Style, Styled,
-    WeakEntity, Window,
+    ParentElement, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent,
+    StatefulInteractiveElement, Style, Styled, WeakEntity, Window,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,8 +29,37 @@ actions!(
         PageDown,
         ScrollToTop,
         ScrollToBottom,
+        /// Zooms the page in one step.
+        ZoomIn,
+        /// Zooms the page out one step.
+        ZoomOut,
+        /// Back to 100%.
+        ResetZoom,
     ]
 );
+
+/// Browser zoom levels (Chromium's), from 25% to 500%.
+pub const ZOOM_LEVELS: [f32; 17] = [
+    0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0,
+];
+
+/// The zoom level one step in (`steps > 0`) or out from `zoom`.
+pub fn zoom_step(zoom: f32, steps: i32) -> f32 {
+    let index = ZOOM_LEVELS
+        .iter()
+        .position(|level| (level - zoom).abs() < 0.005)
+        // Between levels: the nearest one in the step's direction.
+        .map(|i| i as i32 + steps)
+        .unwrap_or_else(|| {
+            let above = ZOOM_LEVELS.iter().position(|level| *level > zoom);
+            match above {
+                Some(i) if steps > 0 => i as i32 + steps - 1,
+                Some(i) => i as i32 + steps,
+                None => ZOOM_LEVELS.len() as i32 + steps,
+            }
+        });
+    ZOOM_LEVELS[index.clamp(0, ZOOM_LEVELS.len() as i32 - 1) as usize]
+}
 
 /// Key context of a focused [`HtmlView`].
 pub const KEY_CONTEXT: &str = "HtmlView";
@@ -52,12 +81,18 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-space", PageUp, context),
         KeyBinding::new("home", ScrollToTop, context),
         KeyBinding::new("end", ScrollToBottom, context),
+        KeyBinding::new("secondary-=", ZoomIn, context),
+        KeyBinding::new("secondary-+", ZoomIn, context),
+        KeyBinding::new("secondary--", ZoomOut, context),
+        KeyBinding::new("secondary-0", ResetZoom, context),
     ]);
 }
 
 /// What an [`HtmlView`] reports to its host.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HtmlViewEvent {
+    /// The page zoom changed (1 = 100%).
+    ZoomChanged(f32),
     /// The pointer entered (`Some(url)`) or left (`None`) a link.
     LinkHovered(Option<String>),
     /// A link was clicked; the host decides how to open it.
@@ -290,6 +325,23 @@ fn paint_input_listeners(
             let _ = move_view.update(cx, |view, cx| view.mouse_move(event, x, y, over, cx));
         }
     });
+    // Ctrl/Cmd + wheel zooms instead of scrolling (captured before the
+    // scroll container sees it).
+    let wheel_view = view.clone();
+    let wheel_hitbox = hitbox.clone();
+    window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+        if phase == DispatchPhase::Capture
+            && event.modifiers.secondary()
+            && wheel_hitbox.is_hovered(window)
+        {
+            let dy = f32::from(event.delta.pixel_delta(px(20.)).y);
+            if dy != 0.0 {
+                let steps = if dy > 0.0 { 1 } else { -1 };
+                let _ = wheel_view.update(cx, |view, cx| view.zoom_by(steps, cx));
+            }
+            cx.stop_propagation();
+        }
+    });
     window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
         if phase == DispatchPhase::Bubble {
             let (x, y) = to_document(event.position);
@@ -310,6 +362,8 @@ pub struct HtmlView {
     hovered_link: Option<String>,
     /// Whether a primary-button press started in the document (selection drag).
     dragging: bool,
+    /// Page zoom, kept across documents like a browser tab's.
+    zoom: f32,
 }
 
 impl EventEmitter<HtmlViewEvent> for HtmlView {}
@@ -330,17 +384,46 @@ impl HtmlView {
             cursor: CursorStyle::Arrow,
             hovered_link: None,
             dragging: false,
+            zoom: 1.0,
         }
     }
 
     /// Replaces the displayed document and scrolls back to the top.
-    pub fn set_document(&mut self, document: HtmlDocument, cx: &mut Context<Self>) {
+    pub fn set_document(&mut self, mut document: HtmlDocument, cx: &mut Context<Self>) {
+        document.set_zoom(self.zoom);
         self.document = Rc::new(RefCell::new(document));
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.dragging = false;
         self.cursor = CursorStyle::Arrow;
         self.set_hovered_link(None, cx);
         cx.notify();
+    }
+
+    /// The page zoom (1 = 100%).
+    pub fn zoom(&self) -> f32 {
+        self.zoom
+    }
+
+    /// Sets the page zoom (clamped to [`ZOOM_LEVELS`]' range), keeping the
+    /// same part of the document at the top of the view.
+    pub fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        let zoom = zoom.clamp(ZOOM_LEVELS[0], ZOOM_LEVELS[ZOOM_LEVELS.len() - 1]);
+        if zoom == self.zoom {
+            return;
+        }
+        let ratio = zoom / self.zoom;
+        self.zoom = zoom;
+        self.document.borrow_mut().set_zoom(zoom);
+        let offset = self.scroll.offset();
+        self.scroll
+            .set_offset(point(offset.x * ratio, offset.y * ratio));
+        cx.emit(HtmlViewEvent::ZoomChanged(zoom));
+        cx.notify();
+    }
+
+    /// Zooms `steps` levels in (> 0) or out (< 0) of [`ZOOM_LEVELS`].
+    pub fn zoom_by(&mut self, steps: i32, cx: &mut Context<Self>) {
+        self.set_zoom(zoom_step(self.zoom, steps), cx);
     }
 
     pub fn document(&self) -> Rc<RefCell<HtmlDocument>> {
@@ -544,6 +627,9 @@ impl Render for HtmlView {
             }))
             .on_action(cx.listener(|this, _: &ScrollToTop, _, cx| this.scroll_by(f32::MIN, cx)))
             .on_action(cx.listener(|this, _: &ScrollToBottom, _, cx| this.scroll_by(f32::MAX, cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(1, cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(-1, cx)))
+            .on_action(cx.listener(|this, _: &ResetZoom, _, cx| this.set_zoom(1.0, cx)))
             .child(
                 HtmlElement::new(self.document.clone(), self.cache.clone())
                     .interactive(cx.weak_entity()),
@@ -555,6 +641,20 @@ impl Render for HtmlView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_steps_follow_browser_levels() {
+        assert_eq!(zoom_step(1.0, 1), 1.1);
+        assert_eq!(zoom_step(1.0, -1), 0.9);
+        assert_eq!(zoom_step(1.0, 3), 1.5);
+        // Clamped at both ends.
+        assert_eq!(zoom_step(5.0, 1), 5.0);
+        assert_eq!(zoom_step(0.25, -1), 0.25);
+        // From between two levels, the next one in the step's direction.
+        assert_eq!(zoom_step(1.2, 1), 1.25);
+        assert_eq!(zoom_step(1.2, -1), 1.1);
+        assert_eq!(zoom_step(9.0, -1), 5.0);
+    }
 
     #[test]
     fn content_width_changes_ignore_subpixel_noise() {
