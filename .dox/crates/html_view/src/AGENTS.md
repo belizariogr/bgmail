@@ -223,7 +223,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   unavailable images framed only from 18px, width-only block images,
   inline alt text keeping the image's font, collapsed borders per cell, C1
   controls repaired, collapsed tables without padding, alt text in links
-  underlined, plain `<hr>` bevel, `align=justify`,
+  underlined, plain `<hr>` bevel, `align=justify`, "Arial Black" drawn at
+  900 when filed under Arial,
   root background filling a requested height, relative URLs neither panicking
   nor counted as remote, XHTML mail keeps block `<p>`, blocked remote image
   recording, text runs carry ordered words + face.
@@ -242,12 +243,17 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `fn set_fallback_order(collection, fallback)` (crate): makes the (deduped,
   installed) family order the default fallback of every script; an empty order
   keeps fontique's per-script fallback.
+- `fn weight_aliases(collection) -> Vec<(name, family, 900.0)>` (crate):
+  installed family names "<Family> Black" whose prefix is exactly an
+  installed family ("Arial Black" → "Arial"), from a scan of family names
+  only (≈0.4 ms, no font files read); `font_context` hands them to
+  `blitz_dom::set_family_aliases`.
 - `mod platform` (Linux/FreeBSD): `generic_families()` = fontconfig matches of
   Chromium's defaults (Times New Roman, Arial, monospace, Comic Sans MS,
   Impact, system-ui); `fallback_order()` = family-less `FcFontSort` (trimmed).
   Other platforms: both empty (fontique's native behaviour).
 - Tests: generic names prefer the platform choice then the first family (no
-  emoji, no uninstalled names), fallback order on every script (deduped),
+  emoji, no uninstalled names), weight aliases need the base family, fallback order on every script (deduped),
   empty order keeps the platform fallback.
 
 ### `display_list.rs`

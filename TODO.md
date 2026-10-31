@@ -503,9 +503,12 @@
          distribution); Chromium gives it to unconstrained rows;
        - remaining drift in ham-01, ham-16 and ham-05 (fonts missing here,
          iframe ads, listbox `<select size>`);
-       - alt text of fixed-size images isn't clipped to the image box;
-       - fonts registered under another family (Arial Black as "Arial"
-         Black);
+       - alt-text boxes: clipping and wrapping match Chromium; only in
+         cramped table rows Chromium keeps the alt box atomic (MasterClass
+         social icons) where html_view flows it as text;
+       - ~~fonts registered under another family~~ decided: keep the
+         system's family names; "<Family> Black" is drawn as the family at
+         weight 900 (Arial Black filed under Arial gets its black face);
        - CJK/RTL and multi-MB mail are still missing from the corpus.
   5. ⬜ Later: zoom, print, animated GIF.
 - ⬜ Stage 3 — remote content on request: HTTP image fetcher behind

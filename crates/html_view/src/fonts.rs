@@ -50,6 +50,7 @@ pub(crate) fn font_context() -> FontContext {
             collection.register_fonts(Blob::new(Arc::new(blitz_dom::BULLET_FONT) as _), None);
             let names = generic_family_names(&mut collection, &platform::generic_families());
             blitz_dom::set_generic_family_names(names);
+            blitz_dom::set_family_aliases(weight_aliases(&mut collection));
             set_fallback_order(&mut collection, &platform::fallback_order());
             FontContext {
                 collection,
@@ -57,6 +58,38 @@ pub(crate) fn font_context() -> FontContext {
             }
         })
         .clone()
+}
+
+/// Installed family names "<Family> Black" whose prefix is exactly an
+/// installed family ("Arial Black" → "Arial"), aliased to that family at
+/// weight 900. Platforms that file the face under its base family (Windows
+/// fonts on Linux: "Arial Black" is family "Arial", style Black) would
+/// otherwise give the regular face; at 900 the family picks the black one.
+/// Only names are scanned (no font files are read).
+pub(crate) fn weight_aliases(collection: &mut Collection) -> Vec<(String, String, f32)> {
+    const SUFFIX: &str = " black";
+    let names: Vec<String> = collection
+        .family_names()
+        .filter(|name| {
+            name.len() > SUFFIX.len()
+                && name
+                    .get(name.len() - SUFFIX.len()..)
+                    .is_some_and(|end| end.eq_ignore_ascii_case(SUFFIX))
+        })
+        .map(str::to_string)
+        .collect();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let prefix = &name[..name.len() - SUFFIX.len()];
+            let id = collection.family_id(prefix)?;
+            // The exact family, not a fuzzy match.
+            let family = collection.family(id)?.name().to_string();
+            family
+                .eq_ignore_ascii_case(prefix)
+                .then(|| (name.clone(), family, 900.0))
+        })
+        .collect()
 }
 
 /// One family name per generic family: the platform's choice (`preferred`)
@@ -239,5 +272,15 @@ mod tests {
         c.set_fallbacks(key, std::iter::once(a));
         set_fallback_order(&mut c, &[]);
         assert_eq!(c.fallback_families(key).collect::<Vec<_>>(), [a]);
+    }
+
+    #[test]
+    fn weight_aliases_need_the_base_family() {
+        // No system fonts: no base family, so nothing is aliased.
+        let mut collection = Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: false,
+        });
+        assert!(weight_aliases(&mut collection).is_empty());
     }
 }

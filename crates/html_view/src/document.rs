@@ -2162,4 +2162,27 @@ mod tests {
         assert!(first_line_end("") < 195.0);
         assert!((first_line_end("align=\"justify\"") - 200.0).abs() < 1.0);
     }
+
+    #[test]
+    fn aliased_faces_render_heavy() {
+        let mut collection = crate::fonts::font_context().collection;
+        if !crate::fonts::weight_aliases(&mut collection)
+            .iter()
+            .any(|(face, _, _)| face == "Arial Black")
+        {
+            return; // Arial Black is installed as its own family, or Arial is missing.
+        }
+        let mut doc =
+            laid_out("<!DOCTYPE html><body><p style=\"font-family:'arial black',arial\">Heavy</p>");
+        let weights: Vec<f32> = doc
+            .display_list()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                crate::display_list::Command::Text(run) => Some(run.face.weight),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(weights, [900.0]);
+    }
 }

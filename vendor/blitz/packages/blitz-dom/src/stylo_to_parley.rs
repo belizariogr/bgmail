@@ -81,6 +81,26 @@ pub(crate) fn generic_family_name(generic: parley::GenericFamily) -> Option<&'st
         .map(|(_, name)| name.as_str())
 }
 
+/// BGMail: family names the embedder maps to another family at a minimum
+/// weight, for faces some platforms register under their base family
+/// ("Arial Black" as "Arial", style Black): (name, family, weight).
+static FAMILY_ALIASES: std::sync::OnceLock<Vec<(String, String, f32)>> = std::sync::OnceLock::new();
+
+/// BGMail: sets the family aliases (once per process; later calls are
+/// ignored and return `false`). Names match case-insensitively.
+pub fn set_family_aliases(aliases: Vec<(String, String, f32)>) -> bool {
+    FAMILY_ALIASES.set(aliases).is_ok()
+}
+
+/// BGMail: the (family, minimum weight) an aliased family name stands for.
+pub(crate) fn family_alias(name: &str) -> Option<(&'static str, f32)> {
+    FAMILY_ALIASES
+        .get()?
+        .iter()
+        .find(|(alias, _, _)| alias.eq_ignore_ascii_case(name))
+        .map(|(_, family, weight)| (family.as_str(), *weight))
+}
+
 /// BGMail: `Generic(g)` → the embedder's family name for `g`, if set.
 fn resolve_generic(family: parley::FontFamilyName<'static>) -> parley::FontFamilyName<'static> {
     match family {
@@ -112,6 +132,9 @@ pub(crate) fn query_font_family(input: &stylo::SingleFontFamily) -> parley::Quer
                     break 'ret generic(parley::GenericFamily::SystemUi);
                 }
 
+                if let Some((family, _)) = family_alias(name) {
+                    break 'ret parley::QueryFamily::Named(family);
+                }
                 break 'ret parley::QueryFamily::Named(name);
             }
         }
@@ -472,7 +495,7 @@ pub(crate) fn style(
         .px();
 
     // Convert Bold/Italic
-    let font_weight = self::font_weight(font_styles.font_weight);
+    let mut font_weight = self::font_weight(font_styles.font_weight);
     let font_style = self::font_style(font_styles.font_style);
     let font_width = self::font_width(font_styles.font_width);
     let font_variations = self::font_variations(&font_styles.font_variation_settings);
@@ -484,7 +507,8 @@ pub(crate) fn style(
         .families
         .list
         .iter()
-        .map(|family| match family {
+        .enumerate()
+        .map(|(index, family)| match family {
             stylo::SingleFontFamily::FamilyName(name) => {
                 'ret: {
                     let name = name.name.as_str();
@@ -499,6 +523,16 @@ pub(crate) fn style(
                         break 'ret parley::FontFamilyName::Generic(
                             parley::GenericFamily::SystemUi,
                         );
+                    }
+
+                    // BGMail: an aliased face ("Arial Black") is its base
+                    // family, at least as heavy as the face when it's the
+                    // family the text asks for first.
+                    if let Some((family, weight)) = family_alias(name) {
+                        if index == 0 && font_weight.value() < weight {
+                            font_weight = parley::FontWeight::new(weight);
+                        }
+                        break 'ret parley::FontFamilyName::Named(Cow::Borrowed(family));
                     }
 
                     break 'ret parley::FontFamilyName::Named(Cow::Owned(name.to_string()));

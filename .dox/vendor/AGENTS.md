@@ -77,7 +77,8 @@ repository instead of living in someone's checkout.
     order and complete; the DOM-order helpers it used are removed.
   - `stylo_to_parley.rs`: `set_generic_family_names` (embedder resolves CSS
     generics to single family names); font lists without a generic end in
-    `serif`.
+    `serif`; `set_family_aliases` (embedder maps a family name to another
+    family at a minimum weight, applied when it's the first family listed).
   - Real-mail round (2002-era quirks mail + modern templates, measured
     against Chromium):
     - `layout/table.rs`:

@@ -63,6 +63,10 @@ positions Blitz computed.
   character in the platform order (Linux: family-less `FcFontSort`, as
   Chromium); emoji clusters still try the colour emoji generic first. Font
   lists without a generic end in `serif` (the browser default font).
+  "<Family> Black" faces filed under their base family (Windows fonts on
+  Linux) are drawn as that family at weight 900 (`weight_aliases`), the
+  heaviest face available; decided: no per-file registration of secondary
+  family names (startup cost).
 - **Text:** never forward glyph ids when the source text is known. Each word is
   shaped with `TextSystem::shape_line` using the family/weight/style of the
   face Parley resolved (`FaceSpec`) and placed at Blitz's x and baseline.
@@ -119,8 +123,7 @@ positions Blitz computed.
   listbox `<select size>` drawn as a
   drop-down; a bordered inline around a block draws a box border (Chromium:
   empty line fragments); weight matching follows CSS (a face list holding "Arial
-  Black" under "Arial" — Windows fonts on Linux — gives it for weight 800,
-  Chromium gives Bold); small `<br>`/line-height drifts (≤5px).
+  Black" under "Arial" gives it for weight 800, Chromium gives Bold); small `<br>`/line-height drifts (≤5px).
 - Diagnostics: `viewer --capture` (stitched full-page grabs with `grim`),
   `layout_dump` (element boxes, diff with `spikes/html_render/tools/ldiff.sh`),
   `dump_text`, `dump_cmds`, `measure`, `content_size` (content width/height
