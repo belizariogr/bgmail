@@ -27,6 +27,8 @@ gpui.workspace = true
 blitz-dom = { path = "../../vendor/blitz/packages/blitz-dom", default-features = false, features = ["system-fonts", "woff", "floats", "text-transform-icu"] }
 blitz-html = { path = "../../vendor/blitz/packages/blitz-html", default-features = false }
 url = "2.5.0"
+# Blitz event types (pointer modifiers) used to drive document interaction.
+keyboard-types = "0.8"
 data-url = "0.3.1"
 blitz-traits = { path = "../../vendor/blitz/packages/blitz-traits", default-features = false }
 

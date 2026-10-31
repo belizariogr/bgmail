@@ -31,9 +31,10 @@ use gpui::{
 
 use crate::commands::CommandId;
 use actions::{
-    ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, MessageArchive,
-    MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessageRestore, MessageToggleFlag,
-    MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette, ToggleSidebar,
+    ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, FindInMessage,
+    MessageArchive, MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessageRestore,
+    MessageToggleFlag, MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette,
+    ToggleSidebar,
 };
 use compose::ComposeView;
 use root::{RootView, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH};
@@ -99,9 +100,19 @@ fn schedule_compose_close(cx: &mut App) {
     });
 }
 
+/// Opens the reader's find bar in the main window. Global so the shortcut also
+/// works when nothing in the main window has focus yet.
+fn schedule_find_in_message(cx: &mut App) {
+    let main = cx.global::<MainWindow>().0;
+    cx.defer(move |cx| {
+        let _ = main.update(cx, |root, window, cx| root.open_find_bar(window, cx));
+    });
+}
+
 /// Global handlers keep macOS menu items enabled when focus is outside the main
 /// view tree (compose/settings windows).
 fn register_global_menu_actions(cx: &mut App) {
+    cx.on_action(|_: &FindInMessage, cx| schedule_find_in_message(cx));
     cx.on_action(|_: &ComposeNew, cx| schedule_menu_command(CommandId::ComposeNew, cx));
     cx.on_action(|_: &OpenSettings, cx| schedule_menu_command(CommandId::OpenSettings, cx));
     cx.on_action(|_: &ToggleSidebar, cx| schedule_menu_command(CommandId::ToggleSidebar, cx));
@@ -168,6 +179,7 @@ fn main() {
             // Initialize localization (English by default).
             locale::init(locale::Language::default(), cx);
             ui::bind_keys(cx);
+            html_view::init(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
             shortcuts::bind_app_shortcuts(cx);
             cx.set_menus(app_menus());

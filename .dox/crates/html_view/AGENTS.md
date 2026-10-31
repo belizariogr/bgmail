@@ -11,8 +11,8 @@ positions Blitz computed.
 
 ## Ownership
 
-- Owns: `HtmlDocument` (parse/layout/paint cache), `HtmlView`/`HtmlElement`
-  (GPUI view/element), the display list, the GPUI replayer, gradient sampling,
+- Owns: `HtmlDocument` (parse/layout/paint cache, pointer/text interaction),
+  `HtmlView`/`HtmlElement` (GPUI view/element, input, keyboard commands), the display list, the GPUI replayer, gradient sampling,
   the offline resource policy (`Resources`), the browser-like font policy
   (`src/fonts.rs`), and the vendored painter `src/blitz_paint/`.
 - Does not own: HTML sanitisation policy and reader UI (`bgmail`), theme colors
@@ -76,6 +76,17 @@ positions Blitz computed.
   that (fixed-width tables) reports `content_width()` (rightmost in-flow box,
   not descending into overflow-clipping boxes) and `HtmlView` scrolls both
   axes, extending the scroll area with a zero-height spacer of that width.
+- **Interaction:** `HtmlDocument` takes pointer input in document coordinates
+  (`PointerInput`) and drives Blitz's event driver (hover, drag selection,
+  link clicks); double/triple clicks select a word/paragraph; links are
+  captured (`take_activated_link`), never navigated. `hit_info` reports link,
+  image and text under a point. Selection is painted with the host's color
+  (`DocumentOptions::selection_color`). `find`/`select_match` search the
+  text. `HtmlView` routes window-level mouse events (drags may leave it),
+  sets the cursor (hand/I-beam), emits `HtmlViewEvent` (`LinkHovered`,
+  `LinkActivated`, `ContextMenu`) and handles `Copy`, `SelectAll` and
+  scrolling keys in the `HtmlView` key context (`html_view::init` binds them;
+  call it once at startup).
 - **Images:** drawn at less than half their size, they are pre-downscaled on
   the CPU (area filter, premultiplied alpha) and cached per upload size —
   GPUI samples without mipmaps.
@@ -89,8 +100,8 @@ positions Blitz computed.
 - Visual check: `cargo run -p html_view --example viewer -- [--width <px>] <file.html>...`
   (Left/Right switch files). The spike corpus lives in
   `spikes/html_render/corpus/`.
-- Known gaps: no interaction yet (hover, links, selection, copy, context
-  menu); blend modes and filters other than grayscale/opacity ignored;
+- Known gaps: a selection can't start in blank space (Blitz anchors only on
+  text); find highlights only the current match; blend modes and filters other than grayscale/opacity ignored;
   glyph-only runs (form editors) not drawn; the quirks-mode strut rule for text
   lines (Parley); weight matching follows CSS (a face list holding "Arial
   Black" under "Arial" — Windows fonts on Linux — gives it for weight 800,

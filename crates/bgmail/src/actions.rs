@@ -20,6 +20,7 @@ actions!(
         ComposeAttach,
         ComposeDiscard,
         ComposeClose,
+        FindInMessage,
     ]
 );
 

@@ -58,6 +58,7 @@ pub enum IconName {
     Refresh,
     ChevronRight,
     ChevronDown,
+    ChevronUp,
     Account,
     Attachment,
     Mail,
@@ -102,6 +103,7 @@ impl IconName {
             IconName::Refresh => crate::REFRESH,
             IconName::ChevronRight => crate::CHEVRON_RIGHT,
             IconName::ChevronDown => crate::CHEVRON_DOWN,
+            IconName::ChevronUp => crate::CHEVRON_UP,
             IconName::Account => crate::CIRCLE_USER,
             IconName::Attachment => crate::PAPERCLIP,
             IconName::Mail => crate::ENVELOPE,
@@ -171,7 +173,7 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 34] = [
+    const ALL: [IconName; 35] = [
         IconName::Inbox,
         IconName::Sent,
         IconName::Drafts,
@@ -192,6 +194,7 @@ mod tests {
         IconName::Refresh,
         IconName::ChevronRight,
         IconName::ChevronDown,
+        IconName::ChevronUp,
         IconName::Account,
         IconName::Attachment,
         IconName::Mail,

@@ -326,7 +326,7 @@ mod tests {
     fn toggle_starred_updates_flagged_folder() {
         let (_file, db) = seeded_db();
         let id = message_id(&db, "Inbox");
-        assert!(db.toggle_message_starred(id).unwrap() == false);
+        assert!(!db.toggle_message_starred(id).unwrap());
         let csv = message_csv(&db, "Inbox");
         assert!(!message_has_folder(&csv, system::FLAGGED));
 

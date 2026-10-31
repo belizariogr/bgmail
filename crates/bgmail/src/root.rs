@@ -10,11 +10,11 @@ use std::time::Duration;
 use std::f32::consts::FRAC_PI_2;
 
 use gpui::{
-    ease_in_out, point, radians, size, svg, Animation, AnimationExt as _, App, AppContext as _,
-    Bounds, Context, DragMoveEvent, Empty, Entity, Focusable, FontWeight, Hsla, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Point, ScrollHandle, Size, Svg, TitlebarOptions,
-    Transformation, WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle,
-    WindowOptions,
+    anchored, deferred, ease_in_out, point, radians, size, svg, Animation, AnimationExt as _, App,
+    AppContext as _, Bounds, ClipboardItem, Context, Corner, DragMoveEvent, Empty, Entity,
+    Focusable, FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Point,
+    ScrollHandle, Size, Subscription, Svg, TitlebarOptions, Transformation, WeakEntity, Window,
+    WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
 };
 
 use crate::command_palette_overlay;
@@ -25,7 +25,7 @@ use ui::{
     LabelSize, ListItem, Scrollbar, ScrollbarState, Switch, TextInput, Tooltip,
 };
 
-use crate::actions::{ComposeClose, ToggleCommandPalette};
+use crate::actions::{ComposeClose, FindInMessage, ToggleCommandPalette};
 use crate::app_menus;
 use crate::command_palette::CommandPaletteState;
 use crate::commands::{CommandContext, CommandId};
@@ -34,9 +34,11 @@ use crate::config::{self, Config};
 use crate::data::{self, GlobalMailbox, MailboxKind};
 use crate::db_seed;
 use crate::locale::{self, ActiveLanguage, Key, Language};
-use crate::mail_html::{email_document, DocumentColors};
+use crate::mail_html::{email_document, is_openable_link, DocumentColors};
 use crate::shortcuts;
-use html_view::{Appearance as PageAppearance, DocumentOptions, HtmlDocument, HtmlView};
+use html_view::{
+    Appearance as PageAppearance, DocumentOptions, HitInfo, HtmlDocument, HtmlView, HtmlViewEvent,
+};
 use storage::{MailListQuery, MessageDetail, MessageListItem};
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
@@ -250,6 +252,45 @@ struct ReaderSignature {
     colors: DocumentColors,
 }
 
+/// A reader context menu: where it was summoned and what it applies to.
+struct ReaderMenu {
+    position: Point<Pixels>,
+    hit: HitInfo,
+    has_selection: bool,
+}
+
+/// The reader's find bar: query field and the current match.
+struct FindBar {
+    input: Entity<TextInput>,
+    /// Number of matches of the current query.
+    count: usize,
+    /// Index of the selected match (`< count` when there are matches).
+    current: usize,
+    _observation: Subscription,
+}
+
+/// Index of the find match after moving `step` (±1) from `current` among
+/// `count` matches, wrapping around both ends.
+fn step_match(current: usize, count: usize, step: isize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    (current as isize + step).rem_euclid(count as isize) as usize
+}
+
+/// Text selection highlight of the reader (RGBA): the accent at a strength
+/// that keeps dark and light text readable on any page.
+fn reader_selection_color(accent: Hsla) -> [u8; 4] {
+    let rgba: gpui::Rgba = accent.opacity(0.35).into();
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [
+        channel(rgba.r),
+        channel(rgba.g),
+        channel(rgba.b),
+        channel(rgba.a),
+    ]
+}
+
 /// Application state.
 pub struct RootView {
     db: storage::Database,
@@ -347,6 +388,12 @@ pub struct RootView {
     /// Native HTML view showing the selected message's body (`html_view`:
     /// Blitz layout painted by GPUI). Created on first use.
     reader_view: Option<Entity<HtmlView>>,
+    /// Subscription to the reader's events (hovered/clicked links, menus).
+    _reader_subscription: Option<Subscription>,
+    /// Context menu opened by a secondary click in the reader.
+    reader_menu: Option<ReaderMenu>,
+    /// Find bar of the reader, while open.
+    find_bar: Option<FindBar>,
     /// Inputs that last produced the reader document (selected message and the
     /// colors it was themed with). Used to skip re-parsing the body on every
     /// render when nothing that affects the document has changed.
@@ -482,6 +529,9 @@ impl RootView {
             sidebar_scroll: ScrollHandle::new(),
             sidebar_scrollbar: None,
             reader_view: None,
+            _reader_subscription: None,
+            reader_menu: None,
+            find_bar: None,
             last_reader_sig: None,
             load_remote_images: settings.load_remote_images,
             reader_white_background: settings.reader_white_background,
@@ -1212,14 +1262,124 @@ impl RootView {
             &rendered.html,
             DocumentOptions {
                 appearance,
+                selection_color: Some(reader_selection_color(colors.accent)),
                 ..Default::default()
             },
         );
+        self.reader_menu = None;
         match &self.reader_view {
             Some(view) => view.update(cx, |view, cx| view.set_document(document, cx)),
-            None => self.reader_view = Some(cx.new(|_| HtmlView::new(document))),
+            None => {
+                let view = cx.new(|cx| HtmlView::new(document, cx));
+                self._reader_subscription = Some(cx.subscribe(&view, Self::on_reader_event));
+                self.reader_view = Some(view);
+            }
         }
         self.last_reader_sig = Some(signature);
+        // Keep an open find bar's query applied to the new document.
+        self.run_find(cx);
+    }
+
+    /// Reacts to the reader: link under the pointer (status bar), link clicks
+    /// (opened outside the app) and context menus.
+    fn on_reader_event(
+        &mut self,
+        view: Entity<HtmlView>,
+        event: &HtmlViewEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            HtmlViewEvent::LinkHovered(link) => {
+                self.hovered_link = link.clone().unwrap_or_default();
+                cx.notify();
+            }
+            HtmlViewEvent::LinkActivated(url) => {
+                if is_openable_link(url) {
+                    cx.open_url(url);
+                }
+            }
+            HtmlViewEvent::ContextMenu { position, hit } => {
+                self.reader_menu = Some(ReaderMenu {
+                    position: *position,
+                    hit: hit.clone(),
+                    has_selection: view.read(cx).has_selection(),
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    /// Opens (or focuses) the reader's find bar.
+    pub(crate) fn open_find_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_detail.is_none() {
+            return;
+        }
+        if self.find_bar.is_none() {
+            let placeholder = Key::FindPlaceholder.tr(cx.language());
+            let input = cx.new(|cx| TextInput::new(placeholder, cx));
+            // Defer: the input notifies while it is being updated.
+            let root = cx.weak_entity();
+            let observation = cx.observe(&input, move |_, _, cx| {
+                let root = root.clone();
+                cx.defer(move |cx| {
+                    let _ = root.update(cx, |this, cx| this.run_find(cx));
+                });
+            });
+            self.find_bar = Some(FindBar {
+                input,
+                count: 0,
+                current: 0,
+                _observation: observation,
+            });
+        }
+        if let Some(bar) = &self.find_bar {
+            let focus = bar.input.read(cx).focus_handle(cx);
+            window.focus(&focus);
+        }
+        cx.notify();
+    }
+
+    /// Closes the find bar, clearing its highlight, and focuses the reader.
+    fn close_find_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_bar.take().is_none() {
+            return;
+        }
+        if let Some(view) = &self.reader_view {
+            view.update(cx, |view, cx| {
+                view.find("", cx);
+            });
+            let focus = view.read(cx).focus_handle(cx);
+            window.focus(&focus);
+        }
+        cx.notify();
+    }
+
+    /// Searches the reader for the find bar's query and selects the first match.
+    fn run_find(&mut self, cx: &mut Context<Self>) {
+        let (Some(bar), Some(view)) = (&mut self.find_bar, &self.reader_view) else {
+            return;
+        };
+        let query = bar.input.read(cx).content().to_string();
+        bar.count = view.update(cx, |view, cx| view.find(&query, cx));
+        bar.current = 0;
+        if bar.count > 0 {
+            view.update(cx, |view, cx| view.select_match(0, cx));
+        }
+        cx.notify();
+    }
+
+    /// Moves to the next (`step` = 1) or previous (-1) find match.
+    fn step_find(&mut self, step: isize, cx: &mut Context<Self>) {
+        let (Some(bar), Some(view)) = (&mut self.find_bar, &self.reader_view) else {
+            return;
+        };
+        if bar.count == 0 {
+            return;
+        }
+        bar.current = step_match(bar.current, bar.count, step);
+        let current = bar.current;
+        view.update(cx, |view, cx| view.select_match(current, cx));
+        cx.notify();
     }
 
     /// Toggles whether the reader forces a white background, persisting the
@@ -2542,6 +2702,163 @@ impl RootView {
             .into_any_element()
     }
 
+    /// The reader's find bar: query field, "n of m" count, previous/next and
+    /// close. Enter goes to the next match (Shift+Enter: previous), Escape
+    /// closes it.
+    fn render_find_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(bar) = &self.find_bar else {
+            return div().into_any_element();
+        };
+        let colors = cx.theme().colors();
+        let language = cx.language();
+        let status = if bar.input.read(cx).content().is_empty() {
+            String::new()
+        } else if bar.count == 0 {
+            Key::FindNoMatches.tr(language).to_string()
+        } else {
+            Key::FindMatches
+                .tr(language)
+                .replacen("{}", &(bar.current + 1).to_string(), 1)
+                .replacen("{}", &bar.count.to_string(), 1)
+        };
+        h_flex()
+            .flex_shrink_0()
+            .w_full()
+            .px_6()
+            .py_1p5()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(colors.border)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "enter" => {
+                        let step = if event.keystroke.modifiers.shift {
+                            -1
+                        } else {
+                            1
+                        };
+                        this.step_find(step, cx);
+                        cx.stop_propagation();
+                    }
+                    "escape" => {
+                        this.close_find_bar(window, cx);
+                        cx.stop_propagation();
+                    }
+                    _ => {}
+                }
+            }))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .max_w(px(320.0))
+                    .h(px(28.0))
+                    .px_2()
+                    .gap_1p5()
+                    .items_center()
+                    .rounded_md()
+                    .bg(colors.element_background)
+                    .child(
+                        Icon::new(IconName::Search)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(div().flex_1().min_w_0().child(bar.input.clone())),
+            )
+            .child(
+                Label::new(status)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(div().flex_1())
+            .child(
+                IconButton::new("find-previous", IconName::ChevronUp)
+                    .on_click(cx.listener(|this, _, _, cx| this.step_find(-1, cx))),
+            )
+            .child(
+                IconButton::new("find-next", IconName::ChevronDown)
+                    .on_click(cx.listener(|this, _, _, cx| this.step_find(1, cx))),
+            )
+            .child(
+                IconButton::new("find-close", IconName::Clear)
+                    .on_click(cx.listener(|this, _, window, cx| this.close_find_bar(window, cx))),
+            )
+            .into_any_element()
+    }
+
+    /// The reader's context menu (secondary click): copy/select all for text,
+    /// open/copy for links. Anchored at the click; any outside click closes it.
+    fn render_reader_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some((menu, view)) = self.reader_menu.as_ref().zip(self.reader_view.clone()) else {
+            return div().into_any_element();
+        };
+        let language = cx.language();
+        let root = cx.weak_entity();
+        let close = move |cx: &mut App| {
+            let _ = root.update(cx, |this, cx| {
+                this.reader_menu = None;
+                cx.notify();
+            });
+        };
+        let hint = |source_mac: &str, source_other: &str| {
+            crate::shortcuts::format_binding(crate::shortcuts::primary_binding(
+                source_mac,
+                source_other,
+            ))
+        };
+        let mut items = ui::ContextMenu::new();
+        if let Some(link) = menu.hit.link.clone().filter(|link| is_openable_link(link)) {
+            let (open_link, copy_link) = (link.clone(), link);
+            let (close_open, close_copy) = (close.clone(), close.clone());
+            items = items
+                .entry(Key::CtxOpenLink.tr(language), move |_, _, cx| {
+                    cx.open_url(&open_link);
+                    close_open(cx);
+                })
+                .entry(Key::CtxCopyLink.tr(language), move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy_link.clone()));
+                    close_copy(cx);
+                })
+                .separator();
+        }
+        if menu.has_selection {
+            let (view, close) = (view.clone(), close.clone());
+            items = items.entry_with_key_hint(
+                Key::CtxCopy.tr(language),
+                hint("cmd-c", "ctrl-c"),
+                move |_, _, cx| {
+                    view.update(cx, |view, cx| view.copy_selection(cx));
+                    close(cx);
+                },
+            );
+        }
+        let select_close = close.clone();
+        items = items.entry_with_key_hint(
+            Key::CtxSelectAll.tr(language),
+            hint("cmd-a", "ctrl-a"),
+            move |_, _, cx| {
+                view.update(cx, |view, cx| view.select_all(cx));
+                select_close(cx);
+            },
+        );
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.reader_menu = None;
+                cx.notify();
+            }))
+            .child(deferred(
+                anchored()
+                    .position(menu.position)
+                    .anchor(Corner::TopLeft)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(items),
+            ))
+            .into_any_element()
+    }
+
     fn render_reader(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let bg = colors.background;
@@ -2661,6 +2978,9 @@ impl RootView {
             .h_full()
             .bg(bg)
             .child(header)
+            .when(self.find_bar.is_some(), |el| {
+                el.child(self.render_find_bar(cx))
+            })
             .child(body_area)
             .into_any_element()
     }
@@ -3156,6 +3476,9 @@ impl Render for RootView {
             .bg(background)
             .text_color(text)
             .font_family("Helvetica")
+            .on_action(cx.listener(|this, _: &FindInMessage, window, cx| {
+                this.open_find_bar(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
@@ -3165,6 +3488,9 @@ impl Render for RootView {
             .child(self.render_toolbar(window, cx))
             .child(body)
             .child(self.render_status_bar(cx))
+            .when(self.reader_menu.is_some(), |el| {
+                el.child(self.render_reader_menu(cx))
+            })
             .when(
                 self.command_palette
                     .as_ref()
@@ -3214,6 +3540,21 @@ mod tests {
     fn sidebar_starts_visible() {
         let (_dir, view) = test_view();
         assert!(view.show_sidebar);
+    }
+
+    #[test]
+    fn find_steps_wrap_around() {
+        assert_eq!(step_match(0, 3, 1), 1);
+        assert_eq!(step_match(2, 3, 1), 0);
+        assert_eq!(step_match(0, 3, -1), 2);
+        assert_eq!(step_match(0, 0, 1), 0);
+    }
+
+    #[test]
+    fn reader_selection_is_a_translucent_accent() {
+        let [r, g, b, a] = reader_selection_color(gpui::hsla(0.0, 1.0, 0.5, 1.0));
+        assert_eq!((r, g, b), (255, 0, 0));
+        assert_eq!(a, 89);
     }
 
     #[test]

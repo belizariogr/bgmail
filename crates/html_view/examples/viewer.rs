@@ -239,6 +239,7 @@ fn main() {
         std::process::exit(2);
     }
     Application::new().run(move |cx: &mut App| {
+        html_view::init(cx);
         cx.bind_keys([
             KeyBinding::new("right", Next, None),
             KeyBinding::new("left", Previous, None),
@@ -255,7 +256,7 @@ fn main() {
                 },
                 |window, cx| {
                     let document = load(&files[0]);
-                    let view = cx.new(|_| HtmlView::new(document));
+                    let view = cx.new(|cx| HtmlView::new(document, cx));
                     let viewer = cx.new(|cx| Viewer {
                         files: files.clone(),
                         index: 0,

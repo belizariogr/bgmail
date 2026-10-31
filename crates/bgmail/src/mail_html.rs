@@ -62,6 +62,16 @@ pub fn email_document(colors: DocumentColors, body: &MessageBody) -> RenderedEma
     }
 }
 
+/// Whether a link clicked in a message may be opened (in the system browser
+/// or mail handler): web and `mailto:` links only. Message-relative URLs,
+/// `javascript:` and every other scheme are ignored.
+pub fn is_openable_link(url: &str) -> bool {
+    let url = url.trim().to_ascii_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
+}
+
 /// Theme-aware stylesheet shared by every rendered message, so the page
 /// matches the surrounding UI (incl. dark mode) instead of a default white page.
 fn document_css(colors: DocumentColors) -> String {
@@ -764,7 +774,7 @@ mod tests {
         let html = format!("<img src=\"{url}\">");
         let none = HashSet::new();
         // Loading off → present and blocked; on → present, nothing blocked.
-        assert_eq!(sanitize_html_inner(&html, false, &none).1, true);
+        assert!(sanitize_html_inner(&html, false, &none).1);
         assert_eq!(sanitize_html_inner(&html, false, &none).2, 1);
         assert_eq!(sanitize_html_inner(&html, true, &none).2, 0);
         // Individually shown images are let through while loading is off.
@@ -773,6 +783,16 @@ mod tests {
         // A message without remote resources reports none.
         let local = sanitize_html_inner("<p>x</p>", false, &none);
         assert!(!local.1 && local.2 == 0);
+    }
+
+    #[test]
+    fn only_web_and_mail_links_open() {
+        assert!(is_openable_link("https://example.com/a"));
+        assert!(is_openable_link(" HTTP://example.com"));
+        assert!(is_openable_link("mailto:someone@example.com"));
+        assert!(!is_openable_link("bgmail://message/page.html"));
+        assert!(!is_openable_link("javascript:alert(1)"));
+        assert!(!is_openable_link("file:///etc/passwd"));
     }
 
     #[test]

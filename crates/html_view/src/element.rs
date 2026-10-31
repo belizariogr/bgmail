@@ -1,14 +1,73 @@
-//! The GPUI element and view that display an [`HtmlDocument`].
+//! The GPUI element and view that display an [`HtmlDocument`], with pointer
+//! interaction (hover, links, text selection, context menus) and keyboard
+//! commands (copy, select all, scrolling).
 
 use crate::document::HtmlDocument;
+use crate::interaction::{HitInfo, PointerButton, PointerInput, PointerModifiers, PointerPhase};
 use crate::paint::{paint_display_list, PaintCache};
 use gpui::{
-    div, px, relative, size, App, AvailableSpace, Bounds, Context, Element, ElementId,
-    GlobalElementId, InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement,
-    Pixels, Render, ScrollHandle, StatefulInteractiveElement, Style, Styled, Window,
+    actions, div, point, px, relative, size, App, AvailableSpace, Bounds, ClipboardItem, Context,
+    CursorStyle, DispatchPhase, Element, ElementId, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement,
+    KeyBinding, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Point, Render, ScrollHandle, StatefulInteractiveElement, Style, Styled,
+    WeakEntity, Window,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
+
+actions!(
+    html_view,
+    [
+        /// Copies the selected text.
+        Copy,
+        /// Selects all the text of the document.
+        SelectAll,
+        ScrollUp,
+        ScrollDown,
+        PageUp,
+        PageDown,
+        ScrollToTop,
+        ScrollToBottom,
+    ]
+);
+
+/// Key context of a focused [`HtmlView`].
+pub const KEY_CONTEXT: &str = "HtmlView";
+
+/// Pixels scrolled by the arrow keys.
+const LINE_SCROLL: f32 = 40.0;
+
+/// Binds the [`HtmlView`] keyboard commands (call once at startup).
+pub fn init(cx: &mut App) {
+    let context = Some(KEY_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("secondary-c", Copy, context),
+        KeyBinding::new("secondary-a", SelectAll, context),
+        KeyBinding::new("up", ScrollUp, context),
+        KeyBinding::new("down", ScrollDown, context),
+        KeyBinding::new("pageup", PageUp, context),
+        KeyBinding::new("pagedown", PageDown, context),
+        KeyBinding::new("space", PageDown, context),
+        KeyBinding::new("shift-space", PageUp, context),
+        KeyBinding::new("home", ScrollToTop, context),
+        KeyBinding::new("end", ScrollToBottom, context),
+    ]);
+}
+
+/// What an [`HtmlView`] reports to its host.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HtmlViewEvent {
+    /// The pointer entered (`Some(url)`) or left (`None`) a link.
+    LinkHovered(Option<String>),
+    /// A link was clicked; the host decides how to open it.
+    LinkActivated(String),
+    /// A secondary click: show a context menu for what is under the pointer.
+    ContextMenu {
+        position: Point<Pixels>,
+        hit: HitInfo,
+    },
+}
 
 /// Width used when the parent gives no definite width (should not happen in a
 /// laid-out reader pane, but keeps measurement total).
@@ -38,15 +97,49 @@ pub fn content_width_changed(rendered: f32, current: f32) -> bool {
     (rendered - current).abs() >= 0.5
 }
 
+/// Pointer cursor for what is under it: a hand over links, a text cursor over
+/// text, an arrow elsewhere.
+pub fn cursor_for(hit: &HitInfo) -> CursorStyle {
+    if hit.link.is_some() {
+        CursorStyle::PointingHand
+    } else if hit.text {
+        CursorStyle::IBeam
+    } else {
+        CursorStyle::Arrow
+    }
+}
+
+/// Scroll position (distance scrolled down, ≥ 0) that reveals the document
+/// span `top..bottom` in a viewport of `height`: unchanged when already
+/// visible, else the span sits a third of the way down.
+pub fn reveal_scroll(scrolled: f32, height: f32, top: f32, bottom: f32) -> f32 {
+    if top >= scrolled && bottom <= scrolled + height {
+        scrolled
+    } else {
+        (top - height / 3.0).max(0.0)
+    }
+}
+
+fn modifiers(modifiers: &Modifiers) -> PointerModifiers {
+    PointerModifiers {
+        shift: modifiers.shift,
+        control: modifiers.control,
+        alt: modifiers.alt,
+        platform: modifiers.platform,
+    }
+}
+
 /// Element that lays out a document at the pane width and paints it at its
 /// full content size (wider when the mail overflows). Put it inside a
 /// scrolling container (see [`HtmlView`], which also makes the overflow
-/// scrollable).
+/// scrollable and handles input).
 pub struct HtmlElement {
     document: Rc<RefCell<HtmlDocument>>,
     cache: Rc<RefCell<PaintCache>>,
     /// Content width when this element was built (by the view's render).
     rendered_content_width: f32,
+    /// The view receiving pointer input, if interactive.
+    view: Option<WeakEntity<HtmlView>>,
 }
 
 impl HtmlElement {
@@ -56,7 +149,14 @@ impl HtmlElement {
             document,
             cache,
             rendered_content_width,
+            view: None,
         }
+    }
+
+    /// Routes pointer input over the element to `view`.
+    pub fn interactive(mut self, view: WeakEntity<HtmlView>) -> Self {
+        self.view = Some(view);
+        self
     }
 }
 
@@ -70,7 +170,7 @@ impl IntoElement for HtmlElement {
 
 impl Element for HtmlElement {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = Hitbox;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -102,7 +202,7 @@ impl Element for HtmlElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         _cx: &mut App,
@@ -112,6 +212,9 @@ impl Element for HtmlElement {
         if content_width_changed(self.rendered_content_width, current) {
             window.refresh();
         }
+        let mut area = bounds;
+        area.size.width = area.size.width.max(px(current));
+        window.insert_hitbox(area, HitboxBehavior::Normal)
     }
 
     fn paint(
@@ -120,7 +223,7 @@ impl Element for HtmlElement {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
+        hitbox: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -145,29 +248,98 @@ impl Element for HtmlElement {
                 cx,
             );
         });
+        if let Some(view) = self.view.clone() {
+            paint_input_listeners(view, bounds.origin, hitbox.clone(), window, cx);
+        }
     }
 }
 
-/// A scrollable view showing one HTML document.
+/// Registers the window-level pointer listeners of an interactive element:
+/// presses over it, and moves/releases anywhere (a selection drag may leave
+/// the element). Positions become document coordinates relative to `origin`.
+fn paint_input_listeners(
+    view: WeakEntity<HtmlView>,
+    origin: Point<Pixels>,
+    hitbox: Hitbox,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if let Some(entity) = view.upgrade() {
+        window.set_cursor_style(entity.read(cx).cursor, &hitbox);
+    }
+    let to_document = move |position: Point<Pixels>| {
+        (
+            f32::from(position.x - origin.x),
+            f32::from(position.y - origin.y),
+        )
+    };
+    let down_view = view.clone();
+    let down_hitbox = hitbox.clone();
+    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+        if phase == DispatchPhase::Bubble && down_hitbox.is_hovered(window) {
+            let (x, y) = to_document(event.position);
+            let _ = down_view.update(cx, |view, cx| view.mouse_down(event, x, y, window, cx));
+        }
+    });
+    let move_view = view.clone();
+    let move_hitbox = hitbox.clone();
+    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+        if phase == DispatchPhase::Bubble {
+            let (x, y) = to_document(event.position);
+            let over = move_hitbox.is_hovered(window);
+            let _ = move_view.update(cx, |view, cx| view.mouse_move(event, x, y, over, cx));
+        }
+    });
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
+        if phase == DispatchPhase::Bubble {
+            let (x, y) = to_document(event.position);
+            let _ = view.update(cx, |view, cx| view.mouse_up(event, x, y, cx));
+        }
+    });
+}
+
+/// A scrollable, interactive view showing one HTML document.
 pub struct HtmlView {
     document: Rc<RefCell<HtmlDocument>>,
     cache: Rc<RefCell<PaintCache>>,
     scroll: ScrollHandle,
+    focus: FocusHandle,
+    /// Pointer cursor for what is under the pointer.
+    cursor: CursorStyle,
+    /// Link under the pointer (reported through [`HtmlViewEvent::LinkHovered`]).
+    hovered_link: Option<String>,
+    /// Whether a primary-button press started in the document (selection drag).
+    dragging: bool,
+}
+
+impl EventEmitter<HtmlViewEvent> for HtmlView {}
+
+impl Focusable for HtmlView {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus.clone()
+    }
 }
 
 impl HtmlView {
-    pub fn new(document: HtmlDocument) -> Self {
+    pub fn new(document: HtmlDocument, cx: &mut Context<Self>) -> Self {
         Self {
             document: Rc::new(RefCell::new(document)),
             cache: Rc::default(),
             scroll: ScrollHandle::new(),
+            focus: cx.focus_handle(),
+            cursor: CursorStyle::Arrow,
+            hovered_link: None,
+            dragging: false,
         }
     }
 
     /// Replaces the displayed document and scrolls back to the top.
     pub fn set_document(&mut self, document: HtmlDocument, cx: &mut Context<Self>) {
         self.document = Rc::new(RefCell::new(document));
-        self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        self.dragging = false;
+        self.cursor = CursorStyle::Arrow;
+        self.set_hovered_link(None, cx);
         cx.notify();
     }
 
@@ -178,20 +350,204 @@ impl HtmlView {
     pub fn scroll_handle(&self) -> &ScrollHandle {
         &self.scroll
     }
+
+    /// Whether some text is selected.
+    pub fn has_selection(&self) -> bool {
+        self.document.borrow().has_selection()
+    }
+
+    /// Copies the selected text to the clipboard (no-op without a selection).
+    pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.document.borrow().selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Selects all the text of the document.
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.document.borrow_mut().select_all();
+        cx.notify();
+    }
+
+    /// Finds `query` in the document (case-insensitive) and returns the
+    /// number of matches; see [`Self::select_match`].
+    pub fn find(&mut self, query: &str, cx: &mut Context<Self>) -> usize {
+        let count = self.document.borrow_mut().find(query);
+        if count == 0 {
+            self.document.borrow_mut().clear_selection();
+        }
+        cx.notify();
+        count
+    }
+
+    /// Selects match `index` of the last [`Self::find`] and scrolls it into view.
+    pub fn select_match(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some((top, bottom)) = self.document.borrow_mut().select_match(index) else {
+            return;
+        };
+        let offset = self.scroll.offset();
+        let height = f32::from(self.scroll.bounds().size.height);
+        let scrolled = reveal_scroll(-f32::from(offset.y), height, top, bottom);
+        self.scroll.set_offset(point(offset.x, px(-scrolled)));
+        cx.notify();
+    }
+
+    fn set_hovered_link(&mut self, link: Option<String>, cx: &mut Context<Self>) {
+        if self.hovered_link != link {
+            self.hovered_link = link.clone();
+            cx.emit(HtmlViewEvent::LinkHovered(link));
+        }
+    }
+
+    fn mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        x: f32,
+        y: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus);
+        let button = match event.button {
+            MouseButton::Left => PointerButton::Primary,
+            MouseButton::Right => PointerButton::Secondary,
+            MouseButton::Middle => PointerButton::Middle,
+            _ => return,
+        };
+        if button == PointerButton::Secondary {
+            let hit = self.document.borrow().hit_info(x, y);
+            cx.emit(HtmlViewEvent::ContextMenu {
+                position: event.position,
+                hit,
+            });
+            return;
+        }
+        self.dragging = button == PointerButton::Primary;
+        let changed = self.document.borrow_mut().pointer(PointerInput {
+            x,
+            y,
+            phase: PointerPhase::Down {
+                click_count: event.click_count,
+            },
+            button,
+            primary_pressed: self.dragging,
+            modifiers: modifiers(&event.modifiers),
+        });
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        x: f32,
+        y: f32,
+        over: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !over && !self.dragging {
+            if self.hovered_link.is_some() || self.cursor != CursorStyle::Arrow {
+                self.cursor = CursorStyle::Arrow;
+                self.set_hovered_link(None, cx);
+                cx.notify();
+            }
+            return;
+        }
+        let pressed = self.dragging && event.pressed_button == Some(MouseButton::Left);
+        let mut document = self.document.borrow_mut();
+        let mut changed = document.pointer(PointerInput {
+            x,
+            y,
+            phase: PointerPhase::Move,
+            button: PointerButton::Primary,
+            primary_pressed: pressed,
+            modifiers: modifiers(&event.modifiers),
+        });
+        let hit = document.hit_info(x, y);
+        drop(document);
+        let cursor = if pressed {
+            CursorStyle::IBeam
+        } else {
+            cursor_for(&hit)
+        };
+        changed |= cursor != self.cursor;
+        self.cursor = cursor;
+        self.set_hovered_link(hit.link, cx);
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn mouse_up(&mut self, event: &MouseUpEvent, x: f32, y: f32, cx: &mut Context<Self>) {
+        if event.button != MouseButton::Left || !self.dragging {
+            return;
+        }
+        self.dragging = false;
+        let mut document = self.document.borrow_mut();
+        let changed = document.pointer(PointerInput {
+            x,
+            y,
+            phase: PointerPhase::Up,
+            button: PointerButton::Primary,
+            primary_pressed: false,
+            modifiers: modifiers(&event.modifiers),
+        });
+        let link = document.take_activated_link();
+        drop(document);
+        if let Some(link) = link {
+            cx.emit(HtmlViewEvent::LinkActivated(link));
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Scrolls vertically by `delta` px (positive = down), clamped.
+    fn scroll_by(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let offset = self.scroll.offset();
+        let max = f32::from(self.scroll.max_offset().height);
+        let scrolled = (-f32::from(offset.y) + delta).clamp(0.0, max.max(0.0));
+        self.scroll.set_offset(point(offset.x, px(-scrolled)));
+        cx.notify();
+    }
+
+    fn page(&self) -> f32 {
+        (f32::from(self.scroll.bounds().size.height) - LINE_SCROLL).max(LINE_SCROLL)
+    }
 }
 
 impl Render for HtmlView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Mail wider than the pane (fixed-width tables) scrolls horizontally:
         // a zero-height spacer as wide as the content extends the scroll area,
         // while the document itself keeps laying out at the pane width.
         let content_width = self.document.borrow().content_width();
         div()
             .id("html-view")
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus)
             .size_full()
             .overflow_scroll()
             .track_scroll(&self.scroll)
-            .child(HtmlElement::new(self.document.clone(), self.cache.clone()))
+            .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy_selection(cx)))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
+            .on_action(cx.listener(|this, _: &ScrollUp, _, cx| this.scroll_by(-LINE_SCROLL, cx)))
+            .on_action(cx.listener(|this, _: &ScrollDown, _, cx| this.scroll_by(LINE_SCROLL, cx)))
+            .on_action(cx.listener(|this, _: &PageUp, _, cx| {
+                let page = this.page();
+                this.scroll_by(-page, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PageDown, _, cx| {
+                let page = this.page();
+                this.scroll_by(page, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ScrollToTop, _, cx| this.scroll_by(f32::MIN, cx)))
+            .on_action(cx.listener(|this, _: &ScrollToBottom, _, cx| this.scroll_by(f32::MAX, cx)))
+            .child(
+                HtmlElement::new(self.document.clone(), self.cache.clone())
+                    .interactive(cx.weak_entity()),
+            )
             .child(div().w(px(content_width)).h(px(0.)))
     }
 }
@@ -205,6 +561,31 @@ mod tests {
         assert!(!content_width_changed(600.0, 600.2));
         assert!(content_width_changed(0.0, 375.0));
         assert!(content_width_changed(668.0, 375.0));
+    }
+
+    #[test]
+    fn cursor_follows_what_is_under_the_pointer() {
+        let link = HitInfo {
+            link: Some("https://x".into()),
+            text: true,
+            ..Default::default()
+        };
+        assert_eq!(cursor_for(&link), CursorStyle::PointingHand);
+        let text = HitInfo {
+            text: true,
+            ..Default::default()
+        };
+        assert_eq!(cursor_for(&text), CursorStyle::IBeam);
+        assert_eq!(cursor_for(&HitInfo::default()), CursorStyle::Arrow);
+    }
+
+    #[test]
+    fn reveal_scroll_keeps_visible_spans_and_centers_hidden_ones() {
+        // Visible: unchanged.
+        assert_eq!(reveal_scroll(100.0, 300.0, 150.0, 170.0), 100.0);
+        // Below or above the viewport: a third of the way down.
+        assert_eq!(reveal_scroll(0.0, 300.0, 700.0, 720.0), 600.0);
+        assert_eq!(reveal_scroll(500.0, 300.0, 40.0, 60.0), 0.0);
     }
 
     #[test]

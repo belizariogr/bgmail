@@ -26,9 +26,6 @@ const FONT_EMBOLDEN_ENABLED: bool = cfg!(any(
     all(feature = "apple-font-embolden", target_os = "ios"),
 ));
 
-/// The default color for text selection highlights
-const SELECTION_COLOR: Color = Color::from_rgb8(180, 213, 255);
-
 /// Pre-computed `Scene`s for each CustomWidget, keyed by `(document id, node id)`
 type CustomWidgetSceneMap = HashMap<(usize, NodeId), Scene>;
 
@@ -49,6 +46,8 @@ pub fn paint_scene(
     height: u32,
     x_offset: u32,
     y_offset: u32,
+    // BGMail: the host's (theme) selection color.
+    selection_color: peniko::Color,
 ) {
     // Run `.paint()` on every custom widget in the document (and all subdocuments) ahead of time.
     // This helps us avoid borrow-checker issues as we recurse down the tree (`.paint()` require `&mut self`).
@@ -67,6 +66,7 @@ pub fn paint_scene(
         x_offset as f64,
         y_offset as f64,
         &custom_widget_scenes,
+        selection_color,
     );
     generator.paint_scene(scene);
 

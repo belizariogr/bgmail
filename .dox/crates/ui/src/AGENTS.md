@@ -86,7 +86,7 @@ _(No functions — re-exports only.)_
   pair it emits a public `NAME` path constant and embeds bytes via
   `include_bytes!` into the private `ICON_ASSETS` slice used by [`Assets`].
 - **pub const icon paths** (L34–L66): Asset path strings for every embedded SVG
-  — `CHEVRON_RIGHT`, `CHEVRON_DOWN`, `INBOX`, `SEND`, `FILE_PEN`, `TRASH`,
+  — `CHEVRON_RIGHT`, `CHEVRON_DOWN`, `CHEVRON_UP`, `INBOX`, `SEND`, `FILE_PEN`, `TRASH`,
   `TRIANGLE_EXCLAMATION`, `ARCHIVE`, `STAR`, `STAR_FILLED`, `PALETTE`, `FLAG`,
   `REPLY`, `REPLY_ALL`, `FORWARD`, `PEN_TO_SQUARE`, `SEARCH`, `SETTINGS`,
   `REFRESH`, `CIRCLE_USER`, `PAPERCLIP`, `ENVELOPE`, `SIDEBAR`, `FILTER`,
@@ -163,7 +163,7 @@ _(No functions — re-exports only.)_
 - **enum `IconName`**: Stable icon identifiers for BGMail UI. Variants map to
   embedded SVG paths via `path()` — mailbox/actions (`Inbox`, `Sent`, `Drafts`,
   `Trash`, `Junk`, `Archive`, `Star`, `StarFilled`, …), compose/navigation
-  (`Compose`, `Send`, `Search`, `ChevronRight`, `ChevronDown`, …), chrome
+  (`Compose`, `Send`, `Search`, `ChevronRight`, `ChevronDown`, `ChevronUp`, …), chrome
   (`Sidebar`, `Settings`, `WindowMinimize`, `WindowMaximize`, `WindowRestore`,
   …). `Sent` and `Send` share the paper-plane artwork but are distinct enum
   values.
@@ -310,6 +310,32 @@ _(No functions — re-exports only.)_
   - Behavior: Resolves color via `hsla(cx)`, applies `text_size`, `text_color`,
     and `font_weight`. When `single_line`, adds overflow/ellipsis modifiers.
     Child is the label string.
+
+### `src/context_menu.rs`
+
+#### Types / constants
+
+- **type `EntryHandler`** (private): boxed click handler of an entry.
+- **enum `ContextMenuItem`** (pub): `Entry { label, key_hint, handler }` or
+  `Separator`.
+- **struct `ContextMenu`** (pub, `IntoElement` + `Default`): floating menu of
+  actions named after Zed's `ContextMenu`; the host positions it (e.g.
+  `deferred(anchored().position(..))`) and closes it.
+
+#### Functions / methods
+
+- **`ContextMenu::new`**: empty menu.
+- **`ContextMenu::entry(label, handler)`**: appends an entry run on click.
+- **`ContextMenu::entry_with_key_hint(label, key_hint, handler)`**: entry with
+  a muted shortcut hint at its end.
+- **`ContextMenu::separator`**: appends a separator only after an entry (no
+  leading/double separators).
+- **`ContextMenu::items`** / **`ContextMenu::is_empty`**: rows; whether it has
+  no entries.
+- **`RenderOnce for ContextMenu`**: occluding elevated surface (min 200px,
+  border, rounded, shadow); rows with hover background, small label and hint;
+  a trailing separator is dropped.
+- Tests: separators only follow entries; empty menus.
 
 ### `src/button.rs`
 

@@ -22,6 +22,12 @@ wiring to `storage`.
 - The reader shows bodies with `html_view::HtmlView` (sanitized + themed by
   `mail_html`); remote content is always blocked until Stage 3 (the
   `load_remote_images` preference is persisted but not offered).
+- Reader interaction comes from `HtmlView` events: hovered links go to the
+  status bar, clicked links open outside the app only when
+  `mail_html::is_openable_link` (http/https/mailto), secondary clicks open a
+  `ui::ContextMenu` (open/copy link, copy, select all), and Cmd/Ctrl+F
+  (`FindInMessage`, also a global action) opens the find bar.
+  `html_view::init` is called at startup.
 - **Modules (flat under `src/`):**
   - `root` — main three-column UI + selection/layout state.
   - `data` — mock/sample structures (keep isolated for replacement).

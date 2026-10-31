@@ -2811,6 +2811,7 @@ dependencies = [
  "fontique",
  "gpui",
  "image",
+ "keyboard-types",
  "kurbo 0.13.1",
  "parley",
  "peniko",

@@ -11,11 +11,15 @@ pub mod document;
 pub mod element;
 mod fonts;
 pub mod gradient;
+pub mod interaction;
 pub mod paint;
 pub mod resources;
 pub mod text;
 
 pub use display_list::DisplayList;
-pub use document::{Appearance, DocumentMode, DocumentOptions, HtmlDocument};
-pub use element::{HtmlElement, HtmlView};
+pub use document::{
+    Appearance, DocumentMode, DocumentOptions, HtmlDocument, DEFAULT_SELECTION_COLOR,
+};
+pub use element::{init, HtmlElement, HtmlView, HtmlViewEvent};
+pub use interaction::{HitInfo, PointerButton, PointerInput, PointerModifiers, PointerPhase};
 pub use resources::Resources;

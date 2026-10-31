@@ -39,8 +39,27 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 
 ### `html_view.rs` (crate root)
 - Re-exports `DisplayList`, `HtmlDocument`, `DocumentOptions`, `DocumentMode`,
-  `Appearance`, `HtmlElement`, `HtmlView`, `Resources`; declares modules
-  (`fonts` is private).
+  `Appearance`, `DEFAULT_SELECTION_COLOR`, `init`, `HtmlElement`, `HtmlView`,
+  `HtmlViewEvent`, `HitInfo`, `PointerButton`, `PointerInput`,
+  `PointerModifiers`, `PointerPhase`, `Resources`; declares modules (`fonts`
+  is private).
+
+### `interaction.rs`
+- `enum PointerButton { Primary, Secondary, Middle }`,
+  `enum PointerPhase { Down { click_count }, Move, Up }`,
+  `struct PointerModifiers { shift, control, alt, platform }`,
+  `struct PointerInput { x, y, phase, button, primary_pressed, modifiers }`
+  (document coordinates).
+- `struct HitInfo { link, image, text }`: absolute link URL, image source (or
+  its blocked remote URL), whether over text.
+- `fn word_bounds(text, offset) -> Range`: word (alphanumeric/`_` run) or
+  single other char around `offset`; offsets inside a char snap back.
+- `fn find_all(haystack, needle) -> Vec<Range>`: non-overlapping,
+  case-insensitive (per-char folding that keeps byte length) matches.
+- `struct LinkCapture` (crate): `NavigationProvider` recording the last
+  activated URL; `take()`.
+- Tests: word bounds (ASCII, multibyte), find (case, overlap, empty),
+  multibyte ranges, link capture.
 
 ### `document.rs`
 - `const VIEWPORT_HEIGHT` (private): layout viewport height (800) used only for
@@ -54,16 +73,23 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   Transitional/Frameset → limited; HTML 4.01 Transitional/Frameset → limited
   with system id, else quirks; legacy public ids → quirks; otherwise standards.
 - `enum Appearance { Light, Dark }`: forwarded to `prefers-color-scheme`.
-- `struct DocumentOptions { appearance, user_agent_css, base_url, resources }`:
-  parse options; extra UA CSS goes after Blitz's default sheet.
+- `struct DocumentOptions { appearance, user_agent_css, base_url, resources,
+  selection_color }`: parse options; extra UA CSS goes after Blitz's default
+  sheet; `selection_color` is RGBA.
+- `const DEFAULT_SELECTION_COLOR`: RGBA used when no selection color is given.
+- `fn inline_roots(doc, node_id, out)` (private): inline roots in layout order
+  (the layout tree includes anonymous blocks).
+- `fn pointer_event(input)` (private): Blitz mouse event for a `PointerInput`
+  (page = client = screen coordinates, primary button state, modifiers).
 - `fn overflow_right(doc, node_id, left)` (private): rightmost edge of the
   in-flow boxes under a node, skipping the inside of boxes whose `overflow-x`
   isn't visible (Blitz's `scrollWidth` misses nested-table overflow).
 - `struct HtmlDocument`: Blitz document + resources + cached layout width,
-  content width/height and `(height, display list)`.
+  content width/height and `(height, display list)`, selection color, base
+  URL, link capture and last find matches.
 - `HtmlDocument::parse(html, options)`: parses via `force_html_parse`, wires the
-  `ResourceProvider`, base URL, UA sheets and the shared browser-like font
-  context (`fonts::font_context`), and enables Blitz's line height quirk unless
+  `ResourceProvider`, base URL, UA sheets, the shared browser-like font
+  context (`fonts::font_context`) and the `LinkCapture` navigation provider, and enables Blitz's line height quirk unless
   `document_mode(html)` is `NoQuirks`.
 - `HtmlDocument::layout(width) -> f32`: sets the viewport when the width changes
   (dropping the cached display list), resolves styles/layout (re-resolving while
@@ -79,6 +105,22 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   the root background covers the viewport; cached per height until
   invalidated.
 - `HtmlDocument::invalidate_paint()`: drops the cached display list.
+- `HtmlDocument::pointer(input) -> bool`: primary double/triple clicks select
+  word/paragraph (`select_at`); other primary events go through Blitz's
+  `EventDriver` (hover, drag selection, clicks); secondary/middle presses are
+  ignored (host menus). Resets Blitz's viewport scroll (fragment links).
+  Returns (and invalidates the paint) when hover or selection changed.
+- `select_at(x, y, paragraph)` / `root_text(root)` (private): word or
+  paragraph selection at a point; text of an inline root.
+- `HtmlDocument::take_activated_link()`: last clicked link, cleared.
+- `HtmlDocument::hit_info(x, y) -> HitInfo`: text flag from the hit; walks
+  ancestors for `<img>` (src, else `data-rm-blocked-src`) and `<a href>`
+  (resolved against the base URL).
+- `has_selection()`, `selected_text()`, `select_all()` (first to last inline
+  root), `clear_selection()`.
+- `HtmlDocument::find(query) -> usize`: matches over every inline root's text.
+- `HtmlDocument::select_match(index) -> Option<(top, bottom)>`: selects the
+  match and returns its line span in document y (parley cursor geometry).
 - `HtmlDocument::blocked_remote_urls()`: remote URLs requested and blocked.
 - `HtmlDocument::blitz()` / `blitz_mut()`: underlying `BaseDocument`; mutable
   access invalidates the display list.
@@ -95,7 +137,11 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   with `height:auto`), content width of overflowing mail, nested-table rows
   fitting inline-block buttons, inline-block tables sitting on their bottom
   edge, collapsed borders counted once per row, markers aligned with a block
-  item's first line, symbol list markers drawn as 5px discs (not "•" glyphs),
+  item's first line, link clicks reported (not followed), hit info (links,
+  relative links, blocked images, text), double/triple click selection, drag
+  selection and select-all across paragraphs into anonymous blocks, find and
+  match selection, selection painted with the given color,
+  symbol list markers drawn as 5px discs (not "•" glyphs),
   prolog replacement, fragments, lowercase doctype, layout height + caching,
   root background filling a requested height, relative URLs neither panicking
   nor counted as remote, XHTML mail keeps block `<p>`, blocked remote image
@@ -274,24 +320,48 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   RGBA→BGRA, unpremultiply, downscale sizes, premultiplied resizing.
 
 ### `element.rs`
+- `actions!(html_view, [Copy, SelectAll, ScrollUp, ScrollDown, PageUp,
+  PageDown, ScrollToTop, ScrollToBottom])`; `const KEY_CONTEXT = "HtmlView"`;
+  `const LINE_SCROLL` (40px, private).
+- `fn init(cx)`: binds `secondary-c`/`secondary-a`, arrows, page keys,
+  space/shift-space, home/end in the `HtmlView` context.
+- `enum HtmlViewEvent { LinkHovered(Option<String>), LinkActivated(String),
+  ContextMenu { position, hit } }`.
 - `const FALLBACK_WIDTH` (private), `fn layout_width(known, available)`: known
   width, else definite available width, else 800.
-- `fn canvas_height(element_height, element_top, visible_bottom)`: paint height
-  reaching the bottom of the visible area.
+- `fn canvas_height(element_height, element_top, visible_bottom)`.
 - `fn content_width_changed(rendered, current)`: ≥ 0.5px apart.
-- `struct HtmlElement { document, cache, rendered_content_width }`;
-  `HtmlElement::new(document, cache)` records the document's content width at
-  render time; `impl Element`: `request_layout` uses a measured layout (pane
-  width, content height), `prepaint` refreshes the window when the content
-  width changed since render (stale overflow spacer), `paint` replays the
-  display list for `canvas_height` over max(element, content) width.
-- `struct HtmlView`; `new(document)`; `set_document(document, cx)` (resets
-  scroll); `document()`; `scroll_handle()`; `impl Render`: `div` scrolling on
-  both axes with the element and a zero-height spacer as wide as the content.
-- Tests: width selection, canvas height, content width change threshold.
+- `fn cursor_for(hit)`: hand over links, I-beam over text, else arrow.
+- `fn reveal_scroll(scrolled, height, top, bottom)`: keeps a visible span,
+  else puts it a third of the way down (≥ 0).
+- `fn modifiers(&Modifiers)` (private): GPUI → `PointerModifiers`.
+- `struct HtmlElement { document, cache, rendered_content_width, view }`;
+  `new(document, cache)`; `interactive(view)` routes input to an `HtmlView`.
+  `impl Element`: measured layout (pane width, content height); `prepaint`
+  refreshes on content width change and inserts the hitbox (content width);
+  `paint` replays the display list (`canvas_height`, content width) and, when
+  interactive, `paint_input_listeners`.
+- `fn paint_input_listeners(view, origin, hitbox, window, cx)` (private): sets
+  the view's cursor on the hitbox; window-level mouse down (over the hitbox),
+  move and up listeners converting to document coordinates.
+- `struct HtmlView { document, cache, scroll, focus, cursor, hovered_link,
+  dragging }` (`EventEmitter<HtmlViewEvent>`, `Focusable`); `new(document,
+  cx)`; `set_document` (resets scroll, drag, cursor, hovered link);
+  `document()`; `scroll_handle()`; `has_selection()`; `copy_selection(cx)`;
+  `select_all(cx)`; `find(query, cx)` (clears selection without matches);
+  `select_match(index, cx)` (scrolls with `reveal_scroll`).
+  Private: `set_hovered_link` (emits on change), `mouse_down` (focus;
+  secondary → `ContextMenu`; primary starts a drag), `mouse_move` (hover-only
+  updates when outside and not dragging; cursor and link hover),
+  `mouse_up` (ends the drag, emits `LinkActivated`), `scroll_by` (clamped),
+  `page` (viewport − one line).
+  `impl Render`: focusable `div` in the `HtmlView` key context scrolling on
+  both axes, action handlers, the interactive element and the overflow spacer.
+- Tests: width selection, canvas height, content width change threshold,
+  cursor choice, reveal scroll.
 
 ### `examples/`
-- `viewer.rs`: window (app id `html_view_viewer`) showing HTML files in an
+- `viewer.rs`: calls `html_view::init`; window (app id `html_view_viewer`) showing HTML files in an
   800 px (or `--width <px>`, first argument) column (`file:` allowed, base URL
   = file); Left/Right switch files;
   `--capture <dir>` scrolls each file, grabs every viewport with `grim`

@@ -33,6 +33,7 @@ macro_rules! icon_assets {
 icon_assets! {
     (CHEVRON_RIGHT, "icons/chevron-right.svg"),
     (CHEVRON_DOWN, "icons/chevron-down.svg"),
+    (CHEVRON_UP, "icons/chevron-up.svg"),
     (INBOX, "icons/inbox.svg"),
     (SEND, "icons/send.svg"),
     (FILE_PEN, "icons/file-pen.svg"),

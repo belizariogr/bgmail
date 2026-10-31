@@ -442,10 +442,18 @@
      networking before Stage 3; the shield now only reports blocked images,
      Settings ▸ Privacy explains it). Palette overlay, global menu handlers and
      the palette key interceptor kept (still needed without a webview).
-  2. ⬜ Milestone 3 — interaction: hover/cursor + link clicks (URL preview,
-     open in browser), text selection painted with the theme color + copy,
-     native context menu (link/image/text) via `doc.hit`, find in message,
-     keyboard scroll.
+  2. ✅ Milestone 3 — interaction: `html_view` drives Blitz's event driver
+     (hover, drag selection, link clicks captured, never navigated),
+     double/triple click word/paragraph, `hit_info`, select all, find with
+     match scrolling, theme selection color; `HtmlView` routes window-level
+     mouse events, sets hand/I-beam cursors, emits `HtmlViewEvent`, handles
+     copy/select-all/arrow/page/home/end keys. BGMail: status-bar link URL,
+     open http/https/mailto in the browser, `ui::ContextMenu` (new, Zed API)
+     with open/copy link, copy, select all, and a find bar (Cmd/Ctrl+F,
+     Enter/Shift+Enter, Esc). Fixed Blitz multi-root selection order with
+     anonymous blocks. Verified in the running app (uinput clicks, wtype).
+     Gaps: selections can't start in blank space; find highlights only the
+     current match.
   3. ⬜ Milestone 4 — robustness: parse/layout off the UI thread or behind
      `catch_unwind` (a Blitz panic must not take the app down), size/time
      limits for huge mail, graceful fallback to plain text.

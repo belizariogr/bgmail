@@ -19,7 +19,7 @@ use crate::blitz_paint::kurbo_css::NonUniformRoundedRectRadii;
 use crate::blitz_paint::layers::LayerManager;
 use crate::blitz_paint::sizing::compute_object_fit;
 use crate::blitz_paint::text::{DrawTextContext, TextPaintOptions};
-use crate::blitz_paint::{CustomWidgetSceneMap, SELECTION_COLOR};
+use crate::blitz_paint::CustomWidgetSceneMap;
 use anyrender::{PaintScene, Scene};
 use blitz_dom::node::{
     ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, TextInputData,
@@ -134,6 +134,8 @@ pub struct BlitzDomPainter<'dom, 'a> {
     pub(crate) draw_text_context: RefCell<DrawTextContext>,
     /// Cached selection ranges for O(1) lookup: node_id -> (start_offset, end_offset)
     pub(crate) selection_ranges: HashMap<NodeId, (usize, usize)>,
+    /// BGMail: text selection highlight color (from the host's theme).
+    pub(crate) selection_color: peniko::Color,
 
     // Pre-computed `Scene`s for each CustomWidget
     pub(crate) custom_widget_scenes: &'a CustomWidgetSceneMap,
@@ -149,6 +151,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         initial_x: f64,
         initial_y: f64,
         custom_widget_scenes: &'a CustomWidgetSceneMap,
+        selection_color: peniko::Color,
     ) -> Self {
         let selection_ranges: HashMap<NodeId, (usize, usize)> = dom
             .get_text_selection_ranges()
@@ -175,6 +178,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             draw_text_context: RefCell::new(DrawTextContext::default()),
             selection_ranges,
             custom_widget_scenes,
+            selection_color,
         }
     }
 
@@ -1037,6 +1041,7 @@ impl ElementCx<'_, '_> {
                     transform,
                     sel_start,
                     sel_end,
+                    self.context.selection_color,
                 );
             }
 
@@ -1088,7 +1093,7 @@ impl ElementCx<'_, '_> {
                     scene.fill(
                         Fill::NonZero,
                         transform,
-                        SELECTION_COLOR,
+                        self.context.selection_color,
                         None,
                         &convert_rect(rect),
                     );
@@ -1493,6 +1498,7 @@ impl ElementCx<'_, '_> {
                 initial_x,
                 initial_y,
                 self.custom_widget_scenes,
+                self.context.selection_color,
             );
             painter.paint_scene(scene);
         }

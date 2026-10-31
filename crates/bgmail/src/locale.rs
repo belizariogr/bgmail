@@ -109,6 +109,14 @@ pub enum Key {
     ComposeCcBcc,
     ComposeFieldPlaceholder,
     ComposeBodyPlaceholder,
+    // Reader: context menu and find bar.
+    CtxCopy,
+    CtxSelectAll,
+    CtxOpenLink,
+    CtxCopyLink,
+    FindPlaceholder,
+    FindMatches,
+    FindNoMatches,
 }
 
 impl Key {
@@ -258,6 +266,20 @@ impl Key {
             (ComposeFieldPlaceholder, P) => "Digite aqui…",
             (ComposeBodyPlaceholder, E) => "Write your message…",
             (ComposeBodyPlaceholder, P) => "Escreva sua mensagem…",
+            (CtxCopy, E) => "Copy",
+            (CtxCopy, P) => "Copiar",
+            (CtxSelectAll, E) => "Select all",
+            (CtxSelectAll, P) => "Selecionar tudo",
+            (CtxOpenLink, E) => "Open link",
+            (CtxOpenLink, P) => "Abrir link",
+            (CtxCopyLink, E) => "Copy link",
+            (CtxCopyLink, P) => "Copiar link",
+            (FindPlaceholder, E) => "Find in message",
+            (FindPlaceholder, P) => "Buscar na mensagem",
+            (FindMatches, E) => "{} of {}",
+            (FindMatches, P) => "{} de {}",
+            (FindNoMatches, E) => "No matches",
+            (FindNoMatches, P) => "Nenhum resultado",
 
         }
     }
@@ -334,7 +356,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 55] = [
+    const ALL_KEYS: [Key; 62] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -390,6 +412,13 @@ mod tests {
         Key::ComposeCcBcc,
         Key::ComposeFieldPlaceholder,
         Key::ComposeBodyPlaceholder,
+        Key::CtxCopy,
+        Key::CtxSelectAll,
+        Key::CtxOpenLink,
+        Key::CtxCopyLink,
+        Key::FindPlaceholder,
+        Key::FindMatches,
+        Key::FindNoMatches,
     ];
 
     #[test]

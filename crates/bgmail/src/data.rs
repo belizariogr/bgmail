@@ -485,11 +485,11 @@ fn html_body(subject: &str, preview: &str, sender: &str, image_src: &str) -> Sha
          <pre>fn main() {{\n    println!(\"Hello, BGMail!\");\n}}</pre>\
          <hr>\
          <p>Messages can embed images; inline (<code>data:</code>) ones always \
-         render, while remote ones load only when you allow remote content in \
-         Settings &rsaquo; Privacy:</p>\
+         render, while remote ones stay blocked (the shield next to the \
+         subject counts them):</p>\
          <p><img src=\"{image_src}\" alt=\"Inline image\" width=\"{width}\" height=\"{height}\"></p>\
          <p><img src=\"https://picsum.photos/seed/bgmail/{width}/{height}\" \
-         alt=\"Remote image (blocked unless you allow remote content)\" \
+         alt=\"Remote image (blocked)\" \
          width=\"{width}\" height=\"{height}\"></p>\
          <p><img src=\"https://picsum.photos/seed/bgmail2/{width}/{height}\" \
          alt=\"Another remote image (blocked unless you allow remote content)\" \
@@ -737,7 +737,7 @@ mod tests {
     fn embedded_image_is_wider_than_a_typical_reading_pane() {
         // A reading pane is roughly 520–620px; the image must be wider so the
         // horizontal scrollbar is actually exercised.
-        assert!(EMBEDDED_IMAGE_WIDTH >= 640);
+        const { assert!(EMBEDDED_IMAGE_WIDTH >= 640) };
     }
 
     #[test]

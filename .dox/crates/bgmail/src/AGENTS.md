@@ -40,7 +40,7 @@ _624 functions/methods documented._
 
 #### Types / constants
 
-- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
+- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`, `FindInMessage`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
 - **struct `MoveMessageToFolder`**: Parameterized action carrying a folder storage path (`path: SharedString`). Dispatched when the user picks a move target from menus or the command palette.
 
 #### Functions / methods
@@ -928,9 +928,9 @@ _(None at module top level — conversion helpers only.)_
   - Behavior: `[English, Portuguese]`.
 
 - **`Key`** (pub, L38)
-  - Signature: `pub enum Key { … }` (64 UI string keys)
+  - Signature: `pub enum Key { … }` (62 UI string keys)
   - Purpose: Typed catalog of translatable UI chrome strings.
-  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings, toolbar, commands, compose, context menu, and status strings.
+  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`) and status strings.
 
 - **`GlobalLanguage`** (private, L332)
   - Signature: `struct GlobalLanguage(Language)`
@@ -1031,6 +1031,7 @@ _(None at module top level — conversion helpers only.)_
 #### Functions / methods
 
 - **`DocumentColors::is_dark`** (pub): `background.l < 0.5`.
+- **`is_openable_link`** (pub): Whether a clicked link may be opened outside the app: `http(s)://` and `mailto:` only (case-insensitive, trimmed).
 - **`email_document`** (pub)
   - Signature: `pub fn email_document(colors: DocumentColors, body: &MessageBody) -> RenderedEmail`
   - Purpose: Builds the reader document for a body.
@@ -1046,7 +1047,7 @@ _(None at module top level — conversion helpers only.)_
 - **`neutralize_attributes`** (private): Removes `on*`, `contenteditable`, dangerous-scheme URLs, scripted `style`, and (unless allowed) remote resource attributes / `srcset`; a blocked remote `<img src>` is kept as `data-rm-blocked-src`; returns the image's blocked state.
 - **`is_dangerous_url`** / **`is_remote_url`** / **`style_has_script_vector`** (private): URL scheme and CSS vector checks.
 - **`escape_html`** (private): Escapes `& < > " '`.
-- Tests: HTML escaping, colors, document wrapping (HTML verbatim, plain text escaped, color scheme), disallowed elements, SVG scriptable parts, event handlers, dangerous schemes, legacy style vectors, safe markup kept, remote detection and blocking (attributes, `href` kept, CSS urls), remote image policy (`load_remote`, `shown`), documents always blocking remote images.
+- Tests: HTML escaping, openable links, colors, document wrapping (HTML verbatim, plain text escaped, color scheme), disallowed elements, SVG scriptable parts, event handlers, dangerous schemes, legacy style vectors, safe markup kept, remote detection and blocking (attributes, `href` kept, CSS urls), remote image policy (`load_remote`, `shown`), documents always blocking remote images.
 
 ### `src/main.rs`
 
@@ -1083,6 +1084,11 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn schedule_compose_close(cx: &mut App)`
   - Purpose: Defers closing the focused auxiliary window.
   - Behavior: Calls `RootView::close_focused_auxiliary_window` (compose or settings).
+
+- **`schedule_find_in_message`** (private)
+  - Signature: `fn schedule_find_in_message(cx: &mut App)`
+  - Purpose: Opens the reader's find bar in the main window.
+  - Behavior: Defers `RootView::open_find_bar`. Registered globally so Cmd/Ctrl+F works even when nothing in the main window is focused.
 
 - **`register_global_menu_actions`** (private, L105)
   - Signature: `fn register_global_menu_actions(cx: &mut App)`
@@ -1133,6 +1139,8 @@ _(None at module top level — conversion helpers only.)_
 - **struct `FoldAnim`**: In-flight account fold animation token and direction.
 - **enum `SettingsSection`**: Settings window section (General, Accounts, Appearance, Notifications, Privacy).
 - **struct `ReaderSignature`**: Memo key for the reader document (message id and page colors, which include the white-background preference).
+- **struct `ReaderMenu`**: Open reader context menu: window position, `HitInfo`, whether text was selected.
+- **struct `FindBar`**: Open find bar: query `TextInput`, match count, current match, input observation.
 - **struct `RootView`**: Main application view state (layout, selection, reader `HtmlView`, search, palette, auxiliary windows, persistence).
 - **struct `SettingsView`**: Preferences window content with section navigation.
 
@@ -1464,10 +1472,32 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Reacts to the main window becoming active.
   - Behavior: Refreshes the custom caption layout and notifies.
 
+- **`step_match`** (private)
+  - Signature: `fn step_match(current: usize, count: usize, step: isize) -> usize`
+  - Purpose: Next/previous find match index, wrapping; 0 without matches.
+
+- **`reader_selection_color`** (private)
+  - Signature: `fn reader_selection_color(accent: Hsla) -> [u8; 4]`
+  - Purpose: Reader selection highlight: the accent at 35% opacity as RGBA (readable over dark and light text).
+
+- **`on_reader_event`** (private)
+  - Signature: `fn on_reader_event(&mut self, view: Entity<HtmlView>, event: &HtmlViewEvent, cx)`
+  - Purpose: Handles reader events.
+  - Behavior: `LinkHovered` → status bar `hovered_link`; `LinkActivated` → `cx.open_url` when `is_openable_link`; `ContextMenu` → opens `ReaderMenu` (records whether text is selected).
+
+- **`open_find_bar`** (pub(crate))
+  - Signature: `pub(crate) fn open_find_bar(&mut self, window, cx)`
+  - Purpose: Opens (or focuses) the find bar while a message is shown.
+  - Behavior: Creates the query input on first open (its changes re-run the search, deferred) and focuses it.
+
+- **`close_find_bar`** (private): Drops the bar, clears the reader's find highlight (`find("")`) and focuses the reader.
+- **`run_find`** (private): Searches the reader for the query, resets to the first match and selects it.
+- **`step_find`** (private): Moves to the next/previous match (`step_match`) and selects it (the reader scrolls it into view).
+
 - **`sync_reader`** (private)
   - Signature: `fn sync_reader(&mut self, cx: &mut Context<Self>)`
   - Purpose: Keeps the reader document in sync with the selected message and theme.
-  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, builds the sanitized themed document (`mail_html::email_document`), records the blocked image count, parses it with `HtmlDocument::parse` (dark appearance for dark pages) and sets it on the reader `HtmlView` (created on first use).
+  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, builds the sanitized themed document (`mail_html::email_document`), records the blocked image count, parses it with `HtmlDocument::parse` (dark appearance for dark pages, `reader_selection_color`), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
 
 - **`set_reader_white_background`** (private, L1658)
   - Signature: `fn set_reader_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
@@ -1638,6 +1668,16 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn render_privacy_shield(&self, cx) -> impl IntoElement`
   - Purpose: Privacy shield on reader subject line.
   - Behavior: Red shield with a "Blocked images: N" tooltip while the message has blocked remote images; an empty slot of the same size otherwise (layout stability). No unblock action until Stage 3.
+
+- **`render_find_bar`** (private)
+  - Signature: `fn render_find_bar(&self, cx) -> impl IntoElement`
+  - Purpose: Find bar under the reader header.
+  - Behavior: Search-styled query field, "n of m"/"No matches" status, previous/next (`ChevronUp`/`ChevronDown`) and close buttons; Enter = next, Shift+Enter = previous, Escape closes.
+
+- **`render_reader_menu`** (private)
+  - Signature: `fn render_reader_menu(&self, cx) -> impl IntoElement`
+  - Purpose: Reader context menu (`ui::ContextMenu`) anchored at the click.
+  - Behavior: Openable links → Open link / Copy link; a selection → Copy (with shortcut hint); always Select all. A full-window occluding layer closes it on any click.
 
 - **`render_reader`** (private, L3100)
   - Signature: `fn render_reader(&mut self, cx) -> impl IntoElement`
@@ -1897,6 +1937,7 @@ _(None at module top level — conversion helpers only.)_
 - **const `MARK_JUNK_MAC` / `MARK_JUNK_OTHER`**: Binding strings for mark junk.
 - **const `TOGGLE_FLAG_MAC` / `TOGGLE_FLAG_OTHER`**: Binding strings for flag/unflag.
 - **const `COMPOSE_CLOSE_MAC` / `COMPOSE_CLOSE_OTHER`**: Binding strings for closing compose window.
+- **const `FIND_MAC` / `FIND_OTHER`**: `cmd-f` / `ctrl-f`, open the reader's find bar.
 
 #### Functions / methods
 

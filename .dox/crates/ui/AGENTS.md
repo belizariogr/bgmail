@@ -9,7 +9,7 @@ an e-mail client, without Zed-scale bloat.
 ## Ownership
 
 - Owns: visual primitives (`Label`, `Icon`, `Button`, `IconButton`, `ListItem`,
-  `Scrollbar`, `Switch`, `TextInput`, `Tooltip`), `Color`, layout helpers
+  `ContextMenu`, `Scrollbar`, `Switch`, `TextInput`, `Tooltip`), `Color`, layout helpers
   (`h_flex` / `v_flex`), embedded SVG `Assets` / `IconName`.
 - Does not own: theme palettes (`theme`), app views/windows (`bgmail`), mail
   domain (`storage` / future `mail_core`).

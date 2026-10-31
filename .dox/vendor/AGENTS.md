@@ -72,6 +72,9 @@ repository instead of living in someone's checkout.
   - `layout/replaced.rs`: a definite preferred size in one axis wins over the
     ratio when the other axis is clamped/known (CSS2 §10.4's table only for
     `auto`×`auto`).
+  - `traversal.rs` (`collect_inline_roots_in_range`): walks the layout tree
+    (which has the anonymous blocks) so multi-root text selections are in
+    order and complete; the DOM-order helpers it used are removed.
   - `stylo_to_parley.rs`: `set_generic_family_names` (embedder resolves CSS
     generics to single family names); font lists without a generic end in
     `serif`.

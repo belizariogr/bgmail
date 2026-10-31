@@ -1,9 +1,19 @@
 //! A parsed, styled and laid-out HTML document, independent of any window.
 
 use crate::display_list::DisplayList;
+use crate::interaction::{
+    find_all, word_bounds, HitInfo, LinkCapture, PointerButton, PointerInput, PointerPhase,
+};
 use crate::resources::{ResourceProvider, Resources};
-use blitz_dom::{DocumentConfig, UserAgentStylesheet};
+use blitz_dom::UserAgentStylesheet;
+use blitz_dom::{local_name, BaseDocument, DocumentConfig, EventDriver, NoopEventHandler};
+use blitz_traits::events::{
+    BlitzPointerEvent, BlitzPointerId, MouseEventButton, MouseEventButtons, PointerCoords,
+    PointerDetails, UiEvent,
+};
+use blitz_traits::node_id::NodeId;
 use blitz_traits::shell::{ColorScheme, Viewport};
+use std::ops::Range;
 use std::sync::Arc;
 
 /// Height of the layout viewport. Mail is laid out in a scrolling column, so
@@ -107,6 +117,10 @@ pub enum Appearance {
     Dark,
 }
 
+/// Text selection highlight used when [`DocumentOptions::selection_color`]
+/// is not set (RGBA).
+pub const DEFAULT_SELECTION_COLOR: [u8; 4] = [180, 213, 255, 255];
+
 /// Options for [`HtmlDocument::parse`].
 #[derive(Default)]
 pub struct DocumentOptions {
@@ -117,6 +131,24 @@ pub struct DocumentOptions {
     /// URL relative references resolve against ([`MESSAGE_BASE_URL`] when unset).
     pub base_url: Option<String>,
     pub resources: Resources,
+    /// Text selection highlight (RGBA); the host passes its theme's color.
+    pub selection_color: Option<[u8; 4]>,
+}
+
+/// Inline formatting roots (the boxes that own text) under `node_id`, in
+/// layout order.
+fn inline_roots(doc: &BaseDocument, node_id: NodeId, out: &mut Vec<NodeId>) {
+    let Some(node) = doc.get_node(node_id) else {
+        return;
+    };
+    if node.flags.is_inline_root() {
+        out.push(node_id);
+    }
+    if let Some(children) = node.layout_children.borrow().as_ref() {
+        for &child in children.iter() {
+            inline_roots(doc, child, out);
+        }
+    }
 }
 
 /// Rightmost edge (px from the left of `node_id`'s parent at `left`) of the
@@ -160,25 +192,34 @@ pub struct HtmlDocument {
     content_height: f32,
     /// Cached display list and the height it was painted for.
     display_list: Option<(f32, Arc<DisplayList>)>,
+    selection_color: peniko::Color,
+    /// Base URL links resolve against.
+    base_url: url::Url,
+    /// Links activated by clicks, for the host to open.
+    links: Arc<LinkCapture>,
+    /// Matches of the last [`HtmlDocument::find`]: (inline root, byte range).
+    find_matches: Vec<(NodeId, Range<usize>)>,
 }
 
 impl HtmlDocument {
     /// Parses `html` as an HTML document (never as XML, whatever its doctype).
     pub fn parse(html: &str, options: DocumentOptions) -> Self {
         let resources = Arc::new(options.resources);
+        let base_url = options
+            .base_url
+            .clone()
+            .unwrap_or_else(|| MESSAGE_BASE_URL.to_string());
+        let links = Arc::new(LinkCapture::default());
         let mut ua_stylesheets = vec![UserAgentStylesheet::default_sheet()];
         if let Some(css) = &options.user_agent_css {
             ua_stylesheets.push(UserAgentStylesheet::parse(css));
         }
         let config = DocumentConfig {
             // A base URL makes relative and `cid:` references resolvable.
-            base_url: Some(
-                options
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| MESSAGE_BASE_URL.to_string()),
-            ),
+            base_url: Some(base_url.clone()),
             net_provider: Some(Arc::new(ResourceProvider(resources.clone()))),
+            // Clicked links are reported to the host, never followed.
+            navigation_provider: Some(links.clone()),
             viewport: Some(viewport(800, options.appearance)),
             ua_stylesheets,
             font_ctx: Some(crate::fonts::font_context()),
@@ -196,6 +237,14 @@ impl HtmlDocument {
             content_width: 0.0,
             content_height: 0.0,
             display_list: None,
+            selection_color: {
+                let [r, g, b, a] = options.selection_color.unwrap_or(DEFAULT_SELECTION_COLOR);
+                peniko::Color::from_rgba8(r, g, b, a)
+            },
+            base_url: url::Url::parse(&base_url)
+                .unwrap_or_else(|_| url::Url::parse(MESSAGE_BASE_URL).expect("valid base URL")),
+            links,
+            find_matches: Vec::new(),
         }
     }
 
@@ -260,6 +309,7 @@ impl HtmlDocument {
             height as u32,
             0,
             0,
+            self.selection_color,
         );
         let list = Arc::new(list);
         self.display_list = Some((height, list.clone()));
@@ -269,6 +319,194 @@ impl HtmlDocument {
     /// Discards the cached display list (after hover/selection changes).
     pub fn invalidate_paint(&mut self) {
         self.display_list = None;
+    }
+
+    /// Handles a pointer event: hover, text selection (drag; double click
+    /// selects a word, triple click a paragraph) and link clicks (see
+    /// [`Self::take_activated_link`]). Returns whether the document must be
+    /// repainted. Only the primary button presses reach the document; other
+    /// buttons are the host's (context menus).
+    pub fn pointer(&mut self, input: PointerInput) -> bool {
+        let before = (
+            self.inner.get_hover_node_id(),
+            self.inner.get_text_selection_ranges(),
+        );
+        let pressed = input.button == PointerButton::Primary;
+        match input.phase {
+            PointerPhase::Down { click_count } if pressed && click_count >= 2 => {
+                self.select_at(input.x, input.y, click_count >= 3);
+            }
+            PointerPhase::Down { .. } | PointerPhase::Up if !pressed => {}
+            phase => {
+                let event = pointer_event(&input);
+                let event = match phase {
+                    PointerPhase::Down { .. } => UiEvent::PointerDown(event),
+                    PointerPhase::Move => UiEvent::PointerMove(event),
+                    PointerPhase::Up => UiEvent::PointerUp(event),
+                };
+                EventDriver::new(&mut self.inner, NoopEventHandler).handle_ui_event(event);
+                // Fragment links scroll Blitz's own viewport; the host owns
+                // scrolling, so the document always paints from its origin.
+                let scroll = self.inner.viewport_scroll();
+                if scroll.x != 0.0 || scroll.y != 0.0 {
+                    self.inner
+                        .set_viewport_scroll(blitz_dom::Point { x: 0.0, y: 0.0 });
+                }
+            }
+        }
+        let after = (
+            self.inner.get_hover_node_id(),
+            self.inner.get_text_selection_ranges(),
+        );
+        let changed = before != after;
+        if changed {
+            self.display_list = None;
+        }
+        changed
+    }
+
+    /// Selects the word (or, with `paragraph`, the whole inline root) at a
+    /// point; clears the selection when the point is not over text.
+    fn select_at(&mut self, x: f32, y: f32, paragraph: bool) {
+        let Some((root, offset)) = self.inner.find_text_position(x, y) else {
+            self.inner.clear_text_selection();
+            return;
+        };
+        let Some(text) = self.root_text(root) else {
+            return;
+        };
+        let range = if paragraph {
+            0..text.len()
+        } else {
+            word_bounds(text, offset)
+        };
+        self.inner
+            .set_text_selection(root, range.start, root, range.end);
+    }
+
+    /// Text of an inline root.
+    fn root_text(&self, root: NodeId) -> Option<&str> {
+        let layout = self
+            .inner
+            .get_node(root)?
+            .element_data()?
+            .inline_layout_data
+            .as_ref()?;
+        Some(&layout.text)
+    }
+
+    /// The link activated by the last click (absolute URL), cleared.
+    pub fn take_activated_link(&mut self) -> Option<String> {
+        self.links.take()
+    }
+
+    /// What lies under a document point: link URL, image source, text.
+    pub fn hit_info(&self, x: f32, y: f32) -> HitInfo {
+        let Some(hit) = self.inner.hit(x, y) else {
+            return HitInfo::default();
+        };
+        let mut info = HitInfo {
+            text: hit.is_text,
+            ..Default::default()
+        };
+        let mut node = self.inner.get_node(hit.node_id);
+        while let Some(current) = node {
+            if let Some(element) = current.element_data() {
+                if info.image.is_none() && element.name.local == local_name!("img") {
+                    info.image = element
+                        .attr(local_name!("src"))
+                        .filter(|src| !src.is_empty())
+                        .or_else(|| {
+                            element.attrs().iter().find_map(|attr| {
+                                (&*attr.name.local == "data-rm-blocked-src")
+                                    .then_some(attr.value.as_str())
+                            })
+                        })
+                        .map(str::to_string);
+                }
+                if element.name.local == local_name!("a") {
+                    info.link = element
+                        .attr(local_name!("href"))
+                        .and_then(|href| self.base_url.join(href.trim()).ok())
+                        .map(|url| url.to_string());
+                    break;
+                }
+            }
+            node = current.parent.and_then(|id| self.inner.get_node(id));
+        }
+        info
+    }
+
+    /// Whether some text is selected.
+    pub fn has_selection(&self) -> bool {
+        self.inner.has_text_selection()
+    }
+
+    /// The selected text, if any.
+    pub fn selected_text(&self) -> Option<String> {
+        self.inner.get_selected_text()
+    }
+
+    /// Selects all the text of the document.
+    pub fn select_all(&mut self) {
+        let mut roots = Vec::new();
+        inline_roots(&self.inner, self.inner.root_element().id, &mut roots);
+        let (Some(&first), Some(&last)) = (roots.first(), roots.last()) else {
+            return;
+        };
+        let end = self.root_text(last).map_or(0, str::len);
+        self.inner.set_text_selection(first, 0, last, end);
+        self.display_list = None;
+    }
+
+    /// Clears the text selection.
+    pub fn clear_selection(&mut self) {
+        if self.inner.has_text_selection() {
+            self.inner.clear_text_selection();
+            self.display_list = None;
+        }
+    }
+
+    /// Finds every case-insensitive occurrence of `query` in the document's
+    /// text and returns how many there are (see [`Self::select_match`]).
+    pub fn find(&mut self, query: &str) -> usize {
+        let mut roots = Vec::new();
+        inline_roots(&self.inner, self.inner.root_element().id, &mut roots);
+        self.find_matches = roots
+            .into_iter()
+            .flat_map(|root| {
+                let ranges = self.root_text(root).map(|text| find_all(text, query));
+                ranges
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |range| (root, range))
+            })
+            .collect();
+        self.find_matches.len()
+    }
+
+    /// Selects match `index` of the last [`Self::find`] and returns the top
+    /// and bottom of its line (document y), to scroll it into view.
+    pub fn select_match(&mut self, index: usize) -> Option<(f32, f32)> {
+        let (root, range) = self.find_matches.get(index)?.clone();
+        self.inner
+            .set_text_selection(root, range.start, root, range.end);
+        self.display_list = None;
+        let node = self.inner.get_node(root)?;
+        let text = node.element_data()?.inline_layout_data.as_ref()?;
+        let scale = text.layout.scale();
+        let caret = parley::Cursor::from_byte_index(
+            &text.layout,
+            range.start,
+            parley::Affinity::Downstream,
+        )
+        .geometry(&text.layout, 1.0);
+        let layout = node.final_layout();
+        let top = node.absolute_position(0.0, 0.0).y
+            + layout.padding.top
+            + layout.border.top
+            + text.block_offset;
+        Some((top + caret.y0 as f32 / scale, top + caret.y1 as f32 / scale))
     }
 
     /// Remote URLs the document asked for and that were blocked.
@@ -285,6 +523,44 @@ impl HtmlDocument {
     pub fn blitz_mut(&mut self) -> &mut blitz_dom::BaseDocument {
         self.display_list = None;
         &mut self.inner
+    }
+}
+
+/// A Blitz mouse event for `input` (document, client and screen coordinates
+/// coincide: the document is painted from its origin).
+fn pointer_event(input: &PointerInput) -> BlitzPointerEvent {
+    let button = match input.button {
+        PointerButton::Primary => MouseEventButton::Main,
+        PointerButton::Secondary => MouseEventButton::Secondary,
+        PointerButton::Middle => MouseEventButton::Auxiliary,
+    };
+    let buttons = if input.primary_pressed {
+        MouseEventButtons::Primary
+    } else {
+        MouseEventButtons::None
+    };
+    let mut mods = keyboard_types::Modifiers::empty();
+    mods.set(keyboard_types::Modifiers::SHIFT, input.modifiers.shift);
+    mods.set(keyboard_types::Modifiers::CONTROL, input.modifiers.control);
+    mods.set(keyboard_types::Modifiers::ALT, input.modifiers.alt);
+    mods.set(keyboard_types::Modifiers::META, input.modifiers.platform);
+    BlitzPointerEvent {
+        id: BlitzPointerId::Mouse,
+        is_primary: true,
+        coords: PointerCoords {
+            page_x: input.x,
+            page_y: input.y,
+            screen_x: input.x,
+            screen_y: input.y,
+            client_x: input.x,
+            client_y: input.y,
+        },
+        button,
+        buttons,
+        mods,
+        details: PointerDetails::default(),
+        element: Default::default(),
+        active_pointers: Default::default(),
     }
 }
 
@@ -323,6 +599,7 @@ pub fn force_html_parse(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interaction::{HitInfo, PointerButton, PointerInput, PointerPhase};
 
     #[test]
     fn document_modes_follow_the_doctype() {
@@ -601,6 +878,165 @@ mod tests {
             box_of(&html, "o").3
         };
         assert!(line("inline-block") > line("inline-table") + 3.0);
+    }
+
+    fn laid_out(html: &str) -> HtmlDocument {
+        let mut doc = HtmlDocument::parse(html, DocumentOptions::default());
+        doc.layout(400.0);
+        doc
+    }
+
+    fn press(doc: &mut HtmlDocument, x: f32, y: f32, phase: PointerPhase, held: bool) -> bool {
+        doc.pointer(PointerInput {
+            x,
+            y,
+            phase,
+            button: PointerButton::Primary,
+            primary_pressed: held,
+            modifiers: Default::default(),
+        })
+    }
+
+    /// Two paragraphs, two links (one per line, so their paragraphs locate
+    /// them: inline boxes have no box of their own), loose text in an
+    /// anonymous block and a blocked image.
+    const TEXT: &str = "<!DOCTYPE html><body style=\"margin:0;font-size:16px\"><p id=\"a\" style=\"margin:0\">hello brave world</p><p id=\"b\" style=\"margin:0\">second line</p><p id=\"l\" style=\"margin:0\"><a href=\"https://example.com/x\">link</a></p><p id=\"r\" style=\"margin:0\"><a href=\"page.html\">rel</a></p>loose text<img id=\"i\" data-rm-blocked-src=\"https://t.test/p.gif\" style=\"display:block;width:20px;height:20px\">";
+
+    #[test]
+    fn clicking_a_link_reports_it_without_navigating() {
+        let mut doc = laid_out(TEXT);
+        let (x, y, _, h) = box_of(TEXT, "l");
+        let (x, y) = (x + 2.0, y + h / 2.0);
+        press(&mut doc, x, y, PointerPhase::Down { click_count: 1 }, true);
+        press(&mut doc, x, y, PointerPhase::Up, false);
+        assert_eq!(
+            doc.take_activated_link().as_deref(),
+            Some("https://example.com/x")
+        );
+        assert_eq!(doc.take_activated_link(), None);
+    }
+
+    #[test]
+    fn hit_info_reports_links_images_and_text() {
+        let doc = laid_out(TEXT);
+        // A point on the first glyphs of a line (links sit at the start).
+        let start = |id: &str| {
+            let (x, y, _, h) = box_of(TEXT, id);
+            (x + 5.0, y + h / 2.0)
+        };
+        let (x, y) = start("l");
+        let link = doc.hit_info(x, y);
+        assert_eq!(link.link.as_deref(), Some("https://example.com/x"));
+        assert!(link.text);
+        let (x, y) = start("r");
+        assert_eq!(
+            doc.hit_info(x, y).link.as_deref(),
+            Some("bgmail://message/page.html")
+        );
+        let (x, y) = start("i");
+        assert_eq!(
+            doc.hit_info(x, y).image.as_deref(),
+            Some("https://t.test/p.gif")
+        );
+        let (x, y) = start("a");
+        assert_eq!(
+            doc.hit_info(x, y),
+            HitInfo {
+                text: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn double_and_triple_clicks_select_word_and_paragraph() {
+        let mut doc = laid_out(TEXT);
+        let (x, y, _, h) = box_of(TEXT, "a");
+        // "hello" starts the line; a point inside it.
+        assert!(press(
+            &mut doc,
+            x + 10.0,
+            y + h / 2.0,
+            PointerPhase::Down { click_count: 2 },
+            true
+        ));
+        assert_eq!(doc.selected_text().as_deref(), Some("hello"));
+        press(
+            &mut doc,
+            x + 10.0,
+            y + h / 2.0,
+            PointerPhase::Down { click_count: 3 },
+            true,
+        );
+        assert_eq!(doc.selected_text().as_deref(), Some("hello brave world"));
+        doc.clear_selection();
+        assert!(!doc.has_selection());
+    }
+
+    #[test]
+    fn dragging_selects_text_and_select_all_spans_the_document() {
+        let mut doc = laid_out(TEXT);
+        let (x, y, w, h) = box_of(TEXT, "a");
+        let mid = y + h / 2.0;
+        press(
+            &mut doc,
+            x + 1.0,
+            mid,
+            PointerPhase::Down { click_count: 1 },
+            true,
+        );
+        assert!(press(
+            &mut doc,
+            x + w.min(60.0),
+            mid,
+            PointerPhase::Move,
+            true
+        ));
+        press(&mut doc, x + w.min(60.0), mid, PointerPhase::Up, false);
+        let dragged = doc.selected_text().unwrap_or_default();
+        assert!(dragged.starts_with("hel"), "{dragged}");
+        doc.select_all();
+        let all = doc.selected_text().unwrap_or_default();
+        // Across paragraphs and into the anonymous block of loose text.
+        for part in ["hello brave world", "second line", "loose text"] {
+            assert!(all.contains(part), "{all}");
+        }
+    }
+
+    #[test]
+    fn find_counts_matches_and_selects_them_in_place() {
+        let mut doc = laid_out(TEXT);
+        assert_eq!(doc.find("LINE"), 1);
+        assert_eq!(doc.find("o"), 5); // hello, world, second, loose (2)
+        assert_eq!(doc.find("second"), 1);
+        let (top, bottom) = doc.select_match(0).unwrap();
+        let (_, y, _, h) = box_of(TEXT, "b");
+        assert!(
+            top >= y - 0.5 && bottom <= y + h + 0.5,
+            "{top}..{bottom} vs {y}+{h}"
+        );
+        assert_eq!(doc.selected_text().as_deref(), Some("second"));
+        assert_eq!(doc.select_match(5), None);
+    }
+
+    #[test]
+    fn selection_is_painted_with_the_given_color() {
+        let mut doc = HtmlDocument::parse(
+            TEXT,
+            DocumentOptions {
+                selection_color: Some([10, 20, 30, 255]),
+                ..Default::default()
+            },
+        );
+        doc.layout(400.0);
+        doc.select_all();
+        let color = peniko::Color::from_rgba8(10, 20, 30, 255);
+        let painted = doc.display_list().commands.iter().any(|c| {
+            matches!(c, crate::display_list::Command::Fill {
+                brush: crate::display_list::Brush::Solid(fill), ..
+            } if *fill == color)
+        });
+        assert!(painted);
     }
 
     #[test]

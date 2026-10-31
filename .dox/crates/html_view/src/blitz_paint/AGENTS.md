@@ -44,6 +44,10 @@ images, SVG, list markers, selections, text decorations and text.
     0.25em trailing space. Items without their own text (`<li><p>…`) align
     the marker with the first line found down their in-flow block children
     (`first_line_baseline`).
+  - `mod.rs`/`render.rs`/`text.rs`: the selection highlight color is a
+    `paint_scene` parameter stored on the painter (`selection_color`,
+    passed to sub-documents and `draw_text_selection`); the
+    `SELECTION_COLOR` constant is gone.
   - `layers.rs` tests adapted to `DisplayList` commands.
 
 ## Work Guidance
