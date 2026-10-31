@@ -7,7 +7,7 @@ use gpui::{App, KeyBinding, KeybindingKeystroke, Keystroke};
 
 use crate::actions::{
     ComposeClose, ComposeNew, FindInMessage, MessageArchive, MessageDelete, MessageMarkJunk,
-    MessageToggleFlag, OpenSettings, Quit, ToggleCommandPalette, ToggleSidebar,
+    MessagePrint, MessageToggleFlag, OpenSettings, Quit, ToggleCommandPalette, ToggleSidebar,
 };
 
 /// GPUI keystroke string shown in tooltips on macOS.
@@ -35,6 +35,9 @@ pub const MARK_JUNK_OTHER: &str = "ctrl-shift-j";
 
 pub const TOGGLE_FLAG_MAC: &str = "cmd-shift-l";
 pub const TOGGLE_FLAG_OTHER: &str = "ctrl-shift-l";
+/// Prints the selected message (through the system browser).
+pub const PRINT_MAC: &str = "cmd-p";
+pub const PRINT_OTHER: &str = "ctrl-p";
 
 pub const COMPOSE_CLOSE_MAC: &str = "cmd-w";
 pub const COMPOSE_CLOSE_OTHER: &str = "ctrl-w";
@@ -83,6 +86,8 @@ pub fn bind_app_shortcuts(cx: &mut App) {
         KeyBinding::new(ARCHIVE_OTHER, MessageArchive, None),
         KeyBinding::new(MARK_JUNK_MAC, MessageMarkJunk, None),
         KeyBinding::new(MARK_JUNK_OTHER, MessageMarkJunk, None),
+        KeyBinding::new(PRINT_MAC, MessagePrint, None),
+        KeyBinding::new(PRINT_OTHER, MessagePrint, None),
         KeyBinding::new(TOGGLE_FLAG_MAC, MessageToggleFlag, None),
         KeyBinding::new(TOGGLE_FLAG_OTHER, MessageToggleFlag, None),
         KeyBinding::new(COMPOSE_CLOSE_MAC, ComposeClose, None),

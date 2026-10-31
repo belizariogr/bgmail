@@ -35,7 +35,9 @@ use crate::crash_guard::CrashGuard;
 use crate::data::{self, GlobalMailbox, MailboxKind, MessageBody};
 use crate::db_seed;
 use crate::locale::{self, ActiveLanguage, Key, Language};
-use crate::mail_html::{email_document, is_openable_link, plain_text, DocumentColors};
+use crate::mail_html::{
+    email_document, is_openable_link, plain_text, print_document, DocumentColors, PrintHeader,
+};
 use crate::shortcuts;
 use html_view::{
     Appearance as PageAppearance, DocumentOptions, HitInfo, HtmlDocument, HtmlView, HtmlViewEvent,
@@ -833,9 +835,40 @@ impl RootView {
             CommandId::MessageArchive => self.archive_message(cx),
             CommandId::MessageMarkJunk => self.mark_message_junk(cx),
             CommandId::MessageToggleFlag => self.toggle_message_flag(cx),
+            CommandId::MessagePrint => self.print_message(cx),
             CommandId::MoveToFolder(path) => self.move_message_to_folder(path.as_ref(), cx),
         }
         self.close_command_palette(cx);
+    }
+
+    /// Prints the selected message: a standalone print page (light theme,
+    /// header, remote content blocked; `mail_html::print_document`) written
+    /// to a private temporary file and opened in the system browser, which
+    /// shows the print dialog.
+    pub(crate) fn print_message(&mut self, cx: &mut Context<Self>) {
+        let Some(detail) = self.selected_detail.as_ref() else {
+            return;
+        };
+        let language = cx.language();
+        let from = if detail.sender_email.is_empty() {
+            detail.sender.clone()
+        } else {
+            format!("{} <{}>", detail.sender, detail.sender_email)
+        };
+        let header = PrintHeader {
+            subject: &detail.subject,
+            from_label: Key::PrintFrom.tr(language),
+            from: &from,
+            date_label: Key::PrintDate.tr(language),
+            date: &detail.received_at,
+        };
+        let body = db_seed::message_body_from_detail(detail);
+        let nonce = crate::print::nonce();
+        let html = print_document(&header, &body, &nonce);
+        match crate::print::write_print_page(&crate::print::print_dir(), &html, &nonce) {
+            Ok(path) => cx.open_with_system(&path),
+            Err(error) => eprintln!("BGMail: could not write the print page: {error}"),
+        }
     }
 
     pub(crate) fn delete_message_to_trash(&mut self, cx: &mut Context<Self>) {

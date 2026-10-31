@@ -20,6 +20,7 @@ pub enum CommandId {
     MessageArchive,
     MessageMarkJunk,
     MessageToggleFlag,
+    MessagePrint,
     MoveToFolder(SharedString),
 }
 
@@ -122,6 +123,7 @@ fn label_for(id: &CommandId, language: Language, ctx: &CommandContext) -> Shared
         CommandId::MessageMarkJunk => Key::CommandMarkJunk.tr(language),
         CommandId::MessageToggleFlag if ctx.message_starred() => Key::CommandUnflag.tr(language),
         CommandId::MessageToggleFlag => Key::CommandFlag.tr(language),
+        CommandId::MessagePrint => Key::CommandPrint.tr(language),
         CommandId::MoveToFolder(path) => {
             let folder = ctx
                 .folders_by_account
@@ -153,6 +155,7 @@ pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool {
         CommandId::MessageMarkJunk => {
             ctx.selected_message_id.is_some() && !ctx.message_in_trash() && !ctx.message_in_junk()
         }
+        CommandId::MessagePrint => ctx.selected_message_id.is_some(),
         CommandId::MessageToggleFlag | CommandId::MoveToFolder(_) => {
             ctx.selected_message_id.is_some() && !ctx.message_in_trash()
         }
@@ -175,6 +178,7 @@ pub fn palette_commands(language: Language, ctx: &CommandContext) -> Vec<Command
             CommandId::MessageArchive,
             CommandId::MessageMarkJunk,
             CommandId::MessageToggleFlag,
+            CommandId::MessagePrint,
         ]);
         for (_label, path) in ctx.move_targets() {
             ids.push(CommandId::MoveToFolder(path));
@@ -251,6 +255,23 @@ mod tests {
             }),
             folders_by_account,
         }
+    }
+
+    #[test]
+    fn print_needs_a_selected_message_even_in_trash() {
+        assert!(command_enabled(
+            &CommandId::MessagePrint,
+            &ctx_with_message(true, false)
+        ));
+        assert!(!command_enabled(
+            &CommandId::MessagePrint,
+            &CommandContext::default()
+        ));
+        let labels: Vec<_> = palette_commands(Language::English, &ctx_with_message(false, false))
+            .into_iter()
+            .map(|entry| entry.label.to_string())
+            .collect();
+        assert!(labels.iter().any(|label| label == "Print…"));
     }
 
     #[test]

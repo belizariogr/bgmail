@@ -69,6 +69,75 @@ pub fn email_document(colors: DocumentColors, body: &MessageBody) -> RenderedEma
     }
 }
 
+/// What a printed message shows above its body (labels already localized).
+pub struct PrintHeader<'a> {
+    pub subject: &'a str,
+    pub from_label: &'a str,
+    pub from: &'a str,
+    pub date_label: &'a str,
+    pub date: &'a str,
+}
+
+/// Light page colors for printing, whatever the app theme.
+const PRINT_COLORS: DocumentColors = DocumentColors {
+    background: Hsla {
+        h: 0.0,
+        s: 0.0,
+        l: 1.0,
+        a: 1.0,
+    },
+    text: Hsla {
+        h: 0.0,
+        s: 0.0,
+        l: 0.1,
+        a: 1.0,
+    },
+    accent: Hsla {
+        h: 0.6,
+        s: 0.8,
+        l: 0.4,
+        a: 1.0,
+    },
+};
+
+/// A standalone page for printing a message in the system browser: the
+/// sanitized body (remote content still blocked) under a header, on a light
+/// page, opening the print dialog once loaded. A Content-Security-Policy
+/// lets nothing load but `data:` images and only the page's own script run
+/// (`nonce`), so the browser stays as offline as the reader even if the
+/// sanitizer missed something.
+pub fn print_document(header: &PrintHeader, body: &MessageBody, nonce: &str) -> String {
+    let rendered = email_document(PRINT_COLORS, body);
+    let csp = format!(
+        "default-src 'none'; img-src data:; style-src 'unsafe-inline'; \
+         script-src 'nonce-{nonce}'"
+    );
+    let head = format!(
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
+         <title>{subject}</title>\
+         <style>.bgmail-print-header{{font:13px system-ui,sans-serif;color:#222;\
+         margin:0 0 16px;padding:0 0 12px;border-bottom:1px solid #ccc}}\
+         .bgmail-print-header h1{{font-size:18px;margin:0 0 8px}}\
+         .bgmail-print-header p{{margin:2px 0}}</style>\
+         <script nonce=\"{nonce}\">addEventListener('load',function(){{print()}})</script>",
+        subject = escape_html(header.subject),
+    );
+    let header = format!(
+        "<header class=\"bgmail-print-header\"><h1>{}</h1><p><b>{}:</b> {}</p>\
+         <p><b>{}:</b> {}</p></header>",
+        escape_html(header.subject),
+        escape_html(header.from_label),
+        escape_html(header.from),
+        escape_html(header.date_label),
+        escape_html(header.date),
+    );
+    // The CSP must precede everything else in <head>; the header opens <body>.
+    rendered
+        .html
+        .replacen("<head>", &format!("<head>{head}"), 1)
+        .replacen("<body>", &format!("<body>{header}"), 1)
+}
+
 /// The doctype an HTML body starts with (after a BOM, whitespace, an XML
 /// declaration and comments), if any.
 fn leading_doctype(html: &str) -> Option<&str> {
@@ -636,6 +705,35 @@ fn escape_html(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn print_pages_are_light_locked_down_and_headed() {
+        let header = PrintHeader {
+            subject: "Hello <you>",
+            from_label: "From",
+            from: "Ann <ann@x.test>",
+            date_label: "Date",
+            date: "2002-07-09",
+        };
+        let body = MessageBody::Html(
+            "<p>Body</p><img src=\"https://tracker.test/p.gif\"><script>alert(1)</script>".into(),
+        );
+        let html = print_document(&header, &body, "n0nce");
+        // The CSP comes first in <head>; only the nonce'd script may run.
+        let head = &html[html.find("<head>").unwrap()..];
+        assert!(head.starts_with("<head><meta http-equiv=\"Content-Security-Policy\""));
+        assert!(html.contains("default-src 'none'; img-src data:"));
+        assert!(html.contains("script-src 'nonce-n0nce'"));
+        assert!(html.contains("<script nonce=\"n0nce\">"));
+        assert_eq!(html.matches("<script").count(), 1);
+        // Header escaped, body sanitized (remote image blocked).
+        assert!(html.contains("<h1>Hello &lt;you&gt;</h1>"));
+        assert!(html.contains("Ann &lt;ann@x.test&gt;"));
+        assert!(html.contains("<p>Body</p>"));
+        assert!(!html.contains(" src=\"https://tracker.test"));
+        // Light page whatever the app theme.
+        assert!(html.contains("color-scheme: light") || !html.contains("color-scheme: dark"));
+    }
     use gpui::hsla;
 
     fn body_html() -> MessageBody {

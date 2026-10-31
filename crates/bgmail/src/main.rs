@@ -17,6 +17,7 @@ mod data;
 mod db_seed;
 mod locale;
 mod mail_html;
+mod print;
 mod root;
 mod shortcuts;
 mod startup;
@@ -33,9 +34,9 @@ use gpui::{
 use crate::commands::CommandId;
 use actions::{
     ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, FindInMessage,
-    MessageArchive, MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessageRestore,
-    MessageToggleFlag, MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette,
-    ToggleSidebar,
+    MessageArchive, MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessagePrint,
+    MessageRestore, MessageToggleFlag, MoveMessageToFolder, OpenSettings, Quit,
+    ToggleCommandPalette, ToggleSidebar,
 };
 use compose::ComposeView;
 use root::{RootView, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH};
@@ -124,6 +125,7 @@ fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &MessageRestore, cx| schedule_menu_command(CommandId::MessageRestore, cx));
     cx.on_action(|_: &MessageArchive, cx| schedule_menu_command(CommandId::MessageArchive, cx));
     cx.on_action(|_: &MessageMarkJunk, cx| schedule_menu_command(CommandId::MessageMarkJunk, cx));
+    cx.on_action(|_: &MessagePrint, cx| schedule_menu_command(CommandId::MessagePrint, cx));
     cx.on_action(|_: &MessageToggleFlag, cx| {
         schedule_menu_command(CommandId::MessageToggleFlag, cx);
     });

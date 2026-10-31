@@ -40,7 +40,7 @@ _624 functions/methods documented._
 
 #### Types / constants
 
-- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`, `FindInMessage`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
+- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`, `FindInMessage`, `MessagePrint`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
 - **struct `MoveMessageToFolder`**: Parameterized action carrying a folder storage path (`path: SharedString`). Dispatched when the user picks a move target from menus or the command palette.
 
 #### Functions / methods
@@ -203,7 +203,7 @@ _(No functions — only action types.)_
 
 #### Types / constants
 
-- **enum `CommandId`**: Identifies a command in menus and the palette (compose, settings, message actions, move-to-folder with path).
+- **enum `CommandId`**: Identifies a command in menus and the palette (compose, settings, message actions incl. `MessagePrint` (enabled with a selected message, even in Trash), move-to-folder with path).
 - **struct `CommandContext`**: Snapshot of UI state (selected message, detail, folders) used to decide command availability and labels.
 - **struct `CommandEntry`**: One palette row: `id` plus localized `label`.
 
@@ -636,6 +636,21 @@ _(No functions — only action types.)_
 - **`CrashGuard::finish()`**: Removes the marker once a frame showing it was drawn.
 - Tests: unfinished renders reported once; finished renders leave no marker.
 
+### `src/print.rs`
+
+#### Types / constants
+
+- **const `STALE_AFTER`** (private): 10 minutes; older print pages are deleted on the next print.
+
+#### Functions / methods
+
+- **`print_dir()`** (pub): `<temp dir>/bgmail-print`.
+- **`nonce()`** (pub): 16 hex digits from the process's random hasher keys, the clock, a counter and the pid (CSP nonce and file name).
+- **`write_print_page(dir, html, nonce)`** (pub): Creates the private directory, removes stale pages, writes `message-<nonce>.html` as a new private file; returns its path.
+- **`remove_stale_pages(dir, now, age)`** (pub): Deletes `message-*.html` older than `age`; returns how many.
+- **`create_private_dir(dir)`** / **`create_private_file(path)`** (private): Unix modes 0700 / 0600 (create-new); elsewhere plain creation (Windows' temp dir is per user).
+- Tests: nonces differ; pages are private, never overwritten; only stale pages are removed.
+
 ### `src/data.rs`
 
 #### Types / constants
@@ -1042,6 +1057,8 @@ _(None at module top level — conversion helpers only.)_
 
 - **struct `RenderedEmail`** (pub): Full themed HTML document for `html_view` plus `blocked_images` (remote `<img>` withheld) for the privacy shield.
 - **struct `DocumentColors`** (pub): Page `background`, `text`, `accent`; `is_dark()` (background lightness < 0.5) selects the dark scheme.
+- **struct `PrintHeader`** (pub): Subject, sender and date (with localized labels) printed above a message.
+- **const `PRINT_COLORS`** (private): Light page colors used for printing whatever the theme.
 - **const `DISALLOWED_ELEMENTS`** (private): Selector of elements stripped with their content (scripts, frames, media, form controls, `base`/`meta`/`link`, scripting surfaces, scriptable SVG parts).
 - **const `URL_ATTRIBUTES`** (private): Attributes vetted for dangerous URL schemes.
 - **const `RESOURCE_ATTRIBUTES`** (private): Attributes that fetch on render; blocked for remoteness when loading is off.
@@ -1057,6 +1074,10 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Builds the reader document for a body.
   - Behavior: HTML bodies are sanitized with remote loading off (Stage 3 adds loading); plain text is escaped into `<pre class="plain">`. Wraps the result in a document with `document_css` that starts with the body's own doctype (`leading_doctype`, so legacy mail keeps its quirks mode), else `<!DOCTYPE html>`.
 - **`leading_doctype`** (private): The doctype an HTML body starts with, after a BOM, whitespace, `<?…?>` declarations and comments; `None` without one.
+- **`print_document`** (pub)
+  - Signature: `pub fn print_document(header: &PrintHeader, body: &MessageBody, nonce: &str) -> String`
+  - Purpose: Standalone page for printing a message in the system browser.
+  - Behavior: `email_document` with `PRINT_COLORS`, plus in `<head>` (first) a Content-Security-Policy (`default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-…'`), the subject as title, header styles and a nonce'd script calling `print()` on load; the escaped header opens `<body>`. Remote content stays blocked by the sanitizer and, as defense in depth, by the CSP.
 - **`document_css`** (private): Theme stylesheet (color scheme, page colors/padding/font, links in accent, blocked-image placeholder, code/pre/blockquote/hr styles).
 - **`css_color`** / **`css_color_alpha`** / **`channel`** (private): Theme colors → CSS `rgb()`/`rgba()`; channel clamps and rounds to 0–255.
 - **`sanitize_html`** (private, test-only): `sanitize_html_inner` without the remote-image report.
@@ -1325,6 +1346,11 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `pub(crate) fn execute_command(&mut self, id: &CommandId, window, cx)`
   - Purpose: Runs a command by id.
   - Behavior: Dispatches to compose/settings/sidebar/message handlers, then closes palette.
+
+- **`print_message`** (pub(crate))
+  - Signature: `pub(crate) fn print_message(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Prints the selected message through the system browser.
+  - Behavior: Builds the `PrintHeader` (sender with address, `received_at`), the print page (`mail_html::print_document` with a fresh `print::nonce`), writes it with `print::write_print_page` and opens it with `cx.open_with_system` (errors logged).
 
 - **`delete_message_to_trash`** (pub(crate), L830)
   - Signature: `pub(crate) fn delete_message_to_trash(&mut self, cx: &mut Context<Self>)`
@@ -1966,6 +1992,7 @@ _(None at module top level — conversion helpers only.)_
 - **const `TOGGLE_FLAG_MAC` / `TOGGLE_FLAG_OTHER`**: Binding strings for flag/unflag.
 - **const `COMPOSE_CLOSE_MAC` / `COMPOSE_CLOSE_OTHER`**: Binding strings for closing compose window.
 - **const `FIND_MAC` / `FIND_OTHER`**: `cmd-f` / `ctrl-f`, open the reader's find bar.
+- **const `PRINT_MAC` / `PRINT_OTHER`**: `cmd-p` / `ctrl-p`, print the selected message.
 
 #### Functions / methods
 

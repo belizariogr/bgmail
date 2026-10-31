@@ -14,8 +14,9 @@ use gpui::{App, Global, Menu, MenuItem, SystemMenuType};
 
 use crate::actions::{
     ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, MessageArchive,
-    MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessageRestore, MessageToggleFlag,
-    MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette, ToggleSidebar,
+    MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessagePrint, MessageRestore,
+    MessageToggleFlag, MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette,
+    ToggleSidebar,
 };
 use crate::commands::{self, CommandContext, CommandId};
 use crate::locale::{Key, Language};
@@ -118,6 +119,13 @@ pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
         },
         MessageToggleFlag,
         CommandId::MessageToggleFlag,
+        ctx,
+    );
+    push_if_enabled(
+        &mut message_items,
+        Key::CommandPrint.tr(language),
+        MessagePrint,
+        CommandId::MessagePrint,
         ctx,
     );
     if !move_items.is_empty() {

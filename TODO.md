@@ -515,7 +515,13 @@
        sharp); Ctrl/Cmd `+`/`-`/`0` and Ctrl/Cmd + wheel over the reader,
        Chromium's levels (25%–500%), kept across messages; the status bar
        shows it when it isn't 100%. Not persisted between runs yet.
-     - ⬜ Print.
+     - ✅ Print (Cmd/Ctrl+P, Message menu, palette): decided with two
+       opposing reviews to print through the system browser (native
+       dialog, pagination, "Save as PDF"): a light print page with a header
+       and the sanitized body, locked down by a CSP (only `data:` images
+       and its own nonce'd `print()` script), written to a private temp
+       file (0600 in a 0700 dir; stale pages removed on the next print).
+       Later: a native "Save as PDF" from the display list if needed.
      - ⬜ Animated GIF.
 - ⬜ Stage 3 — remote content on request: HTTP image fetcher behind
       `html_view::Resources` (per-message/per-image unblock, cache, size/time

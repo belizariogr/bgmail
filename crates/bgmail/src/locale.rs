@@ -94,6 +94,9 @@ pub enum Key {
     CommandMarkJunk,
     CommandFlag,
     CommandUnflag,
+    CommandPrint,
+    PrintFrom,
+    PrintDate,
     CommandMoveTo,
 
     ComposeWindowTitle,
@@ -242,6 +245,12 @@ impl Key {
             (CommandFlag, P) => "Sinalizar",
             (CommandUnflag, E) => "Unflag",
             (CommandUnflag, P) => "Remover sinalização",
+            (CommandPrint, E) => "Print…",
+            (CommandPrint, P) => "Imprimir…",
+            (PrintFrom, E) => "From",
+            (PrintFrom, P) => "De",
+            (PrintDate, E) => "Date",
+            (PrintDate, P) => "Data",
             (CommandMoveTo, E) => "Move To",
             (CommandMoveTo, P) => "Mover para",
 
@@ -378,7 +387,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 66] = [
+    const ALL_KEYS: [Key; 69] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -445,6 +454,9 @@ mod tests {
         Key::NoticeTooDeep,
         Key::NoticeCrashed,
         Key::NoticeShowFormatted,
+        Key::CommandPrint,
+        Key::PrintFrom,
+        Key::PrintDate,
     ];
 
     #[test]

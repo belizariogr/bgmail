@@ -26,8 +26,15 @@ wiring to `storage`.
   status bar, clicked links open outside the app only when
   `mail_html::is_openable_link` (http/https/mailto), secondary clicks open a
   `ui::ContextMenu` (open/copy link, copy, select all), and Cmd/Ctrl+F
-  (`FindInMessage`, also a global action) opens the find bar.
+  (`FindInMessage`, also a global action) opens the find bar. The reader
+  zoom (Ctrl/Cmd `+`/`-`/`0`, Ctrl/Cmd + wheel; `HtmlView`) shows in the
+  status bar when not 100%.
   `html_view::init` is called at startup.
+- Printing (`MessagePrint`, Cmd/Ctrl+P) goes through the system browser
+  (decided with two opposing reviews; GPUI has no print API): `print`
+  writes `mail_html::print_document` (light page, header, CSP allowing only
+  `data:` images and its own nonce'd `print()` script) to a private temp
+  file and `open_with_system` opens it.
 - Reader robustness: HTML over 1 MB is shown as plain text (with "Show
   formatted"), bodies `html_view` refuses (too deep) as plain text, and a
   message whose formatted rendering was interrupted by a crash (the
@@ -45,6 +52,8 @@ wiring to `storage`.
   - `mail_html` — e-mail HTML sanitizing (`lol_html`), remote image policy,
     the themed document handed to `html_view`, and the plain-text fallback.
   - `crash_guard` — marker of the message being rendered (crash loops).
+  - `print` — private print pages in the temp dir (Unix 0700/0600, stale
+    pages removed on the next print).
   - `compose`, `command_palette*`, `commands`, `actions`, `shortcuts`,
     `app_menus` — app actions and overlays.
   - `window_drag` / `window_frame` — portable window move/CSD; OS code behind

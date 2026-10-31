@@ -21,6 +21,7 @@ actions!(
         ComposeDiscard,
         ComposeClose,
         FindInMessage,
+        MessagePrint,
     ]
 );
 
