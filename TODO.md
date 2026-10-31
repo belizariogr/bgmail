@@ -528,12 +528,15 @@
        current one and the view repaints only when a painted animation's
        next frame is due (GIF `background-image` too). Loop counts are not
        honoured (always loops, like most mail GIFs); APNG/WebP stay still.
-- ⬜ Stage 3 — remote content on request: HTTP image fetcher behind
-      `html_view::Resources` (per-message/per-image unblock, cache, size/time
-      limits, no cookies/referrer, optional privacy proxy); restore the
-      shield's unblock menu and the Settings ▸ Privacy toggle
-      (`load_remote_images` is still persisted; `mail_html` keeps the
-      `load_remote`/`shown` policy).
+- ✅ Remote images on request (user decision, ahead of Stage 3): `html_view`
+      fetches `http(s)` only for documents that allow it (4 lazy threads,
+      15s timeout, 15 MB cap, no cookies/referrer, 64 MB cache) and
+      re-lays out as images arrive; the reader's shield loads them for one
+      message, Settings ▸ Privacy ▸ "Always load remote images" everywhere.
+      Later: per-image unblock, an optional privacy proxy, a disk cache.
+- ✅ Bigger text: reader base font 16px (Chromium's default; was 14px);
+      UI text scale from one `ui::UI_FONT_SIZE` (15px, was 14px), all UI
+      sizes derived from it. Reader CSS no longer forces `img` to block.
 - ⬜ Upstream the `vendor/blitz` and `vendor/taffy` fixes (each is marked
       `BGMail`), then drop the vendored copies. Either way: behind a `crates/html_view` API, with
       "Open in browser" as the escape hatch.

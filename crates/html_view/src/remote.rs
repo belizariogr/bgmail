@@ -1,0 +1,210 @@
+//! Remote resources (`http:`/`https:`), fetched only for documents that
+//! allow them ([`crate::Resources::allow_remote`]).
+//!
+//! A small pool of background threads, started on the first remote request
+//! (never at startup), fetches with conservative limits: no cookies, no
+//! referrer, a timeout and a size cap. Bodies are kept in a bounded memory
+//! cache so re-rendering a message (theme change, zoom) doesn't refetch.
+
+use blitz_traits::net::{Bytes, NetHandler};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+/// Fetch threads (requests beyond these wait in the queue).
+const WORKERS: usize = 4;
+/// Per-request timeout.
+const TIMEOUT: Duration = Duration::from_secs(15);
+/// Largest body accepted.
+const MAX_BODY: u64 = 15 << 20;
+/// Memory kept by the body cache.
+const CACHE_BYTES: usize = 64 << 20;
+
+/// What a document tracks about its remote loads: how many are in flight and
+/// whether one finished since the host last looked.
+#[derive(Default, Debug)]
+pub struct RemoteLoads {
+    in_flight: AtomicUsize,
+    arrived: AtomicBool,
+}
+
+impl RemoteLoads {
+    /// Whether loads are still in flight.
+    pub fn pending(&self) -> bool {
+        self.in_flight.load(Ordering::Acquire) > 0
+    }
+
+    /// Whether a load finished since the last call (cleared).
+    pub fn take_arrived(&self) -> bool {
+        self.arrived.swap(false, Ordering::AcqRel)
+    }
+
+    fn start(&self) {
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn finish(&self) {
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        self.arrived.store(true, Ordering::Release);
+    }
+}
+
+struct Job {
+    url: url::Url,
+    handler: Box<dyn NetHandler>,
+    loads: Arc<RemoteLoads>,
+}
+
+/// Queues `url` for fetching; `handler` gets the body (or the error) on a
+/// fetch thread and `loads` follows it.
+pub(crate) fn fetch(url: url::Url, handler: Box<dyn NetHandler>, loads: Arc<RemoteLoads>) {
+    if let Some(bytes) = cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(url.as_str()))
+    {
+        handler.bytes(url.to_string(), Bytes::from(bytes.to_vec()));
+        loads.arrived.store(true, Ordering::Release);
+        return;
+    }
+    loads.start();
+    let job = Job {
+        url,
+        handler,
+        loads,
+    };
+    let sent = queue().lock().map(|tx| tx.send(job));
+    if let Ok(Err(std::sync::mpsc::SendError(job))) = sent {
+        // The pool is gone (shouldn't happen): fail the load.
+        job.handler
+            .error(job.url.to_string(), "fetch pool unavailable".into());
+        job.loads.finish();
+    }
+}
+
+fn queue() -> &'static Mutex<Sender<Job>> {
+    static QUEUE: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
+    QUEUE.get_or_init(|| {
+        let (tx, rx) = channel::<Job>();
+        let rx = Arc::new(Mutex::new(rx));
+        for index in 0..WORKERS {
+            let rx = rx.clone();
+            let _ = std::thread::Builder::new()
+                .name(format!("html_view-fetch-{index}"))
+                .spawn(move || worker(rx));
+        }
+        Mutex::new(tx)
+    })
+}
+
+fn worker(rx: Arc<Mutex<Receiver<Job>>>) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(TIMEOUT))
+        .user_agent("Mozilla/5.0 (compatible; BGMail)")
+        // Status codes are checked below; error bodies are not wanted.
+        .http_status_as_error(true)
+        .build()
+        .into();
+    loop {
+        let job = match rx.lock().map(|rx| rx.recv()) {
+            Ok(Ok(job)) => job,
+            _ => return,
+        };
+        let url = job.url.to_string();
+        match get(&agent, &url) {
+            Ok(bytes) => {
+                if let Ok(mut cache) = cache().lock() {
+                    cache.insert(url.clone(), bytes.clone());
+                }
+                job.handler.bytes(url, Bytes::from(bytes.to_vec()));
+            }
+            Err(error) => job.handler.error(url, error),
+        }
+        job.loads.finish();
+    }
+}
+
+fn get(agent: &ureq::Agent, url: &str) -> Result<Arc<[u8]>, String> {
+    let mut response = agent.get(url).call().map_err(|e| e.to_string())?;
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_BODY)
+        .read_to_vec()
+        .map_err(|e| e.to_string())?;
+    Ok(body.into())
+}
+
+/// Bodies by URL, oldest evicted first past [`CACHE_BYTES`].
+#[derive(Default)]
+struct BodyCache {
+    bodies: HashMap<String, Arc<[u8]>>,
+    order: VecDeque<String>,
+    bytes: usize,
+}
+
+impl BodyCache {
+    fn get(&self, url: &str) -> Option<Arc<[u8]>> {
+        self.bodies.get(url).cloned()
+    }
+
+    fn insert(&mut self, url: String, body: Arc<[u8]>) {
+        self.insert_capped(url, body, CACHE_BYTES);
+    }
+
+    fn insert_capped(&mut self, url: String, body: Arc<[u8]>, cap: usize) {
+        if body.len() > cap || self.bodies.contains_key(&url) {
+            return;
+        }
+        self.bytes += body.len();
+        self.bodies.insert(url.clone(), body);
+        self.order.push_back(url);
+        while self.bytes > cap {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(body) = self.bodies.remove(&oldest) {
+                self.bytes -= body.len();
+            }
+        }
+    }
+}
+
+fn cache() -> &'static Mutex<BodyCache> {
+    static CACHE: OnceLock<Mutex<BodyCache>> = OnceLock::new();
+    CACHE.get_or_init(Mutex::default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_cache_evicts_oldest_past_its_cap() {
+        let mut cache = BodyCache::default();
+        let body = |n: usize| -> Arc<[u8]> { vec![0u8; n].into() };
+        cache.insert_capped("a".into(), body(4), 10);
+        cache.insert_capped("b".into(), body(4), 10);
+        cache.insert_capped("c".into(), body(4), 10);
+        assert!(cache.get("a").is_none());
+        assert!(cache.get("b").is_some() && cache.get("c").is_some());
+        assert_eq!(cache.bytes, 8);
+        // Bodies larger than the cache aren't kept.
+        cache.insert_capped("big".into(), body(11), 10);
+        assert!(cache.get("big").is_none());
+    }
+
+    #[test]
+    fn loads_track_flight_and_arrival() {
+        let loads = RemoteLoads::default();
+        assert!(!loads.pending() && !loads.take_arrived());
+        loads.start();
+        assert!(loads.pending());
+        loads.finish();
+        assert!(!loads.pending());
+        assert!(loads.take_arrived());
+        assert!(!loads.take_arrived());
+    }
+}

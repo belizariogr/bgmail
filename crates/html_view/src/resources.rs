@@ -15,6 +15,8 @@ pub enum Resolution {
     Served(Vec<u8>),
     Blocked,
     Missing,
+    /// Fetched from the network (remote content allowed).
+    Remote,
 }
 
 /// In-memory resource source for one document.
@@ -23,7 +25,10 @@ pub struct Resources {
     /// Attachments addressed as `cid:<content-id>` (without angle brackets).
     attachments: HashMap<String, Arc<[u8]>>,
     allow_file_urls: bool,
+    allow_remote: bool,
     blocked: Mutex<Vec<String>>,
+    /// Remote loads of the document using these resources.
+    loads: Arc<crate::remote::RemoteLoads>,
 }
 
 impl Resources {
@@ -51,6 +56,18 @@ impl Resources {
     }
 
     /// Remote URLs that were requested and blocked, in request order.
+    /// Fetches `http:`/`https:` resources from the network instead of
+    /// blocking them (the user chose to show remote content).
+    pub fn allow_remote(mut self, allow: bool) -> Self {
+        self.allow_remote = allow;
+        self
+    }
+
+    /// The document's remote loads (in flight, arrived).
+    pub fn remote_loads(&self) -> &Arc<crate::remote::RemoteLoads> {
+        &self.loads
+    }
+
     pub fn blocked_urls(&self) -> Vec<String> {
         self.blocked
             .lock()
@@ -67,6 +84,7 @@ impl Resources {
                 .is_ok_and(|data| data.decode_to_vec().is_ok()),
             "cid" => self.attachments.contains_key(&percent_decode(url.path())),
             "file" => self.allow_file_urls,
+            "http" | "https" => self.allow_remote,
             _ => false,
         }
     }
@@ -99,6 +117,7 @@ impl Resources {
             // Relative references inside the message (see `MESSAGE_BASE_URL`):
             // nothing to fetch, and not remote content either.
             "bgmail" => Resolution::Missing,
+            "http" | "https" if self.allow_remote => Resolution::Remote,
             _ => {
                 if let Ok(mut blocked) = self.blocked.lock() {
                     blocked.push(url.to_string());
@@ -139,6 +158,7 @@ impl NetProvider for ResourceProvider {
             Resolution::Served(bytes) => handler.bytes(url, Bytes::from(bytes)),
             Resolution::Blocked => handler.error(url, "blocked by offline policy".into()),
             Resolution::Missing => handler.error(url, "not found".into()),
+            Resolution::Remote => crate::remote::fetch(request.url, handler, self.0.loads.clone()),
         }
     }
 }
@@ -146,6 +166,33 @@ impl NetProvider for ResourceProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_urls_are_fetched_only_when_allowed() {
+        let blocked = Resources::new();
+        assert_eq!(
+            blocked.resolve(&url("https://cdn.test/a.png")),
+            Resolution::Blocked
+        );
+        assert!(!blocked.is_available(&url("https://cdn.test/a.png")));
+        let allowed = Resources::new().allow_remote(true);
+        assert_eq!(
+            allowed.resolve(&url("https://cdn.test/a.png")),
+            Resolution::Remote
+        );
+        assert_eq!(
+            allowed.resolve(&url("http://cdn.test/a.png")),
+            Resolution::Remote
+        );
+        assert!(allowed.is_available(&url("https://cdn.test/a.png")));
+        // Other schemes keep their policy; nothing is recorded as blocked.
+        assert_eq!(
+            allowed.resolve(&url("ftp://cdn.test/a")),
+            Resolution::Blocked
+        );
+        assert_eq!(allowed.blocked_urls(), ["ftp://cdn.test/a"]);
+        assert!(!allowed.remote_loads().pending());
+    }
 
     fn url(s: &str) -> url::Url {
         url::Url::parse(s).unwrap()

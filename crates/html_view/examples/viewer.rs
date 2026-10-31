@@ -9,7 +9,8 @@
 //!       PNG per file into `out_dir`. Used to compare against Chromium.
 //!
 //! `file:` URLs next to each file are allowed so the spike corpus (with its
-//! local `assets/`) renders offline.
+//! local `assets/`) renders offline. `--remote` (first) also loads remote
+//! (`http:`/`https:`) images.
 
 use gpui::{
     actions, div, point, prelude::*, px, rgb, size, App, Application, AsyncApp, Bounds, Context,
@@ -24,6 +25,9 @@ actions!(viewer, [Next, Previous]);
 /// Default width of the document column (the Chromium reference viewport).
 const DEFAULT_COLUMN_WIDTH: f32 = 800.0;
 static COLUMN_WIDTH: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+
+/// Whether remote images load (`--remote`).
+static REMOTE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Width of the document column (`--width`, else 800px).
 fn column_width() -> f32 {
@@ -51,7 +55,9 @@ fn load(path: &Path) -> HtmlDocument {
         &html,
         DocumentOptions {
             base_url,
-            resources: Resources::new().allow_file_urls(true),
+            resources: Resources::new()
+                .allow_file_urls(true)
+                .allow_remote(*REMOTE.get().unwrap_or(&false)),
             ..Default::default()
         },
     );
@@ -222,6 +228,10 @@ async fn capture_all(
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--remote") {
+        args.remove(0);
+        REMOTE.set(true).ok();
+    }
     if args.first().map(String::as_str) == Some("--width") && args.len() > 1 {
         args.remove(0);
         let width = args.remove(0).parse().expect("--width <px>");

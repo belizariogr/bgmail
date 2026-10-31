@@ -21,6 +21,7 @@ mod list_item;
 mod scrollbar;
 mod switch;
 mod text_input;
+mod text_size;
 mod tooltip;
 
 pub use assets::*;
@@ -33,6 +34,7 @@ pub use list_item::*;
 pub use scrollbar::*;
 pub use switch::*;
 pub use text_input::*;
+pub use text_size::*;
 pub use tooltip::*;
 
 pub use prelude::{h_flex, v_flex};

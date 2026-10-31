@@ -1073,14 +1073,14 @@ _(None at module top level — conversion helpers only.)_
 - **`decode_entities`** (private): Named basics, `&nbsp;`, decimal/hex references; unknown entities kept.
 - **`is_openable_link`** (pub): Whether a clicked link may be opened outside the app: `http(s)://` and `mailto:` only (case-insensitive, trimmed).
 - **`email_document`** (pub)
-  - Signature: `pub fn email_document(colors: DocumentColors, body: &MessageBody) -> RenderedEmail`
+  - Signature: `pub fn email_document(colors: DocumentColors, body: &MessageBody, load_remote: bool) -> RenderedEmail`
   - Purpose: Builds the reader document for a body.
-  - Behavior: HTML bodies are sanitized with remote loading off (Stage 3 adds loading); plain text is escaped into `<pre class="plain">`. Wraps the result in a document with `document_css` that starts with the body's own doctype (`leading_doctype`, so legacy mail keeps its quirks mode), else `<!DOCTYPE html>`.
+  - Behavior: HTML bodies are sanitized keeping remote sources only with `load_remote` (else blocked and counted); document CSS: 16px body text (Chromium's default), plain text in the body font; plain text is escaped into `<pre class="plain">`. Wraps the result in a document with `document_css` that starts with the body's own doctype (`leading_doctype`, so legacy mail keeps its quirks mode), else `<!DOCTYPE html>`.
 - **`leading_doctype`** (private): The doctype an HTML body starts with, after a BOM, whitespace, `<?…?>` declarations and comments; `None` without one.
 - **`print_document`** (pub)
-  - Signature: `pub fn print_document(header: &PrintHeader, body: &MessageBody, nonce: &str) -> String`
+  - Signature: `pub fn print_document(header: &PrintHeader, body: &MessageBody, nonce: &str, load_remote: bool) -> String`
   - Purpose: Standalone page for printing a message in the system browser.
-  - Behavior: `email_document` with `PRINT_COLORS`, plus in `<head>` (first) a Content-Security-Policy (`default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-…'`), the subject as title, header styles and a nonce'd script calling `print()` on load; the escaped header opens `<body>`. Remote content stays blocked by the sanitizer and, as defense in depth, by the CSP.
+  - Behavior: `email_document` with `PRINT_COLORS`, plus in `<head>` (first) a Content-Security-Policy (`default-src 'none'; img-src data:` (plus `http: https:` with `load_remote`)`; style-src 'unsafe-inline'; script-src 'nonce-…'`), the subject as title, header styles and a nonce'd script calling `print()` on load; the escaped header opens `<body>`. Remote content stays blocked by the sanitizer and, as defense in depth, by the CSP.
 - **`document_css`** (private): Theme stylesheet (color scheme, page colors/padding/font, links in accent, blocked-image placeholder, code/pre/blockquote/hr styles).
 - **`css_color`** / **`css_color_alpha`** / **`channel`** (private): Theme colors → CSS `rgb()`/`rgba()`; channel clamps and rounds to 0–255.
 - **`sanitize_html`** (private, test-only): `sanitize_html_inner` without the remote-image report.
@@ -1183,7 +1183,7 @@ _(None at module top level — conversion helpers only.)_
 - **enum `Selection`**: Sidebar selection — unified `Global` mailbox or account `Mailbox` with folder path.
 - **struct `FoldAnim`**: In-flight account fold animation token and direction.
 - **enum `SettingsSection`**: Settings window section (General, Accounts, Appearance, Notifications, Privacy).
-- **struct `ReaderSignature`**: Memo key for the reader document (message id and page colors, which include the white-background preference).
+- **struct `ReaderSignature`**: Memo key for the reader document (message id, page colors (incl. the white-background preference), "show formatted anyway", and whether remote content loads).
 - **struct `ReaderMenu`**: Open reader context menu: window position, `HitInfo`, whether text was selected.
 - **struct `FindBar`**: Open find bar: query `TextInput`, match count, current match, input observation.
 - **const `MAX_FORMATTED_HTML_BYTES`** (1 MB): HTML bodies above it are shown as plain text unless the user asks for the formatted version.
@@ -1350,10 +1350,14 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Runs a command by id.
   - Behavior: Dispatches to compose/settings/sidebar/message handlers, then closes palette.
 
+- **`remote_allowed_for`** (private): Whether a message loads remote content: `load_remote_images` or loaded from the shield this session (`remote_allowed`).
+- **`load_remote_for_selected`** (private): Shield click: adds the selected message to `remote_allowed` (re-renders through the `ReaderSignature`).
+- **`set_load_remote_images`** (private): "Always load remote images" (Settings ▸ Privacy): persists and refreshes windows.
+
 - **`print_message`** (pub(crate))
   - Signature: `pub(crate) fn print_message(&mut self, cx: &mut Context<Self>)`
   - Purpose: Prints the selected message through the system browser.
-  - Behavior: Builds the `PrintHeader` (sender with address, `received_at`), the print page (`mail_html::print_document` with a fresh `print::nonce`), writes it with `print::write_print_page` and opens it with `cx.open_with_system` (errors logged).
+  - Behavior: Builds the `PrintHeader` (sender with address, `received_at`), the print page (`mail_html::print_document` with a fresh `print::nonce`, remote images when allowed for the message), writes it with `print::write_print_page` and opens it with `cx.open_with_system` (errors logged).
 
 - **`delete_message_to_trash`** (pub(crate), L830)
   - Signature: `pub(crate) fn delete_message_to_trash(&mut self, cx: &mut Context<Self>)`
@@ -1550,7 +1554,7 @@ _(None at module top level — conversion helpers only.)_
 - **`sync_reader`** (private)
   - Signature: `fn sync_reader(&mut self, window: &mut Window, cx: &mut Context<Self>)`
   - Purpose: Keeps the reader document in sync with the selected message and theme.
-  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, picks plain text per `plain_text_reason` (`mail_html::plain_text`), builds the sanitized themed document (`mail_html::email_document`), parses it with `HtmlDocument::try_parse` (falling back to plain text, `Unrenderable`, when too deep; dark appearance for dark pages, `reader_selection_color`), records the blocked image count (0 for plain text) and the notice, marks formatted HTML renders in the `CrashGuard` until the next frame (`window.on_next_frame`), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
+  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, picks plain text per `plain_text_reason` (`mail_html::plain_text`), builds the sanitized themed document (`mail_html::email_document`, remote content per `remote_allowed_for`, with `Resources::allow_remote` to match), parses it with `HtmlDocument::try_parse` (falling back to plain text, `Unrenderable`, when too deep; dark appearance for dark pages, `reader_selection_color`), records the blocked image count (0 for plain text) and the notice, marks formatted HTML renders in the `CrashGuard` until the next frame (`window.on_next_frame`), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
 
 - **`set_reader_white_background`** (private, L1658)
   - Signature: `fn set_reader_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
@@ -1720,7 +1724,7 @@ _(None at module top level — conversion helpers only.)_
 - **`render_privacy_shield`** (private, L2968)
   - Signature: `fn render_privacy_shield(&self, cx) -> impl IntoElement`
   - Purpose: Privacy shield on reader subject line.
-  - Behavior: Red shield with a "Blocked images: N" tooltip while the message has blocked remote images; an empty slot of the same size otherwise (layout stability). No unblock action until Stage 3.
+  - Behavior: Red clickable shield with a "Blocked images: N · Click to load" tooltip while the message has blocked remote images (click: `load_remote_for_selected`); an empty slot of the same size otherwise (layout stability).
 
 - **`render_reader_notice`** (private)
   - Signature: `fn render_reader_notice(&self, cx) -> impl IntoElement`

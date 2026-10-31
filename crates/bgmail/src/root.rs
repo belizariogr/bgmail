@@ -256,6 +256,8 @@ struct ReaderSignature {
     colors: DocumentColors,
     /// The user asked to show a large message formatted anyway.
     formatted_anyway: bool,
+    /// Remote content loads (always, or allowed for this message).
+    remote: bool,
 }
 
 /// HTML bodies larger than this are shown as plain text unless the user asks
@@ -449,6 +451,8 @@ pub struct RootView {
     /// Persisted "load remote content" preference. Remote content needs
     /// networking (Stage 3), so it is kept but not offered or applied yet.
     load_remote_images: bool,
+    /// Messages whose remote images the user loaded this session.
+    remote_allowed: HashSet<i64>,
     /// Whether the reader always paints the message body on a white background
     /// (dark text), ignoring the app theme. Persisted; off by default.
     reader_white_background: bool,
@@ -593,6 +597,7 @@ impl RootView {
             crash_guard,
             last_reader_sig: None,
             load_remote_images: settings.load_remote_images,
+            remote_allowed: HashSet::new(),
             reader_white_background: settings.reader_white_background,
             compose_white_background: settings.compose_white_background,
             content_blocked_count: 0,
@@ -846,6 +851,30 @@ impl RootView {
         self.close_command_palette(cx);
     }
 
+    /// Whether message `id` loads remote content: always (Settings ▸
+    /// Privacy) or because the user loaded it from the privacy shield.
+    fn remote_allowed_for(&self, id: i64) -> bool {
+        self.load_remote_images || self.remote_allowed.contains(&id)
+    }
+
+    /// Loads the remote images of the selected message (privacy shield).
+    fn load_remote_for_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected_message_id {
+            self.remote_allowed.insert(id);
+            cx.notify();
+        }
+    }
+
+    /// Sets "always load remote images", persisting it and re-rendering the
+    /// reader.
+    fn set_load_remote_images(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.load_remote_images != value {
+            self.load_remote_images = value;
+            self.request_save(cx);
+            cx.refresh_windows();
+        }
+    }
+
     /// Prints the selected message: a standalone print page (light theme,
     /// header, remote content blocked; `mail_html::print_document`) written
     /// to a private temporary file and opened in the system browser, which
@@ -869,7 +898,7 @@ impl RootView {
         };
         let body = db_seed::message_body_from_detail(detail);
         let nonce = crate::print::nonce();
-        let html = print_document(&header, &body, &nonce);
+        let html = print_document(&header, &body, &nonce, self.remote_allowed_for(detail.id));
         match crate::print::write_print_page(&crate::print::print_dir(), &html, &nonce) {
             Ok(path) => cx.open_with_system(&path),
             Err(error) => eprintln!("BGMail: could not write the print page: {error}"),
@@ -1336,10 +1365,12 @@ impl RootView {
             accent: colors.accent,
         };
         let id = detail.id;
+        let remote = self.remote_allowed_for(id);
         let signature = ReaderSignature {
             selected: id,
             colors: doc_colors,
             formatted_anyway: self.formatted_anyway.contains(&id),
+            remote,
         };
         if self.reader_view.is_some() && self.last_reader_sig == Some(signature) {
             return;
@@ -1360,6 +1391,7 @@ impl RootView {
                 PageAppearance::Light
             },
             selection_color: Some(reader_selection_color(colors.accent)),
+            resources: html_view::Resources::new().allow_remote(remote),
             ..Default::default()
         };
         let as_plain = |body: &MessageBody| match body {
@@ -1371,12 +1403,12 @@ impl RootView {
         } else {
             body.clone()
         };
-        let rendered = email_document(doc_colors, &shown);
+        let rendered = email_document(doc_colors, &shown, remote);
         let document = match HtmlDocument::try_parse(&rendered.html, options()) {
             Ok(document) => document,
             Err(RenderError::TooDeep { .. }) => {
                 notice = Some(ReaderNotice::Unrenderable);
-                let fallback = email_document(doc_colors, &as_plain(&body));
+                let fallback = email_document(doc_colors, &as_plain(&body), false);
                 HtmlDocument::parse(&fallback.html, options())
             }
         };
@@ -2661,7 +2693,7 @@ impl RootView {
             .justify_center()
             .rounded_full()
             .bg(bg)
-            .text_size(px(10.0))
+            .text_size(ui::ui_text_size(-4.0))
             .text_color(text)
             .child(count.to_string())
     }
@@ -2852,9 +2884,9 @@ impl RootView {
     // ----- Reading pane ---------------------------------------------------
 
     /// Privacy affordance shown on the subject line: a red shield whose tooltip
-    /// counts the remote images blocked in the message. A same-sized empty
-    /// slot is reserved otherwise, so the header keeps its height. (Loading
-    /// remote content needs networking, Stage 3.)
+    /// counts the remote images blocked in the message; clicking it loads
+    /// them (for this message, this session). A same-sized empty slot is
+    /// reserved otherwise, so the header keeps its height.
     fn render_privacy_shield(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let slot = div().flex_shrink_0().size(px(20.0));
         if self.content_blocked_count == 0 {
@@ -2865,11 +2897,13 @@ impl RootView {
             .flex()
             .items_center()
             .justify_center()
+            .cursor_pointer()
             .tooltip(Tooltip::text(
                 Key::BlockedElements
                     .tr(language)
                     .replace("{}", &self.content_blocked_count.to_string()),
             ))
+            .on_click(cx.listener(|this, _, _, cx| this.load_remote_for_selected(cx)))
             .child(
                 Icon::new(IconName::Shield)
                     .size(IconSize::Small)
@@ -3053,7 +3087,7 @@ impl RootView {
                 .justify_center()
                 .child(
                     div()
-                        .text_size(px(24.0))
+                        .text_size(ui::ui_text_size(10.0))
                         .text_color(colors.text_muted)
                         .child(Key::ReaderNoSelection.tr(language)),
                 )
@@ -3107,10 +3141,10 @@ impl RootView {
                             .items_center()
                             .justify_center()
                             .text_color(on_accent)
-                            .text_size(px(15.0))
+                            .text_size(ui::ui_text_size(1.0))
                             // Tight line height so the glyph (not the looser line
                             // box) is what gets centered vertically.
-                            .line_height(px(15.0))
+                            .line_height(ui::ui_text_size(1.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(initial),
                     )
@@ -3433,15 +3467,35 @@ impl SettingsView {
                     Key::Disabled.tr(language),
                 ))
                 .into_any_element(),
-            SettingsSection::Privacy => v_flex()
-                .gap_2()
-                .child(Label::new(Key::RemoteImagesLabel.tr(language)).weight(FontWeight::SEMIBOLD))
-                .child(
-                    Label::new(Key::RemoteImagesHint.tr(language))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .into_any_element(),
+            SettingsSection::Privacy => {
+                let always = self
+                    .root
+                    .upgrade()
+                    .map(|root| root.read(cx).load_remote_images)
+                    .unwrap_or(false);
+                v_flex()
+                    .gap_2()
+                    .child(
+                        Label::new(Key::RemoteImagesLabel.tr(language))
+                            .weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(
+                        Label::new(Key::RemoteImagesHint.tr(language))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Switch::new("always-load-remote", always)
+                            .label(Key::AlwaysLoadRemoteImages.tr(language))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let _ = this.root.update(cx, |root, cx| {
+                                    root.set_load_remote_images(!always, cx);
+                                });
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
+            }
         };
 
         v_flex()

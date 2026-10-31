@@ -50,9 +50,13 @@ positions Blitz computed.
   text inputs are `size` characters wide.
 - **Base URL:** defaults to `bgmail://message/` (Blitz panics resolving
   relative URLs against `about:blank`); that scheme resolves to "missing".
-- **Offline resources:** `data:` and `cid:` served from memory; `file:` only
-  with `Resources::allow_file_urls(true)` (tools/tests); every other scheme is
-  blocked and recorded (`blocked_remote_urls`).
+- **Resources:** `data:` and `cid:` served from memory; `file:` only
+  with `Resources::allow_file_urls(true)` (tools/tests); `http:`/`https:` only
+  with `Resources::allow_remote(true)` (the user allowed remote content),
+  fetched off the UI thread by `remote` (4 lazily started threads, 15s
+  timeout, 15 MB cap, no cookies or referrer, 64 MB body cache); `HtmlView`
+  re-lays out as they arrive. Everything else is blocked and recorded
+  (`blocked_remote_urls`).
 - **Coordinates:** documents lay out and paint at scale 1 in CSS px = GPUI
   logical `Pixels`; GPUI applies the display scale factor.
 - **Fonts (browser policy, `fonts.rs`):** one process-wide shared font

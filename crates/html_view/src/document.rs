@@ -1043,6 +1043,13 @@ impl HtmlDocument {
         ))
     }
 
+    /// The document's remote loads (only with
+    /// [`Resources::allow_remote`]): hosts re-lay out and repaint while they
+    /// arrive.
+    pub fn remote_loads(&self) -> Arc<crate::remote::RemoteLoads> {
+        self.resources.remote_loads().clone()
+    }
+
     /// Remote URLs the document asked for and that were blocked.
     pub fn blocked_remote_urls(&self) -> Vec<String> {
         self.resources.blocked_urls()

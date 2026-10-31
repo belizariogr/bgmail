@@ -299,7 +299,7 @@ impl ComposeView {
             .tooltip(Tooltip::text(label))
             .px_1p5()
             .rounded_sm()
-            .text_size(px(12.0))
+            .text_size(ui::ui_text_size(-2.0))
             .text_color(text_color)
             .hover(move |el| el.bg(hover_bg))
             .cursor_pointer()

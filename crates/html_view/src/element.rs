@@ -65,6 +65,9 @@ pub fn zoom_step(zoom: f32, steps: i32) -> f32 {
 /// Key context of a focused [`HtmlView`].
 pub const KEY_CONTEXT: &str = "HtmlView";
 
+/// How often a view with remote loads in flight looks for arrivals.
+const REMOTE_POLL: Duration = Duration::from_millis(100);
+
 /// Pixels scrolled by the arrow keys.
 const LINE_SCROLL: f32 = 40.0;
 
@@ -284,8 +287,15 @@ impl Element for HtmlElement {
                 cx,
             );
         });
-        // Animated images (GIFs): repaint when the next frame is due.
+        // Animated images (GIFs): repaint when the next frame is due; remote
+        // images still loading: look again shortly.
+        let loading = self.document.borrow().remote_loads().pending();
         let next_frame = self.cache.borrow().next_animation_frame();
+        let next_frame = match (next_frame, loading) {
+            (Some(delay), true) => Some(delay.min(REMOTE_POLL)),
+            (None, true) => Some(REMOTE_POLL),
+            (delay, false) => delay,
+        };
         if let Some(delay) = next_frame {
             match self.view.as_ref().and_then(|view| view.upgrade()) {
                 Some(view) => view.update(cx, |view, cx| view.schedule_frame(delay, cx)),
@@ -411,8 +421,9 @@ impl HtmlView {
         cx.notify();
     }
 
-    /// Repaints after `delay` (an animated image's next frame), unless an
-    /// earlier repaint is already pending.
+    /// Repaints after `delay` (an animated image's next frame, or a look
+    /// for arrived remote resources), unless an earlier repaint is already
+    /// pending.
     fn schedule_frame(&mut self, delay: Duration, cx: &mut Context<Self>) {
         let due = Instant::now() + delay;
         if self
@@ -426,6 +437,12 @@ impl HtmlView {
             cx.background_executor().timer(delay).await;
             let _ = this.update(cx, |this, cx| {
                 this.frame_timer = None;
+                // Remote resources that arrived are applied by the next
+                // layout; the cached paint is stale.
+                let arrived = this.document.borrow().remote_loads().take_arrived();
+                if arrived {
+                    this.document.borrow_mut().invalidate_paint();
+                }
                 cx.notify();
             });
         });

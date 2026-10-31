@@ -188,6 +188,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `HtmlDocument::find(query) -> usize`: matches over every inline root's text.
 - `HtmlDocument::select_match(index) -> Option<(top, bottom)>`: selects the
   match and returns its line span in document y (parley cursor geometry).
+- `HtmlDocument::remote_loads()`: the document's remote loads (hosts
+  re-lay out while they arrive).
 - `HtmlDocument::blocked_remote_urls()`: remote URLs requested and blocked.
 - `HtmlDocument::blitz()` / `blitz_mut()`: underlying `BaseDocument`; mutable
   access invalidates the display list.
@@ -345,13 +347,35 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `file:` only when allowed, `bgmail:` (message-relative) missing, everything
   else blocked and recorded.
 - `Resources::is_available(url)`: whether `resolve` would serve the URL
-  (decodable `data:`, known `cid:`, allowed `file:`), without recording it.
+  (decodable `data:`, known `cid:`, allowed `file:`, `http(s):` when remote
+  is allowed), without recording it.
+- `Resources::allow_remote(bool)`: fetch `http:`/`https:` (`Resolution::Remote`)
+  instead of blocking; `remote_loads()`: the document's in-flight/arrived
+  loads.
 - `fn percent_decode(input)` (private): `%XX` decoding, invalid sequences kept.
 - `struct ResourceProvider(Arc<Resources>)` (crate): `NetProvider` that answers
   Blitz synchronously (`bytes` or `error`).
 - Tests: data URLs, cid with/without brackets, percent-encoded cid, remote
   blocking + recording, message-relative URLs, file opt-in, percent decoding,
-  availability without recording.
+  availability without recording, remote URLs fetched only when allowed.
+- `ResourceProvider::fetch`: serves, fails, or hands `Remote` URLs to
+  `remote::fetch`.
+
+### `remote.rs`
+- Consts (private): `WORKERS` (4), `TIMEOUT` (15s), `MAX_BODY` (15 MB),
+  `CACHE_BYTES` (64 MB).
+- `struct RemoteLoads`: `pending()` (in flight), `take_arrived()` (a load
+  finished since the last call; cleared); private `start`/`finish`.
+- `fn fetch(url, handler, loads)` (crate): serves from the body cache, else
+  queues the job (failing it if the pool is gone).
+- `queue()` (private): the job channel, starting `WORKERS` threads on first
+  use; `worker(rx)`: a `ureq` agent (timeout, generic user agent, HTTP
+  errors as errors) fetching jobs, caching bodies, answering the handler and
+  finishing the load; `get(agent, url)`: body capped at `MAX_BODY`.
+- `struct BodyCache` (private): `get`, `insert`/`insert_capped` (oldest
+  evicted past the cap; bodies over the cap or already cached skipped);
+  `cache()`.
+- Tests: cache eviction and cap, load flight/arrival.
 
 ### `gradient.rs`
 - `fn gradient_t(kind, point)`: position along linear (projection), radial
@@ -454,7 +478,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `impl Element`: measured layout (pane width, content height); `prepaint`
   refreshes on content width change and inserts the hitbox (content width);
   `paint` replays the display list (`canvas_height`, content width), asks
-  for a repaint when an animated image's next frame is due (the view's
+  for a repaint when an animated image's next frame is due or remote loads
+  are in flight (`REMOTE_POLL`, 100ms) (the view's
   `schedule_frame`, else `request_animation_frame`) and, when interactive,
   `paint_input_listeners`.
 - `fn paint_input_listeners(view, origin, hitbox, window, cx)` (private): sets
@@ -465,7 +490,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `struct HtmlView { document, cache, scroll, focus, cursor, hovered_link,
   dragging, zoom, frame_timer }` (`EventEmitter<HtmlViewEvent>`,
   `Focusable`); private `schedule_frame(delay, cx)` (one pending repaint
-  for animated images, the earliest wins);
+  for animated images or remote loads, the earliest wins; on firing,
+  arrived remote resources invalidate the cached paint);
   `new(document, cx)`; `set_document` (applies the view's zoom; resets
   scroll, drag, cursor, hovered link); `zoom()`; `set_zoom(zoom, cx)`
   (clamped; scales the scroll offset to keep the same content at the top,

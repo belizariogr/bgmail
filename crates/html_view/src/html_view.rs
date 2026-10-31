@@ -13,6 +13,7 @@ mod fonts;
 pub mod gradient;
 pub mod interaction;
 pub mod paint;
+pub mod remote;
 pub mod resources;
 pub mod text;
 

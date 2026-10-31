@@ -85,7 +85,7 @@ impl RenderOnce for Button {
             .py_1p5()
             .rounded_md()
             .bg(bg)
-            .text_size(px(13.0))
+            .text_size(crate::ui_text_size(-1.0))
             .text_color(text_color)
             .when(self.full_width, |el| el.w_full())
             .hover(move |el| el.bg(hover_bg))

@@ -69,6 +69,7 @@ pub enum Key {
 
     RemoteImagesLabel,
     RemoteImagesHint,
+    AlwaysLoadRemoteImages,
     BlockedElements,
 
     SearchPlaceholder,
@@ -193,13 +194,15 @@ impl Key {
             (RemoteImagesLabel, E) => "Remote images",
             (RemoteImagesLabel, P) => "Imagens remotas",
             (RemoteImagesHint, E) => {
-                "Blocked: remote images can track when and where you open a message. Loading them on request will come with account sync."
+                "Remote images can track when and where you open a message. When they are blocked, the shield next to the subject loads them for that message."
             }
             (RemoteImagesHint, P) => {
-                "Bloqueadas: imagens remotas podem rastrear quando e onde você abre uma mensagem. Carregá-las sob demanda chegará com a sincronização de contas."
+                "Imagens remotas podem rastrear quando e onde você abre uma mensagem. Quando estão bloqueadas, o escudo ao lado do assunto as carrega para aquela mensagem."
             }
-            (BlockedElements, E) => "Blocked images: {}",
-            (BlockedElements, P) => "Imagens bloqueadas: {}",
+            (AlwaysLoadRemoteImages, E) => "Always load remote images",
+            (AlwaysLoadRemoteImages, P) => "Sempre carregar imagens remotas",
+            (BlockedElements, E) => "Blocked images: {} · Click to load",
+            (BlockedElements, P) => "Imagens bloqueadas: {} · Clique para carregar",
 
             (SearchPlaceholder, E) => "Search",
             (SearchPlaceholder, P) => "Buscar",
@@ -387,7 +390,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 69] = [
+    const ALL_KEYS: [Key; 70] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -416,6 +419,7 @@ mod tests {
         Key::Disabled,
         Key::RemoteImagesLabel,
         Key::RemoteImagesHint,
+        Key::AlwaysLoadRemoteImages,
         Key::BlockedElements,
         Key::SearchPlaceholder,
         Key::SearchClear,

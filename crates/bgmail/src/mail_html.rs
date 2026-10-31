@@ -41,10 +41,15 @@ impl DocumentColors {
 /// Builds a self-contained HTML document for `body`, themed to match the
 /// current app colors. Plain-text bodies are HTML-escaped and wrapped so they
 /// keep their line breaks and wrap to the pane width. Remote resources are
-/// always blocked: loading them needs networking (Stage 3).
-pub fn email_document(colors: DocumentColors, body: &MessageBody) -> RenderedEmail {
+/// kept only with `load_remote` (the user allowed them, for this message or
+/// always); otherwise they are blocked and counted.
+pub fn email_document(
+    colors: DocumentColors,
+    body: &MessageBody,
+    load_remote: bool,
+) -> RenderedEmail {
     let (inner, _, blocked_images) = match body {
-        MessageBody::Html(html) => sanitize_html_inner(html, false, &HashSet::new()),
+        MessageBody::Html(html) => sanitize_html_inner(html, load_remote, &HashSet::new()),
         MessageBody::Text(plain) => (
             format!("<pre class=\"plain\">{}</pre>", escape_html(plain)),
             false,
@@ -106,10 +111,21 @@ const PRINT_COLORS: DocumentColors = DocumentColors {
 /// lets nothing load but `data:` images and only the page's own script run
 /// (`nonce`), so the browser stays as offline as the reader even if the
 /// sanitizer missed something.
-pub fn print_document(header: &PrintHeader, body: &MessageBody, nonce: &str) -> String {
-    let rendered = email_document(PRINT_COLORS, body);
+pub fn print_document(
+    header: &PrintHeader,
+    body: &MessageBody,
+    nonce: &str,
+    load_remote: bool,
+) -> String {
+    let rendered = email_document(PRINT_COLORS, body, load_remote);
+    // Remote images the user allowed for this message print too.
+    let images = if load_remote {
+        "data: http: https:"
+    } else {
+        "data:"
+    };
     let csp = format!(
-        "default-src 'none'; img-src data:; style-src 'unsafe-inline'; \
+        "default-src 'none'; img-src {images}; style-src 'unsafe-inline'; \
          script-src 'nonce-{nonce}'"
     );
     let head = format!(
@@ -179,17 +195,17 @@ fn document_css(colors: DocumentColors) -> String {
     let scheme = if colors.is_dark() { "dark" } else { "light" };
     format!(
         ":root {{ color-scheme: {scheme}; }}\
-         html, body {{ margin: 0; padding: 16px 24px; background: {bg}; color: {fg}; \
-           font: 14px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; \
+         html {{ background: {bg}; }}\
+         body {{ margin: 0; padding: 16px 24px; background: {bg}; color: {fg}; \
+           font: 16px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; \
            overflow-wrap: anywhere; }}\
          a {{ color: {accent}; }}\
-         img {{ display: block; }}\
          img[data-rm-blocked-src] {{ background: {soft}; border: 1px dashed {line}; \
            box-sizing: border-box; min-width: 24px; min-height: 24px; }}\
          h1, h2, h3 {{ line-height: 1.25; }}\
          code, pre {{ font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }}\
          pre {{ white-space: pre-wrap; background: {soft}; padding: 12px; border-radius: 6px; }}\
-         pre.plain {{ background: transparent; padding: 0; }}\
+         pre.plain {{ background: transparent; padding: 0; font: inherit; }}\
          code {{ background: {soft}; padding: 1px 4px; border-radius: 4px; }}\
          blockquote {{ margin: 0; padding-left: 12px; border-left: 3px solid {accent}; opacity: 0.85; }}\
          hr {{ border: none; border-top: 1px solid {fg}; opacity: 0.15; margin: 16px 0; }}",
@@ -707,6 +723,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn remote_images_load_only_when_allowed() {
+        let colors = DocumentColors {
+            background: hsla(0.0, 0.0, 1.0, 1.0),
+            text: hsla(0.0, 0.0, 0.1, 1.0),
+            accent: hsla(0.6, 0.8, 0.4, 1.0),
+        };
+        let body = MessageBody::Html("<img src=\"https://cdn.test/a.png\">".into());
+        let blocked = email_document(colors, &body, false);
+        assert_eq!(blocked.blocked_images, 1);
+        assert!(!blocked.html.contains(" src=\"https://cdn.test"));
+        let allowed = email_document(colors, &body, true);
+        assert_eq!(allowed.blocked_images, 0);
+        assert!(allowed.html.contains(" src=\"https://cdn.test/a.png\""));
+        // The print page lets allowed images through its CSP.
+        let header = PrintHeader {
+            subject: "s",
+            from_label: "From",
+            from: "f",
+            date_label: "Date",
+            date: "d",
+        };
+        assert!(print_document(&header, &body, "n", true).contains("img-src data: http: https:"));
+        assert!(print_document(&header, &body, "n", false).contains("img-src data:;"));
+    }
+
+    #[test]
     fn print_pages_are_light_locked_down_and_headed() {
         let header = PrintHeader {
             subject: "Hello <you>",
@@ -718,7 +760,7 @@ mod tests {
         let body = MessageBody::Html(
             "<p>Body</p><img src=\"https://tracker.test/p.gif\"><script>alert(1)</script>".into(),
         );
-        let html = print_document(&header, &body, "n0nce");
+        let html = print_document(&header, &body, "n0nce", false);
         // The CSP comes first in <head>; only the nonce'd script may run.
         let head = &html[html.find("<head>").unwrap()..];
         assert!(head.starts_with("<head><meta http-equiv=\"Content-Security-Policy\""));
@@ -779,6 +821,7 @@ mod tests {
                 hsla(0.6, 0.7, 0.5, 1.0),
             ),
             &body_html(),
+            false,
         )
         .html;
         assert!(doc.starts_with("<!DOCTYPE html>"));
@@ -797,6 +840,7 @@ mod tests {
                 hsla(0.6, 0.7, 0.5, 1.0),
             ),
             &body,
+            false,
         )
         .html;
         assert!(doc.contains("<pre class=\"plain\">1 &lt; 2 &amp; 3</pre>"));
@@ -1046,6 +1090,7 @@ mod tests {
                 hsla(0.6, 0.7, 0.5, 1.0),
             ),
             &body,
+            false,
         )
         .html;
         assert!(doc.contains("<p>safe</p>"));
@@ -1110,9 +1155,10 @@ mod tests {
         let doc = email_document(
             colors,
             &MessageBody::Html(format!("{legacy}<p>x</p>").into()),
+            false,
         );
         assert!(doc.html.starts_with(legacy));
-        let doc = email_document(colors, &MessageBody::Text("x".into()));
+        let doc = email_document(colors, &MessageBody::Text("x".into()), false);
         assert!(doc.html.starts_with("<!DOCTYPE html>"));
     }
 
@@ -1134,7 +1180,7 @@ mod tests {
             hsla(0.0, 0.0, 0.9, 1.0),
             hsla(0.6, 0.7, 0.5, 1.0),
         );
-        let doc = email_document(colors, &body);
+        let doc = email_document(colors, &body, false);
         assert_eq!(doc.blocked_images, 1);
         assert!(!doc.html.contains(" src=\"https://"));
         assert!(colors.is_dark());

@@ -20,8 +20,10 @@ wiring to `storage`.
 - Binary name is `BGMail` (menu title on unbundled macOS). Package crate name
   is `bgmail`.
 - The reader shows bodies with `html_view::HtmlView` (sanitized + themed by
-  `mail_html`); remote content is always blocked until Stage 3 (the
-  `load_remote_images` preference is persisted but not offered).
+  `mail_html`). Remote images are blocked unless the user loads them:
+  clicking the privacy shield next to the subject loads them for that
+  message (this session), and Settings ▸ Privacy ▸ "Always load remote
+  images" (`load_remote_images`, persisted) loads them everywhere.
 - Reader interaction comes from `HtmlView` events: hovered links go to the
   status bar, clicked links open outside the app only when
   `mail_html::is_openable_link` (http/https/mailto), secondary clicks open a

@@ -91,6 +91,8 @@ BGMail/
   progress — see `TODO.md`.
 - Do **not** implement networking, OAuth, IMAP/POP3/SMTP, or Gmail API yet
   (Stage 3). Keep protocol code out until Stage 2 sync/storage is stable.
+  Exception (user decision): remote images in the reader, fetched by
+  `html_view` only when the user allows them (per message or always).
 - Sample / seed data stays isolated (`crates/bgmail/src/data.rs`,
   `crates/bgmail/src/db_seed.rs`, `storage::seed`) so it can be replaced by the
   real mail layer later.

@@ -49,6 +49,9 @@ bytemuck = "1"
 # decodes colour-emoji bitmaps (CBDT/sbix strikes).
 image = { version = "0.25", default-features = false, features = ["png"] }
 smallvec = "1"
+# Remote images (`src/remote.rs`), only for documents that allow them:
+# blocking client on a small background pool, rustls TLS.
+ureq = "3"
 tracing = { version = "0.1", optional = true }
 
 [lints.rust]

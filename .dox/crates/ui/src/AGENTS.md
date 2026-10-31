@@ -248,8 +248,9 @@ _(No functions — re-exports only.)_
 
 #### Types / constants
 
-- **enum `LabelSize`**: Text size presets — `XSmall` (11px), `Small` (12px),
-  `Default` (14px), `Large` (16px). Default variant is `Default`.
+- **enum `LabelSize`**: Text size presets relative to `UI_FONT_SIZE` —
+  `XSmall` (−3px), `Small` (−2px), `Default` (base), `Large` (+2px).
+  Default variant is `Default`.
 - **struct `Label`**: Themed single-line or multi-line text (`IntoElement`).
   Fields: `text`, `size`, `color`, `weight`, `single_line`.
 
@@ -260,7 +261,7 @@ _(No functions — re-exports only.)_
 - **`px`** (private, L20)
   - Signature: `fn px(self) -> Pixels`
   - Purpose: Converts a label size preset to pixel `text_size`.
-  - Behavior: Maps each variant to `px(11|12|14|16)`.
+  - Behavior: `ui_text_size(-3 | -2 | 0 | +2)`.
 
 ##### Context: `Label`
 
@@ -389,7 +390,7 @@ _(No functions — re-exports only.)_
   - Behavior: Reads theme colors; maps `ButtonStyle` to `(bg, text_color,
     hover_bg)` — subtle uses element background, filled uses accent/on-accent,
     ghost is transparent with hover fill. Builds centered horizontal flex with
-    padding, rounded corners, 13px text. Optional icon uses `OnAccent` tint
+    padding, rounded corners, `ui_text_size(-1)` text. Optional icon uses `OnAccent` tint
     when filled, else `Default`. Applies hover background swap. Wires click
     handling when `on_click` is set.
 
@@ -539,6 +540,13 @@ _(No functions — re-exports only.)_
     on disabled/checked. Track uses group hover brighten. Thumb aligns start/end
     within 32×20 pill. Label renders when set. Click row when handler present
     and enabled.
+
+### `src/text_size.rs`
+
+- **const `UI_FONT_SIZE`** (pub): base UI text size, 15px; every UI text size
+  derives from it so the interface scales as a whole.
+- **`ui_text_size(offset)`** (pub): `px(UI_FONT_SIZE + offset)`.
+- Tests: sizes follow the base.
 
 ### `src/tooltip.rs`
 
