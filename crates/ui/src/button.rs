@@ -118,6 +118,7 @@ pub struct IconButton {
     size: IconSize,
     color: Color,
     selected: bool,
+    disabled: bool,
     on_click: Option<ClickHandler>,
 }
 
@@ -130,6 +131,7 @@ impl IconButton {
             size: IconSize::default(),
             color: Color::Default,
             selected: false,
+            disabled: false,
             on_click: None,
         }
     }
@@ -152,6 +154,13 @@ impl IconButton {
         self
     }
 
+    /// Disables the button (as Zed's `Disableable`): dimmed icon, no hover
+    /// and the click handler is dropped.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
     /// Registers the click handler.
     pub fn on_click(
         mut self,
@@ -160,6 +169,17 @@ impl IconButton {
         self.on_click = Some(Box::new(handler));
         self
     }
+
+    /// Icon color after the selected/disabled states are applied.
+    fn effective_color(&self) -> Color {
+        if self.disabled {
+            Color::Disabled
+        } else if self.selected {
+            Color::Accent
+        } else {
+            self.color
+        }
+    }
 }
 
 impl RenderOnce for IconButton {
@@ -167,25 +187,42 @@ impl RenderOnce for IconButton {
         let colors = cx.theme().colors();
         let hover_bg = colors.element_hover;
         let selected_bg = colors.element_active;
-        let color = if self.selected {
-            Color::Accent
-        } else {
-            self.color
-        };
+        let color = self.effective_color();
+        let disabled = self.disabled;
+        let on_click = self.on_click.filter(|_| !disabled);
 
         h_flex()
             .id(self.id)
             .justify_center()
             .size(px(28.0))
             .rounded_md()
-            .when(self.selected, |el| el.bg(selected_bg))
-            .hover(move |el| el.bg(hover_bg))
+            .when(self.selected && !disabled, |el| el.bg(selected_bg))
+            .when(!disabled, |el| el.hover(move |el| el.bg(hover_bg)))
+            // A dead button still must not start a title-bar window drag.
+            .when(disabled, |el| {
+                el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            })
             .child(Icon::new(self.icon).size(self.size).color(color))
-            .when_some(self.on_click, |el, handler| {
+            .when_some(on_click, |el, handler| {
                 // See `Button`: keep title-bar dragging from swallowing button clicks.
                 el.cursor_pointer()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |event, window, cx| handler(event, window, cx))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icon_button_color_follows_disabled_then_selected() {
+        let button = IconButton::new("b", IconName::Reply).color(Color::Muted);
+        assert_eq!(button.effective_color(), Color::Muted);
+        let button = button.selected(true);
+        assert_eq!(button.effective_color(), Color::Accent);
+        let button = button.disabled(true);
+        assert_eq!(button.effective_color(), Color::Disabled);
     }
 }

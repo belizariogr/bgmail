@@ -10,10 +10,11 @@ use std::time::Duration;
 use std::f32::consts::FRAC_PI_2;
 
 use gpui::{
-    anchored, deferred, ease_in_out, point, radians, size, svg, Animation, AnimationExt as _, App,
-    AppContext as _, Bounds, ClipboardItem, Context, Corner, DragMoveEvent, Empty, Entity,
-    Focusable, FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Point,
-    ScrollHandle, Size, Subscription, Svg, TitlebarOptions, Transformation, Window, WindowBounds,
+    anchored, deferred, ease_in_out, point, radians, size, svg, uniform_list, Animation,
+    AnimationExt as _, App, AppContext as _, Bounds, ClipboardItem, Context, Corner, DragMoveEvent,
+    Empty, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Point, ScrollHandle, ScrollStrategy, Size, Subscription, Svg,
+    TitlebarOptions, Transformation, UniformListScrollHandle, Window, WindowBounds,
     WindowControlArea, WindowHandle, WindowOptions,
 };
 
@@ -25,10 +26,13 @@ use ui::{
     ListItem, Scrollbar, ScrollbarState, TextInput, Tooltip,
 };
 
-use crate::actions::{FindInMessage, ToggleCommandPalette};
+use crate::actions::{
+    FindInMessage, SelectNextMessage, SelectPreviousMessage, ToggleCommandPalette,
+};
 use crate::app_menus;
+use crate::attachments;
 use crate::command_palette::CommandPaletteState;
-use crate::commands::{CommandContext, CommandId};
+use crate::commands::{self, CommandContext, CommandId};
 use crate::compose::{self, ComposeAccount, ComposeInit, ComposeView};
 use crate::config::{self, Config};
 use crate::crash_guard::CrashGuard;
@@ -48,7 +52,7 @@ use html_view::{
 };
 use mail_core::{AccountConfig, Address, Draft, ParsedMessage, QuoteLabels, ReplyKind};
 use mail_sync::{actions as mail_actions, ActionOutcome, Command, SyncEvent};
-use storage::{MailListQuery, MessageDetail, MessageListItem};
+use storage::{AttachmentRow, MailListQuery, MessageDetail, MessageListItem};
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
 const SIDEBAR_MIN_WIDTH: f32 = 150.0;
@@ -114,14 +118,14 @@ const SEARCH_ICON_WIDTH: f32 = 28.0;
 /// single magnifying-glass button. Tweak this to fine-tune the breakpoint.
 const SEARCH_COLLAPSE_WIDTH: f32 = 700.0;
 /// Fixed reader-segment overhead that always precedes the action groups:
-/// horizontal padding, inter-child gaps and the compose button.
-const TOOLBAR_FIXED_OVERHEAD: f32 = 100.0;
+/// horizontal padding, inter-child gaps and the compose + get-mail buttons.
+const TOOLBAR_FIXED_OVERHEAD: f32 = 140.0;
 /// Cumulative widths (incl. separators/gaps) of the centered action groups, used
 /// to decide how many fit alongside the always-visible search button. Groups are
 /// dropped from the right (flag/move first) so search is never overlapped.
 const ACTIONS_1_WIDTH: f32 = 92.0; // reply / reply-all / forward
 const ACTIONS_2_WIDTH: f32 = 193.0; // + trash / archive / junk
-const ACTIONS_3_WIDTH: f32 = 290.0; // + flag / move
+const ACTIONS_3_WIDTH: f32 = 322.0; // + flag / read / move
 
 /// Which inter-column divider is currently being dragged.
 #[derive(Debug, Clone, Copy)]
@@ -264,6 +268,13 @@ struct ReaderMenu {
     has_selection: bool,
 }
 
+/// The attachment chip menu (Open / Save As… / Save to Downloads): where it
+/// was summoned and which attachment it acts on.
+struct AttachmentMenu {
+    position: Point<Pixels>,
+    attachment: AttachmentRow,
+}
+
 /// The reader's find bar: query field and the current match.
 struct FindBar {
     input: Entity<TextInput>,
@@ -399,9 +410,18 @@ pub struct RootView {
     /// reopens where/how the user left it.
     compose_origin: Point<Pixels>,
     compose_size: Size<Pixels>,
-    /// Scroll handle + scrollbar state for the message list.
-    list_scroll: ScrollHandle,
+    /// Scroll handle (virtualized `uniform_list`) + scrollbar state for the
+    /// message list.
+    list_scroll: UniformListScrollHandle,
     list_scrollbar: Option<Entity<ScrollbarState>>,
+    /// Focus of the message list (key context `MessageList`: arrows/j/k move
+    /// the selection, Delete/Backspace trash). Created on first render.
+    list_focus: Option<FocusHandle>,
+    /// User-facing (non-inline) attachments of the selected message; empty
+    /// until its body is downloaded.
+    attachments: Vec<AttachmentRow>,
+    /// Open attachment chip menu.
+    attachment_menu: Option<AttachmentMenu>,
     /// Scroll handle + scrollbar state for the sidebar.
     sidebar_scroll: ScrollHandle,
     sidebar_scrollbar: Option<Entity<ScrollbarState>>,
@@ -522,6 +542,70 @@ fn unique_token() -> u64 {
     hasher.finish()
 }
 
+/// The attachment chips of `detail`: its non-inline attachments, and none
+/// while only the headers are downloaded (`BodyReady` reloads them).
+fn visible_attachments(
+    db: &storage::Database,
+    detail: Option<&MessageDetail>,
+) -> Vec<AttachmentRow> {
+    let Some(detail) = detail.filter(|detail| detail.body_state != storage::BODY_STATE_HEADERS)
+    else {
+        return Vec::new();
+    };
+    db.list_attachments(detail.id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|attachment| !attachment.inline)
+        .collect()
+}
+
+/// Sidebar position of a system folder (Inbox, Drafts, Sent, Archive, Junk,
+/// Trash, then Flagged); `None` for user folders.
+fn system_folder_rank(path: &str) -> Option<usize> {
+    use storage::system;
+    [
+        system::INBOX,
+        system::DRAFTS,
+        system::SENT,
+        system::ARCHIVE,
+        system::JUNK,
+        system::TRASH,
+        system::FLAGGED,
+    ]
+    .iter()
+    .position(|system_path| *system_path == path)
+}
+
+/// Folders in sidebar order: system folders by [`system_folder_rank`], then
+/// user folders alphabetically (case-insensitive) by display name.
+fn sidebar_ordered(mut folders: Vec<storage::Folder>) -> Vec<storage::Folder> {
+    folders.sort_by_cached_key(|folder| {
+        let rank = system_folder_rank(&folder.path);
+        let name = if folder.display_name.is_empty() {
+            folder.path.to_lowercase()
+        } else {
+            folder.display_name.to_lowercase()
+        };
+        (rank.is_none(), rank, name)
+    });
+    folders
+}
+
+/// Row index after moving `step` rows from `current` in a list of `len`
+/// rows, clamped to the ends. Without a current row, moving down starts at
+/// the first row and moving up at the last. `None` for an empty list.
+fn adjacent_index(current: Option<usize>, len: usize, step: isize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let last = len - 1;
+    Some(match current {
+        None if step < 0 => last,
+        None => 0,
+        Some(ix) => (ix.min(last) as isize + step).clamp(0, last as isize) as usize,
+    })
+}
+
 /// Adapts stored accounts for compose/settings views that still use [`data::Account`].
 fn ui_accounts(accounts: &[storage::Account]) -> Vec<data::Account> {
     accounts
@@ -586,7 +670,7 @@ impl RootView {
         for account in &accounts {
             folders_by_account.insert(
                 account.id,
-                db.list_folders(account.id).expect("failed to load folders"),
+                sidebar_ordered(db.list_folders(account.id).expect("failed to load folders")),
             );
         }
 
@@ -605,6 +689,7 @@ impl RootView {
             })
             .flatten();
         let selected_detail = selected_message_id.and_then(|id| db.get_message(id).ok().flatten());
+        let attachments = visible_attachments(&db, selected_detail.as_ref());
 
         Self {
             db,
@@ -647,8 +732,11 @@ impl RootView {
             compose_window: None,
             compose_origin,
             compose_size,
-            list_scroll: ScrollHandle::new(),
+            list_scroll: UniformListScrollHandle::new(),
             list_scrollbar: None,
+            list_focus: None,
+            attachments,
+            attachment_menu: None,
             sidebar_scroll: ScrollHandle::new(),
             sidebar_scrollbar: None,
             reader_view: None,
@@ -698,13 +786,24 @@ impl RootView {
     fn clear_message_selection(&mut self) {
         self.selected_message_id = None;
         self.selected_detail = None;
+        self.attachments.clear();
+        self.attachment_menu = None;
         self.last_reader_sig = None;
     }
 
+    /// Re-reads the selected message and its attachment chips.
     fn reload_selected_detail(&mut self) {
         self.selected_detail = self
             .selected_message_id
             .and_then(|id| self.db.get_message(id).ok().flatten());
+        self.attachments = visible_attachments(&self.db, self.selected_detail.as_ref());
+        if self
+            .attachment_menu
+            .as_ref()
+            .is_some_and(|menu| Some(menu.attachment.message_id) != self.selected_message_id)
+        {
+            self.attachment_menu = None;
+        }
     }
 
     fn on_message_selection_changed(&mut self, cx: &mut Context<Self>) {
@@ -712,6 +811,45 @@ impl RootView {
         self.open_selected_message();
         self.sync_app_menus(cx);
         cx.notify();
+    }
+
+    /// Selects the message `step` rows below (positive) or above the current
+    /// one (keyboard navigation), opens it and keeps it visible. Returns
+    /// whether the selection moved.
+    fn move_selection(&mut self, step: isize, cx: &mut Context<Self>) -> bool {
+        if !self.select_adjacent_message(step) {
+            return false;
+        }
+        self.reveal_selected_message();
+        self.on_message_selection_changed(cx);
+        true
+    }
+
+    /// Core of [`Self::move_selection`] without side effects on the server
+    /// or the window: moves `selected_message_id` (no wrap-around).
+    fn select_adjacent_message(&mut self, step: isize) -> bool {
+        let current = self
+            .selected_message_id
+            .and_then(|id| self.list_messages.iter().position(|m| m.id == id));
+        let Some(target) = adjacent_index(current, self.list_messages.len(), step) else {
+            return false;
+        };
+        if Some(target) == current {
+            return false;
+        }
+        self.selected_message_id = Some(self.list_messages[target].id);
+        self.last_reader_sig = None;
+        true
+    }
+
+    /// Scrolls the message list so the selected row is visible.
+    fn reveal_selected_message(&self) {
+        if let Some(ix) = self
+            .selected_message_id
+            .and_then(|id| self.list_messages.iter().position(|m| m.id == id))
+        {
+            self.list_scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        }
     }
 
     /// Side effects of opening the selected message: it becomes read (on the
@@ -782,6 +920,7 @@ impl RootView {
                 self.selected_message_id = Some(next);
                 self.reload_selected_detail();
                 self.open_selected_message();
+                self.reveal_selected_message();
             }
         }
         self.sync_app_menus(cx);
@@ -982,7 +1121,7 @@ impl RootView {
             .map(|account| {
                 (
                     account.id,
-                    self.db.list_folders(account.id).unwrap_or_default(),
+                    sidebar_ordered(self.db.list_folders(account.id).unwrap_or_default()),
                 )
             })
             .collect();
@@ -1197,13 +1336,6 @@ impl RootView {
         })
     }
 
-    fn refresh_after_message_action(&mut self, cx: &mut Context<Self>) {
-        self.reload_message_list();
-        self.sync_app_menus(cx);
-        self.last_reader_sig = None;
-        cx.notify();
-    }
-
     fn ensure_command_palette(&mut self, cx: &mut Context<Self>) {
         if self.command_palette.is_none() {
             let input = cx.new(|cx| TextInput::new("", cx));
@@ -1354,6 +1486,15 @@ impl RootView {
         }
     }
 
+    /// Turns desktop notifications for new mail on or off (persisted).
+    pub(crate) fn set_notifications_enabled(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.notifications_enabled != value {
+            self.notifications_enabled = value;
+            self.request_save(cx);
+            cx.notify();
+        }
+    }
+
     /// Prints the selected message: a standalone print page (light theme,
     /// header, remote content blocked; `mail_html::print_document`) written
     /// to a private temporary file and opened in the system browser, which
@@ -1382,6 +1523,124 @@ impl RootView {
             Ok(path) => cx.open_with_system(&path),
             Err(error) => eprintln!("BGMail: could not write the print page: {error}"),
         }
+    }
+
+    /// Raw source of the message an attachment belongs to (where its bytes
+    /// live); reports a failure in the status bar when it is missing.
+    fn attachment_raw(
+        &mut self,
+        attachment: &AttachmentRow,
+        failure: Key,
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<u8>> {
+        let raw = self.db.message_raw(attachment.message_id).ok().flatten();
+        if raw.is_none() {
+            self.set_status_note(failure.tr(cx.language()), cx);
+        }
+        raw
+    }
+
+    /// "Open": decodes the attachment on a background thread, writes it to
+    /// the private temp directory and opens it with the system's default app.
+    pub(crate) fn open_attachment(&mut self, attachment: AttachmentRow, cx: &mut Context<Self>) {
+        self.attachment_menu = None;
+        let Some(raw) = self.attachment_raw(&attachment, Key::StatusAttachmentOpenFailed, cx)
+        else {
+            return;
+        };
+        let task = cx.background_spawn(async move {
+            let data = attachments::extract(&raw, attachment.part_index)?;
+            attachments::write_for_open(&attachment.filename, &data)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| match result {
+                Ok(path) => cx.open_with_system(&path),
+                Err(error) => this.set_status_note(
+                    format!(
+                        "{}: {error}",
+                        Key::StatusAttachmentOpenFailed.tr(cx.language())
+                    ),
+                    cx,
+                ),
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// "Save As…": asks where to save (starting in Downloads, suggesting the
+    /// sanitized name), then decodes and writes on a background thread.
+    pub(crate) fn save_attachment_as(&mut self, attachment: AttachmentRow, cx: &mut Context<Self>) {
+        self.attachment_menu = None;
+        let Some(raw) = self.attachment_raw(&attachment, Key::StatusAttachmentFailed, cx) else {
+            return;
+        };
+        let suggested = attachments::sanitize_filename(&attachment.filename);
+        let prompt = cx.prompt_for_new_path(&attachments::downloads_dir(), Some(&suggested));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = prompt.await else {
+                return;
+            };
+            let result = cx
+                .background_spawn(async move {
+                    let data = attachments::extract(&raw, attachment.part_index)?;
+                    std::fs::write(&path, data).map(|()| path)
+                })
+                .await;
+            this.update(cx, |this, cx| this.report_attachment_saved(result, cx))
+                .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// "Save to Downloads": writes the attachment into the Downloads folder
+    /// under a free name (never overwriting) on a background thread.
+    pub(crate) fn save_attachment_to_downloads(
+        &mut self,
+        attachment: AttachmentRow,
+        cx: &mut Context<Self>,
+    ) {
+        self.attachment_menu = None;
+        let Some(raw) = self.attachment_raw(&attachment, Key::StatusAttachmentFailed, cx) else {
+            return;
+        };
+        let task = cx.background_spawn(async move {
+            let data = attachments::extract(&raw, attachment.part_index)?;
+            attachments::write_unique(
+                &attachments::downloads_dir(),
+                &attachment.filename,
+                &data,
+                false,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| this.report_attachment_saved(result, cx))
+                .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Status bar note for a finished save: the saved path, or the error.
+    fn report_attachment_saved(
+        &mut self,
+        result: std::io::Result<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let language = cx.language();
+        let note = match result {
+            Ok(path) => format!(
+                "{}: {}",
+                Key::StatusAttachmentSaved.tr(language),
+                path.display()
+            ),
+            Err(error) => format!("{}: {error}", Key::StatusAttachmentFailed.tr(language)),
+        };
+        self.set_status_note(note, cx);
     }
 
     pub(crate) fn delete_message_to_trash(&mut self, cx: &mut Context<Self>) {
@@ -1588,6 +1847,13 @@ impl RootView {
         }
     }
 
+    /// Focus handle of the message list, created on first use.
+    fn ensure_list_focus(&mut self, cx: &mut Context<Self>) -> FocusHandle {
+        self.list_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone()
+    }
+
     /// Lazily creates the toolbar search field.
     fn ensure_search_input(
         &mut self,
@@ -1742,7 +2008,11 @@ impl RootView {
     /// the top when the query changes.
     fn sync_search_selection(&mut self) {
         if self.list_messages.is_empty() {
-            self.list_scroll.scroll_to_top_of_item(0);
+            self.list_scroll
+                .0
+                .borrow()
+                .base_handle
+                .set_offset(point(px(0.0), px(0.0)));
             return;
         }
         if let Some(selected) = self.selected_message_id {
@@ -1754,7 +2024,8 @@ impl RootView {
             .selected_message_id
             .and_then(|id| self.list_messages.iter().position(|m| m.id == id))
             .unwrap_or(0);
-        self.list_scroll.scroll_to_top_of_item(visible);
+        self.list_scroll
+            .scroll_to_item_strict(visible, ScrollStrategy::Top);
     }
 
     fn focus_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2262,8 +2533,14 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         if let Some(handle) = self.compose_window {
+            let init_for_open = init.clone();
             if handle
-                .update(cx, |_, window, _| window.activate_window())
+                .update(cx, |view, window, cx| {
+                    if init_for_open.is_some() {
+                        view.apply_init(init_for_open, window, cx);
+                    }
+                    window.activate_window();
+                })
                 .is_ok()
             {
                 return;
@@ -2271,7 +2548,7 @@ impl RootView {
             self.compose_window = None;
         }
 
-        let accounts = ui_accounts(&self.accounts);
+        let accounts = self.compose_accounts();
         let root = cx.entity().downgrade();
         let compose_white = self.compose_white_background;
         let title = compose::window_title(cx.language());
@@ -2292,8 +2569,8 @@ impl RootView {
 
         if let Ok(handle) = cx.open_window(options, |window, cx| {
             let root_for_close = root.clone();
-            let _init = init.clone(); // handed to the compose rewrite
-            let view = cx.new(|_| ComposeView::new(accounts, root, compose_white));
+            let view =
+                cx.new(|cx| ComposeView::new(accounts, root, compose_white, init, window, cx));
             window.on_window_should_close(cx, move |_, cx| {
                 if let Some(root) = root_for_close.upgrade() {
                     root.update(cx, |root, cx| {
@@ -2742,12 +3019,29 @@ impl RootView {
                                 this.open_compose(window, cx);
                             })),
                     ))
+                    .child(Self::icon_button_with_tooltip(
+                        "get-mail",
+                        Key::CommandSyncNow.tr(language),
+                        Some((shortcuts::GET_MAIL_MAC, shortcuts::GET_MAIL_OTHER)),
+                        IconButton::new("get-mail", IconName::Refresh).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.sync_now(cx);
+                            },
+                        )),
+                    ))
                     .child(div().flex_1())
                     // Centered action groups, divided like macOS Mail. Whole groups
                     // are dropped (right to left) as space shrinks so they never
                     // overlap the search button on the right.
                     .map(|el| {
                         let groups = self.visible_action_groups();
+                        let ctx = self.command_context();
+                        let enabled = |id: CommandId| commands::command_enabled(&id, &ctx);
+                        let read_label = if ctx.message_unread() {
+                            Key::CommandMarkRead.tr(language)
+                        } else {
+                            Key::CommandMarkUnread.tr(language)
+                        };
                         el.child(
                             h_flex()
                                 .gap_2()
@@ -2758,20 +3052,59 @@ impl RootView {
                                             .child(Self::icon_button_with_tooltip(
                                                 "reply",
                                                 Key::ToolbarReply.tr(language),
-                                                None,
-                                                IconButton::new("reply", IconName::Reply),
+                                                Some((
+                                                    shortcuts::REPLY_MAC,
+                                                    shortcuts::REPLY_OTHER,
+                                                )),
+                                                IconButton::new("reply", IconName::Reply)
+                                                    .disabled(!enabled(CommandId::MessageReply))
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.reply_to_selected(
+                                                                ReplyKind::Reply,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
                                             ))
                                             .child(Self::icon_button_with_tooltip(
                                                 "reply-all",
                                                 Key::ToolbarReplyAll.tr(language),
-                                                None,
-                                                IconButton::new("reply-all", IconName::ReplyAll),
+                                                Some((
+                                                    shortcuts::REPLY_ALL_MAC,
+                                                    shortcuts::REPLY_ALL_OTHER,
+                                                )),
+                                                IconButton::new("reply-all", IconName::ReplyAll)
+                                                    .disabled(!enabled(CommandId::MessageReplyAll))
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.reply_to_selected(
+                                                                ReplyKind::ReplyAll,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
                                             ))
                                             .child(Self::icon_button_with_tooltip(
                                                 "forward",
                                                 Key::ToolbarForward.tr(language),
-                                                None,
-                                                IconButton::new("forward", IconName::Forward),
+                                                Some((
+                                                    shortcuts::FORWARD_MAC,
+                                                    shortcuts::FORWARD_OTHER,
+                                                )),
+                                                IconButton::new("forward", IconName::Forward)
+                                                    .disabled(!enabled(CommandId::MessageForward))
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.reply_to_selected(
+                                                                ReplyKind::Forward,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
                                             )),
                                     )
                                 })
@@ -2786,11 +3119,11 @@ impl RootView {
                                                     shortcuts::DELETE_MESSAGE_MAC,
                                                     shortcuts::DELETE_MESSAGE_OTHER,
                                                 )),
-                                                IconButton::new("trash", IconName::Trash).on_click(
-                                                    cx.listener(|this, _, _, cx| {
+                                                IconButton::new("trash", IconName::Trash)
+                                                    .disabled(!enabled(CommandId::MessageDelete))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
                                                         this.delete_message_to_trash(cx);
-                                                    }),
-                                                ),
+                                                    })),
                                             ))
                                             .child(Self::icon_button_with_tooltip(
                                                 "archive",
@@ -2800,6 +3133,7 @@ impl RootView {
                                                     shortcuts::ARCHIVE_OTHER,
                                                 )),
                                                 IconButton::new("archive", IconName::Archive)
+                                                    .disabled(!enabled(CommandId::MessageArchive))
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.archive_message(cx);
                                                     })),
@@ -2811,11 +3145,11 @@ impl RootView {
                                                     shortcuts::MARK_JUNK_MAC,
                                                     shortcuts::MARK_JUNK_OTHER,
                                                 )),
-                                                IconButton::new("junk", IconName::Junk).on_click(
-                                                    cx.listener(|this, _, _, cx| {
+                                                IconButton::new("junk", IconName::Junk)
+                                                    .disabled(!enabled(CommandId::MessageMarkJunk))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
                                                         this.mark_message_junk(cx);
-                                                    }),
-                                                ),
+                                                    })),
                                             )),
                                     )
                                 })
@@ -2830,11 +3164,28 @@ impl RootView {
                                                     shortcuts::TOGGLE_FLAG_MAC,
                                                     shortcuts::TOGGLE_FLAG_OTHER,
                                                 )),
-                                                IconButton::new("flag", IconName::Flag).on_click(
-                                                    cx.listener(|this, _, _, cx| {
+                                                IconButton::new("flag", IconName::Flag)
+                                                    .disabled(!enabled(
+                                                        CommandId::MessageToggleFlag,
+                                                    ))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
                                                         this.toggle_message_flag(cx);
-                                                    }),
-                                                ),
+                                                    })),
+                                            ))
+                                            .child(Self::icon_button_with_tooltip(
+                                                "toggle-read",
+                                                read_label,
+                                                Some((
+                                                    shortcuts::TOGGLE_READ_MAC,
+                                                    shortcuts::TOGGLE_READ_OTHER,
+                                                )),
+                                                IconButton::new("toggle-read", IconName::Mail)
+                                                    .disabled(!enabled(
+                                                        CommandId::MessageToggleRead,
+                                                    ))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.toggle_message_read(cx);
+                                                    })),
                                             ))
                                             .child(Self::icon_button_with_tooltip(
                                                 "move",
@@ -3149,7 +3500,13 @@ impl RootView {
             let folder_path = folder.path.clone();
             let account_id = account.id;
 
-            let mut item = ListItem::new(("mailbox", account_idx * 100 + mailbox_idx))
+            // Keyed by account id + row so accounts with 100+ folders never
+            // share element ids.
+            let mut item =
+                ListItem::new(gpui::ElementId::NamedInteger(
+                    format!("mailbox-{}", account.id).into(),
+                    mailbox_idx as u64,
+                ))
                 .selected(selected)
                 .inset(px(ITEM_PADDING))
                 .start_slot(Icon::new(mailbox_icon(kind)).size(IconSize::Small).color(
@@ -3306,39 +3663,61 @@ impl RootView {
         let border = colors.border;
         let header_bg = colors.panel_background;
         let language = cx.language();
-        let filtered = &self.list_messages;
+        let list_focus = self.ensure_list_focus(cx);
 
-        let mut content = v_flex()
-            .id("message-list")
+        // Virtualized: only the visible rows are built, so mailboxes with
+        // thousands of messages stay cheap. Rows have a uniform height
+        // (measured from the first one).
+        let content = if self.list_messages.is_empty() && self.search_is_active(cx) {
+            div()
+                .id("message-list")
+                .size_full()
+                .child(
+                    div().w_full().py_8().flex().justify_center().child(
+                        Label::new(Key::SearchNoResults.tr(language))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+                )
+                .into_any_element()
+        } else {
+            let list = uniform_list(
+                "message-list",
+                self.list_messages.len(),
+                cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
+                    let end = range.end.min(this.list_messages.len());
+                    let start = range.start.min(end);
+                    let this = &*this;
+                    this.list_messages[start..end]
+                        .iter()
+                        .map(|message| this.render_message_row(message, cx))
+                        .collect::<Vec<_>>()
+                }),
+            )
             .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.list_scroll)
+            .track_scroll(self.list_scroll.clone())
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                 Self::note_scroll([this.list_scrollbar.clone()], cx);
-            }))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.clear_message_selection();
-                cx.notify();
             }));
+            // A click below the last row (rows swallow their mouse-down)
+            // clears the selection.
+            div()
+                .id("message-list-area")
+                .size_full()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.clear_message_selection();
+                    this.sync_app_menus(cx);
+                    cx.notify();
+                }))
+                .child(list)
+                .into_any_element()
+        };
 
-        if filtered.is_empty() && self.search_is_active(cx) {
-            content = content.child(
-                div().w_full().py_8().flex().justify_center().child(
-                    Label::new(Key::SearchNoResults.tr(language))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                ),
-            );
-        } else {
-            for message in filtered {
-                content = content.child(self.render_message_row(message, cx));
-            }
-        }
-
+        let scroll_base = self.list_scroll.0.borrow().base_handle.clone();
         let scrollbar = self
             .list_scrollbar
             .clone()
-            .map(|state| Scrollbar::vertical(state, self.list_scroll.clone()));
+            .map(|state| Scrollbar::vertical(state, scroll_base));
 
         // When the sidebar isn't docked, the list controls that normally live in
         // the top toolbar move here, pinned to the top of the list.
@@ -3364,6 +3743,14 @@ impl RootView {
             .bg(bg)
             .border_r_1()
             .border_color(border)
+            .track_focus(&list_focus)
+            .key_context(shortcuts::MESSAGE_LIST_CONTEXT)
+            .on_action(cx.listener(|this, _: &SelectNextMessage, _, cx| {
+                this.move_selection(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectPreviousMessage, _, cx| {
+                this.move_selection(-1, cx);
+            }))
             .children(header)
             .child(
                 // Inner relative wrapper so the scrollbar overlay aligns with the
@@ -3476,7 +3863,10 @@ impl RootView {
                             .single_line(),
                     ),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(focus) = &this.list_focus {
+                    window.focus(focus);
+                }
                 this.selected_message_id = Some(message_id);
                 this.last_reader_sig = None;
                 this.on_message_selection_changed(cx);
@@ -3711,6 +4101,118 @@ impl RootView {
         )
     }
 
+    /// Wrapping row of attachment chips under the reader header: icon by
+    /// file family, file name and size. Clicking a chip opens its menu.
+    fn render_attachments(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.attachments.is_empty() {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let (chip_bg, chip_border, hover) = (
+            colors.element_background,
+            colors.border_variant,
+            colors.element_hover,
+        );
+        let language = cx.language();
+        Some(h_flex().pl(px(40.0)).flex_wrap().gap_2().children(
+            self.attachments.iter().enumerate().map(|(ix, attachment)| {
+                let family = attachments::file_family(&attachment.mime_type, &attachment.filename);
+                let name = if attachment.filename.trim().is_empty() {
+                    attachments::sanitize_filename("")
+                } else {
+                    attachment.filename.clone()
+                };
+                let menu_attachment = attachment.clone();
+                h_flex()
+                    .id(("attachment", ix))
+                    .max_w(px(280.0))
+                    .h(px(28.0))
+                    .px_2()
+                    .gap_1p5()
+                    .items_center()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(chip_border)
+                    .bg(chip_bg)
+                    .hover(move |el| el.bg(hover))
+                    .cursor_pointer()
+                    .child(
+                        Icon::new(family.icon())
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_shrink()
+                            .overflow_hidden()
+                            .child(Label::new(name).size(LabelSize::Small).single_line()),
+                    )
+                    .child(
+                        div().flex_shrink_0().child(
+                            Label::new(attachments::human_size(attachment.size, language))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                    )
+                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                        this.attachment_menu = Some(AttachmentMenu {
+                            position: event.position(),
+                            attachment: menu_attachment.clone(),
+                        });
+                        cx.notify();
+                    }))
+            }),
+        ))
+    }
+
+    /// The attachment chip menu: Open, Save As…, Save to Downloads. Anchored
+    /// at the click; any outside click closes it.
+    fn render_attachment_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(menu) = self.attachment_menu.as_ref() else {
+            return div().into_any_element();
+        };
+        let language = cx.language();
+        let root = cx.weak_entity();
+        let action = |run: fn(&mut RootView, AttachmentRow, &mut Context<RootView>)| {
+            let (root, attachment) = (root.clone(), menu.attachment.clone());
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                let attachment = attachment.clone();
+                let _ = root.update(cx, |this, cx| run(this, attachment, cx));
+            }
+        };
+        let items = ui::ContextMenu::new()
+            .entry(
+                Key::AttachmentOpen.tr(language),
+                action(Self::open_attachment),
+            )
+            .separator()
+            .entry(
+                Key::AttachmentSaveAs.tr(language),
+                action(Self::save_attachment_as),
+            )
+            .entry(
+                Key::AttachmentSaveToDownloads.tr(language),
+                action(Self::save_attachment_to_downloads),
+            );
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.attachment_menu = None;
+                cx.notify();
+            }))
+            .child(deferred(
+                anchored()
+                    .position(menu.position)
+                    .anchor(Corner::TopLeft)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(items),
+            ))
+            .into_any_element()
+    }
+
     /// Status bar text for the sync engine (or a recent note, which wins).
     fn sync_status_text(&self, language: Language) -> Option<SharedString> {
         if let Some(note) = &self.status_note {
@@ -3886,7 +4388,8 @@ impl RootView {
                         .color(Color::Muted),
                     ),
             )
-            .children(self.render_recipients(message, cx));
+            .children(self.render_recipients(message, cx))
+            .children(self.render_attachments(cx));
 
         let loading_body = message.body_state == storage::BODY_STATE_HEADERS;
         let language = cx.language();
@@ -4034,6 +4537,18 @@ impl Render for RootView {
 
         // Make sure the scrollbar state entities exist before the panels render.
         self.ensure_scrollbar_states(cx);
+        // Keyboard navigation lives on the message list: give it focus
+        // whenever nothing in the window has it (startup, after the search
+        // field blurs), so arrows/Delete work without a click first.
+        let list_focus = self.ensure_list_focus(cx);
+        if window.focused(cx).is_none()
+            && !self
+                .command_palette
+                .as_ref()
+                .is_some_and(|palette| palette.open)
+        {
+            window.defer(cx, move |window, _| window.focus(&list_focus));
+        }
         self.ensure_search_input(cx.language(), window, cx);
         if self.command_palette_focus_pending {
             self.command_palette_focus_pending = false;
@@ -4172,6 +4687,9 @@ impl Render for RootView {
             .child(self.render_status_bar(cx))
             .when(self.reader_menu.is_some(), |el| {
                 el.child(self.render_reader_menu(cx))
+            })
+            .when(self.attachment_menu.is_some(), |el| {
+                el.child(self.render_attachment_menu(cx))
             })
             .when(
                 self.command_palette
@@ -4652,5 +5170,126 @@ mod tests {
         let ctx = view.command_context();
         assert!(commands::command_enabled(&CommandId::MessageRestore, &ctx));
         assert!(!commands::command_enabled(&CommandId::MessageDelete, &ctx));
+    }
+
+    fn folder(path: &str, display_name: &str) -> storage::Folder {
+        storage::Folder {
+            id: 0,
+            account_id: 1,
+            path: path.into(),
+            display_name: display_name.into(),
+            remote_name: None,
+            role: None,
+        }
+    }
+
+    #[test]
+    fn sidebar_orders_system_folders_then_user_folders_alphabetically() {
+        use storage::system;
+        let folders = vec![
+            folder("user:zeta", "zeta"),
+            folder(system::TRASH, ""),
+            folder("user:Alpha", "Alpha"),
+            folder(system::SENT, ""),
+            folder(system::INBOX, ""),
+            folder("user:beta", "beta"),
+            folder(system::JUNK, ""),
+            folder(system::ARCHIVE, ""),
+            folder(system::DRAFTS, ""),
+        ];
+        let paths: Vec<_> = sidebar_ordered(folders)
+            .into_iter()
+            .map(|folder| folder.path)
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                system::INBOX,
+                system::DRAFTS,
+                system::SENT,
+                system::ARCHIVE,
+                system::JUNK,
+                system::TRASH,
+                "user:Alpha",
+                "user:beta",
+                "user:zeta",
+            ]
+        );
+        assert_eq!(system_folder_rank(system::INBOX), Some(0));
+        assert_eq!(system_folder_rank("user:Inbox"), None);
+    }
+
+    #[test]
+    fn adjacent_index_clamps_and_starts_from_the_ends() {
+        assert_eq!(adjacent_index(None, 0, 1), None);
+        assert_eq!(adjacent_index(None, 5, 1), Some(0));
+        assert_eq!(adjacent_index(None, 5, -1), Some(4));
+        assert_eq!(adjacent_index(Some(2), 5, 1), Some(3));
+        assert_eq!(adjacent_index(Some(2), 5, -1), Some(1));
+        assert_eq!(adjacent_index(Some(4), 5, 1), Some(4));
+        assert_eq!(adjacent_index(Some(0), 5, -1), Some(0));
+        assert_eq!(adjacent_index(Some(9), 5, 1), Some(4));
+    }
+
+    #[test]
+    fn keyboard_selection_moves_through_the_list() {
+        let (_dir, mut view) = test_view();
+        assert!(view.list_messages.len() > 2);
+        view.clear_message_selection();
+        assert!(view.select_adjacent_message(1));
+        assert_eq!(view.selected_message_id, Some(view.list_messages[0].id));
+        // Already at the top: moving up does nothing.
+        assert!(!view.select_adjacent_message(-1));
+        assert!(view.select_adjacent_message(1));
+        assert_eq!(view.selected_message_id, Some(view.list_messages[1].id));
+        view.reveal_selected_message();
+        let last = view.list_messages.len() - 1;
+        view.selected_message_id = Some(view.list_messages[last].id);
+        assert!(!view.select_adjacent_message(1));
+    }
+
+    #[test]
+    fn attachments_follow_the_selected_message_body() {
+        let (_dir, mut view) = test_view();
+        let id = view.selected_message_id.expect("seed selects a message");
+        let attachment = |part_index: u32, name: &str, inline: bool| storage::NewAttachment {
+            part_index,
+            filename: name.into(),
+            mime_type: "application/pdf".into(),
+            size: 2048,
+            content_id: None,
+            inline,
+        };
+        view.db
+            .store_body(
+                id,
+                b"raw",
+                "body",
+                "text",
+                "body",
+                "body",
+                &[
+                    attachment(2, "a.pdf", false),
+                    attachment(3, "logo.png", true),
+                ],
+            )
+            .unwrap();
+        view.reload_selected_detail();
+        let names: Vec<_> = view
+            .attachments
+            .iter()
+            .map(|attachment| attachment.filename.as_str())
+            .collect();
+        assert_eq!(names, ["a.pdf"]);
+
+        // Headers-only bodies show no chips (they appear on BodyReady).
+        let mut detail = view.selected_detail.clone().unwrap();
+        detail.body_state = storage::BODY_STATE_HEADERS;
+        assert!(visible_attachments(&view.db, Some(&detail)).is_empty());
+        assert!(visible_attachments(&view.db, None).is_empty());
+
+        view.clear_message_selection();
+        assert!(view.attachments.is_empty());
+        assert!(view.attachment_menu.is_none());
     }
 }

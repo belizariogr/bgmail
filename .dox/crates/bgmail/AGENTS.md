@@ -44,6 +44,17 @@ wiring to `storage`.
   release profile keeps `panic = "abort"` (decided with two opposing
   reviews): unwinding through Blitz/GPUI state isn't safe and stack overflow
   or OOM can't be caught anyway.
+- Compose (`compose::ComposeView`, one window at a time): real editors
+  (`ui::TextInput` To/Cc/Bcc/Subject, `ui::TextArea` body), From picker
+  (`ui::ContextMenu`; local accounts listed but can't send), attachments via
+  picker / drag-and-drop read off the UI thread (25 MB total cap), plain-text
+  send only. Send (button, `ComposeSend`, Cmd/Ctrl+Enter) validates with
+  `mail_core::parse_address_list` (inline per-field errors) and hands the
+  `Draft` to `RootView::send_draft` in a task (never while root is leased);
+  success closes the window, errors show in a banner. Replies prefill from
+  `ComposeInit` (`RootView::open_compose_with`; an open window is refilled)
+  and focus the body above the quote; forwards focus To. Discard asks for
+  confirmation only after edits; closing the window does not prompt.
 - **Modules (flat under `src/`):**
   - `root` — main three-column UI + selection/layout state.
   - `data` — mock/sample structures (keep isolated for replacement).
@@ -56,11 +67,48 @@ wiring to `storage`.
   - `crash_guard` — marker of the message being rendered (crash loops).
   - `print` — private print pages in the temp dir (Unix 0700/0600, stale
     pages removed on the next print).
+  - `attachments` — attachment chip presentation (family icon, human size)
+    and file writing: sanitized names, never-overwrite ` (n)` dedupe,
+    private temp copies for Open (Unix 0700/0600, stale after a day).
   - `compose`, `command_palette*`, `commands`, `actions`, `shortcuts`,
     `app_menus` — app actions and overlays.
   - `window_drag` / `window_frame` — portable window move/CSD; OS code behind
     `cfg`.
   - `startup` — debug startup milestones (keep startup path light).
+  - `settings` — Settings window. Accounts: live list (provider badge,
+    health from `RootView::account_status`/`account_start_error`), per-account
+    "Update password" / "Sign in again" (Google OAuth) / "Remove" (confirmed
+    with `window.prompt`; local mail is deleted), and the inline "Add account"
+    form (preset/discovered servers, "Manual settings" with TLS/STARTTLS/None,
+    Gmail → "Sign in with Google" when `BGMAIL_GOOGLE_CLIENT_ID` is set, else
+    the app-password IMAP path). Notifications: switch bound to
+    `notifications_enabled` (persisted).
+  - `account_setup` — GPUI-free form/validation/config building, account
+    health, and error/preset-note → locale key mapping for `settings`.
+- Message list: virtualized with GPUI `uniform_list` (uniform row height;
+  only visible rows are built) and the `ui::Scrollbar` on the list handle's
+  `base_handle`. It owns a focus handle with key context `MessageList`
+  (focused on startup / whenever nothing has focus, and on row click):
+  `down`/`j` and `up`/`k` select + open the next/previous message (kept
+  visible via `scroll_to_item`), `delete`/`backspace` move it to Trash.
+  These plain keys are bound only in that context, never in text fields.
+- Sidebar folders: system folders first (Inbox, Drafts, Sent, Archive, Junk,
+  Trash, Flagged; names localized), then user folders alphabetically by
+  `display_name`.
+- Reader attachments: non-inline `storage::list_attachments` rows show as
+  chips under the header once the body is downloaded (`BodyReady` reloads
+  them). A chip opens a `ui::ContextMenu`: Open (decoded on a background task
+  with `mail_core::attachment_content`, written to a private temp copy,
+  `open_with_system`), Save As… (`prompt_for_new_path` starting in
+  Downloads), Save to Downloads. Results/errors go to the status bar.
+- Toolbar: compose + Get mail (sync now) on the left; reply / reply all /
+  forward, trash / archive / junk, flag / mark read|unread / move centered;
+  message buttons are disabled when their command isn't available.
+- Mail shortcuts (mac / other): Reply `cmd-r`/`ctrl-r`, Reply All
+  `cmd-shift-r`/`ctrl-shift-r`, Forward `cmd-shift-f`/`ctrl-shift-f`, Mark
+  read/unread `cmd-shift-u`/`ctrl-shift-m` (Ctrl+Shift+U is the Linux IME
+  Unicode key), Get New Mail `cmd-shift-n`/`ctrl-shift-n`; also in the
+  Message and Mailbox menus and the command palette.
 - Development preview: `BGMAIL_DB` opens another database instead of
   `~/.config/BGMail/mail.db`, and `BGMAIL_SAMPLE_DIR` adds its `*.html` to
   the seed (only when that database is first created);
@@ -68,7 +116,12 @@ wiring to `storage`.
 - UI state: `Entity` + `impl Render`; mutate via `cx.listener` + `cx.notify()`.
 - OS-specific code only in abstracted helpers (`window_drag`, notifications,
   etc.), never leaked into layout/domain types.
-- No Stage 3 networking (IMAP/SMTP/OAuth) in this crate yet.
+- Network I/O only through `protocols` / `mail_sync`, never on the UI
+  thread: discovery, login tests and Google sign-in run on the background
+  executor; a running sign-in has a Cancel button (`CancelToken`) and is
+  cancelled when the settings window closes. Account secrets go to the
+  platform keychain via `RootView` (never into `config_json`).
+- Password fields use `TextInput::set_masked(true)`.
 - Unsafe: avoid; isolate and justify if unavoidable.
 
 ## Work Guidance

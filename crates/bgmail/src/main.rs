@@ -5,8 +5,10 @@
 //! The domain layer will be added in later stages (see `docs/PLANEJAMENTO.md` and
 //! `TODO.md`).
 
+mod account_setup;
 mod actions;
 mod app_menus;
+mod attachments;
 mod command_palette;
 mod command_palette_overlay;
 mod commands;
@@ -38,8 +40,9 @@ use gpui::{
 use crate::commands::CommandId;
 use actions::{
     ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, FindInMessage,
-    MessageArchive, MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessagePrint,
-    MessageRestore, MessageToggleFlag, MoveMessageToFolder, OpenSettings, Quit,
+    GetNewMail, MessageArchive, MessageDelete, MessageDeletePermanent, MessageForward,
+    MessageMarkJunk, MessagePrint, MessageReply, MessageReplyAll, MessageRestore,
+    MessageToggleFlag, MessageToggleRead, MoveMessageToFolder, OpenSettings, Quit,
     ToggleCommandPalette, ToggleSidebar,
 };
 use compose::ComposeView;
@@ -134,6 +137,15 @@ fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &MessageToggleFlag, cx| {
         schedule_menu_command(CommandId::MessageToggleFlag, cx);
     });
+    cx.on_action(|_: &MessageReply, cx| schedule_menu_command(CommandId::MessageReply, cx));
+    cx.on_action(|_: &MessageReplyAll, cx| {
+        schedule_menu_command(CommandId::MessageReplyAll, cx);
+    });
+    cx.on_action(|_: &MessageForward, cx| schedule_menu_command(CommandId::MessageForward, cx));
+    cx.on_action(|_: &MessageToggleRead, cx| {
+        schedule_menu_command(CommandId::MessageToggleRead, cx);
+    });
+    cx.on_action(|_: &GetNewMail, cx| schedule_menu_command(CommandId::SyncNow, cx));
     cx.on_action(|action: &MoveMessageToFolder, cx| {
         schedule_menu_command(CommandId::MoveToFolder(action.path.clone()), cx);
     });

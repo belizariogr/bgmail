@@ -65,6 +65,13 @@ icon_assets! {
     (WINDOW_MINIMIZE, "icons/window-minimize.svg"),
     (WINDOW_MAXIMIZE, "icons/window-maximize.svg"),
     (WINDOW_RESTORE, "icons/window-restore.svg"),
+    (FILE, "icons/file.svg"),
+    (FILE_IMAGE, "icons/file-image.svg"),
+    (FILE_PDF, "icons/file-pdf.svg"),
+    (FILE_ZIPPER, "icons/file-zipper.svg"),
+    (FILE_AUDIO, "icons/file-audio.svg"),
+    (FILE_VIDEO, "icons/file-video.svg"),
+    (FILE_LINES, "icons/file-lines.svg"),
 }
 
 /// Asset source that serves the UI crate's embedded SVGs. Register it once with

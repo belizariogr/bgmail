@@ -41,7 +41,7 @@ _(none — modules are files, including the `text_area/` submodules; their APIs 
 
 ## API Catalog
 
-_294 functions/methods documented._
+_300 functions/methods documented._
 
 ### `src/ui.rs`
 
@@ -101,7 +101,9 @@ _294 functions/methods documented._
   `REPLY`, `REPLY_ALL`, `FORWARD`, `PEN_TO_SQUARE`, `SEARCH`, `SETTINGS`,
   `REFRESH`, `CIRCLE_USER`, `PAPERCLIP`, `ENVELOPE`, `SIDEBAR`, `FILTER`,
   `ELLIPSIS`, `FOLDER`, `SHIELD_HALVED`, `SHIELD`, `CHECK`, `XMARK`,
-  `WINDOW_MINIMIZE`, `WINDOW_MAXIMIZE`, `WINDOW_RESTORE`. Each value is the
+  `WINDOW_MINIMIZE`, `WINDOW_MAXIMIZE`, `WINDOW_RESTORE`, and the attachment
+  file icons `FILE`, `FILE_IMAGE`, `FILE_PDF`, `FILE_ZIPPER`, `FILE_AUDIO`,
+  `FILE_VIDEO`, `FILE_LINES`. Each value is the
   GPUI asset key (e.g. `"icons/inbox.svg"`).
 - **struct `Assets`**: Zero-sized [`AssetSource`] implementation. Register once
   with `Application::new().with_assets(ui::Assets)` so `gpui::svg()` can load
@@ -175,7 +177,8 @@ _294 functions/methods documented._
   `Trash`, `Junk`, `Archive`, `Star`, `StarFilled`, …), compose/navigation
   (`Compose`, `Send`, `Search`, `ChevronRight`, `ChevronDown`, `ChevronUp`, …), chrome
   (`Sidebar`, `Settings`, `WindowMinimize`, `WindowMaximize`, `WindowRestore`,
-  …). `Sent` and `Send` share the paper-plane artwork but are distinct enum
+  …), attachment families (`File`, `FileImage`, `FilePdf`, `FileArchive`,
+  `FileAudio`, `FileVideo`, `FileText`). `Sent` and `Send` share the paper-plane artwork but are distinct enum
   values.
 - **struct `Icon`**: Themed SVG icon element (`IntoElement` + `RenderOnce`).
   Fields: `name`, `size`, `color`.
@@ -434,14 +437,25 @@ _294 functions/methods documented._
   - Purpose: Registers click handler with drag-safe mouse-down swallow.
   - Behavior: Same propagation pattern as `Button::on_click`.
 
+- **`disabled`** (pub)
+  - Signature: `pub fn disabled(mut self, disabled: bool) -> Self`
+  - Purpose: Inert state (as Zed's `Disableable`), e.g. message actions with no selection.
+  - Behavior: Render uses `Color::Disabled`, no hover/selected background, drops the click handler, but still swallows left mouse-down (no title-bar drag).
+
+- **`effective_color`** (private)
+  - Signature: `fn effective_color(&self) -> Color`
+  - Purpose: Icon color after states.
+  - Behavior: `Disabled` when disabled, else `Accent` when selected, else the configured color. Tested by `icon_button_color_follows_disabled_then_selected`.
+
 ##### Context: `RenderOnce for IconButton`
 
 - **`render`** (private, L166)
   - Signature: `fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement`
   - Purpose: Paints square icon button with hover/selected chrome.
   - Behavior: 28px rounded flex container. Selected state gets active
-    background; all states get hover background. Renders `Icon` at configured
-    size/color (accent when selected). Optional click wiring mirrors `Button`.
+    background; enabled buttons get hover background. Renders `Icon` at
+    `effective_color`. Optional click wiring mirrors `Button` (skipped when
+    disabled).
 
 ### `src/list_item.rs`
 
@@ -778,10 +792,12 @@ _294 functions/methods documented._
   `Paste`, `Cut`, `Copy`. Bound via `bind_keys`.
 - **enum `TextInputEvent`**: `Changed` — emitted (via `EventEmitter`) when the
   user changes the text through the input handler (typing, IME, paste, cut,
-  delete). Programmatic `clear` does not emit it.
+  delete). Programmatic `clear` / `set_content` do not emit it.
 - **struct `TextInput`**: Single-line editable field (`Render` + `Focusable` +
   `EntityInputHandler` + `EventEmitter<TextInputEvent>`). Tracks content, placeholder, UTF-8 selection/marked
-  ranges, shaped line layout, bounds, focus, and mouse selection state.
+  ranges, shaped line layout, bounds, focus, mouse selection state, and
+  `masked` (password field).
+- **const `MASK_CHAR`** (private): `•`, drawn once per character of a masked field.
 - **struct `TextInputElement`** (private): GPUI `Element` wrapper painting the
   field and wiring platform input.
 - **struct `PrepaintState`** (private): Frame prepaint output — shaped `line`,
@@ -818,6 +834,21 @@ _294 functions/methods documented._
   - Behavior: Returns `len` when at/ past end. Skips current word chars, then
     skips whitespace to next non-whitespace byte index (or `len`).
 
+- **`single_line`** (pub(crate), L120)
+  - Signature: `fn single_line(text: &str) -> String`
+  - Purpose: Folds `\r\n` / `\r` / `\n` into single spaces for the one-line field.
+  - Behavior: Used by `TextInput::set_content`; covered by
+    `single_line_folds_line_breaks_into_spaces`.
+
+- **`masked_text`** / **`masked_offset`** / **`unmasked_offset`** (pub(crate))
+  - Signatures: `fn masked_text(content: &str) -> String`, `fn masked_offset(content: &str, offset: usize) -> usize`, `fn unmasked_offset(content: &str, display_offset: usize) -> usize`
+  - Purpose: Display text of a masked field and the mapping between content
+    byte offsets and offsets in the drawn bullets.
+  - Behavior: One `MASK_CHAR` per `char`; `masked_offset` = chars before the
+    offset × 3 bytes; `unmasked_offset` rounds down to the char boundary
+    (past the end → `content.len()`). Covered by
+    `masking_draws_one_bullet_per_character_and_maps_offsets`.
+
 - **`bind_keys`** (pub, L120)
   - Signature: `pub fn bind_keys(cx: &mut App)`
   - Purpose: Registers all keyboard shortcuts for `TextInput` focus context.
@@ -844,6 +875,24 @@ _294 functions/methods documented._
   - Purpose: Empties content and resets selection/mark state.
   - Behavior: Sets content to default, selection to `0..0`, clears marked range,
     notifies subscribers.
+
+- **`set_content`** (pub, L240)
+  - Signature: `pub fn set_content(&mut self, text: impl AsRef<str>, cx: &mut Context<Self>)`
+  - Purpose: Prefills the field (compose To/Cc/Bcc/Subject from a reply draft).
+  - Behavior: Stores `single_line(text)`, puts the caret at the end, clears the
+    marked range and notifies. Like `clear`, does not emit `Changed`.
+
+- **`set_masked`** (pub)
+  - Signature: `pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>)`
+  - Purpose: Password mode (Settings ▸ Accounts password fields).
+  - Behavior: Draws bullets instead of the text and makes copy/cut no-ops;
+    editing, selection and IME work as usual through `display_offset` /
+    `content_offset`. Notifies.
+
+- **`display_offset`** / **`content_offset`** (private)
+  - Purpose: Map content byte offsets to/from the drawn line (identity unless
+    masked). Used by caret/selection painting, mouse hit-testing and the IME
+    `bounds_for_range` / `character_index_for_point`.
 
 - **`set_placeholder`** (pub, L235)
   - Signature: `pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>)`
@@ -957,14 +1006,14 @@ _294 functions/methods documented._
 - **`copy`** (private, L367)
   - Signature: `fn copy(&mut self, _: &Copy, …, cx: &mut Context<Self>)`
   - Purpose: Copies selected text to clipboard.
-  - Behavior: No-op when selection empty; otherwise writes selected substring to
-    clipboard.
+  - Behavior: No-op when selection empty or the field is masked; otherwise
+    writes selected substring to clipboard.
 
 - **`cut`** (private, L375)
   - Signature: `fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>)`
   - Purpose: Copies selection then deletes it.
-  - Behavior: When selection non-empty, copies to clipboard then replaces
-    selection with empty string.
+  - Behavior: When selection non-empty and the field isn't masked, copies to
+    clipboard then replaces selection with empty string.
 
 - **`move_to`** (private, L384)
   - Signature: `fn move_to(&mut self, offset: usize, cx: &mut Context<Self>)`
@@ -981,7 +1030,8 @@ _294 functions/methods documented._
   - Purpose: Maps pointer x/y to nearest text byte index.
   - Behavior: Returns `0` for empty content or missing layout/bounds. Above top →
     `0`; below bottom → `content.len()`. Otherwise uses shaped line
-    `closest_index_for_x` relative to bounds left edge.
+    `closest_index_for_x` relative to bounds left edge, mapped back through
+    `content_offset` (masked fields).
 
 - **`select_to`** (private, L414)
   - Signature: `fn select_to(&mut self, offset: usize, cx: &mut Context<Self>)`
@@ -1098,7 +1148,8 @@ _294 functions/methods documented._
   - Signature: `fn prepaint(&mut self, …, bounds: Bounds<Pixels>, …, window: &mut Window, cx: &mut App) -> PrepaintState`
   - Purpose: Shapes display text and prepares selection/caret quads.
   - Behavior: Reads input entity. Empty content shows placeholder in muted color;
-    else uses window text style. Builds `TextRun`(s) via
+    else uses window text style (masked: `masked_text`, with caret, selection
+    and marked range mapped through `display_offset`). Builds `TextRun`(s) via
     `text_area::marked_text_runs` (solid underline on the marked range). Shapes line. Collapsed selection → accent caret quad inset
     vertically; non-empty → selected background quad spanning glyph bounds.
 

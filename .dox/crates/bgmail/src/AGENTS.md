@@ -34,13 +34,63 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ## API Catalog
 
-_624 functions/methods documented._
+_688 functions/methods documented._
+
+### `src/account_setup.rs`
+
+GPUI-free logic of Settings ▸ Accounts: the "Add account" form, account
+health, and localized mapping of protocol errors and provider notes. All
+network calls are injected as closures so the job bodies are unit-tested.
+
+#### Types / constants
+
+- **const `GOOGLE`** (pub(crate)): `"google"` OAuth provider id.
+- **const `SECURITY_OPTIONS`** (pub(crate)): `[Tls, StartTls, None]` (picker order).
+- **struct `ManualFields`** (pub(crate)): typed IMAP/SMTP host, port (text), security, and username.
+- **enum `FormError`** (pub(crate)): `InvalidEmail`, `PasswordRequired`, `HostRequired`, `InvalidPort`, `AlreadyAdded`.
+- **enum `ConnectPlan`** (pub(crate)): `Ready(AccountConfig)` or `Discover { email, username }` (no server typed).
+- **enum `SetupFailure`** (pub(crate)): `Form`, `Remote(RemoteError)`, `DifferentGoogleAccount`, `GoogleUnavailable`, `SaveFailed(String)`.
+- **struct `FailureMessage`** (pub(crate)): `key: Key` + optional raw `detail`.
+- **struct `ConnectOutcome`** (pub(crate)): config `tried` (if any) + `result`.
+- **enum `AccountHealth`** (pub(crate)): `Local`, `UpToDate`, `Syncing`, `Offline`, `SignInFailed`, `PasswordMissing`, `GoogleUnavailable`, `Error`.
+- **enum `ProviderBadge`** (pub(crate)): `Local`, `Imap`, `Gmail`.
+
+#### Functions / methods
+
+- **`ManualFields::from_config(config)`**: fields prefilled from a preset/discovered config (ports as text).
+- **`ManualFields::is_blank()`**: no IMAP and no SMTP host typed (Connect must discover).
+- **`FormError::key()`**: localized message key per error.
+- **`is_valid_email(email)`**: loose shape check — one `@`, non-empty local part, dotted domain with non-empty labels not starting/ending in `-`, no whitespace/control chars.
+- **`parse_port(text)`**: trimmed `1..=65535`, else `None`.
+- **`port_after_security_change(current, old, new, imap)`**: new conventional port when the field is empty or holds `old`'s default (IMAP or SMTP table); `None` keeps a custom port.
+- **`is_duplicate(email, existing)`**: case-insensitive, trimmed match against stored addresses.
+- **`plan_password_connect(email, password, manual, existing)`**: validates in order (e-mail → duplicate → password non-empty → both hosts → both ports); username defaults to the e-mail; blank servers → `Discover`, else `Ready` with `AuthKind::Password` and the default sync window.
+- **`with_password_auth(config, email, username)`**: a discovered/preset config as a password account (Gmail app-password path reuses preset servers).
+- **`is_google_address(email)`**: the preset's `oauth == Some("google")` (gmail.com, googlemail.com).
+- **`preset_note(email)`**: the provider's `PresetNote`, if any.
+- **`note_key(note)`**: `AppPasswordRequired` / `OAuthRequired` / `ProtonBridge` / `EnableImapFirst` → localized keys.
+- **`google_account_email(typed, from_tokens)`**: the typed address when valid, else Google's reported one when valid.
+- **`google_config(email)`**: Gmail preset servers, username = address, `AuthKind::OAuth2 { provider: "google" }`.
+- **`same_google_account(expected, from_tokens)`**: re-sign-in check (case-insensitive; absent e-mail accepted).
+- **`error_key(kind, oauth, user_cancelled)`**: Auth → wrong password / app-password hint (Google: access denied); Network → can't reach server; Tls → certificate; Cancelled → cancelled/timed out, or `None` when the user cancelled; Protocol/NotFound/Unsupported/Other → unexpected answer.
+- **`shows_error_detail(kind)`**: raw server text is shown except for Auth and Cancelled.
+- **`SetupFailure::from(FormError | RemoteError)`**: conversions for `?`.
+- **`SetupFailure::message(oauth, user_cancelled)`**: `FailureMessage` (Remote via `error_key` + detail rule; Different account; Google not configured; Save failed + DB error text); `None` for a user cancellation.
+- **`run_password_connect(plan, discover, test)`**: `Discover` → `discover` + `with_password_auth` (nothing found → `HostRequired`); then `test`; returns the tried config and the verdict.
+- **`run_google_sign_in(typed, existing, authorize, test)`**: authorize → pick the address (`InvalidEmail` if none) → refuse duplicates → `google_config` → `test(config, refresh_token)`; returns config + refresh token.
+- **`run_google_reauth(expected_login, authorize)`**: authorize → `DifferentGoogleAccount` unless `same_google_account` → refresh token.
+- **`AccountHealth::key()`** / **`is_problem()`**: status text key (`Error` reuses `StatusSyncError`) / whether it needs attention (sign-in failed, password missing, Google unavailable, error).
+- **`account_health(provider, uses_oauth, status, start_error)`**: local provider → `Local`; start error wins (MissingSecret → `SignInFailed` for OAuth else `PasswordMissing`; OAuthUnavailable → `GoogleUnavailable`; NotRemote → `Error`); then status (none/Connecting/Syncing → `Syncing`, Idle → `UpToDate`, Offline, AuthFailed → `SignInFailed`, Error).
+- **`ProviderBadge::for_provider(provider)`** / **`label(language)`**: `gmail`/`local`/other → badge; "Local" is localized, "IMAP"/"Gmail" are names.
+- **`security_label(security, language)`**: "TLS", "STARTTLS", localized "None".
+- Tests: e-mail shapes, port bounds, security/port switching, duplicates, form → config (trim, username override), discovery plan, validation order + keys, manual round trip, password-auth conversion, Gmail detection/config, Google address choice, re-sign-in match, preset notes, error mapping + detail rule, failure messages, the three job bodies with fake network closures, health folding, badges and security labels.
 
 ### `src/actions.rs`
 
 #### Types / constants
 
-- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`, `FindInMessage`, `MessagePrint`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
+- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`, `FindInMessage`, `MessagePrint`, `MessageReply`, `MessageReplyAll`, `MessageForward`, `MessageToggleRead`, `GetNewMail`, `SelectNextMessage`, `SelectPreviousMessage`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
+- `SelectNextMessage` / `SelectPreviousMessage` are handled by the message list itself (key context `MessageList`), not globally.
 - **struct `MoveMessageToFolder`**: Parameterized action carrying a folder storage path (`path: SharedString`). Dispatched when the user picks a move target from menus or the command palette.
 
 #### Functions / methods
@@ -78,7 +128,7 @@ _(No functions — only action types.)_
 - **`build_menus`** (pub, L65)
   - Signature: `pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu>`
   - Purpose: Builds the full menu tree for the main mail window.
-  - Behavior: Assembles App, File (compose + settings), Edit, View (sidebar toggle + command palette), and Message menus. Message actions are added only when `commands::command_enabled` allows them; move-to-folder items come from `ctx.move_targets()` filtered the same way. Flag label switches between flag/unflag based on `ctx.message_starred()`. Move targets appear in a submenu when non-empty.
+  - Behavior: Assembles App, File (compose + settings), Edit, View (sidebar toggle + command palette), Mailbox (Get New Mail → `GetNewMail`, always) and Message menus. Message starts with Reply / Reply All / Forward / Mark as Read|Unread (label from `ctx.message_unread()`), a separator, then the delete group (separator after it when non-empty), archive/junk/flag/print and Move To. Message actions are added only when `commands::command_enabled` allows them; move-to-folder items come from `ctx.move_targets()` filtered the same way. Flag label switches between flag/unflag based on `ctx.message_starred()`. Move targets appear in a submenu when non-empty.
 
 - **`build_compose_menus`** (pub, L158)
   - Signature: `pub fn build_compose_menus(language: Language) -> Vec<Menu>`
@@ -315,200 +365,205 @@ _(No functions — only action types.)_
 
 ### `src/compose.rs`
 
+Real compose window (new message, reply, reply all, forward). GPUI-free
+logic (validation, draft building, attachment reading/merging, titles,
+focus choice) lives in module functions so it is unit-tested without a
+window.
+
 #### Types / constants
 
-- **`COMPOSE_DEFAULT_WIDTH`** (pub, L23)
-  - Signature: `pub const COMPOSE_DEFAULT_WIDTH: f32 = 790.0`
-  - Purpose: Default compose window width in logical pixels on first open.
-  - Behavior: Used by `Config::default` and clamped upward by `clamp_compose_size`.
+- **`COMPOSE_DEFAULT_WIDTH`** / **`COMPOSE_DEFAULT_HEIGHT`** (pub, L32/L34)
+  - Purpose: Default compose window size (790×720) on first open.
+  - Behavior: Used by `Config::default`; clamped upward by `clamp_compose_size`.
 
-- **`COMPOSE_DEFAULT_HEIGHT`** (pub, L25)
-  - Signature: `pub const COMPOSE_DEFAULT_HEIGHT: f32 = 720.0`
-  - Purpose: Default compose window height in logical pixels on first open.
-  - Behavior: Persisted in config defaults and respected unless below minimum height.
+- **`COMPOSE_MIN_WIDTH`** / **`COMPOSE_MIN_HEIGHT`** (pub, L36/L38)
+  - Purpose: Minimum compose window size (480×400).
+  - Behavior: Enforced by `clamp_compose_size` and the window's `window_min_size`.
 
-- **`COMPOSE_MIN_WIDTH`** (pub, L27)
-  - Signature: `pub const COMPOSE_MIN_WIDTH: f32 = 480.0`
-  - Purpose: Minimum allowed compose window width.
-  - Behavior: Enforced by `clamp_compose_size` when restoring saved sizes.
+- **`COMPOSE_POSITION_UNSET`** (pub, L42)
+  - Purpose: Sentinel coordinate (-1) stored when the window was never placed.
+  - Behavior: Negative x/y make `open_bounds` center the window.
 
-- **`COMPOSE_MIN_HEIGHT`** (pub, L29)
-  - Signature: `pub const COMPOSE_MIN_HEIGHT: f32 = 400.0`
-  - Purpose: Minimum allowed compose window height.
-  - Behavior: Enforced by `clamp_compose_size` when restoring saved sizes.
+- **`ATTACHMENT_LIMIT_BYTES`** (pub, L46)
+  - Purpose: Total attachment cap per message (25 MB = 26 214 400 bytes).
+  - Behavior: Checked from file metadata before reading (`read_attachments`) and again on merge (`merge_attachments`).
 
-- **`COMPOSE_POSITION_UNSET`** (pub, L33)
-  - Signature: `pub const COMPOSE_POSITION_UNSET: f32 = -1.0`
-  - Purpose: Sentinel coordinate stored in config when the compose window has never been placed.
-  - Behavior: Negative x/y values cause `open_bounds` to center the window instead of using saved origin.
+- **`KEY_CONTEXT`** (private, L49) — `"ComposeView"`, key context of the compose root (scopes the send shortcut).
 
-- **`FIELD_LABEL_WIDTH`** (private, L65)
-  - Signature: `const FIELD_LABEL_WIDTH: f32 = 72.0`
-  - Purpose: Fixed width of the From/To/Cc/Subject label column in pixels.
-  - Behavior: Applied in `field_row` and the To row so header rows align visually.
+- **`SEND_MAC`** / **`SEND_OTHER`** (pub, L51/L53)
+  - Purpose: Send shortcut (`cmd-enter` / `ctrl-enter`).
+  - Behavior: Bound to `ComposeSend` in `KEY_CONTEXT` by `ensure_key_bindings`.
 
-- **`ComposeView`** (pub, L68)
-  - Signature: `pub struct ComposeView { accounts, from_account, show_cc_bcc, root, last_reported_bounds, white_background }`
-  - Purpose: GPUI entity rendering the standalone new-message window (visual mock).
-  - Behavior: Holds mock field state, a weak link to `RootView` for bounds persistence and close notification, cached white-background preference, and defers bounds sync to avoid re-entrancy during render.
+- **`FIELD_LABEL_WIDTH`** (private, L56) — 72 px label column of every header row.
+
+- **`BODY_MIN_LINES`** (private, L58) — 12-row minimum body height (big click target).
+
+- **`ComposeAccount`** (pub, L91)
+  - Signature: `pub struct ComposeAccount { id: i64, name, email, can_send: bool }`
+  - Purpose: An account offered in the From picker (built by `RootView::compose_accounts`).
+  - Behavior: `can_send == false` for local/demo accounts (listed, marked "Can't send", rejected on Send).
+
+- **`ComposeInit`** (pub, L101)
+  - Signature: `pub struct ComposeInit { account_id: Option<i64>, draft: mail_core::Draft }`
+  - Purpose: Prefill for reply / reply all / forward (built by `RootView::reply_to_selected`).
+
+- **`AddressField`** (private enum, L109) — `To | Cc | Bcc`, the address-list fields.
+
+- **`ComposeFocus`** (private enum, L117) — `To | Body`, initial keyboard focus.
+
+- **`ComposeFields`** (private, L124) — snapshot of to/cc/bcc/subject/body text for validation.
+
+- **`ReplyHeaders`** (private, L134) — `in_reply_to` + `references` carried from the init draft.
+
+- **`ComposeErrors`** (private, L142)
+  - Purpose: Per-field address errors (inline under To/Cc/Bcc) plus a banner message.
+  - `field(f)` returns the field's error; `field_mut(f)` its slot; `has_field_errors()` is true when any of to/cc/bcc is set.
+
+- **`AttachmentBatch`** (private, L173) — result of a background read: `files`, `too_large` (cap hit), `failed` (unreadable names).
+
+- **`ComposeKeysBound`** (private global, L183) — marker so the send bindings are registered once per app.
+
+- **`ComposeView`** (pub, L188)
+  - Purpose: GPUI entity of the compose window.
+  - Behavior: Owns `TextInput` entities for To/Cc/Bcc/Subject, a `TextArea` body (inside a scroll container tracked via `body_scroll`), the From index + picker state, Cc/Bcc visibility, attachments (+ count of background loads), reply headers, `ComposeErrors`, `sending`/`edited` flags, weak `RootView`, its own `AnyWindowHandle`, last reported bounds, last title, cached white-background pref and the `Changed` subscriptions.
 
 #### Functions / methods
 
 ##### Context: `module`
 
-- **`open_bounds`** (pub, L38)
-  - Signature: `pub fn open_bounds(origin: Point<gpui::Pixels>, window_size: Size<gpui::Pixels>, cx: &App) -> Bounds<gpui::Pixels>`
-  - Purpose: Computes initial window bounds from persisted compose geometry.
-  - Behavior: Clamps size via `clamp_compose_size`. When `compose_position_is_unset(origin)`, returns centered bounds; otherwise uses the saved origin with clamped size.
+- **`open_bounds`** (pub, L63)
+  - Signature: `pub fn open_bounds(origin: Point<Pixels>, window_size: Size<Pixels>, cx: &App) -> Bounds<Pixels>`
+  - Behavior: Clamps size via `clamp_compose_size`; centered bounds when `compose_position_is_unset(origin)`, else saved origin.
 
-- **`clamp_compose_size`** (pub, L52)
-  - Signature: `pub fn clamp_compose_size(window_size: Size<gpui::Pixels>) -> Size<gpui::Pixels>`
-  - Purpose: Ensures stored compose dimensions meet minimum width/height.
-  - Behavior: Takes the max of each dimension with `COMPOSE_MIN_WIDTH` / `COMPOSE_MIN_HEIGHT`.
+- **`clamp_compose_size`** (pub, L77) — max of each dimension with the minimums.
 
-- **`compose_position_is_unset`** (pub, L60)
-  - Signature: `pub fn compose_position_is_unset(origin: Point<gpui::Pixels>) -> bool`
-  - Purpose: Detects whether persisted coordinates mean "center on first open".
-  - Behavior: Returns true when either x or y converts to a negative `f32`.
+- **`compose_position_is_unset`** (pub, L85) — true when x or y is negative.
 
-- **`compose_body_colors`** (private, L363)
-  - Signature: `fn compose_body_colors(white_background: bool) -> (Option<Hsla>, Color)`
-  - Purpose: Chooses compose body background and placeholder colors, mirroring the reader.
-  - Behavior: When `white_background` is true, returns white fill plus a custom mid-gray placeholder; otherwise transparent background with `Color::Disabled` placeholder.
+- **`compose_body_colors`** (private, L961)
+  - Signature: `fn compose_body_colors(white_background: bool) -> (Option<Hsla>, Option<Hsla>)`
+  - Behavior: White-background pref → `(white, black)` (dark text on white, mirroring the reader); otherwise `(None, None)` (theme colors).
 
-- **`window_title`** (pub, L425)
-  - Signature: `pub fn window_title(language: Language) -> &'static str`
-  - Purpose: Localized window title for compose windows.
-  - Behavior: Resolves `Key::ComposeWindowTitle` for the given language.
+- **`ensure_key_bindings`** (private, L1039)
+  - Behavior: First call binds `SEND_MAC`/`SEND_OTHER` → `ComposeSend` in `KEY_CONTEXT` and sets `ComposeKeysBound`; later calls are no-ops.
 
-- **`compose_body_uses_white_background_when_reader_pref_is_on`** (private, L436)
-  - Signature: `fn compose_body_uses_white_background_when_reader_pref_is_on()` (test)
-  - Purpose: Verifies white-background color mapping for compose body.
-  - Behavior: Asserts `compose_body_colors(true)` yields a background and `compose_body_colors(false)` yields none with disabled placeholder color.
+- **`set_input`** (private, L1051) — `TextInput::set_content` on an entity (no `Changed` event).
 
-- **`clamp_compose_size_enforces_minimums`** (private, L445)
-  - Signature: `fn clamp_compose_size_enforces_minimums()` (test)
-  - Purpose: Ensures undersized stored dimensions are raised to minimums.
-  - Behavior: Clamps 100×200 to `COMPOSE_MIN_WIDTH` × `COMPOSE_MIN_HEIGHT`.
+- **`window_title`** (pub, L1056) — localized "New Message" (`Key::ComposeWindowTitle`), used by root for the initial title.
 
-- **`clamp_compose_size_leaves_large_sizes_unchanged`** (private, L452)
-  - Signature: `fn clamp_compose_size_leaves_large_sizes_unchanged()` (test)
-  - Purpose: Ensures sizes above minimums pass through unchanged.
-  - Behavior: Clamps 900×800 and expects identical output.
+- **`title_for_subject`** (private, L1062) — trimmed subject, or `window_title` when blank.
 
-- **`compose_position_unset_detects_negative_coordinates`** (private, L459)
-  - Signature: `fn compose_position_unset_detects_negative_coordinates()` (test)
-  - Purpose: Covers sentinel and normal coordinate detection.
-  - Behavior: Negative x or y is unset; (0, 0) is considered set.
+- **`account_index`** (private, L1073)
+  - Behavior: Position of `id` in `accounts`; else first `can_send` account; else 0.
 
-- **`window_title_is_localized`** (private, L469)
-  - Signature: `fn window_title_is_localized()` (test)
-  - Purpose: Checks English and Portuguese compose titles.
-  - Behavior: Expects "New Message" and "Nova mensagem".
+- **`account_label`** (private, L1080) — `Name <email>`, or the bare email when the name is blank.
 
-- **`new_view_defaults_to_first_account_and_hidden_cc_bcc`** (private, L475)
-  - Signature: `fn new_view_defaults_to_first_account_and_hidden_cc_bcc()` (test)
-  - Purpose: Validates initial `ComposeView` state with sample accounts.
-  - Behavior: Expects `from_account == 0`, hidden Cc/Bcc, and first account email as From address.
+- **`initial_focus`** (private, L1091)
+  - Behavior: `Body` when the init draft has `in_reply_to` or recipients (replies: caret before the quote); `To` for blank messages and forwards.
 
-- **`selected_from_address_is_empty_without_accounts`** (private, L484)
-  - Signature: `fn selected_from_address_is_empty_without_accounts()` (test)
-  - Purpose: Ensures empty account list yields empty From address.
-  - Behavior: Constructs view with no accounts and expects `""`.
+- **`invalid_address_message`** (private, L1101) — localized `"Invalid address: a, b"`.
 
-- **`toggle_cc_bcc_flips_visibility`** (private, L490)
-  - Signature: `fn toggle_cc_bcc_flips_visibility()` (test)
-  - Purpose: Documents expected toggle semantics (logic-only test).
-  - Behavior: Flips a boolean twice to assert show/hide behavior pattern.
+- **`parse_field`** (private, L1110) — `mail_core::parse_address_list`; invalid tokens become `(vec![], Some(message))`.
 
-- **`cycle_from_account_wraps`** (private, L499)
-  - Signature: `fn cycle_from_account_wraps()` (test)
-  - Purpose: Documents wrap-around account cycling (logic-only test).
-  - Behavior: Increments from last index modulo account count expecting index 0.
+- **`build_draft`** (private, L1120)
+  - Signature: `fn build_draft(from: Option<&ComposeAccount>, fields: &ComposeFields, reply: &ReplyHeaders, attachments: &[OutgoingAttachment], language: Language) -> Result<Draft, ComposeErrors>`
+  - Behavior: Errors in order: invalid tokens per field; no recipients at all (`ComposeNoRecipients` banner); missing or local From account (`ComposeLocalAccount` banner). On success: `from = Address(name, email)`, trimmed subject, body as `text`, `html: None`, reply headers and a copy of the attachments.
+
+- **`attachments_total`** (private, L1162) — sum of attachment byte lengths.
+
+- **`attachment_name`** (private, L1167) — file name of a path (lossy), or the whole path when it has none.
+
+- **`read_attachments`** (private, L1176)
+  - Signature: `fn read_attachments(paths: &[PathBuf], used: usize, cap: usize) -> AttachmentBatch`
+  - Behavior: Blocking (run via `background_spawn`). Non-files/unreadable → `failed`; files that would exceed `cap` (metadata size, re-checked after reading) → skipped with `too_large`; others read with `mail_core::guess_mime_type`.
+
+- **`merge_attachments`** (private, L1212) — appends files while the total stays within `cap`; returns whether any was rejected.
+
+- **`attachment_error_message`** (private, L1232) — banner text combining `ComposeAttachTooLarge` and `ComposeAttachReadFailed: names`; `None` when nothing failed.
 
 ##### Context: `ComposeView`
 
-- **`new`** (pub, L88)
-  - Signature: `pub fn new(accounts: Vec<Account>, root: WeakEntity<RootView>, white_background: bool) -> Self`
-  - Purpose: Creates a compose view seeded with accounts and preferences.
-  - Behavior: Initializes first account selected, Cc/Bcc hidden, no reported bounds, and stores the weak root handle plus white-background flag.
+- **`new`** (pub, L234)
+  - Signature: `pub fn new(accounts: Vec<ComposeAccount>, root: WeakEntity<RootView>, white_background: bool, init: Option<ComposeInit>, window: &mut Window, cx: &mut Context<Self>) -> Self`
+  - Behavior: Ensures key bindings, creates the editors (To placeholder `ComposeFieldPlaceholder`, body placeholder `ComposeBodyPlaceholder`, `min_lines(BODY_MIN_LINES)`, `track_scroll`), subscribes to `Changed` (address fields clear their error; all mark edited), picks the From account and calls `apply_init`.
 
-- **`set_white_background`** (pub(crate), L100)
-  - Signature: `pub(crate) fn set_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
-  - Purpose: Applies white-compose preference pushed from the main view without reading `RootView` during render.
-  - Behavior: Updates cached flag and calls `cx.notify()` only when the value changes.
+- **`apply_init`** (pub(crate), L305)
+  - Behavior: Replaces every field from `init` (blank when `None`): From via `account_index(init.account_id)`, To/Cc/Bcc via `format_address_list`, subject, body (caret at start), attachments, reply headers; shows Cc/Bcc when prefilled; clears errors, picker and `edited`; focuses per `initial_focus`. Root calls it when a reply is opened while the window is already open.
 
-- **`toggle_cc_bcc`** (private, L108)
-  - Signature: `fn toggle_cc_bcc(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Shows or hides Cc and Bcc header rows.
-  - Behavior: Flips `show_cc_bcc` and notifies for re-render.
+- **`set_white_background`** (pub(crate), L340) — updates the cached pref and notifies on change.
 
-- **`cycle_from_account`** (private, L114)
-  - Signature: `fn cycle_from_account(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Mock From-account selector cycling through available accounts.
-  - Behavior: No-op when `accounts` is empty; otherwise increments index modulo length and notifies.
+- **`mark_edited`** (private, L347) — sets `edited` and notifies.
 
-- **`send_message`** (pub(crate), L123)
+- **`on_address_changed`** (private, L353) — clears that field's inline error, marks edited.
+
+- **`toggle_cc_bcc`** (private, L359) — flips Cc/Bcc row visibility.
+
+- **`toggle_from_menu`** / **`close_from_menu`** (private, L364/L369) — open/close the From picker (never opens without accounts).
+
+- **`select_from_account`** (private, L375) — sets the From index (when in range), clears the banner, closes the picker.
+
+- **`selected_account`** (private, L383) — the chosen `ComposeAccount`, if any.
+
+- **`fields`** (private, L387) — snapshots the editors into `ComposeFields`.
+
+- **`can_send_now`** (private, L397) — no attachment loads pending and not already sending.
+
+- **`send_message`** (pub(crate), L405)
   - Signature: `pub(crate) fn send_message(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Placeholder send action until the domain layer exists.
-  - Behavior: Intentionally empty (ignores `cx`).
+  - Behavior: No-op unless `can_send_now`. Runs `build_draft`; on errors stores them (showing Cc/Bcc when they hold one). On success sets `sending` and, in a spawned task (the menu action reaches here while `RootView` is leased), calls `RootView::send_draft(account_id, draft)`, then `finish_send`; when sent, notifies `on_compose_window_closed` and removes the window via the stored handle.
 
-- **`attach_file`** (pub(crate), L128)
-  - Signature: `pub(crate) fn attach_file(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Placeholder attach action until a file picker exists.
-  - Behavior: Intentionally empty (ignores `cx`).
+- **`finish_send`** (private, L454) — clears `sending`; on `Err` shows the message in the banner; returns whether it was sent.
 
-- **`discard_draft`** (pub(crate), L133)
-  - Signature: `pub(crate) fn discard_draft(&mut self, window: &mut Window, cx: &mut Context<Self>)`
-  - Purpose: Mock discard that closes the compose window.
-  - Behavior: Delegates to `close_window`.
+- **`attach_file`** (pub(crate), L465) — `prompt_for_paths` (files, multiple) then `attach_paths` with the selection.
 
-- **`close_window`** (pub(crate), L138)
-  - Signature: `pub(crate) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>)`
-  - Purpose: Closes the compose window and notifies the main view.
-  - Behavior: Defers work: upgrades `root` to call `on_compose_window_closed`, then removes the window. Avoids synchronous root updates during close handling.
+- **`attach_paths`** (private, L482)
+  - Behavior: Increments pending loads (Send disabled), runs `read_attachments` on `background_spawn` with the bytes already attached, then `finish_attachments`. Also used by drag-and-drop (`ExternalPaths`).
 
-- **`sync_menus_if_active`** (private, L150)
-  - Signature: `fn sync_menus_if_active(&self, window: &Window, language: Language, cx: &mut Context<Self>)`
-  - Purpose: Keeps the global menu bar on the compose surface when this window is active.
-  - Behavior: Calls `app_menus::sync_compose_menus` when `window.is_window_active()`.
+- **`finish_attachments`** (private, L503) — decrements pending loads, merges under the cap, marks edited when files were added, shows `attachment_error_message` in the banner.
 
-- **`selected_from_address`** (private, L156)
-  - Signature: `fn selected_from_address(&self) -> &str`
-  - Purpose: Returns the email of the currently selected From account.
-  - Behavior: Looks up `accounts[from_account]` email or returns empty string.
+- **`remove_attachment`** (private, L520) — removes the chip at `index` and marks edited.
 
-- **`render_toolbar`** (private, L163)
-  - Signature: `fn render_toolbar(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement`
-  - Purpose: Builds the bottom toolbar (discard, attach, send).
-  - Behavior: Renders bordered row with trash icon (discard), flexible spacer, attachment icon, and filled Send button wired to mock handlers.
+- **`dismiss_error`** (private, L527) — hides the banner.
 
-- **`render_header`** (private, L206)
-  - Signature: `fn render_header(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement`
-  - Purpose: Builds the compose header fields (From, To, optional Cc/Bcc, Subject).
-  - Behavior: From row cycles accounts on click; To row shows placeholder and Cc/Bcc toggle; optional Cc/Bcc rows and Subject row use `field_row`. Uses theme border and muted label colors.
+- **`discard_draft`** (pub(crate), L534)
+  - Behavior: Closes immediately when nothing was edited; otherwise `window.prompt(Warning, ComposeDiscardConfirm, ComposeDiscardDetail, [Discard, Cancel])` and closes only on Discard.
 
-- **`cc_bcc_toggle`** (private, L288)
-  - Signature: `fn cc_bcc_toggle(&self, language: Language, text_color: Hsla, hover_bg: Hsla, cx: &mut Context<Self>) -> impl IntoElement`
-  - Purpose: Compact Cc/Bcc toggle aligned with 12px field rows.
-  - Behavior: Renders localized label with hover background, stops mouse-down propagation, and toggles Cc/Bcc visibility on click.
+- **`close_window`** (pub(crate), L559) — deferred: notifies `RootView::on_compose_window_closed`, then removes the window.
 
-- **`field_row`** (private, L312)
-  - Signature: `fn field_row(&self, label: &'static str, placeholder: impl Into<SharedString>, value_slot: Option<impl IntoElement>, border: Hsla) -> impl IntoElement`
-  - Purpose: One labeled header row with optional interactive value slot.
-  - Behavior: Fixed-width muted label, bottom border, and either a custom value element or disabled placeholder label.
+- **`sync_menus_if_active`** (private, L571) — `app_menus::sync_compose_menus` while the window is active.
 
-- **`render_body`** (private, L352)
-  - Signature: `fn render_body(&self, language: Language, white_background: bool) -> impl IntoElement`
-  - Purpose: Builds the message body placeholder area.
-  - Behavior: Flex-grow region with optional white background and localized body placeholder text.
+- **`sync_title`** (private, L578) — sets the platform title to `title_for_subject` when it changed (follows subject edits and language).
+
+- **`render_toolbar`** (private, L586) — Discard (trash), spacer, "Loading attachments…" while reads run, Attach, Send (dimmed and inert unless `can_send_now`).
+
+- **`render_header`** (private, L640) — From picker row, To row (+ Cc/Bcc toggle), optional Cc/Bcc rows, Subject row, each with its inline error.
+
+- **`render_from_picker`** (private, L698) — chosen account label + "Can't send" (warning color) for local accounts + chevron; renders the menu when open.
+
+- **`render_from_menu`** (private, L742) — `ui::ContextMenu` of accounts (local ones with a "Can't send" hint), `deferred(anchored())` under the From value.
+
+- **`cc_bcc_toggle`** (private, L768) — compact Cc/Bcc toggle that keeps the To row height.
+
+- **`field_row`** (private, L793)
+  - Signature: `fn field_row(&self, label: &'static str, value: AnyElement, trailing: Option<AnyElement>, error: Option<&str>, border: Hsla) -> impl IntoElement`
+  - Behavior: Fixed label column, value at `ui_text_size(-1)`, optional trailing control, error line (`Color::Error`) aligned with the value, bottom border.
+
+- **`render_attachments`** (private, L837) — chip per attachment: `attachments::file_family` icon, name, `attachments::human_size`, remove button with tooltip.
+
+- **`render_error_banner`** (private, L906) — error icon + message + dismiss, above the toolbar; `None` without a banner.
+
+- **`render_body`** (private, L938) — scrollable (`track_scroll`) body with the white-background colors; mouse-down anywhere in it focuses the text area.
 
 ##### Context: `Render for ComposeView`
 
-- **`render`** (private, L380)
-  - Signature: `fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement`
-  - Purpose: Renders the full compose window and wires actions/menus/bounds sync.
-  - Behavior: When windowed bounds change, defers `root.sync_compose_window_bounds`. Syncs compose menus if active. Builds vertical layout with header, body, toolbar; registers `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, and `ComposeClose` actions.
+- **`render`** (private, L970)
+  - Behavior: Defers `root.sync_compose_window_bounds` when bounds changed; syncs menus and title; root has `key_context("ComposeView")`, actions `ComposeSend`/`ComposeAttach`/`ComposeDiscard`/`ComposeClose`, file drop target (`drag_over` highlight + `on_drop::<ExternalPaths>` → `attach_paths`); lays out header, chips, body, banner, toolbar, plus a full-window click catcher while the From picker is open.
+
+##### Tests (`#[cfg(test)]`)
+
+- `compose_body_uses_white_background_when_reader_pref_is_on`, `clamp_compose_size_*`, `compose_position_unset_detects_negative_coordinates`, `window_title_is_localized`, `title_follows_subject_or_falls_back`, `send_shortcuts_parse` — window/geometry/title contracts.
+- `account_index_prefers_requested_then_sending_account`, `account_label_shows_name_and_email`, `initial_focus_is_body_for_replies_and_to_otherwise` — From choice and focus.
+- `build_draft_maps_fields_and_reply_headers`, `build_draft_reports_invalid_tokens_per_field`, `build_draft_requires_a_recipient_and_a_sending_account`, `compose_errors_field_mut_targets_the_field`, `invalid_address_message_is_localized` — validation contract.
+- `read_attachments_reads_files_and_reports_failures`, `merge_attachments_enforces_cap`, `attachment_name_uses_file_name`, `attachment_error_message_combines_parts`, `attachment_limit_is_25_mb` — attachments contract.
 
 
 ### `src/config.rs`
@@ -648,8 +703,39 @@ _(No functions — only action types.)_
 - **`nonce()`** (pub): 16 hex digits from the process's random hasher keys, the clock, a counter and the pid (CSP nonce and file name).
 - **`write_print_page(dir, html, nonce)`** (pub): Creates the private directory, removes stale pages, writes `message-<nonce>.html` as a new private file; returns its path.
 - **`remove_stale_pages(dir, now, age)`** (pub): Deletes `message-*.html` older than `age`; returns how many.
-- **`create_private_dir(dir)`** / **`create_private_file(path)`** (private): Unix modes 0700 / 0600 (create-new); elsewhere plain creation (Windows' temp dir is per user).
+- **`create_private_dir(dir)`** / **`create_private_file(path)`** (pub(crate); also used by `attachments`): Unix modes 0700 / 0600 (create-new); elsewhere plain creation (Windows' temp dir is per user).
 - Tests: nonces differ; pages are private, never overwritten; only stale pages are removed.
+
+### `src/attachments.rs`
+
+Reader attachment chips' presentation and the file side of Open / Save As… /
+Save to Downloads. Sender-supplied names are always sanitized; writers never
+overwrite (a ` (n)` suffix is added while a name is taken).
+
+#### Types / constants
+
+- **const `STALE_AFTER`** (private): 24 h; opened attachments older than this are deleted on the next open.
+- **const `MAX_STEM_CHARS`** (private): 120; longer stems are cut (extension kept).
+- **const `FALLBACK_NAME`** (private): `"attachment"`, used when nothing usable is left of a name.
+- **const `MAX_DEDUPE`** (private): 1000 ` (n)` candidates before giving up.
+- **enum `FileFamily`** (pub): `Image`, `Pdf`, `Archive`, `Audio`, `Video`, `Text`, `Other`.
+
+#### Functions / methods
+
+- **`FileFamily::icon(self)`** (pub): chip icon — `FileImage`, `FilePdf`, `FileArchive`, `FileAudio`, `FileVideo`, `FileText`, `File`.
+- **`file_family(mime_type, filename)`** (pub): family from the (case-insensitive) MIME top/sub type (`image/*`, `audio/*`, `video/*`, `text/*`, `application/pdf`, archive and word-processor types); generic types fall back to `family_from_extension`.
+- **`family_from_extension(filename)`** (private): family from the lowercase extension; unknown → `Other`.
+- **`human_size(bytes, language)`** (pub): `"N B"` under 1 KB, else KB/MB/GB/TB base 1024 with one decimal under 10 (`"1.2 MB"`, `"15 KB"`); Portuguese uses a decimal comma.
+- **`sanitize_filename(name)`** (pub): last `/`- or `\`-separated segment only; control chars and `: * ? " < > |` → `_`; trims surrounding whitespace and dots (no hidden dotfiles); empty → `"attachment"`; stem cut to `MAX_STEM_CHARS`; Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) get a `_` prefix.
+- **`split_extension(name)`** (private): `(stem, ext)`; a leading dot or an "extension" over 16 chars is not an extension.
+- **`numbered_name(name, n)`** (private): `name` for 0, else `stem (n).ext`.
+- **`extract(raw, part_index)`** (pub): decoded bytes via `mail_core::attachment_content`; `NotFound` error when the part is missing.
+- **`open_dir()`** (pub): `<temp dir>/bgmail-attachments`.
+- **`downloads_dir()`** (pub) / **`downloads_dir_in(home)`** (private): `~/Downloads` when it exists, else home (`HOME`/`USERPROFILE`), else the temp dir.
+- **`write_unique(dir, filename, data, private)`** (pub): creates `dir` (private → 0700 via `print::create_private_dir`), then create-new files `sanitize_filename(filename)`, `… (1)`, … until one is free (private → 0600); writes `data`, returns the path. Races are safe (create-new, `AlreadyExists` → next name).
+- **`write_for_open(filename, data)`** (pub): removes stale files in `open_dir()`, then private `write_unique` there.
+- **`remove_stale_files(dir, now, age)`** (pub): deletes regular files older than `age`; returns how many (best effort).
+- Tests: families, sizes (EN/PT), sanitizing (traversal, Windows paths, control/reserved chars, dotfiles, device names, long names), numbering, unique/private writes (Unix modes), stale removal, Downloads fallback, part extraction from a raw MIME message, `write_for_open`.
 
 ### `src/data.rs`
 
@@ -962,7 +1048,7 @@ _(None at module top level — conversion helpers only.)_
 - **`Key`** (pub, L38)
   - Signature: `pub enum Key { … }` (66 UI string keys)
   - Purpose: Typed catalog of translatable UI chrome strings.
-  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`), plain-text fallback notices (`NoticeTooLarge`, `NoticeTooDeep`, `NoticeCrashed`, `NoticeShowFormatted`) and status strings.
+  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`), plain-text fallback notices (`NoticeTooLarge`, `NoticeTooDeep`, `NoticeCrashed`, `NoticeShowFormatted`), status strings, Settings ▸ Accounts (`Account*`: form labels, provider notes, health, errors) and `NotificationsHint`.
 
 - **`GlobalLanguage`** (private, L332)
   - Signature: `struct GlobalLanguage(Language)`
@@ -1139,7 +1225,7 @@ _(None at module top level — conversion helpers only.)_
 - **`register_global_menu_actions`** (private, L105)
   - Signature: `fn register_global_menu_actions(cx: &mut App)`
   - Purpose: Registers app-wide action handlers for macOS menu bar.
-  - Behavior: Maps each GPUI action to deferred menu/compose handlers so items stay enabled when focus is in a compose/settings window.
+  - Behavior: Maps each GPUI action to deferred menu/compose handlers so items stay enabled when focus is in a compose/settings window. `MessageReply`/`MessageReplyAll`/`MessageForward`/`MessageToggleRead` → the matching `CommandId`, `GetNewMail` → `CommandId::SyncNow` (via `schedule_menu_command`, which checks `command_enabled`).
 
 - **`app_menus`** (private, L161)
   - Signature: `fn app_menus() -> Vec<Menu>`
@@ -1183,15 +1269,15 @@ _(None at module top level — conversion helpers only.)_
 - **struct `ResizeDrag`**: GPUI drag payload wrapping `ResizeHandle`.
 - **enum `Selection`**: Sidebar selection — unified `Global` mailbox or account `Mailbox` with folder path.
 - **struct `FoldAnim`**: In-flight account fold animation token and direction.
-- **enum `SettingsSection`**: Settings window section (General, Accounts, Appearance, Notifications, Privacy).
 - **struct `ReaderSignature`**: Memo key for the reader document (message id, page colors (incl. the white-background preference), "show formatted anyway", and whether remote content loads).
+- **struct `AttachmentMenu`**: Open attachment chip menu: window position and the `AttachmentRow` it acts on.
+- **const `TOOLBAR_FIXED_OVERHEAD`** (140px, compose + get-mail) / **`ACTIONS_1/2/3_WIDTH`** (92 / 193 / 322px): toolbar budget used by `visible_action_groups`.
 - **struct `ReaderMenu`**: Open reader context menu: window position, `HitInfo`, whether text was selected.
 - **struct `FindBar`**: Open find bar: query `TextInput`, match count, current match, input observation.
 - **const `MAX_FORMATTED_HTML_BYTES`** (1 MB): HTML bodies above it are shown as plain text unless the user asks for the formatted version.
 - **enum `ReaderNotice`**: Why a message is shown as plain text: `TooLarge`, `Unrenderable` (`RenderError`), `Crashed` (crash guard).
 - **`plain_text_reason`** (private): `Crashed` if the message crashed the renderer, else `TooLarge` above the limit unless shown formatted anyway, else `None`.
-- **struct `RootView`**: Main application view state (layout, selection, reader `HtmlView`, search, palette, auxiliary windows, persistence).
-- **struct `SettingsView`**: Preferences window content with section navigation.
+- **struct `RootView`**: Main application view state (layout, selection, reader `HtmlView`, search, palette, auxiliary windows, persistence). List state: `list_scroll: UniformListScrollHandle`, `list_focus`, `attachments` (chips of the selected message), `attachment_menu`.
 
 #### Functions / methods
 
@@ -1211,29 +1297,30 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn chevron_svg(color: Hsla, angle: f32) -> Svg`
   - Purpose: Rotatable chevron SVG for account disclosure.
   - Behavior: Renders right-pointing chevron rotated by `angle` radians (0= collapsed, π/2= expanded).
+- **`visible_attachments`** (private)
+  - Signature: `fn visible_attachments(db, detail: Option<&MessageDetail>) -> Vec<AttachmentRow>`
+  - Purpose: Chips of the selected message.
+  - Behavior: Non-inline `db.list_attachments` rows; empty without a message or while `body_state == BODY_STATE_HEADERS` (BodyReady reloads the detail).
+- **`system_folder_rank`** (private)
+  - Signature: `fn system_folder_rank(path: &str) -> Option<usize>`
+  - Purpose: Sidebar order of system folders.
+  - Behavior: Inbox, Drafts, Sent, Archive, Junk, Trash, Flagged → 0..6; user folders `None`.
+- **`sidebar_ordered`** (private)
+  - Signature: `fn sidebar_ordered(folders: Vec<Folder>) -> Vec<Folder>`
+  - Purpose: Folder order for the sidebar (and move targets).
+  - Behavior: System folders by rank, then user folders by lowercase display name (path when empty). Applied when folders are loaded (`new_with_database`, `reload_from_database`).
+- **`adjacent_index`** (private)
+  - Signature: `fn adjacent_index(current: Option<usize>, len: usize, step: isize) -> Option<usize>`
+  - Purpose: Keyboard row movement.
+  - Behavior: `None` for an empty list; no current → first (down) / last (up); else clamped `current + step`.
 - **`ui_accounts`** (private, L461)
   - Signature: `fn ui_accounts(accounts: &[storage::Account]) -> Vec<data::Account>`
   - Purpose: Adapts storage accounts for legacy compose/settings UI types.
   - Behavior: Maps name/email fields; leaves mailboxes empty.
-- **`settings_row`** (private, L3684)
-  - Signature: `fn settings_row(label: impl Into<SharedString>, value: impl Into<SharedString>) -> impl IntoElement`
-  - Purpose: Settings UI row with muted label and value.
-  - Behavior: Horizontal flex row with spaced labels.
 - **`can_open_command_palette`** (pub(crate), L3911)
   - Signature: `pub(crate) fn can_open_command_palette(main_window_active: bool) -> bool`
   - Purpose: Gate for opening the command palette.
   - Behavior: Returns `main_window_active` — palette only opens when main window is key.
-##### Context: `SettingsSection`
-
-- **`title_key`** (private, L227)
-  - Signature: `fn title_key(self) -> Key`
-  - Purpose: Locale key for section title.
-  - Behavior: Maps each section to its Key variant.
-
-- **`icon`** (private, L237)
-  - Signature: `fn icon(self) -> IconName`
-  - Purpose: Icon for section nav.
-  - Behavior: Maps each section to Settings/Account/Palette/Flag/Shield icons.
 ##### Context: `RootView`
 
 - **`new`** (pub, L473)
@@ -1254,12 +1341,12 @@ _(None at module top level — conversion helpers only.)_
 - **`clear_message_selection`** (private, L605)
   - Signature: `fn clear_message_selection(&mut self)`
   - Purpose: Clears selected message and reader state.
-  - Behavior: Resets selected id, detail, and reader signature.
+  - Behavior: Resets selected id, detail, attachment chips + their menu, and reader signature.
 
 - **`reload_selected_detail`** (private, L611)
   - Signature: `fn reload_selected_detail(&mut self)`
   - Purpose: Reloads full body for selected message.
-  - Behavior: Fetches MessageDetail from DB when an id is selected.
+  - Behavior: Fetches MessageDetail from DB when an id is selected, reloads `attachments` (`visible_attachments`) and drops an attachment menu that belongs to another message.
 
 - **`on_message_selection_changed`** (private, L617)
   - Signature: `fn on_message_selection_changed(&mut self, cx: &mut Context<Self>)`
@@ -1306,10 +1393,45 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Runs closure on compose view if open.
   - Behavior: Updates compose entity and returns closure result or None.
 
-- **`refresh_after_message_action`** (private, L698)
-  - Signature: `fn refresh_after_message_action(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Post-action UI refresh.
-  - Behavior: Reloads list, syncs menus, invalidates the reader signature, notifies.
+- **`move_selection`** (private)
+  - Signature: `fn move_selection(&mut self, step: isize, cx) -> bool`
+  - Purpose: Keyboard navigation (`SelectNextMessage` / `SelectPreviousMessage`).
+  - Behavior: `select_adjacent_message`, then `reveal_selected_message` and `on_message_selection_changed` (opens it: marks read, fetches a missing body); false when nothing moved.
+
+- **`select_adjacent_message`** (private)
+  - Signature: `fn select_adjacent_message(&mut self, step: isize) -> bool`
+  - Purpose: Pure core of `move_selection`.
+  - Behavior: Moves `selected_message_id` by `adjacent_index` (clamped, no wrap; no selection → first row going down, last going up) and invalidates the reader signature.
+
+- **`reveal_selected_message`** (private)
+  - Signature: `fn reveal_selected_message(&self)`
+  - Purpose: Keeps the selected row visible.
+  - Behavior: `UniformListScrollHandle::scroll_to_item(ix, Top)` (only scrolls when the row is out of view). Also called by `run_message_action` for the row that replaced a removed message.
+
+- **`attachment_raw`** (private)
+  - Signature: `fn attachment_raw(&mut self, attachment, failure: Key, cx) -> Option<Vec<u8>>`
+  - Purpose: Raw RFC 822 source holding an attachment.
+  - Behavior: `db.message_raw(message_id)`; a missing body shows `failure` in the status bar.
+
+- **`open_attachment`** (pub(crate))
+  - Signature: `pub(crate) fn open_attachment(&mut self, attachment: AttachmentRow, cx)`
+  - Purpose: Chip menu ▸ Open.
+  - Behavior: Closes the menu; on a background task `attachments::extract` + `attachments::write_for_open` (private temp dir), then `cx.open_with_system`; failures → "Could not open the attachment: …" status note.
+
+- **`save_attachment_as`** (pub(crate))
+  - Signature: `pub(crate) fn save_attachment_as(&mut self, attachment: AttachmentRow, cx)`
+  - Purpose: Chip menu ▸ Save As….
+  - Behavior: `cx.prompt_for_new_path(downloads_dir, sanitized name)`; on a chosen path extracts and writes (overwrite confirmed by the dialog) on a background task; result via `report_attachment_saved`. Cancel does nothing.
+
+- **`save_attachment_to_downloads`** (pub(crate))
+  - Signature: `pub(crate) fn save_attachment_to_downloads(&mut self, attachment: AttachmentRow, cx)`
+  - Purpose: Chip menu ▸ Save to Downloads.
+  - Behavior: Background extract + `attachments::write_unique(downloads_dir, name, data, false)` (never overwrites); result via `report_attachment_saved`.
+
+- **`report_attachment_saved`** (private)
+  - Signature: `fn report_attachment_saved(&mut self, result: io::Result<PathBuf>, cx)`
+  - Purpose: Status note after a save.
+  - Behavior: "Attachment saved: <path>" or "Could not save the attachment: <error>".
 
 - **`ensure_command_palette`** (private, L705)
   - Signature: `fn ensure_command_palette(&mut self, cx: &mut Context<Self>)`
@@ -1354,6 +1476,7 @@ _(None at module top level — conversion helpers only.)_
 - **`remote_allowed_for`** (private): Whether a message loads remote content: `load_remote_images` or loaded from the shield this session (`remote_allowed`).
 - **`load_remote_for_selected`** (private): Shield click: adds the selected message to `remote_allowed` (re-renders through the `ReaderSignature`).
 - **`set_load_remote_images`** (private): "Always load remote images" (Settings ▸ Privacy): persists and refreshes windows.
+- **`set_notifications_enabled`** (pub(crate)): Settings ▸ Notifications switch: sets `notifications_enabled`, persists via `request_save`, notifies.
 
 - **`print_message`** (pub(crate))
   - Signature: `pub(crate) fn print_message(&mut self, cx: &mut Context<Self>)`
@@ -1363,7 +1486,7 @@ _(None at module top level — conversion helpers only.)_
 - **`delete_message_to_trash`** (pub(crate), L830)
   - Signature: `pub(crate) fn delete_message_to_trash(&mut self, cx: &mut Context<Self>)`
   - Purpose: Moves selected message to trash.
-  - Behavior: No-op without selection; DB move then refresh_after_message_action.
+  - Behavior: No-op without selection; `run_message_action(mail_actions::trash)` (next row selected and revealed).
 
 - **`delete_message_permanently`** (pub(crate), L838)
   - Signature: `pub(crate) fn delete_message_permanently(&mut self, cx: &mut Context<Self>)`
@@ -1429,6 +1552,11 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn request_save(&mut self, cx: &mut Context<Self>)`
   - Purpose: Debounced settings persistence.
   - Behavior: Increments save token, spawns timer; latest token wins, writes on background thread.
+
+- **`ensure_list_focus`** (private)
+  - Signature: `fn ensure_list_focus(&mut self, cx) -> FocusHandle`
+  - Purpose: Focus handle of the message list (key context `MessageList`).
+  - Behavior: Created on first use. `render` defers focusing it whenever nothing in the window is focused (startup, after the search field blurs) and the palette is closed; clicking a row focuses it.
 
 - **`ensure_scrollbar_states`** (private, L1047)
   - Signature: `fn ensure_scrollbar_states(&mut self, cx: &mut Context<Self>)`
@@ -1577,6 +1705,11 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Opens or focuses compose window.
   - Behavior: Creates ComposeView window or activates existing; syncs compose menus.
 
+- **`open_compose_with`** (pub(crate))
+  - Signature: `pub(crate) fn open_compose_with(&mut self, init: Option<ComposeInit>, _window, cx: &mut Context<Self>)`
+  - Purpose: Opens the compose window, optionally prefilled (reply / reply all / forward).
+  - Behavior: When a compose window is open, hands a `Some(init)` to it via `ComposeView::apply_init` and activates it. Otherwise opens a window with persisted bounds, the localized title and `ComposeView::new(self.compose_accounts(), root, compose_white_background, init, window, cx)`; `on_window_should_close` notifies `on_compose_window_closed`.
+
 - **`select_mailbox`** (private, L1780)
   - Signature: `fn select_mailbox(&mut self, selection: Selection, cx: &mut Context<Self>)`
   - Purpose: Selects sidebar mailbox with UI update.
@@ -1655,7 +1788,7 @@ _(None at module top level — conversion helpers only.)_
 - **`render_toolbar`** (private, L2067)
   - Signature: `fn render_toolbar(&mut self, window, cx) -> impl IntoElement`
   - Purpose: Renders unified top toolbar.
-  - Behavior: Window drag region, list controls when docked, compose/actions/search, theme and sidebar toggles.
+  - Behavior: Window drag region, list controls when docked, compose + Get mail (`IconName::Refresh` → `sync_now`), centered action groups and search, sidebar/settings toggles. Groups: reply / reply all / forward (→ `reply_to_selected(ReplyKind::…)`), trash / archive / junk, flag / mark read|unread (`IconName::Mail`, label from the unread state) / move. Each message button is `.disabled` unless `commands::command_enabled` allows its command; tooltips show the shortcuts.
 
 - **`render_search_control`** (private, L2321)
   - Signature: `fn render_search_control(&self, compact_search, search_bg, language, cx) -> AnyElement`
@@ -1714,13 +1847,23 @@ _(None at module top level — conversion helpers only.)_
 
 - **`render_message_list`** (private, L2766)
   - Signature: `fn render_message_list(&mut self, cx) -> impl IntoElement`
-  - Purpose: Renders scrollable message list column.
-  - Behavior: Optional list header when sidebar undocked, message rows, scrollbar.
+  - Purpose: Renders the virtualized message list column.
+  - Behavior: Optional list header when sidebar undocked; GPUI `uniform_list` over `list_messages` (only visible rows are built; uniform row height measured from the first row) tracked by `list_scroll: UniformListScrollHandle`; the existing `ui::Scrollbar` reads its `base_handle`. A click below the rows clears the selection; search with no results shows "No results". The column tracks `list_focus`, sets key context `MessageList` and handles `SelectNextMessage` / `SelectPreviousMessage`.
 
 - **`render_message_row`** (private, L2847)
   - Signature: `fn render_message_row(&self, message, cx) -> impl IntoElement`
   - Purpose: Single message list row.
-  - Behavior: Sender, subject preview, date, unread/flag/attachment indicators; click selects message.
+  - Behavior: Sender, subject preview, date, unread/flag/attachment indicators; click focuses the list and selects/opens the message.
+
+- **`render_attachments`** (private)
+  - Signature: `fn render_attachments(&self, cx) -> Option<impl IntoElement>`
+  - Purpose: Attachment chips under the reader header (after To/Cc).
+  - Behavior: `None` without attachments; otherwise a wrapping row of bordered chips (family icon, single-line file name, muted `human_size`), max 280px wide; clicking a chip opens `AttachmentMenu` at the click.
+
+- **`render_attachment_menu`** (private)
+  - Signature: `fn render_attachment_menu(&self, cx) -> impl IntoElement`
+  - Purpose: Chip menu (`ui::ContextMenu`): Open, separator, Save As…, Save to Downloads.
+  - Behavior: Anchored at the click (snapped to the window); an occluding overlay closes it on any outside mouse-down; entries call `open_attachment` / `save_attachment_as` / `save_attachment_to_downloads`.
 
 - **`render_privacy_shield`** (private, L2968)
   - Signature: `fn render_privacy_shield(&self, cx) -> impl IntoElement`
@@ -1750,39 +1893,6 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn render_status_bar(&self, cx) -> impl IntoElement`
   - Purpose: Bottom status bar.
   - Behavior: Counts on the left; on the right the reader zoom (`status_zoom`, only when not 100%) and the unread count; the hovered link URL centered when present.
-##### Context: `SettingsView`
-
-- **`new`** (private, L3379)
-  - Signature: `fn new(accounts: Vec<data::Account>, root: WeakEntity<RootView>) -> Self`
-  - Purpose: Constructs settings view.
-  - Behavior: Stores accounts, default General section, weak root link.
-
-- **`close_window`** (private, L3387)
-  - Signature: `fn close_window(&mut self, window, cx: &mut Context<Self>)`
-  - Purpose: Closes settings window.
-  - Behavior: Notifies root and removes window.
-
-- **`render_nav`** (private, L3399)
-  - Signature: `fn render_nav(&self, cx) -> impl IntoElement`
-  - Purpose: Settings section sidebar nav.
-  - Behavior: Lists sections with icons; click switches section.
-
-- **`render_content`** (private, L3443)
-  - Signature: `fn render_content(&self, cx) -> impl IntoElement`
-  - Purpose: Active settings section body.
-  - Behavior: Renders General/Accounts/Appearance/Notifications/Privacy content.
-
-- **`render_language_picker`** (private, L3609)
-  - Signature: `fn render_language_picker(&self, language, cx) -> impl IntoElement`
-  - Purpose: Language selector control.
-  - Behavior: Buttons for EN/PT; updates locale global and refreshes app.
-
-##### Context: `Render for SettingsView`
-
-- **`render`** (private, L3660)
-  - Signature: `fn render(&mut self, _window, cx: &mut Context<Self>) -> impl IntoElement`
-  - Purpose: Settings window layout.
-  - Behavior: Split nav + content with titlebar close handling.
 ##### Context: `Render for RootView`
 
 - **`render`** (private, L3697)
@@ -1986,6 +2096,86 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Test: command_context trash detection.
   - Behavior: After trash move, message_in_trash true in context.
 
+- **`sidebar_orders_system_folders_then_user_folders_alphabetically`** / **`adjacent_index_clamps_and_starts_from_the_ends`** / **`keyboard_selection_moves_through_the_list`** / **`attachments_follow_the_selected_message_body`** (tests): sidebar folder order and ranks; row-step clamping; arrow-key selection over the seeded list (no wrap); chips list only non-inline attachments, none for headers-only bodies, cleared with the selection.
+
+### `src/settings.rs`
+
+Settings window (General, Accounts, Appearance, Notifications, Privacy).
+Accounts and preferences live in `RootView`; this view reads them through a
+weak handle and re-renders when the root notifies. Network work (discovery,
+login tests, Google sign-in) runs on the background executor; decisions are
+in `account_setup`.
+
+#### Types / constants
+
+- **consts `DISCOVERY_DELAY`** (600 ms debounce after the last e-mail keystroke), **`DISCOVERY_TIMEOUT`** (8 s per autoconfig request), **`OAUTH_TIMEOUT`** (5 min browser sign-in).
+- **enum `SettingsSection`** (pub(crate)): General, Accounts, Appearance, Notifications, Privacy; `ALL` in nav order.
+- **struct `AccountForm`** (private): the inline "Add account" form — `TextInput`s (name, e-mail, masked password, IMAP/SMTP host+port, username), IMAP/SMTP `Security`, `show_manual`, `manual_edited` (user typed in a server field → discovery stops overwriting), `gmail_app_password` (Gmail over IMAP instead of Google sign-in), cached `google_client` (`oauth_provider("google")`), discovery `discovery_seq`/`looking_up`/task, `checking` + connect task, current `FailureMessage`, input subscriptions.
+- **enum `OAuthTarget`** (private): `NewAccount` or `Account(id)` (re-sign-in).
+- **struct `OAuthFlow`** (private): running sign-in — target, `CancelToken`, `user_cancelled`, finish + browser-opener tasks. Only one at a time (it owns a loopback port).
+- **struct `SettingsView`** (pub(crate)): `section`, weak `root`, root observation, lazy `form`, `form_open`, inline `password_edit (account id, masked TextInput)`, `oauth`, per-account `account_messages`.
+
+#### Functions / methods
+
+##### Context: `SettingsSection`
+
+- **`title_key`** (private): locale key of the section title.
+- **`icon`** (private): nav icon (Settings/Account/Palette/Flag/Shield).
+
+##### Context: `AccountForm`
+
+- **`new(language, cx)`** (private): creates the inputs (password masked via `TextInput::set_masked`), subscribes to `TextInputEvent::Changed`: e-mail → `SettingsView::on_email_changed`; name/password → clear the message; server fields → `manual_edited = true` + clear the message. Defaults TLS/STARTTLS; reads the Google client once.
+- **`text(input, cx)`** (private): content of an input as `String`.
+- **`email(cx)`** (private): trimmed e-mail field.
+- **`manual_fields(cx)`** (private): snapshot of the server fields as `account_setup::ManualFields`.
+- **`set_manual(fields, cx)`** (private): writes fields into the inputs with `set_content` (no `Changed` event, so not counted as a user edit) and sets both securities.
+- **`uses_google_sign_in(email)`** (private): Gmail address + Google client configured + user didn't choose the app-password path → the password field becomes "Sign in with Google".
+
+##### Context: `SettingsView`
+
+- **`new(_accounts, root)`** (pub(crate)): General section, no form; the `data::Account` snapshot from the caller is ignored (the live list comes from `root`).
+- **`show_section(section, cx)`** (pub(crate)): switches section; `Accounts` also opens the form (welcome-screen "Add account").
+- **`close_window(window, cx)`** (pub(crate)): deferred — notifies `RootView::on_settings_window_closed`, removes the window.
+- **`accounts(cx)`** / **`existing_emails(cx)`** (private): `RootView::accounts()` snapshot / their addresses (duplicate check).
+- **`health(account, cx)`** (private): `account_setup::account_health` from provider, `uses_oauth`, `RootView::account_status` and `account_start_error`.
+- **`on_email_changed(cx)`** (private): clears the message, bumps `discovery_seq`, drops a pending lookup. Unless `manual_edited`: invalid address → blank server fields; preset domain → fields from the preset immediately; otherwise blank fields and a task that waits `DISCOVERY_DELAY`, sets `looking_up`, runs `protocols::discover_config` on the background executor and fills the fields if the sequence is still current and the user hasn't edited them.
+- **`set_security(imap, security, cx)`** (private): segmented-control click; the port follows `port_after_security_change`; marks the fields edited.
+- **`connect(cx)`** (private): ignored while busy; `plan_password_connect` (errors → form message); otherwise `checking`, and a background job `run_password_connect(plan, discover_config, test_account(Credential::Password))`, then `finish_password_connect`.
+- **`finish_password_connect(name, password, outcome, cx)`** (private): clears `checking`; shows the tried servers in the fields (unless edited); success → `add_account`; failure → message, and opens "Manual settings" for non-auth failures.
+- **`add_account(name, config, secret, cx)`** (private): `RootView::add_remote_account`; success drops the form and closes it; an error becomes `SetupFailure::SaveFailed`.
+- **`start_oauth(target, provider, job, finish, cx)`** (private): one sign-in: creates a `CancelToken` and a bounded channel; the background job gets an `authorize` closure (`protocols::authorize(provider, open_browser = send URL on the channel, cancel, OAUTH_TIMEOUT)`); a foreground task receives the URL and calls `cx.open_url`; on completion takes `self.oauth` and calls `finish(this, result, user_cancelled)`.
+- **`sign_in_with_google(cx)`** (private): needs the Google client (else `GoogleUnavailable` message) and an empty or valid e-mail; job = `run_google_sign_in` with `test_account(Credential::OAuth)`; success → `add_account(name, config, refresh_token)`.
+- **`sign_in_again(account_id, cx)`** (private): OAuth accounts only; provider missing → row message; job = `run_google_reauth(username)`; success → `RootView::update_account_secret(id, refresh_token)`; failure → row message.
+- **`cancel_oauth(cx)`** (private): marks `user_cancelled` and cancels the token (the finish handler then resets without an error).
+- **`begin_password_edit(account_id, window, cx)`** (private): inline masked "New password" input, focused.
+- **`save_password(cx)`** (private): non-empty → `RootView::update_account_secret` (stores in the keychain, reconnects); closes the editor.
+- **`confirm_remove(account_id, window, cx)`** (private): `window.prompt` (Warning; local mail is deleted) with Remove / Cancel; Remove → `RootView::remove_account`, clears row state.
+- **`render_nav(cx)`** (private): section list with icons; click switches section.
+- **`render_content(window, cx)`** (private): section title + body. General: name/version/language; Accounts: `render_accounts`; Appearance: theme + white reader/compose switches; Notifications: switch bound to `RootView::notifications_enabled` (`set_notifications_enabled`) + hint; Privacy: always-load-remote-images switch.
+- **`render_accounts(window, cx)`** (private): bordered list of `render_account_row`, then the form (created lazily) when `form_open` or no remote account exists, else an "Add account…" button.
+- **`render_account_row(account, last, window, cx)`** (private): name + provider badge, e-mail, health text (error/warning/success/muted color; "Finish signing in…" while its sign-in runs). Actions: Cancel (sign-in running) / "Sign in again" (OAuth) / "Update password" (password, non-local), and "Remove" (all, incl. local). Inline password editor (Save / Cancel) and the row's failure message below.
+- **`render_form(has_remote, window, cx)`** (private): title, Name, E-mail, preset note; Google mode: "Sign in with Google" + "Use an app password instead"; otherwise (Gmail without client: the `BGMAIL_GOOGLE_CLIENT_ID/SECRET` explanation) Password (+ "Sign in with Google instead" for Gmail with a client). "Manual settings" disclosure with the "Looking up…" hint (hidden in Google mode). Message, then footer: while signing in "Finish signing in in your browser…" + Cancel; else Cancel (only when a remote account exists) and Connect ("Checking…" and no click while busy).
+- **`render_manual(form, window, cx)`** (private): IMAP and SMTP blocks (host, port, security picker) and the user name.
+- **`render_language_picker(language, cx)`** (private): EN/PT buttons; sets the locale global.
+
+##### Context: `Drop for SettingsView`
+
+- **`drop`** (private): cancels a running sign-in so the loopback listener doesn't wait out its timeout after the window closes.
+
+##### Context: `Render for SettingsView`
+
+- **`render`** (private): registers the root observation on first render; nav + scrollable content; `ComposeClose` closes the window.
+
+##### Context: `module`
+
+- **`settings_row(label, value)`** (private): muted label / value row.
+- **`input_box(input, window, cx)`** (private): bordered field box; border follows focus.
+- **`labeled_field(label, input, window, cx)`** (private): small muted caption above an `input_box`.
+- **`security_picker(imap, selected, language, cx)`** (private): TLS / STARTTLS / None segmented buttons → `set_security`.
+- **`badge_element(label, cx)`** (private): provider badge.
+- **`note_element(text)`** (private): warning-icon note (provider requirement, Google setup).
+- **`message_element(message, language)`** (private): localized error line + optional muted raw detail.
+
 ### `src/shortcuts.rs`
 
 #### Types / constants
@@ -2001,6 +2191,12 @@ _(None at module top level — conversion helpers only.)_
 - **const `COMPOSE_CLOSE_MAC` / `COMPOSE_CLOSE_OTHER`**: Binding strings for closing compose window.
 - **const `FIND_MAC` / `FIND_OTHER`**: `cmd-f` / `ctrl-f`, open the reader's find bar.
 - **const `PRINT_MAC` / `PRINT_OTHER`**: `cmd-p` / `ctrl-p`, print the selected message.
+- **const `MESSAGE_LIST_CONTEXT`**: `"MessageList"`, key context of the focused message list.
+- **const `REPLY_*` / `REPLY_ALL_*` / `FORWARD_*`**: `cmd-r`/`ctrl-r`, `cmd-shift-r`/`ctrl-shift-r`, `cmd-shift-f`/`ctrl-shift-f` (macOS Mail).
+- **const `TOGGLE_READ_MAC` / `TOGGLE_READ_OTHER`**: `cmd-shift-u` / `ctrl-shift-m` (Ctrl+Shift+U is the IBus/GTK Unicode-entry key on Linux).
+- **const `GET_MAIL_MAC` / `GET_MAIL_OTHER`**: `cmd-shift-n` / `ctrl-shift-n`.
+- **const `LIST_NEXT_KEYS` / `LIST_PREVIOUS_KEYS` / `LIST_DELETE_KEYS`**: `down`/`j`, `up`/`k`, `delete`/`backspace` — bound only in `MessageList`.
+- **const `GLOBAL_CHORDS`** (test-only): every global chord pair, for the collision test.
 
 #### Functions / methods
 
@@ -2015,7 +2211,7 @@ _(None at module top level — conversion helpers only.)_
 - **`bind_app_shortcuts`** (pub, L60)
   - Signature: `pub fn bind_app_shortcuts(cx: &mut App)`
   - Purpose: Registers global key bindings for menu-driven actions.
-  - Behavior: Binds both macOS and Windows/Linux chords for each action. Command palette bindings also register under the `TextInput` context so they work while typing in search fields.
+  - Behavior: Binds both macOS and Windows/Linux chords for each action (incl. reply/reply all/forward/toggle read/get new mail). Command palette bindings also register under the `TextInput` context so they work while typing in search fields. Plain list keys (`LIST_*_KEYS` → `SelectNextMessage`, `SelectPreviousMessage`, `MessageDelete`) are bound in `MESSAGE_LIST_CONTEXT` only, so they never fire inside a text field.
 
 - **`format_binding_parses_compose_shortcut`** (private, L95)
   - Signature: `fn format_binding_parses_compose_shortcut()`
@@ -2026,6 +2222,8 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn settings_comma_binding_parses()`
   - Purpose: Test: settings comma bindings parse as valid keystrokes.
   - Behavior: Asserts both macOS and non-macOS settings bindings parse successfully.
+
+- **`global_chords_parse_and_never_collide`** / **`mail_shortcuts_mirror_macos_mail`** (tests): every global chord parses and is unique; the mail chords match macOS Mail and the list keys are unmodified keys.
 
 - **`primary_binding_follows_platform`** (private, L109)
   - Signature: `fn primary_binding_follows_platform()`

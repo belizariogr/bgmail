@@ -76,7 +76,7 @@ pub fn remove_stale_pages(dir: &Path, now: SystemTime, age: Duration) -> usize {
 
 /// The print directory, readable only by its owner (Unix; Windows' temp
 /// directory is already per user).
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -93,7 +93,7 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// A new file only its owner can read (fails if it exists).
-fn create_private_file(path: &Path) -> io::Result<File> {
+pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
