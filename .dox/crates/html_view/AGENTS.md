@@ -116,7 +116,7 @@ positions Blitz computed.
   `spikes/html_render/corpus/`.
 - Known gaps: a selection can't start in blank space (Blitz anchors only on
   text); find highlights only the current match; blend modes and filters other than grayscale/opacity ignored;
-  glyph-only runs (form editors) not drawn; listbox `<select size>` drawn as a
+  listbox `<select size>` drawn as a
   drop-down; a bordered inline around a block draws a box border (Chromium:
   empty line fragments); weight matching follows CSS (a face list holding "Arial
   Black" under "Arial" — Windows fonts on Linux — gives it for weight 800,

@@ -10,7 +10,7 @@ use style::{
 };
 
 use crate::blitz_paint::{
-    color::{contrast_ratio, ToColorColor as _},
+    color::ToColorColor as _,
     kurbo_css::Edge,
     render::{ElementCx, PhysicalTracks},
 };
@@ -22,7 +22,8 @@ fn darken(color: Color) -> Color {
     let [r, g, b, a] = color.components;
     let v = r.max(g).max(b);
     if v == 0.0 {
-        return color;
+        // BGMail: pure black darkens to a fixed grey in Chromium (0x545454).
+        return Color::new([0.33, 0.33, 0.33, a]);
     }
     let multiplier = ((v - 0.33) / v).max(0.0);
     Color::new([r * multiplier, g * multiplier, b * multiplier, a])
@@ -35,8 +36,8 @@ fn lighten(color: Color) -> Color {
     let [r, g, b, a] = color.components;
     let v = r.max(g).max(b);
     if v == 0.0 {
-        // Pure black: WebKit uses a fixed dark grey (0x545454).
-        return Color::new([0.33, 0.33, 0.33, a]);
+        // Pure black: Chromium uses a fixed grey (0xA8A8A8).
+        return Color::new([0.66, 0.66, 0.66, a]);
     }
     let multiplier = (v + 0.33).min(1.0) / v;
     Color::new([r * multiplier, g * multiplier, b * multiplier, a])
@@ -44,38 +45,17 @@ fn lighten(color: Color) -> Color {
 
 /// The colour of a single edge of an `inset`/`outset` border.
 ///
-/// An `outset` border is raised: the top/left edges use the "lighter" shade and
-/// the bottom/right edges the "darker" shade (`inset` is the reverse). The exact
-/// shading matches Chrome's `CalculateInsetOutsetColor`:
-///
-/// * The darker edge is always darkened.
-/// * The lighter edge keeps the base colour unchanged, *except* for colours dark
-///   enough that the darkened edge wouldn't have enough contrast against the base
-///   colour, which are lightened instead so the bevel stays visible.
+/// An `outset` border is raised: the top/left edges use the lighter shade and
+/// the bottom/right edges the darker one (`inset` is the reverse). BGMail:
+/// measured in Chromium, the darker edge is `darken(color)` and the lighter
+/// one always `lighten(color)` (gray 128 paints 44 and 212), not the base
+/// colour as upstream assumed.
 fn beveled_edge_color(color: Color, edge: Edge, inset: bool) -> Color {
     let top_or_left = matches!(edge, Edge::Top | Edge::Left);
-    let should_darken = top_or_left == inset;
-
-    let dark_color = darken(color);
-    if should_darken {
-        return dark_color;
-    }
-
-    // Lighter edge. Chrome uses the base colour as-is unless the colour is dark
-    // enough that the darkened edge lacks contrast against it. The red/green
-    // shortcut mirrors Chrome: for those colours the contrast is always
-    // sufficient, so the base colour is used without a contrast check.
-    let [r, g, _, _] = color.components;
-    if r >= 150.0 / 255.0 || g >= 92.0 / 255.0 {
-        return color;
-    }
-
-    // Lighten only when the darkened edge would be too low-contrast to read.
-    const MIN_CONTRAST_RATIO: f32 = 1.75;
-    if contrast_ratio(color, dark_color) < MIN_CONTRAST_RATIO {
-        lighten(color)
+    if top_or_left == inset {
+        darken(color)
     } else {
-        color
+        lighten(color)
     }
 }
 
@@ -520,82 +500,132 @@ impl ElementCx<'_, '_> {
         scene.pop_layer();
     }
 
+    /// BGMail: collapsed table borders, painted per cell. Layout reserves
+    /// the gutters between tracks (and around them) for the borders; each
+    /// cell paints its own sides (style, color) into the gutters around its
+    /// grid area, and the table its own outer sides. Upstream drew every
+    /// gutter with the first cell's top border, so cells bordered only on
+    /// some sides (`border-left/right` cards) got no borders at all.
     pub(crate) fn draw_table_borders(&self, scene: &mut crate::display_list::DisplayList) {
         let SpecialElementData::TableRoot(table) = &self.element.special_data else {
             return;
         };
-        // Borders are only handled at the table level when BorderCollapse::Collapse
         if table.border_collapse != BorderCollapse::Collapse {
             return;
         }
-
-        let Some(grid_info) = &mut *table.computed_grid_info.borrow_mut() else {
+        let Some(grid_info) = &*table.computed_grid_info.borrow() else {
             return;
         };
-        let Some(border_style) = table.border_style.as_deref() else {
+        let cols: Vec<(f64, f64)> = grid_info
+            .columns
+            .positions
+            .iter()
+            .map(|line| (line.start as f64, line.end as f64))
+            .collect();
+        let rows: Vec<(f64, f64)> = grid_info
+            .rows
+            .positions
+            .iter()
+            .map(|line| (line.start as f64, line.end as f64))
+            .collect();
+        if cols.is_empty() || rows.is_empty() {
             return;
+        }
+        let gap = table.style.gap.map(|gap| gap.into_raw().value() as f64);
+        let all_cols = gutters(&cols, 0, cols.len(), gap.width);
+        let all_rows = gutters(&rows, 0, rows.len(), gap.height);
+
+        let mut fill = |color: Color, x0: f64, y0: f64, x1: f64, y1: f64| {
+            if x1 > x0 && y1 > y0 && color != Color::TRANSPARENT {
+                let shape = Rect::new(x0, y0, x1, y1).scale_from_origin(self.scale);
+                scene.fill(Fill::NonZero, self.transform, color, None, &shape);
+            }
         };
+        // Paints the visible sides of `border` around the area whose gutters
+        // are `(before, after)` horizontally and vertically.
+        let mut paint_sides =
+            |border: &style::properties::style_structs::Border,
+             current_color: &style::color::AbsoluteColor,
+             (left, right): ((f64, f64), (f64, f64)),
+             (top, bottom): ((f64, f64), (f64, f64))| {
+                let visible =
+                    |style: BorderStyle, width: f32| !style.none_or_hidden() && width > 0.0;
+                let color = |c: &style::values::computed::Color| {
+                    c.resolve_to_absolute(current_color).as_srgb_color()
+                };
+                if visible(
+                    border.border_top_style,
+                    border.border_top_width.0.to_f32_px(),
+                ) {
+                    fill(
+                        color(&border.border_top_color),
+                        left.0,
+                        top.0,
+                        right.1,
+                        top.1,
+                    );
+                }
+                if visible(
+                    border.border_bottom_style,
+                    border.border_bottom_width.0.to_f32_px(),
+                ) {
+                    fill(
+                        color(&border.border_bottom_color),
+                        left.0,
+                        bottom.0,
+                        right.1,
+                        bottom.1,
+                    );
+                }
+                if visible(
+                    border.border_left_style,
+                    border.border_left_width.0.to_f32_px(),
+                ) {
+                    fill(
+                        color(&border.border_left_color),
+                        left.0,
+                        top.0,
+                        left.1,
+                        bottom.1,
+                    );
+                }
+                if visible(
+                    border.border_right_style,
+                    border.border_right_width.0.to_f32_px(),
+                ) {
+                    fill(
+                        color(&border.border_right_color),
+                        right.0,
+                        top.0,
+                        right.1,
+                        bottom.1,
+                    );
+                }
+            };
 
-        let outer_border_style = self.style.get_border();
-
-        let cols = PhysicalTracks::from_tracks(&grid_info.columns);
-        let rows = PhysicalTracks::from_tracks(&grid_info.rows);
-
-        // TODO: support different colors for different borders
-        let current_color = self.style.clone_color();
-        let border_color = border_style
-            .border_top_color
-            .resolve_to_absolute(&current_color)
-            .as_srgb_color();
-
-        // No need to draw transparent borders (as they won't be visible anyway)
-        if border_color == Color::TRANSPARENT {
-            return;
-        }
-
-        // Border widths are not adjusted for border-style in computed styles,
-        // so a border with `none`/`hidden` style must be treated as zero-width.
-        if border_style.border_top_style.none_or_hidden() {
-            return;
-        }
-
-        // The borders are laid out as the gutters between the tracks, and as the border
-        // of the table around them. Track positions are relative to the table's border box.
-        let border_width = table.style.gap.map(|gap| gap.into_raw().value() as f64);
-        let left = cols.origin() as f64 - border_width.width;
-        let right = (cols.origin() + cols.span()) as f64 + border_width.width;
-        let top = rows.origin() as f64 - border_width.height;
-        let bottom = (rows.origin() + rows.span()) as f64 + border_width.height;
-
-        let mut fill = |x0: f64, y0: f64, x1: f64, y1: f64| {
-            let shape = Rect::new(x0, y0, x1, y1).scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, self.transform, border_color, None, &shape);
-        };
-
-        // Horizontal borders: the outer edges, then the gutters between adjacent row tracks.
-        // The vertical borders are drawn between them so that no corner is painted twice.
-        if outer_border_style.border_top_style != BorderStyle::Hidden {
-            fill(left, top, right, top + border_width.height);
-        }
-        if outer_border_style.border_bottom_style != BorderStyle::Hidden {
-            fill(left, bottom - border_width.height, right, bottom);
-        }
-        for (prev, next) in rows.iter().zip(rows.iter().skip(1)) {
-            fill(left, prev.end as f64, right, next.start as f64);
-        }
-
-        // Vertical borders, one segment per row
-        for row in rows.iter() {
-            let (y0, y1) = (row.start as f64, row.end as f64);
-            if outer_border_style.border_left_style != BorderStyle::Hidden {
-                fill(left, y0, left + border_width.width, y1);
-            }
-            if outer_border_style.border_right_style != BorderStyle::Hidden {
-                fill(right - border_width.width, y0, right, y1);
-            }
-            for (prev, next) in cols.iter().zip(cols.iter().skip(1)) {
-                fill(prev.end as f64, y0, next.start as f64, y1);
-            }
+        // The table's own border goes around the whole grid.
+        paint_sides(
+            self.style.get_border(),
+            &self.style.clone_color(),
+            all_cols,
+            all_rows,
+        );
+        for cell in &table.cells {
+            let Some(styles) = self
+                .context
+                .dom
+                .get_node(cell.node_id)
+                .and_then(|node| node.primary_styles())
+            else {
+                continue;
+            };
+            let (colspan, rowspan) = cell.span;
+            paint_sides(
+                styles.get_border(),
+                &styles.clone_color(),
+                gutters(&cols, cell.column as usize, colspan as usize, gap.width),
+                gutters(&rows, cell.row as usize, rowspan as usize, gap.height),
+            );
         }
     }
 
@@ -638,5 +668,87 @@ impl ElementCx<'_, '_> {
         };
 
         scene.fill(Fill::NonZero, self.transform, color, None, &path);
+    }
+}
+
+/// BGMail: the gutters (before, after) around tracks `first..first + count`
+/// of a collapsed-border table: the space up to the neighbouring tracks, or
+/// a `width`-wide outer edge at the table's sides. Direction-agnostic (RTL
+/// tracks run right to left).
+fn gutters(
+    tracks: &[(f64, f64)],
+    first: usize,
+    count: usize,
+    width: f64,
+) -> ((f64, f64), (f64, f64)) {
+    let last = (first + count.max(1)).min(tracks.len());
+    let first = first.min(last.saturating_sub(1));
+    let span = &tracks[first..last];
+    let lo = span
+        .iter()
+        .map(|t| t.0.min(t.1))
+        .fold(f64::INFINITY, f64::min);
+    let hi = span
+        .iter()
+        .map(|t| t.0.max(t.1))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let before = tracks
+        .iter()
+        .map(|t| t.0.max(t.1))
+        .filter(|end| *end <= lo + 0.01)
+        .fold(None, |best: Option<f64>, end| {
+            Some(best.map_or(end, |b| b.max(end)))
+        })
+        .unwrap_or(lo - width);
+    let after = tracks
+        .iter()
+        .map(|t| t.0.min(t.1))
+        .filter(|start| *start >= hi - 0.01)
+        .fold(None, |best: Option<f64>, start| {
+            Some(best.map_or(start, |b| b.min(start)))
+        })
+        .unwrap_or(hi + width);
+    ((before, lo), (hi, after))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rgb(color: Color) -> [u8; 3] {
+        let [r, g, b, _] = color.to_rgba8().to_u8_array();
+        [r, g, b]
+    }
+
+    #[test]
+    fn inset_edges_match_chromium() {
+        // Measured in Chromium: (top/left, bottom/right) of `1px inset`.
+        let cases = [
+            ([128, 128, 128], [44, 44, 44], [212, 212, 212]),
+            ([200, 200, 200], [116, 116, 116], [255, 255, 255]),
+            ([0, 0, 255], [0, 0, 171], [0, 0, 255]),
+            ([160, 0, 0], [76, 0, 0], [245, 0, 0]),
+            ([0, 0, 0], [84, 84, 84], [168, 168, 168]),
+        ];
+        // Chromium converts to 8 bits by ×256 truncation: allow 1 unit.
+        let near = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= 1);
+        for (base, dark, light) in cases {
+            let color = Color::from_rgb8(base[0], base[1], base[2]);
+            let edge = |edge, inset| rgb(beveled_edge_color(color, edge, inset));
+            assert!(near(edge(Edge::Top, true), dark), "{base:?}");
+            assert!(near(edge(Edge::Bottom, true), light), "{base:?}");
+            // Outset is the reverse.
+            assert!(near(edge(Edge::Left, false), light), "{base:?}");
+        }
+    }
+
+    #[test]
+    fn collapsed_gutters_surround_spans() {
+        let tracks = [(1.0, 10.0), (11.0, 20.0), (21.0, 30.0)];
+        assert_eq!(gutters(&tracks, 0, 1, 1.0), ((0.0, 1.0), (10.0, 11.0)));
+        assert_eq!(gutters(&tracks, 1, 2, 1.0), ((10.0, 11.0), (30.0, 31.0)));
+        // Right-to-left tracks.
+        let rtl = [(21.0, 30.0), (11.0, 20.0), (1.0, 10.0)];
+        assert_eq!(gutters(&rtl, 0, 1, 1.0), ((20.0, 21.0), (30.0, 31.0)));
     }
 }

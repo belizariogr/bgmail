@@ -9,10 +9,6 @@ use style::dom::TElement as _;
 
 impl ElementCx<'_, '_> {
     pub(super) fn draw_input(&self, scene: &mut crate::display_list::DisplayList) {
-        if self.node.local_name() == "select" {
-            self.draw_select_arrow(scene);
-            return;
-        }
         if self.node.local_name() != "input" {
             return;
         }
@@ -53,7 +49,10 @@ impl ElementCx<'_, '_> {
 impl ElementCx<'_, '_> {
     /// BGMail: the drop-down arrow of a `<select>` (drawn as a closed
     /// control), centered in its end padding, in the text color.
-    fn draw_select_arrow(&self, scene: &mut crate::display_list::DisplayList) {
+    pub(super) fn draw_select_arrow(&self, scene: &mut crate::display_list::DisplayList) {
+        if self.node.local_name() != "select" {
+            return;
+        }
         let content = self.frame.content_box;
         let padding = self.frame.padding_box;
         if padding.x1 - content.x1 < 6.0 * self.scale {

@@ -656,6 +656,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                         if paints_own_box {
                             cx.draw_border(scene);
                         }
+                        // BGMail: a select's arrow sits in its padding, outside
+                        // the text control's content clip.
+                        cx.draw_select_arrow(scene);
                         cx.stroke_devtools(scene);
 
                         // TODO: allow layers with opacity to be unclipped (overflow: visible)
@@ -1128,7 +1131,9 @@ impl ElementCx<'_, '_> {
                 },
                 self.node.id,
                 &mut draw_text_context,
-                None,
+                // BGMail: the editor's text, so its words are drawn (glyph-only
+                // runs aren't).
+                Some(input_data.editor.raw_text()),
             );
         }
     }

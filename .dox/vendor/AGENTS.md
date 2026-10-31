@@ -94,6 +94,12 @@ repository instead of living in someone's checkout.
       - Short of space, fixed columns grow in proportion to their distance
         from their minimum, so no space is lost.
       - Fixed layout caps `percent + padding` columns at 100%.
+      - Only single-column cells set column widths in automatic layout. A
+        spanning cell's width is its min/max contribution to the spanned
+        columns (`TableCell::span_width`).
+      - `TableCell::span` = (colspan, rowspan), so paint can draw collapsed
+        borders per cell.
+      - Collapsed-border tables have no padding.
     - `layout/inline/build.rs` (`LineHeightQuirk`): under the line height
       quirk:
       - an inline box, or the root strut, with no direct text and no vertical

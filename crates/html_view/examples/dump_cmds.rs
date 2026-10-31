@@ -73,7 +73,7 @@ fn main() {
                     println!("{pad}  {:?}", p.elements());
                 }
                 let b = match brush {
-                    Brush::Solid(_) => "solid",
+                    Brush::Solid(c) => &format!("solid{:?}", c.to_rgba8().to_u8_array()),
                     Brush::Gradient { .. } => "GRADIENT",
                     Brush::Image { .. } => "IMAGE",
                 };

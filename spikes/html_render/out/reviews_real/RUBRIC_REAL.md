@@ -5,11 +5,11 @@ uses 45 real messages: `ham-*` are legitimate 2002-era mails (old HTML:
 font tags, nested tables, spacer GIFs), `rge-*` are 2025 brand campaigns.
 Both engines render offline: every remote image is blocked in BOTH columns.
 
-Sheets: `out_real_hv3_w800/sheets/<email>__<N>.png` (N = vertical segments;
+Sheets: `out_real_hv6_w800/sheets/<email>__<N>.png` (N = vertical segments;
 columns scaled). LEFT = Chromium (reference), MIDDLE = html_view (under
 test), RIGHT = duplicate of html_view (ignore). View EVERY segment of each
 assigned e-mail. Full-resolution renders: `out/real_chromium_w800_vp/<email>.png`
-and `out/real_html_view_it3_w800/<email>.png`. `out_real_hv3_w800/scores.tsv`
+and `out/real_html_view_it6_w800/<email>.png`. `out_real_hv6_w800/scores.tsv`
 has heights and SSIM (hint only).
 
 ## Ignore (not defects)

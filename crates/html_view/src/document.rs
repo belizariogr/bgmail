@@ -169,13 +169,38 @@ fn style_px(style: &str, property: &str) -> Option<f32> {
     })
 }
 
+/// An inline `style` without the declarations that size or lay out a box
+/// (`width`, `height`, their min/max, `display`, `aspect-ratio`).
+fn without_box_size(style: &str) -> String {
+    const BOX: [&str; 8] = [
+        "width",
+        "height",
+        "min-width",
+        "max-width",
+        "min-height",
+        "max-height",
+        "display",
+        "aspect-ratio",
+    ];
+    style
+        .split(';')
+        .filter(|declaration| {
+            let property = declaration.split(':').next().unwrap_or("").trim();
+            !BOX.iter().any(|name| property.eq_ignore_ascii_case(name))
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 /// Shows unavailable images (blocked remote, missing `cid:`) the way
 /// Chromium does, so mail laid out around images keeps its shape:
 /// - with alt text: the alt text after a 16px icon slot, inline (declared
 ///   sizes ignored), or as a block keeping the width and the attributes'
 ///   aspect ratio when the image is `display:block`;
-/// - without alt text (or `alt=""`): a framed box of the declared size, or
-///   just the 16px icon slot when a dimension is missing (not for `alt=""`).
+/// - without alt text (or `alt=""`): a box of the declared size, framed only
+///   from 18px each way (smaller ones, like spacer GIFs, show nothing), or
+///   the unframed 16px icon slot when a dimension is missing (not for
+///   `alt=""`).
 ///
 /// In quirks mode (`quirks`) any declared size wins, alt text or not: a
 /// framed box of that size (square when only one dimension is declared)
@@ -301,7 +326,10 @@ fn replace_unavailable_images(
                     let width = width.map_or(String::new(), |w| format!("width:{w}px;"));
                     format!("{width}{ratio}{own};display:block;overflow:hidden;{align}")
                 } else {
-                    format!("{spacing}{align}")
+                    // Inline alt text ignores the image's size but keeps the
+                    // rest of its style (`font-size:16px` under a `font-size:0`
+                    // parent).
+                    format!("{};{align}", without_box_size(&own))
                 };
                 Fallback::AltText {
                     alt: alt.to_string(),
@@ -310,16 +338,24 @@ fn replace_unavailable_images(
                 }
             }
             _ => match (width, height) {
-                // Too small for the frame's borders: just keep the size.
-                (Some(w), Some(h)) if w < 2.0 || h < 2.0 => Fallback::Restyle(format!(
-                    "{own};width:{w}px;height:{h}px;box-sizing:border-box"
-                )),
-                (Some(w), Some(h)) => {
+                // Chromium frames the box only when its icon fits (18px each
+                // way): spacer GIFs show nothing.
+                (Some(w), Some(h)) if w >= 18.0 && h >= 18.0 => {
                     Fallback::Restyle(format!("{own};width:{w}px;height:{h}px;{IMAGE_FRAME}"))
                 }
-                _ if alt.is_none() => {
-                    Fallback::Restyle(format!("{own};width:16px;height:16px;{IMAGE_FRAME}"))
+                (Some(w), Some(h)) => Fallback::Restyle(format!(
+                    "{own};width:{w}px;height:{h}px;box-sizing:border-box"
+                )),
+                // A block keeps its width, 16px tall (full-width color bars).
+                (Some(w), None) if alt.is_none() && compact.contains("display:block") => {
+                    Fallback::Restyle(format!(
+                        "{own};width:{w}px;height:16px;box-sizing:border-box"
+                    ))
                 }
+                // The bare 16px icon slot (Chromium draws the icon, unframed).
+                _ if alt.is_none() => Fallback::Restyle(format!(
+                    "{own};width:16px;height:16px;box-sizing:border-box"
+                )),
                 _ => continue,
             },
         };
@@ -372,12 +408,15 @@ fn nesting_depth(doc: &BaseDocument, root: NodeId) -> usize {
     deepest
 }
 
-/// Chromium's form control metrics (its UA sheet and theme), which the
-/// controls of old newsletters' search boxes size table columns by: a
-/// 13.33px UI font, text inputs with 3px of border + padding around their
-/// text, closed drop-downs with room for the arrow at their end, 13px check
-/// boxes and radio buttons.
-const FORM_CONTROLS_UA_CSS: &str = "input, select, textarea, button { \
+/// Chromium UA rules Blitz's default sheet lacks:
+/// - a plain `<hr>` is painted as a light #9a9a9a/#eeeeee bevel whatever its
+///   color (`noshade` and `color` rules come from presentational hints);
+/// - form control metrics (its UA sheet and theme), which the controls of
+///   old newsletters' search boxes size table columns by: a 13.33px UI font,
+///   text inputs with 3px of border + padding around their text, closed
+///   drop-downs with room for the arrow at their end, 13px check boxes and
+///   radio buttons.
+const CHROMIUM_UA_CSS: &str = "input, select, textarea, button { \
      font: 13.333px sans-serif; letter-spacing: normal; word-spacing: normal; \
      text-transform: none; text-indent: 0; text-shadow: none; } \
      input:not([type]), input[type=text i], input[type=password i], input[type=email i], \
@@ -389,7 +428,9 @@ const FORM_CONTROLS_UA_CSS: &str = "input, select, textarea, button { \
      background-color: white; color: black; white-space: pre; } \
      input[type=checkbox i], input[type=radio i] { box-sizing: border-box; \
      width: 13px; height: 13px; padding: 0; margin: 3px 3px 3px 4px; } \
-     input[type=radio i] { margin: 3px 3px 0 5px; }";
+     input[type=radio i] { margin: 3px 3px 0 5px; } \
+     hr:not([noshade]):not([color]) { border-color: #9a9a9a #eeeeee #eeeeee #9a9a9a; \
+     border-style: solid; }";
 
 /// Chromium's quirks-mode UA rules that mail visibly depends on:
 /// - tables don't inherit font and alignment (an old page's small body font
@@ -607,7 +648,7 @@ impl HtmlDocument {
         let mode = document_mode(html);
         let mut ua_stylesheets = vec![
             UserAgentStylesheet::default_sheet(),
-            UserAgentStylesheet::parse(FORM_CONTROLS_UA_CSS),
+            UserAgentStylesheet::parse(CHROMIUM_UA_CSS),
         ];
         if mode == DocumentMode::Quirks {
             ua_stylesheets.push(UserAgentStylesheet::parse(QUIRKS_UA_CSS));
@@ -626,7 +667,10 @@ impl HtmlDocument {
             font_ctx: Some(crate::fonts::font_context()),
             ..Default::default()
         };
-        let mut inner = blitz_html::HtmlDocument::from_html(&force_html_parse(html, mode), config);
+        let mut inner = blitz_html::HtmlDocument::from_html(
+            &force_html_parse(&repair_c1_controls(html), mode),
+            config,
+        );
         let base = url::Url::parse(&base_url)
             .unwrap_or_else(|_| url::Url::parse(MESSAGE_BASE_URL).expect("valid base URL"));
         replace_unavailable_images(&mut inner, &resources, &base, mode == DocumentMode::Quirks);
@@ -1009,6 +1053,59 @@ fn viewport(width: u32, appearance: Appearance) -> Viewport {
         Appearance::Dark => ColorScheme::Dark,
     };
     Viewport::new(width, VIEWPORT_HEIGHT, 1.0, scheme)
+}
+
+/// Windows-1252 characters for the C1 controls U+0080–U+009F (`None` where
+/// windows-1252 leaves the byte undefined).
+const WINDOWS_1252_C1: [Option<char>; 32] = [
+    Some('€'),
+    None,
+    Some('‚'),
+    Some('ƒ'),
+    Some('„'),
+    Some('…'),
+    Some('†'),
+    Some('‡'),
+    Some('ˆ'),
+    Some('‰'),
+    Some('Š'),
+    Some('‹'),
+    Some('Œ'),
+    None,
+    Some('Ž'),
+    None,
+    None,
+    Some('‘'),
+    Some('’'),
+    Some('“'),
+    Some('”'),
+    Some('•'),
+    Some('–'),
+    Some('—'),
+    Some('˜'),
+    Some('™'),
+    Some('š'),
+    Some('›'),
+    Some('œ'),
+    None,
+    Some('ž'),
+    Some('Ÿ'),
+];
+
+/// Text never holds C1 controls: they come from Windows-1252 mail decoded as
+/// strict ISO-8859-1 (browsers decode that label as windows-1252), so they
+/// become the characters the sender typed (curly quotes, dashes, `€`).
+fn repair_c1_controls(html: &str) -> std::borrow::Cow<'_, str> {
+    if !html.chars().any(|c| ('\u{80}'..='\u{9f}').contains(&c)) {
+        return std::borrow::Cow::Borrowed(html);
+    }
+    html.chars()
+        .map(|c| match c {
+            '\u{80}'..='\u{9f}' => WINDOWS_1252_C1[c as usize - 0x80].unwrap_or(c),
+            _ => c,
+        })
+        .collect::<String>()
+        .into()
 }
 
 /// Blitz sniffs XHTML doctypes, `<?xml` prologs and `<html xmlns=…xhtml>` roots
@@ -1864,5 +1961,185 @@ mod tests {
         assert!(height > 10.0 && short > 22.0);
         assert!(box_of(html, "l").2 > short + 50.0);
         assert_eq!(box_of(html, "r").2, 13.0);
+    }
+
+    #[test]
+    fn selects_paint_their_option_and_arrow() {
+        let mut doc = laid_out("<!DOCTYPE html><body><select><option>Other</option><option selected>Downloads</option></select>");
+        let list = doc.display_list();
+        let words: Vec<&str> = list
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                crate::display_list::Command::Text(run) => Some(run),
+                _ => None,
+            })
+            .flat_map(|run| run.words.iter().map(|w| w.text.as_str()))
+            .collect();
+        assert_eq!(words, ["Downloads"]);
+        // The ▾ (no CSS border is stroked: borders are fills).
+        assert!(list
+            .commands
+            .iter()
+            .any(|c| matches!(c, crate::display_list::Command::Stroke { .. })));
+    }
+
+    #[test]
+    fn width_only_block_images_keep_their_width() {
+        let html = "<!DOCTYPE html><body style=\"margin:0\">\
+            <img id=\"b\" src=\"https://t.test/b.png\" width=\"300\" style=\"display:block;background-color:#02b5df\">\
+            <img id=\"i\" src=\"https://t.test/i.png\" width=\"300\">";
+        assert_eq!(box_of(html, "b").2..=box_of(html, "b").3, 300.0..=16.0);
+        assert_eq!(box_of(html, "i").2..=box_of(html, "i").3, 16.0..=16.0);
+    }
+
+    #[test]
+    fn unavailable_images_are_framed_only_when_the_icon_fits() {
+        // Paint commands (fills, strokes) of a page holding one such image.
+        let fills = |size: &str| {
+            let mut doc = laid_out(&format!(
+                "<!DOCTYPE html><body><img src=\"https://t.test/s.gif\" {size}></body>"
+            ));
+            doc.display_list()
+                .commands
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c,
+                        crate::display_list::Command::Fill { .. }
+                            | crate::display_list::Command::Stroke { .. }
+                    )
+                })
+                .count()
+        };
+        let bare = fills("width=\"0\"");
+        // Spacer GIFs and the size-less icon slot paint nothing...
+        assert_eq!(fills("width=\"300\" height=\"5\""), bare);
+        assert_eq!(fills("width=\"17\" height=\"60\""), bare);
+        // ...from 18px each way the silver frame shows.
+        assert!(fills("width=\"18\" height=\"18\"") > bare);
+    }
+
+    #[test]
+    fn c1_controls_become_windows_1252_characters() {
+        assert_eq!(
+            repair_c1_controls("We\u{92}ve \u{93}new\u{94} \u{80}5 \u{96} \u{81}"),
+            "We’ve “new” €5 – \u{81}"
+        );
+        assert!(matches!(
+            repair_c1_controls("plain ‘ok’"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn collapsed_borders_follow_each_cell() {
+        // An MJML card: cells bordered only left and right (no top border).
+        let mut doc = laid_out("<!DOCTYPE html><style>table{border-collapse:collapse}</style><body style=\"margin:0\"><div style=\"width:300px\"><table style=\"width:100%\"><tr><td style=\"border-left:solid 1px #000;border-right:solid 1px #000;padding:0\"><div style=\"background:#eee;height:40px\"></div></td></tr></table></div>");
+        let rects: Vec<kurbo::Rect> = doc
+            .display_list()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                crate::display_list::Command::Fill {
+                    geometry: crate::display_list::Geometry::Rect(rect),
+                    ..
+                } => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        let edge = |x0: f64| {
+            rects
+                .iter()
+                .any(|r| r.x0 == x0 && r.width() == 1.0 && r.height() == 40.0)
+        };
+        // Both side borders sit on the grid lines, outside the cell's content.
+        assert!(edge(0.0) && edge(299.0), "{rects:?}");
+        // No top or bottom border.
+        assert!(!rects.iter().any(|r| r.height() == 1.0));
+    }
+
+    #[test]
+    fn inline_alt_text_keeps_the_image_font() {
+        assert_eq!(
+            without_box_size("font-size:16px; WIDTH: 5px;max-width:100%;color:red;display:block"),
+            "font-size:16px;color:red"
+        );
+        // A `font-size:0` parent doesn't hide alt text whose image restores it.
+        let html = "<!DOCTYPE html><body><div style=\"font-size:0\"><img id=\"i\" alt=\"Latest\" src=\"https://t.test/x.png\" style=\"font-size:16px;max-width:100%\" width=\"598\"></div>";
+        let mut doc = laid_out(html);
+        doc.select_all();
+        assert_eq!(
+            doc.selected_text().as_deref().map(str::trim),
+            Some("Latest")
+        );
+        let sizes: Vec<f32> = doc
+            .display_list()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                crate::display_list::Command::Text(run) => Some(run.font_size),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes, [16.0]);
+    }
+
+    #[test]
+    fn collapsed_tables_have_no_padding() {
+        let html = |collapse: &str| {
+            format!("<!DOCTYPE html><body style=\"margin:0\"><table id=\"t\" cellpadding=0 cellspacing=0 style=\"border-collapse:{collapse};padding:24px 0\"><tr><td><div style=\"height:10px;width:10px\"></div></td></tr></table>")
+        };
+        assert_eq!(box_of(&html("collapse"), "t").3, 10.0);
+        assert_eq!(box_of(&html("separate"), "t").3, 58.0);
+    }
+
+    #[test]
+    fn alt_text_in_links_keeps_the_underline() {
+        let decorations = |content: &str| {
+            let mut doc = laid_out(&format!(
+                "<!DOCTYPE html><body><a href=\"https://x.test/\">{content}</a>"
+            ));
+            doc.display_list()
+                .commands
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c,
+                        crate::display_list::Command::Stroke { .. }
+                            | crate::display_list::Command::Fill { .. }
+                    )
+                })
+                .count()
+        };
+        let text = decorations("Shop now");
+        assert!(text > 0);
+        // The image's `text-decoration:none` can't remove the link's underline.
+        let alt = decorations("<img alt=\"Shop now\" src=\"https://h.test/x.png\" style=\"text-decoration:none;border:0\">");
+        assert!(alt > text, "{alt} vs {text}"); // underline + icon frame
+    }
+
+    #[test]
+    fn plain_rules_paint_chromium_bevel() {
+        let colors = |hr: &str| {
+            let mut doc = laid_out(&format!("<!DOCTYPE html><body>{hr}</body>"));
+            doc.display_list()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    crate::display_list::Command::Fill {
+                        brush: crate::display_list::Brush::Solid(color),
+                        ..
+                    } => Some(color.to_rgba8().to_u8_array()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let plain = colors("<hr>");
+        assert!(plain.contains(&[154, 154, 154, 255]) && plain.contains(&[238, 238, 238, 255]));
+        assert_eq!(colors("<hr style=\"color:red\">"), plain);
+        assert!(colors("<hr noshade>")
+            .iter()
+            .all(|c| *c == [128, 128, 128, 255]));
     }
 }

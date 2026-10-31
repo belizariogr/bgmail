@@ -38,9 +38,20 @@ images, SVG, list markers, selections, text decorations and text.
     path + reversed inner path, so the inside stays empty), with radius;
     horizontal padding/border only on the element's first/last fragment
     (consecutive runs merged per line).
-  - `render/form_controls.rs` (`draw_select_arrow`): a `<select>` (laid out by
+  - `render/form_controls.rs` (`draw_select_arrow`, called from `render.rs`
+    after the border, outside the content clip): a `<select>` (laid out by
     Blitz as a read-only text control) gets a ▾ chevron centered in its end
     padding, in the text color.
+  - `render/border.rs`:
+    - `draw_table_borders` paints collapsed borders per cell: each cell's
+      own sides, plus the table's outer sides, go into the gutters around
+      its grid area (`gutters`, direction-agnostic). Upstream painted every
+      gutter with the first cell's top border.
+    - `beveled_edge_color` (inset/outset/groove/ridge): dark edge
+      `darken(c)`, light edge always `lighten(c)`. Black gives 0x54/0xA8.
+      Measured in Chromium.
+  - `render.rs` (`draw_text_input_text`): passes the editor's text as the
+    source, so text controls' words are drawn (glyph-only runs aren't).
   - `render.rs`: callers pass the source text (inline layout text, list marker
     text; `None` for text inputs).
   - `render.rs` (`draw_marker`): symbol markers (`•`, `◦`, `▪`, `■`) are drawn

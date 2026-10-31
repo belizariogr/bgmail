@@ -467,28 +467,39 @@
   4. 🔄 Real-mail round. The corpus is `spikes/html_render/corpus_real/`
      (git-ignored): 25 newsletters from 2002, mostly in quirks mode, plus 20
      current templates.
-     - Body heights against Chromium at 800px: mean deviation 0.53% over 89
+     - Body heights against Chromium at 800px: mean deviation 0.51% over 89
        mails, counting the template corpus.
+     - Capture 6 SSIM (375/600/800/1280): 0.679 / 0.723 / 0.776 / 0.837, up
+       from 0.584 / 0.590 / 0.658 / 0.744 (capture 3).
+     - Agent review average: 8.78, up from about 7.3.
      - Fixed:
-       - broken-image rendering (alt text, frames, floats, spacing);
+       - broken-image rendering (alt text keeping the image's font, frames
+         only from 18px, floats, spacing, width-only blocks);
        - the quirks-mode line height rule (strut, nested spans, `&nbsp;`,
          lone `<br>`);
        - quirky margins, quirks.css and quirks-mode parsing (`<p><table>`);
        - the rowspan column cursor;
-       - spanning and short fixed columns, table width/height as minimums,
-         capped padded percentage columns;
+       - spanning cells (fixed columns first, widths not given to their
+         first column), short fixed columns, table width/height as
+         minimums, capped padded percentage columns, collapsed tables
+         without padding;
+       - collapsed borders painted per cell;
+       - Chromium's inset/outset shading and plain `<hr>` bevel;
        - inline width ignored around blocks;
        - cell `vertical-align` growing lines;
        - empty-inline blocks collapsing margins;
        - `valign`, image `align`/`hspace`, `<body link>`, `<hr>` attributes;
        - inline borders drawn as rings;
-       - `<select>` (closed drop-down) and `<input size>` with Chromium's
-         metrics;
+       - `<select>` (closed drop-down with its option and ▾) and
+         `<input size>` with Chromium's metrics;
+       - Windows-1252 C1 characters;
        - the reader keeping the message's doctype.
      - Next:
-       - recapture at 4 widths and re-review with agents;
-       - ham-01, ham-16, ham-05: remaining drift (iframe ads, listbox
+       - recapture and re-review;
+       - remaining drift in ham-01, ham-16 and ham-05 (iframe ads, listbox
          `<select size>`);
+       - fonts registered under another family (Arial Black as "Arial"
+         Black);
        - CJK/RTL and multi-MB mail are still missing from the corpus.
   5. ⬜ Later: zoom, print, animated GIF.
 - ⬜ Stage 3 — remote content on request: HTTP image fetcher behind

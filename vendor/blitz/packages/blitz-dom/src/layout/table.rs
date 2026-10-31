@@ -82,6 +82,11 @@ pub struct TableCell {
     pub anonymous: bool,
     /// The anonymously wrapped block's own vertical margins (px, lengths only).
     pub own_margins: (f32, f32),
+    /// BGMail: (colspan, rowspan), for painting collapsed borders.
+    pub span: (u16, u16),
+    /// BGMail: border-box `width` of a spanning cell (px, lengths only): its
+    /// min/max contribution to the columns it spans in automatic layout.
+    pub span_width: Option<f32>,
     style: taffy::Style<Atom>,
 }
 
@@ -434,6 +439,9 @@ pub(crate) fn build_table_context(
     };
 
     if border_collapse == BorderCollapse::Collapse {
+        // BGMail: in the collapsing border model the table has no padding
+        // (CSS 2.1 §17.6.2; Chromium ignores `padding` there).
+        style.padding = taffy::Rect::ZERO.map(style_helpers::length);
         style.border = taffy::Rect {
             left: style.gap.width,
             right: style.gap.width,
@@ -800,8 +808,26 @@ fn collect_table_cells(
             let col_needs_width =
                 (col as usize) >= columns.len() || columns[col as usize].max.is_auto();
             // Fixed layout takes widths from the first row only; the automatic
-            // algorithm (BGMail) considers cells of every row, like browsers.
-            if (*row == 1 || !is_fixed) && col_needs_width && !anonymous {
+            // algorithm (BGMail) considers cells of every row, like browsers,
+            // but only single-column ones: a spanning cell's width isn't its
+            // first column's (it widens its columns through
+            // `distribute_span_excess` instead).
+            let sets_column = if is_fixed { *row == 1 } else { colspan == 1 };
+            let span_width = (colspan > 1
+                && !anonymous
+                && style.size.width.tag() == taffy::CompactLength::LENGTH_TAG)
+                .then(|| {
+                    let len = style.size.width.value();
+                    match style.box_sizing {
+                        taffy::BoxSizing::ContentBox => {
+                            let padding = style.padding.resolve_or_zero(None, resolve_calc_value);
+                            let border = style.border.resolve_or_zero(None, resolve_calc_value);
+                            len + padding.left + padding.right + border.left + border.right
+                        }
+                        taffy::BoxSizing::BorderBox => len,
+                    }
+                });
+            if sets_column && col_needs_width && !anonymous {
                 let column: TrackSizingFunction = match style.size.width.tag() {
                     taffy::CompactLength::LENGTH_TAG => {
                         let len = style.size.width.value();
@@ -927,6 +953,8 @@ fn collect_table_cells(
                 style.size.width = style_helpers::percent(1.0);
             }
             cells.push(TableCell {
+                span: (colspan, rowspan),
+                span_width,
                 node_id,
                 row: row.saturating_sub(1),
                 column: col,
@@ -1327,7 +1355,8 @@ impl TableTreeWrapper<'_, '_> {
                 .size
                 .width
             };
-            let min = measure(AvailableSpace::MinContent);
+            let span_width = ctx.cells[idx].span_width.unwrap_or(0.0);
+            let min = measure(AvailableSpace::MinContent).max(span_width);
             let max = measure(AvailableSpace::MaxContent).max(min);
             if span == 1 {
                 if let Some(c) = columns.get_mut(col) {
