@@ -429,6 +429,167 @@ fn style_has_script_vector(style: &str) -> bool {
         .any(|needle| lower.contains(needle))
 }
 
+/// Readable text of an HTML body, for the plain-text fallback (huge,
+/// too-deep or crashing mail). A single linear scan, no tree: tags and
+/// comments are dropped, `script`/`style`/`head`/`title` content skipped,
+/// block elements start new lines, entities decoded, whitespace collapsed
+/// (kept inside `<pre>`).
+pub fn plain_text(html: &str) -> String {
+    // Blocks separated by a blank line, and those that only start a line.
+    const PARAGRAPHS: &[&str] = &[
+        "p",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "table",
+        "blockquote",
+        "pre",
+        "hr",
+        "ul",
+        "ol",
+    ];
+    const LINES: &[&str] = &[
+        "div", "br", "tr", "li", "section", "article", "header", "footer", "dt", "dd",
+    ];
+    const SKIPPED: &[&str] = &["script", "style", "head", "title"];
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut rest = html;
+    let mut pre = 0usize;
+    // Ends the current line; `blank` also leaves an empty line after it.
+    let push_break = |out: &mut String, blank: bool| {
+        while out.ends_with([' ', '\t']) {
+            out.pop();
+        }
+        if out.is_empty() {
+            return;
+        }
+        let wanted = if blank { "\n\n" } else { "\n" };
+        while !out.ends_with(wanted) {
+            if out.ends_with("\n\n") {
+                break;
+            }
+            out.push('\n');
+        }
+    };
+    while !rest.is_empty() {
+        if let Some(comment) = rest.strip_prefix("<!--") {
+            rest = comment.find("-->").map_or("", |end| &comment[end + 3..]);
+            continue;
+        }
+        if rest.starts_with('<') {
+            let end = rest.find('>').map_or(rest.len(), |i| i + 1);
+            let tag = &rest[1..end.saturating_sub(1).max(1)];
+            rest = &rest[end..];
+            let closing = tag.starts_with('/');
+            let name: String = tag
+                .trim_start_matches('/')
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if !closing && SKIPPED.contains(&name.as_str()) {
+                let close = format!("</{name}");
+                let lower = rest.to_ascii_lowercase();
+                rest = lower.find(&close).map_or("", |at| {
+                    let after = &rest[at..];
+                    after.find('>').map_or("", |gt| &after[gt + 1..])
+                });
+                continue;
+            }
+            if name == "pre" {
+                pre = if closing {
+                    pre.saturating_sub(1)
+                } else {
+                    pre + 1
+                };
+            }
+            if PARAGRAPHS.contains(&name.as_str()) {
+                push_break(&mut out, true);
+            } else if LINES.contains(&name.as_str()) {
+                push_break(&mut out, false);
+            } else if (name == "td" || name == "th")
+                && !closing
+                && !out.is_empty()
+                && !out.ends_with(['\n', ' ', '\t'])
+            {
+                out.push('\t');
+            }
+            continue;
+        }
+        let text_end = rest.find('<').unwrap_or(rest.len());
+        let text = decode_entities(&rest[..text_end]);
+        rest = &rest[text_end..];
+        if pre > 0 {
+            out.push_str(&text);
+        } else {
+            for word in text.split_whitespace() {
+                if !out.is_empty() && !out.ends_with(['\n', ' ', '\t']) {
+                    out.push(' ');
+                }
+                out.push_str(word);
+            }
+            if text.ends_with(char::is_whitespace)
+                && !out.ends_with(['\n', ' ', '\t'])
+                && !out.is_empty()
+            {
+                out.push(' ');
+            }
+        }
+    }
+    out.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// Decodes the HTML entities mail text commonly uses: the named basics,
+/// `&nbsp;` and numeric references. Unknown entities are kept as written.
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+        let entity = &rest[1..semi];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            "nbsp" => Some(' '),
+            _ => entity
+                .strip_prefix("#x")
+                .or_else(|| entity.strip_prefix("#X"))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .or_else(|| entity.strip_prefix('#').and_then(|dec| dec.parse().ok()))
+                .and_then(char::from_u32),
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Escapes the characters that are significant in HTML text content.
 fn escape_html(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
@@ -783,6 +944,29 @@ mod tests {
         // A message without remote resources reports none.
         let local = sanitize_html_inner("<p>x</p>", false, &none);
         assert!(!local.1 && local.2 == 0);
+    }
+
+    #[test]
+    fn plain_text_keeps_readable_structure() {
+        let html = "<html><head><title>T</title><style>p{color:red}</style></head>\
+            <body><h1>Hello&nbsp;there</h1><p>One  two\n three &amp; four</p>\
+            <script>alert(1)</script><!-- note --><ul><li>a</li><li>b</li></ul>\
+            <table><tr><td>x</td><td>y</td></tr></table><pre>  keep\n  this</pre></body></html>";
+        assert_eq!(
+            plain_text(html),
+            "Hello there\n\nOne two three & four\n\na\nb\n\nx\ty\n\n  keep\n  this"
+        );
+    }
+
+    #[test]
+    fn plain_text_decodes_entities_and_survives_broken_markup() {
+        assert_eq!(
+            decode_entities("&lt;a&gt; &#233;&#xE9; &bogus; & x"),
+            "<a> éé &bogus; & x"
+        );
+        assert_eq!(plain_text("text <b unclosed"), "text");
+        assert_eq!(plain_text("<script>never closed"), "");
+        assert_eq!(plain_text("a <!-- open comment"), "a");
     }
 
     #[test]

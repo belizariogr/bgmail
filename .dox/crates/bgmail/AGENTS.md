@@ -28,6 +28,13 @@ wiring to `storage`.
   `ui::ContextMenu` (open/copy link, copy, select all), and Cmd/Ctrl+F
   (`FindInMessage`, also a global action) opens the find bar.
   `html_view::init` is called at startup.
+- Reader robustness: HTML over 1 MB is shown as plain text (with "Show
+  formatted"), bodies `html_view` refuses (too deep) as plain text, and a
+  message whose formatted rendering was interrupted by a crash (the
+  `crash_guard` marker survived) as plain text, each with a notice. The
+  release profile keeps `panic = "abort"` (decided with two opposing
+  reviews): unwinding through Blitz/GPUI state isn't safe and stack overflow
+  or OOM can't be caught anyway.
 - **Modules (flat under `src/`):**
   - `root` — main three-column UI + selection/layout state.
   - `data` — mock/sample structures (keep isolated for replacement).
@@ -35,8 +42,9 @@ wiring to `storage`.
   - `locale` — `Language` + string keys (EN default, PT-BR); no hardcoded
     user-facing strings in views.
   - `config` — `~/.config/BGMail/config.json` (window/columns/privacy prefs).
-  - `mail_html` — e-mail HTML sanitizing (`lol_html`), remote image policy and
-    the themed document handed to `html_view`.
+  - `mail_html` — e-mail HTML sanitizing (`lol_html`), remote image policy,
+    the themed document handed to `html_view`, and the plain-text fallback.
+  - `crash_guard` — marker of the message being rendered (crash loops).
   - `compose`, `command_palette*`, `commands`, `actions`, `shortcuts`,
     `app_menus` — app actions and overlays.
   - `window_drag` / `window_frame` — portable window move/CSD; OS code behind

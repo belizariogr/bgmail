@@ -117,6 +117,11 @@ pub enum Key {
     FindPlaceholder,
     FindMatches,
     FindNoMatches,
+    // Reader: plain-text fallback notices.
+    NoticeTooLarge,
+    NoticeTooDeep,
+    NoticeCrashed,
+    NoticeShowFormatted,
 }
 
 impl Key {
@@ -280,6 +285,14 @@ impl Key {
             (FindMatches, P) => "{} de {}",
             (FindNoMatches, E) => "No matches",
             (FindNoMatches, P) => "Nenhum resultado",
+            (NoticeTooLarge, E) => "This message is very large, so it is shown as plain text.",
+            (NoticeTooLarge, P) => "Esta mensagem é muito grande, por isso é exibida como texto simples.",
+            (NoticeTooDeep, E) => "This message couldn't be displayed formatted, so it is shown as plain text.",
+            (NoticeTooDeep, P) => "Não foi possível exibir esta mensagem formatada, por isso ela é exibida como texto simples.",
+            (NoticeCrashed, E) => "BGMail closed while showing this message, so it is shown as plain text.",
+            (NoticeCrashed, P) => "O BGMail fechou ao exibir esta mensagem, por isso ela é exibida como texto simples.",
+            (NoticeShowFormatted, E) => "Show formatted",
+            (NoticeShowFormatted, P) => "Mostrar formatada",
 
         }
     }
@@ -356,7 +369,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 62] = [
+    const ALL_KEYS: [Key; 66] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -419,6 +432,10 @@ mod tests {
         Key::FindPlaceholder,
         Key::FindMatches,
         Key::FindNoMatches,
+        Key::NoticeTooLarge,
+        Key::NoticeTooDeep,
+        Key::NoticeCrashed,
+        Key::NoticeShowFormatted,
     ];
 
     #[test]

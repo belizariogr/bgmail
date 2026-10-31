@@ -39,7 +39,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 
 ### `html_view.rs` (crate root)
 - Re-exports `DisplayList`, `HtmlDocument`, `DocumentOptions`, `DocumentMode`,
-  `Appearance`, `DEFAULT_SELECTION_COLOR`, `init`, `HtmlElement`, `HtmlView`,
+  `Appearance`, `RenderError`, `MAX_NESTING_DEPTH`, `DEFAULT_SELECTION_COLOR`, `init`, `HtmlElement`, `HtmlView`,
   `HtmlViewEvent`, `HitInfo`, `PointerButton`, `PointerInput`,
   `PointerModifiers`, `PointerPhase`, `Resources`; declares modules (`fonts`
   is private).
@@ -76,6 +76,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `struct DocumentOptions { appearance, user_agent_css, base_url, resources,
   selection_color }`: parse options; extra UA CSS goes after Blitz's default
   sheet; `selection_color` is RGBA.
+- `const MAX_NESTING_DEPTH = 256`: deepest nesting `try_parse` accepts.
+- `enum RenderError { TooDeep { depth } }` (+ `Display`, `Error`).
+- `fn nesting_depth(doc, root)` (private): deepest node nesting, iterative.
 - `const DEFAULT_SELECTION_COLOR`: RGBA used when no selection color is given.
 - `fn inline_roots(doc, node_id, out)` (private): inline roots in layout order
   (the layout tree includes anonymous blocks).
@@ -91,7 +94,12 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `ResourceProvider`, base URL, UA sheets, the shared browser-like font
   context (`fonts::font_context`) and the `LinkCapture` navigation provider, and enables Blitz's line height quirk unless
   `document_mode(html)` is `NoQuirks`.
-- `HtmlDocument::layout(width) -> f32`: sets the viewport when the width changes
+- `with_depth()` (private): records the tree's nesting depth after parsing.
+- `HtmlDocument::try_parse(html, options) -> Result<Self, RenderError>`:
+  `parse`, then `TooDeep` above `MAX_NESTING_DEPTH`.
+- `HtmlDocument::depth()`: element nesting depth.
+- `HtmlDocument::layout(width) -> f32`: returns 0 without resolving a tree
+  deeper than the limit; otherwise sets the viewport when the width changes
   (dropping the cached display list), resolves styles/layout (re-resolving while
   critical resources are pending, max 4 passes), records content width =
   max(width, `overflow_right`) and returns content height =
@@ -101,7 +109,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `HtmlDocument::content_height()`: height from the last layout.
 - `HtmlDocument::display_list()`: `display_list_for_height(content_height)`.
 - `HtmlDocument::display_list_for_height(min_height) -> Arc<DisplayList>`:
-  paints (scale 1) over the content width and max(content, `min_height`) so
+  paints nothing for a too-deep tree; otherwise paints (scale 1) over the content width and max(content, `min_height`) so
   the root background covers the viewport; cached per height until
   invalidated.
 - `HtmlDocument::invalidate_paint()`: drops the cached display list.
@@ -140,7 +148,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   item's first line, link clicks reported (not followed), hit info (links,
   relative links, blocked images, text), double/triple click selection, drag
   selection and select-all across paragraphs into anonymous blocks, find and
-  match selection, selection painted with the given color,
+  match selection, selection painted with the given color, hostile nesting
+  refused and never laid out,
   symbol list markers drawn as 5px discs (not "•" glyphs),
   prolog replacement, fragments, lowercase doctype, layout height + caching,
   root background filling a requested height, relative URLs neither panicking

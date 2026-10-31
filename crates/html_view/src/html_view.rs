@@ -18,7 +18,8 @@ pub mod text;
 
 pub use display_list::DisplayList;
 pub use document::{
-    Appearance, DocumentMode, DocumentOptions, HtmlDocument, DEFAULT_SELECTION_COLOR,
+    Appearance, DocumentMode, DocumentOptions, HtmlDocument, RenderError, DEFAULT_SELECTION_COLOR,
+    MAX_NESTING_DEPTH,
 };
 pub use element::{init, HtmlElement, HtmlView, HtmlViewEvent};
 pub use interaction::{HitInfo, PointerButton, PointerInput, PointerModifiers, PointerPhase};

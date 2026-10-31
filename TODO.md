@@ -454,9 +454,16 @@
      anonymous blocks. Verified in the running app (uinput clicks, wtype).
      Gaps: selections can't start in blank space; find highlights only the
      current match.
-  3. ⬜ Milestone 4 — robustness: parse/layout off the UI thread or behind
-     `catch_unwind` (a Blitz panic must not take the app down), size/time
-     limits for huge mail, graceful fallback to plain text.
+  3. ✅ Milestone 4 — robustness: nesting deeper than 256 is refused
+     (`html_view::try_parse`; ~2,000 levels overflowed the 8 MB stack) and
+     never laid out; HTML over 1 MB shown as plain text with "Show
+     formatted"; a crash while rendering a message (panic, stack overflow,
+     OOM: all abort) is remembered by a marker file and that message opens
+     as plain text next time; plain-text extraction is a linear scanner.
+     Windows main thread gets an 8 MB stack. Kept `panic = "abort"` (two
+     opposing reviews: unwinding through Blitz/GPUI state is unsound and
+     doesn't cover overflow/OOM). Measured: 660 KB mail ~60 ms, 2.6 MB
+     ~260 ms (release, UI thread; the Blitz document is not `Send`).
   4. ⬜ Real-mail round: ~50 exported, anonymised mails from real inboxes
      (Outlook/Word-generated, long forwarded threads, malformed HTML,
      newsletters of MBs, CJK/RTL, plain text → HTML) through the

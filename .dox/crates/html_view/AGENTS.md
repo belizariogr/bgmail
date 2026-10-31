@@ -87,6 +87,11 @@ positions Blitz computed.
   `LinkActivated`, `ContextMenu`) and handles `Copy`, `SelectAll` and
   scrolling keys in the `HtmlView` key context (`html_view::init` binds them;
   call it once at startup).
+- **Hostile input:** style/layout recurse per nesting level (~2,000 levels
+  overflow an 8 MB stack). `try_parse` refuses trees deeper than
+  `MAX_NESTING_DEPTH` (256) with `RenderError::TooDeep`, and `layout`/paint
+  never process such a tree (defense in depth). The Blitz document is not
+  `Send`, so it can't move off the UI thread; hosts bound document size.
 - **Images:** drawn at less than half their size, they are pre-downscaled on
   the CPU (area filter, premultiplied alpha) and cached per upload size —
   GPUI samples without mipmaps.

@@ -117,6 +117,45 @@ pub enum Appearance {
     Dark,
 }
 
+/// Deepest element nesting [`HtmlDocument::try_parse`] accepts. Style and
+/// layout recurse per level; around 2,000 levels exhaust an 8 MB stack, so
+/// hostile mail could crash the app. Real mail stays well under 100.
+pub const MAX_NESTING_DEPTH: usize = 256;
+
+/// Why a document can't be rendered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderError {
+    /// Elements nest deeper than [`MAX_NESTING_DEPTH`].
+    TooDeep { depth: usize },
+}
+
+impl std::fmt::Display for RenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooDeep { depth } => write!(
+                f,
+                "elements nest {depth} levels deep (limit {MAX_NESTING_DEPTH})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RenderError {}
+
+/// Deepest node nesting under `root` (iterative: the tree may be too deep
+/// for recursion, which is what this guards against).
+fn nesting_depth(doc: &BaseDocument, root: NodeId) -> usize {
+    let mut deepest = 0;
+    let mut stack = vec![(root, 1)];
+    while let Some((id, depth)) = stack.pop() {
+        deepest = deepest.max(depth);
+        if let Some(node) = doc.get_node(id) {
+            stack.extend(node.children.iter().map(|&child| (child, depth + 1)));
+        }
+    }
+    deepest
+}
+
 /// Text selection highlight used when [`DocumentOptions::selection_color`]
 /// is not set (RGBA).
 pub const DEFAULT_SELECTION_COLOR: [u8; 4] = [180, 213, 255, 255];
@@ -199,6 +238,8 @@ pub struct HtmlDocument {
     links: Arc<LinkCapture>,
     /// Matches of the last [`HtmlDocument::find`]: (inline root, byte range).
     find_matches: Vec<(NodeId, Range<usize>)>,
+    /// Element nesting depth of the parsed tree.
+    depth: usize,
 }
 
 impl HtmlDocument {
@@ -245,12 +286,42 @@ impl HtmlDocument {
                 .unwrap_or_else(|_| url::Url::parse(MESSAGE_BASE_URL).expect("valid base URL")),
             links,
             find_matches: Vec::new(),
+            depth: 0,
         }
+        .with_depth()
+    }
+
+    /// Records the tree's nesting depth (see [`MAX_NESTING_DEPTH`]).
+    fn with_depth(mut self) -> Self {
+        self.depth = nesting_depth(&self.inner, self.inner.root_node().id);
+        self
+    }
+
+    /// Like [`Self::parse`], but refuses documents that can't be rendered
+    /// safely (see [`RenderError`]).
+    pub fn try_parse(html: &str, options: DocumentOptions) -> Result<Self, RenderError> {
+        let document = Self::parse(html, options);
+        if document.depth > MAX_NESTING_DEPTH {
+            return Err(RenderError::TooDeep {
+                depth: document.depth,
+            });
+        }
+        Ok(document)
+    }
+
+    /// Element nesting depth of the document.
+    pub fn depth(&self) -> usize {
+        self.depth
     }
 
     /// Lays the document out for `width` CSS px and returns its content height.
     /// Cheap when the width did not change.
     pub fn layout(&mut self, width: f32) -> f32 {
+        // Never style or lay out a tree deep enough to overflow the stack;
+        // it stays empty (hosts use `try_parse` and show a fallback).
+        if self.depth > MAX_NESTING_DEPTH {
+            return 0.0;
+        }
         let width = width.max(1.0).round() as u32;
         if self.layout_width != Some(width) {
             self.inner.set_viewport(viewport(width, self.appearance));
@@ -293,6 +364,9 @@ impl HtmlDocument {
     /// the bottom of the viewport when the content is shorter. Recorded once
     /// per layout/height and cached until the document state changes.
     pub fn display_list_for_height(&mut self, min_height: f32) -> Arc<DisplayList> {
+        if self.depth > MAX_NESTING_DEPTH {
+            return Arc::new(DisplayList::new());
+        }
         let height = self.content_height.max(min_height).ceil().max(1.0);
         if let Some((cached_height, list)) = &self.display_list {
             if *cached_height == height {
@@ -1037,6 +1111,30 @@ mod tests {
             } if *fill == color)
         });
         assert!(painted);
+    }
+
+    #[test]
+    fn hostile_nesting_is_refused_and_never_laid_out() {
+        let deep = |levels: usize| {
+            format!(
+                "<!DOCTYPE html><body>{}x{}",
+                "<div>".repeat(levels),
+                "</div>".repeat(levels)
+            )
+        };
+        // Shallow enough: parses and lays out.
+        let ok = HtmlDocument::try_parse(&deep(100), DocumentOptions::default()).unwrap();
+        assert!(ok.depth() > 100 && ok.depth() <= MAX_NESTING_DEPTH);
+        // Deeper than the limit (and than the stack could take): refused, and
+        // a plain `parse` of it renders nothing instead of overflowing.
+        let html = deep(8_000);
+        assert!(matches!(
+            HtmlDocument::try_parse(&html, DocumentOptions::default()),
+            Err(RenderError::TooDeep { depth }) if depth > 8_000
+        ));
+        let mut doc = HtmlDocument::parse(&html, DocumentOptions::default());
+        assert_eq!(doc.layout(400.0), 0.0);
+        assert!(doc.display_list().commands.is_empty());
     }
 
     #[test]

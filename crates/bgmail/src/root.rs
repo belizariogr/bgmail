@@ -31,13 +31,15 @@ use crate::command_palette::CommandPaletteState;
 use crate::commands::{CommandContext, CommandId};
 use crate::compose::{self, ComposeView};
 use crate::config::{self, Config};
-use crate::data::{self, GlobalMailbox, MailboxKind};
+use crate::crash_guard::CrashGuard;
+use crate::data::{self, GlobalMailbox, MailboxKind, MessageBody};
 use crate::db_seed;
 use crate::locale::{self, ActiveLanguage, Key, Language};
-use crate::mail_html::{email_document, is_openable_link, DocumentColors};
+use crate::mail_html::{email_document, is_openable_link, plain_text, DocumentColors};
 use crate::shortcuts;
 use html_view::{
     Appearance as PageAppearance, DocumentOptions, HitInfo, HtmlDocument, HtmlView, HtmlViewEvent,
+    RenderError,
 };
 use storage::{MailListQuery, MessageDetail, MessageListItem};
 
@@ -250,6 +252,40 @@ fn chevron_svg(color: Hsla, angle: f32) -> Svg {
 struct ReaderSignature {
     selected: i64,
     colors: DocumentColors,
+    /// The user asked to show a large message formatted anyway.
+    formatted_anyway: bool,
+}
+
+/// HTML bodies larger than this are shown as plain text unless the user asks
+/// for the formatted version: formatting runs on the UI thread (~100 ms per
+/// MB measured), so a huge newsletter would freeze the window.
+const MAX_FORMATTED_HTML_BYTES: usize = 1024 * 1024;
+
+/// Why the reader shows a message as plain text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReaderNotice {
+    /// Bigger than [`MAX_FORMATTED_HTML_BYTES`] (can be shown formatted).
+    TooLarge,
+    /// The renderer refused it (`RenderError`).
+    Unrenderable,
+    /// The app closed while rendering it last time (see [`CrashGuard`]).
+    Crashed,
+}
+
+/// Plain-text fallback reason for an HTML body (`None`: render formatted):
+/// a crash while rendering it wins, then the size limit unless overridden.
+fn plain_text_reason(
+    html_len: usize,
+    crashed: bool,
+    formatted_anyway: bool,
+) -> Option<ReaderNotice> {
+    if crashed {
+        Some(ReaderNotice::Crashed)
+    } else if html_len > MAX_FORMATTED_HTML_BYTES && !formatted_anyway {
+        Some(ReaderNotice::TooLarge)
+    } else {
+        None
+    }
 }
 
 /// A reader context menu: where it was summoned and what it applies to.
@@ -394,6 +430,14 @@ pub struct RootView {
     reader_menu: Option<ReaderMenu>,
     /// Find bar of the reader, while open.
     find_bar: Option<FindBar>,
+    /// Why the current message is shown as plain text, if it is.
+    reader_notice: Option<ReaderNotice>,
+    /// Large messages the user chose to show formatted anyway.
+    formatted_anyway: HashSet<i64>,
+    /// Messages whose rendering crashed the app (shown as plain text).
+    crashed_messages: HashSet<i64>,
+    /// Marker of the message being rendered (crash-loop protection).
+    crash_guard: CrashGuard,
     /// Inputs that last produced the reader document (selected message and the
     /// colors it was themed with). Used to skip re-parsing the body on every
     /// render when nothing that affects the document has changed.
@@ -463,6 +507,7 @@ impl RootView {
             px(settings.compose_width.max(compose::COMPOSE_MIN_WIDTH)),
             px(settings.compose_height.max(compose::COMPOSE_MIN_HEIGHT)),
         );
+        let crash_guard = CrashGuard::beside(db_path.as_ref());
         let db = storage::Database::open(db_path).expect("failed to open mail database");
         storage::seed_if_empty(
             db.conn(),
@@ -532,6 +577,10 @@ impl RootView {
             _reader_subscription: None,
             reader_menu: None,
             find_bar: None,
+            reader_notice: None,
+            formatted_anyway: HashSet::new(),
+            crashed_messages: crash_guard.take_unfinished().into_iter().collect(),
+            crash_guard,
             last_reader_sig: None,
             load_remote_images: settings.load_remote_images,
             reader_white_background: settings.reader_white_background,
@@ -1226,9 +1275,10 @@ impl RootView {
     /// Keeps the reader document in sync with the selected message and theme:
     /// sanitizes and themes the body, parses it with `html_view` and hands it
     /// to the reader view, which lays it out at the pane width.
-    fn sync_reader(&mut self, cx: &mut Context<Self>) {
+    fn sync_reader(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(detail) = self.selected_detail.as_ref() else {
             self.last_reader_sig = None;
+            self.reader_notice = None;
             return;
         };
         let colors = cx.theme().colors();
@@ -1244,28 +1294,64 @@ impl RootView {
             text,
             accent: colors.accent,
         };
+        let id = detail.id;
         let signature = ReaderSignature {
-            selected: detail.id,
+            selected: id,
             colors: doc_colors,
+            formatted_anyway: self.formatted_anyway.contains(&id),
         };
         if self.reader_view.is_some() && self.last_reader_sig == Some(signature) {
             return;
         }
-        let rendered = email_document(doc_colors, &db_seed::message_body_from_detail(detail));
-        self.content_blocked_count = rendered.blocked_images;
-        let appearance = if doc_colors.is_dark() {
-            PageAppearance::Dark
-        } else {
-            PageAppearance::Light
+        let body = db_seed::message_body_from_detail(detail);
+        let mut notice = match &body {
+            MessageBody::Html(html) => plain_text_reason(
+                html.len(),
+                self.crashed_messages.contains(&id),
+                signature.formatted_anyway,
+            ),
+            MessageBody::Text(_) => None,
         };
-        let document = HtmlDocument::parse(
-            &rendered.html,
-            DocumentOptions {
-                appearance,
-                selection_color: Some(reader_selection_color(colors.accent)),
-                ..Default::default()
+        let options = || DocumentOptions {
+            appearance: if doc_colors.is_dark() {
+                PageAppearance::Dark
+            } else {
+                PageAppearance::Light
             },
-        );
+            selection_color: Some(reader_selection_color(colors.accent)),
+            ..Default::default()
+        };
+        let as_plain = |body: &MessageBody| match body {
+            MessageBody::Html(html) => MessageBody::Text(plain_text(html).into()),
+            text => text.clone(),
+        };
+        let shown = if notice.is_some() {
+            as_plain(&body)
+        } else {
+            body.clone()
+        };
+        let rendered = email_document(doc_colors, &shown);
+        let document = match HtmlDocument::try_parse(&rendered.html, options()) {
+            Ok(document) => document,
+            Err(RenderError::TooDeep { .. }) => {
+                notice = Some(ReaderNotice::Unrenderable);
+                let fallback = email_document(doc_colors, &as_plain(&body));
+                HtmlDocument::parse(&fallback.html, options())
+            }
+        };
+        self.content_blocked_count = if notice.is_some() {
+            0
+        } else {
+            rendered.blocked_images
+        };
+        self.reader_notice = notice;
+        // A crash rendering formatted HTML must not repeat on every start:
+        // mark the message until a frame showing it was drawn.
+        if notice.is_none() && matches!(body, MessageBody::Html(_)) {
+            self.crash_guard.begin(id);
+            let guard = self.crash_guard.clone();
+            window.on_next_frame(move |_, _| guard.finish());
+        }
         self.reader_menu = None;
         match &self.reader_view {
             Some(view) => view.update(cx, |view, cx| view.set_document(document, cx)),
@@ -1278,6 +1364,51 @@ impl RootView {
         self.last_reader_sig = Some(signature);
         // Keep an open find bar's query applied to the new document.
         self.run_find(cx);
+    }
+
+    /// Notice above a message shown as plain text, explaining why; large
+    /// messages offer to show the formatted version anyway.
+    fn render_reader_notice(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(notice) = self.reader_notice else {
+            return div().into_any_element();
+        };
+        let colors = cx.theme().colors();
+        let language = cx.language();
+        let text = match notice {
+            ReaderNotice::TooLarge => Key::NoticeTooLarge,
+            ReaderNotice::Unrenderable => Key::NoticeTooDeep,
+            ReaderNotice::Crashed => Key::NoticeCrashed,
+        }
+        .tr(language);
+        h_flex()
+            .flex_shrink_0()
+            .w_full()
+            .px_6()
+            .py_1p5()
+            .gap_3()
+            .items_center()
+            .border_b_1()
+            .border_color(colors.border)
+            .bg(colors.surface_background)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Label::new(text).size(LabelSize::Small).color(Color::Muted)),
+            )
+            .when(notice == ReaderNotice::TooLarge, |el| {
+                el.child(
+                    Button::new("show-formatted", Key::NoticeShowFormatted.tr(language)).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            if let Some(id) = this.selected_message_id {
+                                this.formatted_anyway.insert(id);
+                                cx.notify();
+                            }
+                        }),
+                    ),
+                )
+            })
+            .into_any_element()
     }
 
     /// Reacts to the reader: link under the pointer (status bar), link clicks
@@ -2978,6 +3109,9 @@ impl RootView {
             .h_full()
             .bg(bg)
             .child(header)
+            .when(self.reader_notice.is_some(), |el| {
+                el.child(self.render_reader_notice(cx))
+            })
             .when(self.find_bar.is_some(), |el| {
                 el.child(self.render_find_bar(cx))
             })
@@ -3373,7 +3507,7 @@ impl Render for RootView {
             self.search_force_expanded = false;
         }
         // Keep the reader document in sync with the selection and theme.
-        self.sync_reader(cx);
+        self.sync_reader(window, cx);
 
         let background = cx.theme().colors().background;
         let text = cx.theme().colors().text;
@@ -3540,6 +3674,22 @@ mod tests {
     fn sidebar_starts_visible() {
         let (_dir, view) = test_view();
         assert!(view.show_sidebar);
+    }
+
+    #[test]
+    fn plain_text_reasons_follow_crash_size_and_override() {
+        let big = MAX_FORMATTED_HTML_BYTES + 1;
+        assert_eq!(plain_text_reason(10, false, false), None);
+        assert_eq!(
+            plain_text_reason(big, false, false),
+            Some(ReaderNotice::TooLarge)
+        );
+        assert_eq!(plain_text_reason(big, false, true), None);
+        // A crash wins over the override.
+        assert_eq!(
+            plain_text_reason(10, true, true),
+            Some(ReaderNotice::Crashed)
+        );
     }
 
     #[test]

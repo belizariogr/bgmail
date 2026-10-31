@@ -12,6 +12,7 @@ mod command_palette_overlay;
 mod commands;
 mod compose;
 mod config;
+mod crash_guard;
 mod data;
 mod db_seed;
 mod locale;

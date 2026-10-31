@@ -622,6 +622,20 @@ _(No functions — only action types.)_
   - Behavior: Combines system temp dir, process id, and nanosecond timestamp.
 
 
+### `src/crash_guard.rs`
+
+#### Types / constants
+
+- **struct `CrashGuard`** (pub, Clone): Path of the reader's render marker (`reader-render.guard` beside the mail database).
+
+#### Functions / methods
+
+- **`CrashGuard::beside(db_path)`**: Guard for that database.
+- **`CrashGuard::take_unfinished()`**: Message id left by a run that crashed while rendering it (marker cleared); `None` otherwise.
+- **`CrashGuard::begin(id)`**: Writes the marker before rendering formatted HTML (best effort).
+- **`CrashGuard::finish()`**: Removes the marker once a frame showing it was drawn.
+- Tests: unfinished renders reported once; finished renders leave no marker.
+
 ### `src/data.rs`
 
 #### Types / constants
@@ -928,9 +942,9 @@ _(None at module top level — conversion helpers only.)_
   - Behavior: `[English, Portuguese]`.
 
 - **`Key`** (pub, L38)
-  - Signature: `pub enum Key { … }` (62 UI string keys)
+  - Signature: `pub enum Key { … }` (66 UI string keys)
   - Purpose: Typed catalog of translatable UI chrome strings.
-  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`) and status strings.
+  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`), plain-text fallback notices (`NoticeTooLarge`, `NoticeTooDeep`, `NoticeCrashed`, `NoticeShowFormatted`) and status strings.
 
 - **`GlobalLanguage`** (private, L332)
   - Signature: `struct GlobalLanguage(Language)`
@@ -1031,6 +1045,8 @@ _(None at module top level — conversion helpers only.)_
 #### Functions / methods
 
 - **`DocumentColors::is_dark`** (pub): `background.l < 0.5`.
+- **`plain_text`** (pub): Readable text of an HTML body for the plain-text fallback: one linear scan (no tree), drops tags/comments, skips `script`/`style`/`head`/`title` content, blank lines around paragraph blocks and line breaks at line blocks, tabs between cells, decoded entities, collapsed whitespace except in `<pre>`.
+- **`decode_entities`** (private): Named basics, `&nbsp;`, decimal/hex references; unknown entities kept.
 - **`is_openable_link`** (pub): Whether a clicked link may be opened outside the app: `http(s)://` and `mailto:` only (case-insensitive, trimmed).
 - **`email_document`** (pub)
   - Signature: `pub fn email_document(colors: DocumentColors, body: &MessageBody) -> RenderedEmail`
@@ -1047,7 +1063,7 @@ _(None at module top level — conversion helpers only.)_
 - **`neutralize_attributes`** (private): Removes `on*`, `contenteditable`, dangerous-scheme URLs, scripted `style`, and (unless allowed) remote resource attributes / `srcset`; a blocked remote `<img src>` is kept as `data-rm-blocked-src`; returns the image's blocked state.
 - **`is_dangerous_url`** / **`is_remote_url`** / **`style_has_script_vector`** (private): URL scheme and CSS vector checks.
 - **`escape_html`** (private): Escapes `& < > " '`.
-- Tests: HTML escaping, openable links, colors, document wrapping (HTML verbatim, plain text escaped, color scheme), disallowed elements, SVG scriptable parts, event handlers, dangerous schemes, legacy style vectors, safe markup kept, remote detection and blocking (attributes, `href` kept, CSS urls), remote image policy (`load_remote`, `shown`), documents always blocking remote images.
+- Tests: HTML escaping, plain text (structure, entities, broken markup), openable links, colors, document wrapping (HTML verbatim, plain text escaped, color scheme), disallowed elements, SVG scriptable parts, event handlers, dangerous schemes, legacy style vectors, safe markup kept, remote detection and blocking (attributes, `href` kept, CSS urls), remote image policy (`load_remote`, `shown`), documents always blocking remote images.
 
 ### `src/main.rs`
 
@@ -1141,6 +1157,9 @@ _(None at module top level — conversion helpers only.)_
 - **struct `ReaderSignature`**: Memo key for the reader document (message id and page colors, which include the white-background preference).
 - **struct `ReaderMenu`**: Open reader context menu: window position, `HitInfo`, whether text was selected.
 - **struct `FindBar`**: Open find bar: query `TextInput`, match count, current match, input observation.
+- **const `MAX_FORMATTED_HTML_BYTES`** (1 MB): HTML bodies above it are shown as plain text unless the user asks for the formatted version.
+- **enum `ReaderNotice`**: Why a message is shown as plain text: `TooLarge`, `Unrenderable` (`RenderError`), `Crashed` (crash guard).
+- **`plain_text_reason`** (private): `Crashed` if the message crashed the renderer, else `TooLarge` above the limit unless shown formatted anyway, else `None`.
 - **struct `RootView`**: Main application view state (layout, selection, reader `HtmlView`, search, palette, auxiliary windows, persistence).
 - **struct `SettingsView`**: Preferences window content with section navigation.
 
@@ -1495,9 +1514,9 @@ _(None at module top level — conversion helpers only.)_
 - **`step_find`** (private): Moves to the next/previous match (`step_match`) and selects it (the reader scrolls it into view).
 
 - **`sync_reader`** (private)
-  - Signature: `fn sync_reader(&mut self, cx: &mut Context<Self>)`
+  - Signature: `fn sync_reader(&mut self, window: &mut Window, cx: &mut Context<Self>)`
   - Purpose: Keeps the reader document in sync with the selected message and theme.
-  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, builds the sanitized themed document (`mail_html::email_document`), records the blocked image count, parses it with `HtmlDocument::parse` (dark appearance for dark pages, `reader_selection_color`), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
+  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, picks plain text per `plain_text_reason` (`mail_html::plain_text`), builds the sanitized themed document (`mail_html::email_document`), parses it with `HtmlDocument::try_parse` (falling back to plain text, `Unrenderable`, when too deep; dark appearance for dark pages, `reader_selection_color`), records the blocked image count (0 for plain text) and the notice, marks formatted HTML renders in the `CrashGuard` until the next frame (`window.on_next_frame`), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
 
 - **`set_reader_white_background`** (private, L1658)
   - Signature: `fn set_reader_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
@@ -1668,6 +1687,10 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn render_privacy_shield(&self, cx) -> impl IntoElement`
   - Purpose: Privacy shield on reader subject line.
   - Behavior: Red shield with a "Blocked images: N" tooltip while the message has blocked remote images; an empty slot of the same size otherwise (layout stability). No unblock action until Stage 3.
+
+- **`render_reader_notice`** (private)
+  - Signature: `fn render_reader_notice(&self, cx) -> impl IntoElement`
+  - Purpose: Notice above a message shown as plain text (reason text); `TooLarge` adds "Show formatted" (adds the message to `formatted_anyway`).
 
 - **`render_find_bar`** (private)
   - Signature: `fn render_find_bar(&self, cx) -> impl IntoElement`
