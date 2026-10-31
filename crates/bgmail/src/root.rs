@@ -13,36 +13,41 @@ use gpui::{
     anchored, deferred, ease_in_out, point, radians, size, svg, Animation, AnimationExt as _, App,
     AppContext as _, Bounds, ClipboardItem, Context, Corner, DragMoveEvent, Empty, Entity,
     Focusable, FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Point,
-    ScrollHandle, Size, Subscription, Svg, TitlebarOptions, Transformation, WeakEntity, Window,
-    WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
+    ScrollHandle, Size, Subscription, Svg, TitlebarOptions, Transformation, Window, WindowBounds,
+    WindowControlArea, WindowHandle, WindowOptions,
 };
 
 use crate::command_palette_overlay;
-use theme::{ActiveTheme, Appearance};
+use theme::ActiveTheme;
 use ui::prelude::*;
 use ui::{
-    set_native_text_focus, Button, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label,
-    LabelSize, ListItem, Scrollbar, ScrollbarState, Switch, TextInput, Tooltip,
+    set_native_text_focus, Button, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize,
+    ListItem, Scrollbar, ScrollbarState, TextInput, Tooltip,
 };
 
-use crate::actions::{ComposeClose, FindInMessage, ToggleCommandPalette};
+use crate::actions::{FindInMessage, ToggleCommandPalette};
 use crate::app_menus;
 use crate::command_palette::CommandPaletteState;
 use crate::commands::{CommandContext, CommandId};
-use crate::compose::{self, ComposeView};
+use crate::compose::{self, ComposeAccount, ComposeInit, ComposeView};
 use crate::config::{self, Config};
 use crate::crash_guard::CrashGuard;
 use crate::data::{self, GlobalMailbox, MailboxKind, MessageBody};
+use crate::dates;
 use crate::db_seed;
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::mail_html::{
     email_document, is_openable_link, plain_text, print_document, DocumentColors, PrintHeader,
 };
+use crate::mail_service::{self, MailService, OverallStatus, StartError};
+use crate::settings::SettingsView;
 use crate::shortcuts;
 use html_view::{
     Appearance as PageAppearance, DocumentOptions, HitInfo, HtmlDocument, HtmlView, HtmlViewEvent,
     RenderError,
 };
+use mail_core::{AccountConfig, Address, Draft, ParsedMessage, QuoteLabels, ReplyKind};
+use mail_sync::{actions as mail_actions, ActionOutcome, Command, SyncEvent};
 use storage::{MailListQuery, MessageDetail, MessageListItem};
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
@@ -174,46 +179,6 @@ struct FoldAnim {
     token: u64,
 }
 
-/// Active section of the settings screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsSection {
-    General,
-    Accounts,
-    Appearance,
-    Notifications,
-    Privacy,
-}
-
-impl SettingsSection {
-    const ALL: [SettingsSection; 5] = [
-        SettingsSection::General,
-        SettingsSection::Accounts,
-        SettingsSection::Appearance,
-        SettingsSection::Notifications,
-        SettingsSection::Privacy,
-    ];
-
-    fn title_key(self) -> Key {
-        match self {
-            SettingsSection::General => Key::SettingsGeneral,
-            SettingsSection::Accounts => Key::SettingsAccounts,
-            SettingsSection::Appearance => Key::SettingsAppearance,
-            SettingsSection::Notifications => Key::SettingsNotifications,
-            SettingsSection::Privacy => Key::SettingsPrivacy,
-        }
-    }
-
-    fn icon(self) -> IconName {
-        match self {
-            SettingsSection::General => IconName::Settings,
-            SettingsSection::Accounts => IconName::Account,
-            SettingsSection::Appearance => IconName::Palette,
-            SettingsSection::Notifications => IconName::Flag,
-            SettingsSection::Privacy => IconName::Shield,
-        }
-    }
-}
-
 fn mailbox_icon(kind: MailboxKind) -> IconName {
     match kind {
         MailboxKind::Inbox => IconName::Inbox,
@@ -334,6 +299,19 @@ fn reader_selection_color(accent: Hsla) -> [u8; 4] {
 /// Application state.
 pub struct RootView {
     db: storage::Database,
+    /// Path of [`Self::db`]; the sync engine opens its own connections on it.
+    db_path: std::path::PathBuf,
+    /// Background sync engine. `None` until [`Self::start_mail`] (and in
+    /// unit tests, which never touch the network).
+    mail: Option<MailService>,
+    /// Accounts that could not start syncing (no keychain secret, …).
+    account_start_errors: HashMap<i64, StartError>,
+    /// A coalesced reload of accounts/folders/list is already scheduled.
+    reload_scheduled: bool,
+    /// Short-lived status bar note (message sent, send failed, …) and the
+    /// token of the timer that clears it.
+    status_note: Option<SharedString>,
+    status_note_seq: u64,
     accounts: Vec<storage::Account>,
     /// Folders keyed by account id (loaded from SQLite).
     folders_by_account: std::collections::HashMap<i64, Vec<storage::Folder>>,
@@ -448,17 +426,19 @@ pub struct RootView {
     /// colors it was themed with). Used to skip re-parsing the body on every
     /// render when nothing that affects the document has changed.
     last_reader_sig: Option<ReaderSignature>,
+    /// Desktop notifications for new mail (Settings ▸ Notifications).
+    pub(crate) notifications_enabled: bool,
     /// Persisted "load remote content" preference. Remote content needs
     /// networking (Stage 3), so it is kept but not offered or applied yet.
-    load_remote_images: bool,
+    pub(crate) load_remote_images: bool,
     /// Messages whose remote images the user loaded this session.
     remote_allowed: HashSet<i64>,
     /// Whether the reader always paints the message body on a white background
     /// (dark text), ignoring the app theme. Persisted; off by default.
-    reader_white_background: bool,
+    pub(crate) reader_white_background: bool,
     /// Whether the compose message body uses a white background. Persisted; off
     /// by default.
-    compose_white_background: bool,
+    pub(crate) compose_white_background: bool,
     /// How many remote images were blocked in the current message (the privacy
     /// shield shows while non-zero). Recomputed when the document rebuilds.
     content_blocked_count: usize,
@@ -481,6 +461,67 @@ pub struct RootView {
     command_palette_focus_pending: bool,
 }
 
+/// Minimal parsed form of a stored message whose raw source is missing
+/// (local/demo messages), so reply/forward still work.
+fn parsed_from_detail(detail: &MessageDetail) -> ParsedMessage {
+    let from = Address::new(
+        (!detail.sender.is_empty()).then(|| detail.sender.clone()),
+        detail.sender_email.clone(),
+    );
+    let (text, html) = if detail.raw_format == "html" {
+        (None, Some(detail.raw_content.clone()))
+    } else {
+        (Some(detail.plain_text.clone()), None)
+    };
+    ParsedMessage {
+        message_id: detail.message_id_hdr.clone(),
+        in_reply_to: detail.in_reply_to.clone(),
+        references: detail
+            .references_hdr
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+        subject: detail.subject.clone(),
+        from: Some(from),
+        to: mail_core::parse_address_list(&detail.to_addrs).unwrap_or_default(),
+        cc: mail_core::parse_address_list(&detail.cc_addrs).unwrap_or_default(),
+        text,
+        html,
+        ..ParsedMessage::default()
+    }
+}
+
+/// The original's real attachments, carried over when forwarding.
+fn forwarded_attachments(raw: &[u8], parsed: &ParsedMessage) -> Vec<mail_core::OutgoingAttachment> {
+    parsed
+        .attachments
+        .iter()
+        .filter(|info| !info.inline)
+        .filter_map(|info| {
+            Some(mail_core::OutgoingAttachment {
+                filename: info.filename.clone(),
+                mime_type: info.mime_type.clone(),
+                data: mail_core::attachment_content(raw, info.index)?,
+            })
+        })
+        .collect()
+}
+
+/// Process-unique number for Message-IDs (time + counter + random seed).
+fn unique_token() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    hasher.finish()
+}
+
 /// Adapts stored accounts for compose/settings views that still use [`data::Account`].
 fn ui_accounts(accounts: &[storage::Account]) -> Vec<data::Account> {
     accounts
@@ -500,10 +541,18 @@ impl RootView {
         let db_path = std::env::var_os("BGMAIL_DB")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(storage::database_path);
-        Self::new_with_database(settings, db_path)
+        // Sample mail only for demos/previews; a real profile starts empty and
+        // shows the "add an account" welcome.
+        let seed = std::env::var_os("BGMAIL_DEMO").is_some()
+            || std::env::var_os("BGMAIL_SAMPLE_DIR").is_some();
+        Self::new_with_database(settings, db_path, seed)
     }
 
-    fn new_with_database(settings: Config, db_path: impl AsRef<std::path::Path>) -> Self {
+    fn new_with_database(
+        settings: Config,
+        db_path: impl AsRef<std::path::Path>,
+        seed: bool,
+    ) -> Self {
         // Restore persisted column widths, clamped to their minimums so a stale
         // config can't produce an unusable layout.
         let sidebar_width = px(settings.sidebar_width.max(SIDEBAR_MIN_WIDTH));
@@ -521,13 +570,16 @@ impl RootView {
             px(settings.compose_height.max(compose::COMPOSE_MIN_HEIGHT)),
         );
         let crash_guard = CrashGuard::beside(db_path.as_ref());
-        let db = storage::Database::open(db_path).expect("failed to open mail database");
-        let mut seed_messages = db_seed::seed_messages();
-        if let Some(dir) = std::env::var_os("BGMAIL_SAMPLE_DIR") {
-            seed_messages.extend(db_seed::sample_dir_messages(std::path::Path::new(&dir)));
+        let db_path = db_path.as_ref().to_path_buf();
+        let db = storage::Database::open(&db_path).expect("failed to open mail database");
+        if seed {
+            let mut seed_messages = db_seed::seed_messages();
+            if let Some(dir) = std::env::var_os("BGMAIL_SAMPLE_DIR") {
+                seed_messages.extend(db_seed::sample_dir_messages(std::path::Path::new(&dir)));
+            }
+            storage::seed_if_empty(db.conn(), &db_seed::seed_accounts(), &seed_messages)
+                .expect("failed to seed mail database");
         }
-        storage::seed_if_empty(db.conn(), &db_seed::seed_accounts(), &seed_messages)
-            .expect("failed to seed mail database");
 
         let accounts = db.list_accounts().expect("failed to load accounts");
         let mut folders_by_account = HashMap::new();
@@ -542,14 +594,26 @@ impl RootView {
         let list_messages = db
             .list_messages(&mail_list_query(&selected_mailbox, ""))
             .expect("failed to load messages");
-        let selected_message_id = list_messages
-            .get(3.min(list_messages.len().saturating_sub(1)))
-            .map(|m| m.id)
-            .or_else(|| list_messages.first().map(|m| m.id));
+        // Opening a message marks it read, so a real profile starts with no
+        // selection; the demo keeps its showcase message open.
+        let selected_message_id = seed
+            .then(|| {
+                list_messages
+                    .get(3.min(list_messages.len().saturating_sub(1)))
+                    .map(|m| m.id)
+                    .or_else(|| list_messages.first().map(|m| m.id))
+            })
+            .flatten();
         let selected_detail = selected_message_id.and_then(|id| db.get_message(id).ok().flatten());
 
         Self {
             db,
+            db_path,
+            mail: None,
+            account_start_errors: HashMap::new(),
+            reload_scheduled: false,
+            status_note: None,
+            status_note_seq: 0,
             accounts,
             folders_by_account,
             list_messages,
@@ -596,6 +660,7 @@ impl RootView {
             crashed_messages: crash_guard.take_unfinished().into_iter().collect(),
             crash_guard,
             last_reader_sig: None,
+            notifications_enabled: settings.notifications_enabled,
             load_remote_images: settings.load_remote_images,
             remote_allowed: HashSet::new(),
             reader_white_background: settings.reader_white_background,
@@ -644,6 +709,415 @@ impl RootView {
 
     fn on_message_selection_changed(&mut self, cx: &mut Context<Self>) {
         self.reload_selected_detail();
+        self.open_selected_message();
+        self.sync_app_menus(cx);
+        cx.notify();
+    }
+
+    /// Side effects of opening the selected message: it becomes read (on the
+    /// server too) and a body that was not downloaded yet is fetched now.
+    fn open_selected_message(&mut self) {
+        let Some(detail) = self.selected_detail.as_ref() else {
+            return;
+        };
+        let (id, account_id) = (detail.id, detail.account_id);
+        let needs_body = detail.body_state == storage::BODY_STATE_HEADERS;
+        if detail.unread {
+            if let Ok(outcome) = mail_actions::set_read(&self.db, id, true) {
+                self.after_action(account_id, outcome);
+            }
+            if let Some(item) = self.list_messages.iter_mut().find(|m| m.id == id) {
+                item.unread = false;
+            }
+            self.reload_selected_detail();
+        }
+        if needs_body {
+            if let Some(mail) = &self.mail {
+                mail.engine().send(account_id, Command::FetchBody(id));
+            }
+        }
+    }
+
+    /// Hands queued server work to the account's sync worker.
+    fn after_action(&self, account_id: i64, outcome: ActionOutcome) {
+        if outcome.needs_sync {
+            if let Some(mail) = &self.mail {
+                mail.process_queue(account_id);
+            }
+        }
+    }
+
+    /// Runs a message action on the selected message through `mail_sync`
+    /// (local change now, server op queued), then keeps a sensible
+    /// selection: the message that took its place in the list.
+    fn run_message_action(
+        &mut self,
+        cx: &mut Context<Self>,
+        action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
+    ) {
+        let Some(id) = self.selected_message_id else {
+            return;
+        };
+        let account_id = self
+            .selected_detail
+            .as_ref()
+            .map(|detail| detail.account_id);
+        let position = self.list_messages.iter().position(|m| m.id == id);
+        match action(&self.db, id) {
+            Ok(outcome) => {
+                if let Some(account_id) = account_id {
+                    self.after_action(account_id, outcome);
+                }
+            }
+            Err(error) => eprintln!("BGMail: message action failed: {error}"),
+        }
+        self.reload_message_list();
+        if self.selected_message_id.is_none() {
+            if let Some(next) = position.and_then(|ix| {
+                self.list_messages
+                    .get(ix)
+                    .or_else(|| self.list_messages.last())
+                    .map(|m| m.id)
+            }) {
+                self.selected_message_id = Some(next);
+                self.reload_selected_detail();
+                self.open_selected_message();
+            }
+        }
+        self.sync_app_menus(cx);
+        self.last_reader_sig = None;
+        cx.notify();
+    }
+
+    /// Toggles read/unread of the selected message (it stays selected).
+    pub(crate) fn toggle_message_read(&mut self, cx: &mut Context<Self>) {
+        let Some(detail) = self.selected_detail.as_ref() else {
+            return;
+        };
+        let read = detail.unread;
+        self.run_message_action(cx, move |db, id| mail_actions::set_read(db, id, read));
+    }
+
+    // ----- Sync engine ------------------------------------------------------
+
+    /// Starts the sync engine and every remote account. Secrets are read from
+    /// the keychain asynchronously, so startup never waits on them (or on the
+    /// network).
+    pub(crate) fn start_mail(&mut self, cx: &mut Context<Self>) {
+        if self.mail.is_some() {
+            return;
+        }
+        let (service, events) = MailService::new(self.db_path.clone());
+        self.mail = Some(service);
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = events.recv().await {
+                if this
+                    .update(cx, |this, cx| this.on_sync_event(event, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        for account in self.accounts.clone() {
+            self.start_account(&account, cx);
+        }
+    }
+
+    /// Reads an account's secret from the keychain and starts its worker.
+    fn start_account(&mut self, account: &storage::Account, cx: &mut Context<Self>) {
+        if account.provider == storage::PROVIDER_LOCAL {
+            return;
+        }
+        let Some(config) = AccountConfig::from_json(&account.config_json) else {
+            self.account_start_errors
+                .insert(account.id, StartError::NotRemote);
+            return;
+        };
+        let read = cx.read_credentials(&config.secret_key());
+        let account_id = account.id;
+        let config_json = account.config_json.clone();
+        cx.spawn(async move |this, cx| {
+            let secret = read.await.ok().flatten().map(|(_, secret)| secret);
+            this.update(cx, |this, cx| {
+                this.start_account_with_secret(account_id, &config_json, secret.as_deref(), cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_account_with_secret(
+        &mut self,
+        account_id: i64,
+        config_json: &str,
+        secret: Option<&[u8]>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mail) = self.mail.as_mut() else {
+            return;
+        };
+        let connector = secret
+            .ok_or(StartError::MissingSecret)
+            .and_then(|secret| mail_service::connector_for(config_json, secret));
+        match connector {
+            Ok(connector) => {
+                self.account_start_errors.remove(&account_id);
+                mail.start_account(account_id, connector);
+            }
+            Err(error) => {
+                self.account_start_errors.insert(account_id, error);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Applies one engine event to the UI.
+    fn on_sync_event(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
+        match event {
+            SyncEvent::Status { account_id, status } => {
+                if let Some(mail) = self.mail.as_mut() {
+                    mail.set_status(account_id, status);
+                }
+                cx.notify();
+            }
+            SyncEvent::MailboxChanged { .. } | SyncEvent::FoldersChanged { .. } => {
+                self.schedule_reload(cx);
+            }
+            SyncEvent::NewMail {
+                account_id,
+                messages,
+            } => {
+                if self.notifications_enabled {
+                    let account = self
+                        .accounts
+                        .iter()
+                        .find(|account| account.id == account_id)
+                        .map(|account| account.name.clone())
+                        .unwrap_or_default();
+                    crate::notifications::notify_new_mail(&account, &messages, cx.language());
+                }
+                self.schedule_reload(cx);
+            }
+            SyncEvent::BodyReady { message_id } => {
+                if self.selected_message_id == Some(message_id) {
+                    self.reload_selected_detail();
+                    self.last_reader_sig = None;
+                }
+                self.schedule_reload(cx);
+            }
+            SyncEvent::BodyFailed { message_id, error } => {
+                if self.selected_message_id == Some(message_id) {
+                    self.set_status_note(
+                        format!("{}: {error}", Key::StatusBodyFailed.tr(cx.language())),
+                        cx,
+                    );
+                }
+            }
+            SyncEvent::Sent { .. } => {
+                self.set_status_note(Key::StatusMessageSent.tr(cx.language()), cx);
+                self.schedule_reload(cx);
+            }
+            SyncEvent::SendFailed {
+                error, permanent, ..
+            } => {
+                let key = if permanent {
+                    Key::StatusSendFailed
+                } else {
+                    Key::StatusSendRetrying
+                };
+                self.set_status_note(format!("{}: {error}", key.tr(cx.language())), cx);
+            }
+        }
+    }
+
+    /// Shows `note` in the status bar for a few seconds.
+    fn set_status_note(&mut self, note: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.status_note = Some(note.into());
+        self.status_note_seq += 1;
+        let token = self.status_note_seq;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(6)).await;
+            this.update(cx, |this, cx| {
+                if this.status_note_seq == token {
+                    this.status_note = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Reloads accounts, folders and the list once a burst of engine events
+    /// settles (an initial sync emits one event per header batch).
+    fn schedule_reload(&mut self, cx: &mut Context<Self>) {
+        if self.reload_scheduled {
+            return;
+        }
+        self.reload_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            this.update(cx, |this, cx| {
+                this.reload_scheduled = false;
+                this.reload_from_database();
+                this.sync_app_menus(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Re-reads accounts, folders and the current list from the database.
+    pub(crate) fn reload_from_database(&mut self) {
+        self.accounts = self.db.list_accounts().unwrap_or_default();
+        self.folders_by_account = self
+            .accounts
+            .iter()
+            .map(|account| {
+                (
+                    account.id,
+                    self.db.list_folders(account.id).unwrap_or_default(),
+                )
+            })
+            .collect();
+        self.reload_message_list();
+    }
+
+    /// Asks every account to sync now ("Get mail").
+    pub(crate) fn sync_now(&mut self, cx: &mut Context<Self>) {
+        if let Some(mail) = &self.mail {
+            for account in &self.accounts {
+                mail.engine().send(account.id, Command::Reconnect);
+            }
+        }
+        cx.notify();
+    }
+
+    // ----- Accounts -----------------------------------------------------------
+
+    /// The stored accounts (settings window).
+    pub(crate) fn accounts(&self) -> &[storage::Account] {
+        &self.accounts
+    }
+
+    /// Sync status of an account, for the settings window.
+    pub(crate) fn account_status(&self, account_id: i64) -> Option<mail_sync::AccountStatus> {
+        self.mail
+            .as_ref()
+            .and_then(|mail| mail.status(account_id).cloned())
+    }
+
+    /// Why an account isn't syncing, when it couldn't start.
+    pub(crate) fn account_start_error(&self, account_id: i64) -> Option<&StartError> {
+        self.account_start_errors.get(&account_id)
+    }
+
+    /// Creates a remote account, stores its secret (password or OAuth refresh
+    /// token) in the platform keychain and starts syncing it. Returns the new
+    /// account id.
+    pub(crate) fn add_remote_account(
+        &mut self,
+        name: &str,
+        config: AccountConfig,
+        secret: String,
+        cx: &mut Context<Self>,
+    ) -> Result<i64, String> {
+        let provider = if config.uses_oauth() {
+            storage::PROVIDER_GMAIL
+        } else {
+            storage::PROVIDER_IMAP
+        };
+        let name = if name.trim().is_empty() {
+            config.email.clone()
+        } else {
+            name.trim().to_string()
+        };
+        let config_json = config.to_json();
+        let account_id = self
+            .db
+            .create_account(&name, &config.email, provider, &config_json)
+            .map_err(|error| error.to_string())?;
+        self.store_secret(&config, &secret, cx);
+        self.reload_from_database();
+        self.start_account_with_secret(account_id, &config_json, Some(secret.as_bytes()), cx);
+        if let Some(mail) = &self.mail {
+            mail.engine().send(account_id, Command::SyncNow);
+        }
+        cx.notify();
+        Ok(account_id)
+    }
+
+    /// Replaces an account's secret (e.g. after a password change) and
+    /// reconnects it.
+    pub(crate) fn update_account_secret(
+        &mut self,
+        account_id: i64,
+        secret: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(account) = self.accounts.iter().find(|a| a.id == account_id).cloned() else {
+            return;
+        };
+        let Some(config) = AccountConfig::from_json(&account.config_json) else {
+            return;
+        };
+        self.store_secret(&config, &secret, cx);
+        self.start_account_with_secret(
+            account_id,
+            &account.config_json,
+            Some(secret.as_bytes()),
+            cx,
+        );
+    }
+
+    fn store_secret(&self, config: &AccountConfig, secret: &str, cx: &mut Context<Self>) {
+        let write = cx.write_credentials(&config.secret_key(), &config.username, secret.as_bytes());
+        cx.background_spawn(async move {
+            if let Err(error) = write.await {
+                eprintln!("BGMail: could not save the account secret: {error}");
+            }
+        })
+        .detach();
+    }
+
+    /// Stops syncing an account, forgets its secret and deletes its local mail.
+    pub(crate) fn remove_account(&mut self, account_id: i64, cx: &mut Context<Self>) {
+        let Some(account) = self.accounts.iter().find(|a| a.id == account_id).cloned() else {
+            return;
+        };
+        if let Some(mail) = self.mail.as_mut() {
+            mail.stop_account(account_id);
+        }
+        if let Some(config) = AccountConfig::from_json(&account.config_json) {
+            let delete = cx.delete_credentials(&config.secret_key());
+            cx.background_spawn(async move {
+                delete.await.ok();
+            })
+            .detach();
+        }
+        self.account_start_errors.remove(&account_id);
+        if let Err(error) = self.db.delete_account(account_id) {
+            eprintln!("BGMail: could not delete the account: {error}");
+        }
+        if self
+            .selected_detail
+            .as_ref()
+            .is_some_and(|detail| detail.account_id == account_id)
+        {
+            self.clear_message_selection();
+        }
+        if matches!(self.selected_mailbox, Selection::Mailbox { account_id: selected, .. } if selected == account_id)
+        {
+            self.selected_mailbox = Selection::Global(GlobalMailbox::Inbox);
+        }
+        self.collapsed_accounts.clear();
+        self.reload_from_database();
         self.sync_app_menus(cx);
         cx.notify();
     }
@@ -847,6 +1321,11 @@ impl RootView {
             CommandId::MessageToggleFlag => self.toggle_message_flag(cx),
             CommandId::MessagePrint => self.print_message(cx),
             CommandId::MoveToFolder(path) => self.move_message_to_folder(path.as_ref(), cx),
+            CommandId::MessageToggleRead => self.toggle_message_read(cx),
+            CommandId::SyncNow => self.sync_now(cx),
+            CommandId::MessageReply => self.reply_to_selected(ReplyKind::Reply, window, cx),
+            CommandId::MessageReplyAll => self.reply_to_selected(ReplyKind::ReplyAll, window, cx),
+            CommandId::MessageForward => self.reply_to_selected(ReplyKind::Forward, window, cx),
         }
         self.close_command_palette(cx);
     }
@@ -867,7 +1346,7 @@ impl RootView {
 
     /// Sets "always load remote images", persisting it and re-rendering the
     /// reader.
-    fn set_load_remote_images(&mut self, value: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_load_remote_images(&mut self, value: bool, cx: &mut Context<Self>) {
         if self.load_remote_images != value {
             self.load_remote_images = value;
             self.request_save(cx);
@@ -906,61 +1385,41 @@ impl RootView {
     }
 
     pub(crate) fn delete_message_to_trash(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.selected_message_id else {
-            return;
-        };
-        let _ = self.db.move_message_to_trash(id);
-        self.refresh_after_message_action(cx);
+        self.run_message_action(cx, mail_actions::trash);
     }
 
     pub(crate) fn delete_message_permanently(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.selected_message_id else {
+        if !self.command_context().message_in_trash() {
             return;
-        };
-        if self.db.delete_message_permanently(id).unwrap_or(false) {
-            self.clear_message_selection();
-            self.refresh_after_message_action(cx);
         }
+        self.run_message_action(cx, mail_actions::delete_permanently);
     }
 
     pub(crate) fn restore_message(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.selected_message_id else {
-            return;
-        };
-        let _ = self.db.restore_message_from_trash(id);
-        self.refresh_after_message_action(cx);
+        self.run_message_action(cx, mail_actions::restore_from_trash);
     }
 
     pub(crate) fn archive_message(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.selected_message_id else {
-            return;
-        };
-        let _ = self.db.archive_message(id);
-        self.refresh_after_message_action(cx);
+        self.run_message_action(cx, mail_actions::archive);
     }
 
     pub(crate) fn mark_message_junk(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.selected_message_id else {
-            return;
-        };
-        let _ = self.db.mark_message_junk(id);
-        self.refresh_after_message_action(cx);
+        self.run_message_action(cx, mail_actions::junk);
     }
 
     pub(crate) fn toggle_message_flag(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.selected_message_id else {
+        let Some(detail) = self.selected_detail.as_ref() else {
             return;
         };
-        let _ = self.db.toggle_message_starred(id);
-        self.refresh_after_message_action(cx);
+        let starred = !detail.starred;
+        self.run_message_action(cx, move |db, id| mail_actions::set_starred(db, id, starred));
     }
 
     pub(crate) fn move_message_to_folder(&mut self, folder_path: &str, cx: &mut Context<Self>) {
-        let Some(id) = self.selected_message_id else {
-            return;
-        };
-        let _ = self.db.move_message_to_folder(id, folder_path);
-        self.refresh_after_message_action(cx);
+        let target = folder_path.to_string();
+        self.run_message_action(cx, move |db, id| {
+            mail_actions::move_to_folder(db, id, &target)
+        });
     }
 
     pub(crate) fn handle_command_palette_key(
@@ -1065,6 +1524,7 @@ impl RootView {
             sidebar_width: f32::from(self.sidebar_width),
             list_width: f32::from(self.list_width),
             load_remote_images: self.load_remote_images,
+            notifications_enabled: self.notifications_enabled,
             reader_white_background: self.reader_white_background,
             compose_white_background: self.compose_white_background,
             collapsed_accounts: {
@@ -1596,7 +2056,7 @@ impl RootView {
 
     /// Toggles whether the reader forces a white background, persisting the
     /// preference and re-rendering so the open message is re-themed.
-    fn set_reader_white_background(&mut self, value: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_reader_white_background(&mut self, value: bool, cx: &mut Context<Self>) {
         if self.reader_white_background != value {
             self.reader_white_background = value;
             self.request_save(cx);
@@ -1606,7 +2066,7 @@ impl RootView {
 
     /// Toggles whether the compose body forces a white background, persisting
     /// the preference and updating an open compose window.
-    fn set_compose_white_background(&mut self, value: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_compose_white_background(&mut self, value: bool, cx: &mut Context<Self>) {
         if self.compose_white_background != value {
             self.compose_white_background = value;
             self.request_save(cx);
@@ -1621,10 +2081,23 @@ impl RootView {
 
     /// Opens the preferences in their own window (like Zed). If it is already
     /// open, just brings it to the front rather than spawning a duplicate.
-    pub(crate) fn open_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings_section(crate::settings::SettingsSection::General, window, cx);
+    }
+
+    /// Opens (or focuses) the settings window on `section`.
+    pub(crate) fn open_settings_section(
+        &mut self,
+        section: crate::settings::SettingsSection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(handle) = self.settings_window {
             if handle
-                .update(cx, |_, window, _| window.activate_window())
+                .update(cx, |view, window, cx| {
+                    view.show_section(section, cx);
+                    window.activate_window()
+                })
                 .is_ok()
             {
                 return;
@@ -1649,7 +2122,11 @@ impl RootView {
 
         if let Ok(handle) = cx.open_window(options, |window, cx| {
             let root_for_close = root.clone();
-            let view = cx.new(|_| SettingsView::new(accounts, root));
+            let view = cx.new(|_| {
+                let mut view = SettingsView::new(accounts, root);
+                view.section = section;
+                view
+            });
             window.on_window_should_close(cx, move |_, cx| {
                 if let Some(root) = root_for_close.upgrade() {
                     root.update(cx, |root, cx| {
@@ -1666,8 +2143,124 @@ impl RootView {
         }
     }
 
-    /// Opens the compose window, or focuses it if it is already open.
-    pub(crate) fn open_compose(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens an empty compose window, or focuses it if it is already open.
+    pub(crate) fn open_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_compose_with(None, window, cx);
+    }
+
+    /// Accounts offered in the compose "From" picker (sending ones first).
+    pub(crate) fn compose_accounts(&self) -> Vec<ComposeAccount> {
+        let mut accounts: Vec<ComposeAccount> = self
+            .accounts
+            .iter()
+            .map(|account| ComposeAccount {
+                id: account.id,
+                name: account.name.clone(),
+                email: account.email.clone(),
+                can_send: account.provider != storage::PROVIDER_LOCAL,
+            })
+            .collect();
+        accounts.sort_by_key(|account| !account.can_send);
+        accounts
+    }
+
+    /// Opens a reply / reply all / forward of the selected message.
+    pub(crate) fn reply_to_selected(
+        &mut self,
+        kind: ReplyKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = self.selected_detail.clone() else {
+            return;
+        };
+        let raw = self.db.message_raw(detail.id).ok().flatten();
+        let parsed = raw
+            .as_deref()
+            .and_then(mail_core::parse_message)
+            .unwrap_or_else(|| parsed_from_detail(&detail));
+        let me: Vec<Address> = self
+            .accounts
+            .iter()
+            .filter(|account| account.id == detail.account_id)
+            .map(|account| Address::new(Some(account.name.clone()), account.email.clone()))
+            .collect();
+        let language = cx.language();
+        let date = dates::full_date(detail.date_ts, &detail.received_at, language);
+        let sender = if detail.sender.is_empty() {
+            detail.sender_email.clone()
+        } else {
+            detail.sender.clone()
+        };
+        let labels = QuoteLabels {
+            attribution: locale::reply_attribution(language, &date, &sender),
+            forward_header: Key::ForwardHeader.tr(language).to_string(),
+            from: Key::QuoteFrom.tr(language).to_string(),
+            date: Key::QuoteDate.tr(language).to_string(),
+            subject: Key::QuoteSubject.tr(language).to_string(),
+            to: Key::QuoteTo.tr(language).to_string(),
+            formatted_date: date,
+        };
+        let mut draft = mail_core::prepare_reply(&parsed, kind, &me, &labels);
+        if kind == ReplyKind::Forward {
+            if let Some(raw) = raw.as_deref() {
+                draft.attachments = forwarded_attachments(raw, &parsed);
+            }
+        }
+        let init = ComposeInit {
+            account_id: Some(detail.account_id),
+            draft,
+        };
+        self.open_compose_with(Some(init), window, cx);
+    }
+
+    /// Queues `draft` for sending from `account_id` and wakes its worker.
+    /// Errors are localized, ready for the compose window to show.
+    pub(crate) fn send_draft(
+        &mut self,
+        account_id: i64,
+        draft: Draft,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let language = cx.language();
+        let account = self
+            .accounts
+            .iter()
+            .find(|account| account.id == account_id)
+            .ok_or_else(|| Key::ComposeLocalAccount.tr(language).to_string())?;
+        if account.provider == storage::PROVIDER_LOCAL {
+            return Err(Key::ComposeLocalAccount.tr(language).to_string());
+        }
+        let recipients = mail_core::envelope_recipients(&draft);
+        if recipients.is_empty() {
+            return Err(Key::ComposeNoRecipients.tr(language).to_string());
+        }
+        let message_id = mail_core::new_message_id(&draft.from.email, unique_token());
+        let raw = mail_core::build_message(&draft, &message_id, dates::now_unix());
+        self.db
+            .enqueue_outgoing(
+                account_id,
+                &draft.from.email,
+                &recipients,
+                &raw,
+                Some(&message_id),
+            )
+            .map_err(|error| error.to_string())?;
+        if let Some(mail) = &self.mail {
+            mail.process_queue(account_id);
+        }
+        self.set_status_note(Key::StatusSyncing.tr(language), cx);
+        Ok(())
+    }
+
+    /// Opens the compose window (optionally prefilled), or focuses it if it
+    /// is already open.
+    pub(crate) fn open_compose_with(
+        &mut self,
+        init: Option<ComposeInit>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(handle) = self.compose_window {
             if handle
                 .update(cx, |_, window, _| window.activate_window())
@@ -1699,6 +2292,7 @@ impl RootView {
 
         if let Ok(handle) = cx.open_window(options, |window, cx| {
             let root_for_close = root.clone();
+            let _init = init.clone(); // handed to the compose rewrite
             let view = cx.new(|_| ComposeView::new(accounts, root, compose_white));
             window.on_window_should_close(cx, move |_, cx| {
                 if let Some(root) = root_for_close.upgrade() {
@@ -2830,9 +3424,13 @@ impl RootView {
             );
         }
         meta = meta.child(
-            Label::new(message.received_at.clone())
-                .size(LabelSize::XSmall)
-                .color(Color::Muted),
+            Label::new(dates::list_date(
+                message.date_ts,
+                &message.received_at,
+                cx.language(),
+            ))
+            .size(LabelSize::XSmall)
+            .color(Color::Muted),
         );
 
         let message_id = message.id;
@@ -3073,6 +3671,116 @@ impl RootView {
             .into_any_element()
     }
 
+    /// "To" / "Cc" lines under the sender (stored display-formatted).
+    fn render_recipients(
+        &self,
+        message: &MessageDetail,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let language = cx.language();
+        let lines: Vec<(Key, &str)> = [
+            (Key::ReaderTo, message.to_addrs.as_str()),
+            (Key::ReaderCc, message.cc_addrs.as_str()),
+        ]
+        .into_iter()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .collect();
+        if lines.is_empty() {
+            return None;
+        }
+        Some(
+            v_flex()
+                .pl(px(40.0))
+                .children(lines.into_iter().map(|(key, value)| {
+                    h_flex()
+                        .gap_1()
+                        .min_w_0()
+                        .child(
+                            Label::new(format!("{}:", key.tr(language)))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                Label::new(value.to_string())
+                                    .size(LabelSize::Small)
+                                    .single_line(),
+                            ),
+                        )
+                })),
+        )
+    }
+
+    /// Status bar text for the sync engine (or a recent note, which wins).
+    fn sync_status_text(&self, language: Language) -> Option<SharedString> {
+        if let Some(note) = &self.status_note {
+            return Some(note.clone());
+        }
+        if let Some((_, error)) = self.account_start_errors.iter().next() {
+            let _ = error;
+            return Some(Key::StatusAuthFailed.tr(language).into());
+        }
+        let status = self.mail.as_ref()?.overall();
+        match status {
+            OverallStatus::None => None,
+            OverallStatus::Syncing => Some(Key::StatusSyncing.tr(language).into()),
+            OverallStatus::UpToDate(at) => {
+                Some(locale::status_updated_at(language, &dates::clock_time(at)).into())
+            }
+            OverallStatus::Offline(_) => Some(Key::StatusOffline.tr(language).into()),
+            OverallStatus::AuthFailed(account_id) => {
+                let email = self
+                    .accounts
+                    .iter()
+                    .find(|account| account.id == account_id)
+                    .map(|account| account.email.as_str())
+                    .unwrap_or_default();
+                Some(format!("{}: {email}", Key::StatusAuthFailed.tr(language)).into())
+            }
+            OverallStatus::Error(_) => Some(Key::StatusSyncError.tr(language).into()),
+        }
+    }
+
+    /// Shown instead of the list and reader while no account exists.
+    fn render_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let language = cx.language();
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(colors.background)
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(
+                Icon::new(IconName::Account)
+                    .size(IconSize::Medium)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(Key::WelcomeTitle.tr(language))
+                    .size(LabelSize::Large)
+                    .bold(),
+            )
+            .child(
+                Label::new(Key::WelcomeBody.tr(language))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                Button::new("welcome-add-account", Key::AddAccount.tr(language))
+                    .style(ui::ButtonStyle::Filled)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_settings_section(
+                            crate::settings::SettingsSection::Accounts,
+                            window,
+                            cx,
+                        );
+                    })),
+            )
+    }
+
     fn render_reader(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let bg = colors.background;
@@ -3169,12 +3877,19 @@ impl RootView {
                             ),
                     )
                     .child(
-                        Label::new(message.received_at.clone())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
+                        Label::new(dates::full_date(
+                            message.date_ts,
+                            &message.received_at,
+                            cx.language(),
+                        ))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
                     ),
-            );
+            )
+            .children(self.render_recipients(message, cx));
 
+        let loading_body = message.body_state == storage::BODY_STATE_HEADERS;
+        let language = cx.language();
         // The body is rendered natively by `html_view` (scrolls on both axes;
         // laid out at the pane width).
         let body_area = div()
@@ -3184,7 +3899,16 @@ impl RootView {
             // Match the forced-white page so no themed background shows at
             // sub-pixel edges.
             .when(self.reader_white_background, |el| el.bg(gpui::white()))
-            .when_some(self.reader_view.clone(), |el, view| el.child(view));
+            .when(loading_body, |el| {
+                el.flex().items_center().justify_center().child(
+                    Label::new(Key::ReaderLoadingBody.tr(language))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+            })
+            .when(!loading_body, |el| {
+                el.when_some(self.reader_view.clone(), |el, view| el.child(view))
+            });
 
         v_flex()
             .flex_1()
@@ -3248,6 +3972,9 @@ impl RootView {
                                 .color(Color::Muted),
                         )
                     })
+                    .when_some(self.sync_status_text(language), |this, text| {
+                        this.child(Label::new(text).size(LabelSize::XSmall).color(Color::Muted))
+                    })
                     .child(
                         Label::new(locale::status_unread(language, total_unread))
                             .size(LabelSize::XSmall)
@@ -3279,302 +4006,6 @@ impl RootView {
                 )
             })
     }
-}
-
-/// Standalone preferences window content (Zed-style: settings open in their own
-/// window). Theme and language are app-wide globals, so changes made here are
-/// reflected in the main window immediately.
-struct SettingsView {
-    accounts: Vec<data::Account>,
-    section: SettingsSection,
-    /// Back-reference to the main view, used to read and toggle preferences that
-    /// live there (e.g. loading remote images). Weak so the settings window can
-    /// outlive nothing it shouldn't.
-    root: WeakEntity<RootView>,
-}
-
-impl SettingsView {
-    fn new(accounts: Vec<data::Account>, root: WeakEntity<RootView>) -> Self {
-        Self {
-            accounts,
-            section: SettingsSection::General,
-            root,
-        }
-    }
-
-    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.root.clone();
-        window.defer(cx, move |window, cx| {
-            if let Some(root) = root.upgrade() {
-                root.update(cx, |root, cx| {
-                    root.on_settings_window_closed(cx);
-                });
-            }
-            window.remove_window();
-        });
-    }
-
-    fn render_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors();
-        let language = cx.language();
-
-        let mut nav = v_flex()
-            .w(px(220.0))
-            .flex_shrink_0()
-            .h_full()
-            .bg(colors.panel_background)
-            .border_r_1()
-            .border_color(colors.border)
-            .p_2()
-            .gap_0p5()
-            .child(
-                div().px_2().py_2().child(
-                    Label::new(Key::SettingsTitle.tr(language))
-                        .size(LabelSize::Large)
-                        .bold(),
-                ),
-            );
-
-        for (ix, section) in SettingsSection::ALL.into_iter().enumerate() {
-            let selected = self.section == section;
-            nav = nav.child(
-                ListItem::new(("settings-nav", ix))
-                    .selected(selected)
-                    .start_slot(Icon::new(section.icon()).size(IconSize::Small).color(
-                        if selected {
-                            Color::Accent
-                        } else {
-                            Color::Muted
-                        },
-                    ))
-                    .child(Label::new(section.title_key().tr(language)).size(LabelSize::Small))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.section = section;
-                        cx.notify();
-                    })),
-            );
-        }
-
-        nav
-    }
-
-    fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let section = self.section;
-        let appearance = cx.theme().appearance();
-        let language = cx.language();
-
-        let content = match section {
-            SettingsSection::General => v_flex()
-                .gap_2()
-                .child(settings_row(Key::AppNameLabel.tr(language), "BGMail"))
-                .child(settings_row(
-                    Key::VersionLabel.tr(language),
-                    env!("CARGO_PKG_VERSION"),
-                ))
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .gap_4()
-                        .py_1()
-                        .child(Label::new(Key::LanguageLabel.tr(language)).color(Color::Muted))
-                        .child(self.render_language_picker(language, cx)),
-                )
-                .into_any_element(),
-            SettingsSection::Accounts => {
-                let mut list = v_flex().gap_2();
-                for account in &self.accounts {
-                    list = list.child(settings_row(account.name.clone(), account.email.clone()));
-                }
-                list.child(
-                    Button::new("add-account", Key::AddAccount.tr(language))
-                        .style(ButtonStyle::Filled),
-                )
-                .into_any_element()
-            }
-            SettingsSection::Appearance => {
-                let reader_white = self
-                    .root
-                    .upgrade()
-                    .map(|root| root.read(cx).reader_white_background)
-                    .unwrap_or(false);
-                let compose_white = self
-                    .root
-                    .upgrade()
-                    .map(|root| root.read(cx).compose_white_background)
-                    .unwrap_or(false);
-                v_flex()
-                    .gap_3()
-                    .child(Label::new(Key::ThemeLabel.tr(language)).weight(FontWeight::SEMIBOLD))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("theme-light", Key::ThemeLight.tr(language))
-                                    .style(if appearance == Appearance::Light {
-                                        ButtonStyle::Filled
-                                    } else {
-                                        ButtonStyle::Subtle
-                                    })
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        theme::set_theme(theme::Theme::light(), cx);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("theme-dark", Key::ThemeDark.tr(language))
-                                    .style(if appearance == Appearance::Dark {
-                                        ButtonStyle::Filled
-                                    } else {
-                                        ButtonStyle::Subtle
-                                    })
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        theme::set_theme(theme::Theme::dark(), cx);
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        // Forcing a white reader only makes sense against a dark
-                        // theme; in light mode the page is already light, so the
-                        // toggle is disabled.
-                        Switch::new("reader-white-bg", reader_white)
-                            .label(Key::ReaderWhiteBackground.tr(language))
-                            .disabled(appearance == Appearance::Light)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let _ = this.root.update(cx, |root, cx| {
-                                    root.set_reader_white_background(!reader_white, cx);
-                                });
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Switch::new("compose-white-bg", compose_white)
-                            .label(Key::ComposeWhiteBackground.tr(language))
-                            .disabled(appearance == Appearance::Light)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let _ = this.root.update(cx, |root, cx| {
-                                    root.set_compose_white_background(!compose_white, cx);
-                                });
-                                cx.notify();
-                            })),
-                    )
-                    .into_any_element()
-            }
-            SettingsSection::Notifications => v_flex()
-                .gap_2()
-                .child(settings_row(
-                    Key::DesktopNotifications.tr(language),
-                    Key::Enabled.tr(language),
-                ))
-                .child(settings_row(
-                    Key::SoundOnNewEmail.tr(language),
-                    Key::Disabled.tr(language),
-                ))
-                .into_any_element(),
-            SettingsSection::Privacy => {
-                let always = self
-                    .root
-                    .upgrade()
-                    .map(|root| root.read(cx).load_remote_images)
-                    .unwrap_or(false);
-                v_flex()
-                    .gap_2()
-                    .child(
-                        Label::new(Key::RemoteImagesLabel.tr(language))
-                            .weight(FontWeight::SEMIBOLD),
-                    )
-                    .child(
-                        Label::new(Key::RemoteImagesHint.tr(language))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        Switch::new("always-load-remote", always)
-                            .label(Key::AlwaysLoadRemoteImages.tr(language))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let _ = this.root.update(cx, |root, cx| {
-                                    root.set_load_remote_images(!always, cx);
-                                });
-                                cx.notify();
-                            })),
-                    )
-                    .into_any_element()
-            }
-        };
-
-        v_flex()
-            .p_6()
-            .gap_4()
-            .child(
-                Label::new(section.title_key().tr(language))
-                    .size(LabelSize::Large)
-                    .bold(),
-            )
-            .child(content)
-    }
-
-    /// Language selector used in the General section. Switching the language
-    /// re-renders the whole app through the locale global.
-    fn render_language_picker(
-        &self,
-        language: Language,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut row = h_flex().gap_2();
-        for option in Language::ALL {
-            let selected = option == language;
-            row = row.child(
-                Button::new(("language", option as usize), option.label())
-                    .style(if selected {
-                        ButtonStyle::Filled
-                    } else {
-                        ButtonStyle::Subtle
-                    })
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        locale::set_language(option, cx);
-                        cx.notify();
-                    })),
-            );
-        }
-        row
-    }
-}
-
-impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors();
-
-        h_flex()
-            .size_full()
-            .bg(colors.background)
-            .text_color(colors.text)
-            .font_family("Helvetica")
-            .on_action(cx.listener(|this, _: &ComposeClose, window, cx| {
-                this.close_window(window, cx);
-            }))
-            .child(self.render_nav(cx))
-            .child(
-                div()
-                    .id("settings-content")
-                    .flex_1()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .child(self.render_content(cx)),
-            )
-    }
-}
-
-/// A "label → value" row used in the settings.
-fn settings_row(
-    label: impl Into<SharedString>,
-    value: impl Into<SharedString>,
-) -> impl IntoElement {
-    h_flex()
-        .justify_between()
-        .gap_4()
-        .py_1()
-        .child(Label::new(label.into()).color(Color::Muted))
-        .child(Label::new(value.into()))
 }
 
 impl Render for RootView {
@@ -3679,9 +4110,12 @@ impl Render for RootView {
         if docked_sidebar {
             row = row.child(self.render_sidebar(false, cx));
         }
-        row = row
-            .child(self.render_message_list(cx))
-            .child(self.render_reader(cx));
+        row = if self.accounts.is_empty() {
+            row.child(self.render_welcome(cx))
+        } else {
+            row.child(self.render_message_list(cx))
+                .child(self.render_reader(cx))
+        };
 
         let body = if floating_sidebar {
             // Wrap the columns so the sidebar can float on top. The scrim and the
@@ -3780,7 +4214,7 @@ mod tests {
     fn test_view() -> (TempDir, RootView) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("mail.db");
-        let view = RootView::new_with_database(Config::default(), &path);
+        let view = RootView::new_with_database(Config::default(), &path, true);
         (dir, view)
     }
 

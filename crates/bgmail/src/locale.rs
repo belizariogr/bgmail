@@ -126,6 +126,30 @@ pub enum Key {
     NoticeTooDeep,
     NoticeCrashed,
     NoticeShowFormatted,
+    StatusBodyFailed,
+    StatusMessageSent,
+    StatusSendFailed,
+    StatusSendRetrying,
+    StatusSyncing,
+    StatusOffline,
+    StatusAuthFailed,
+    StatusSyncError,
+    ReaderLoadingBody,
+    ReaderTo,
+    ReaderCc,
+    WelcomeTitle,
+    WelcomeBody,
+    CommandMarkRead,
+    CommandMarkUnread,
+    CommandSyncNow,
+    QuoteFrom,
+    QuoteDate,
+    QuoteSubject,
+    QuoteTo,
+    ForwardHeader,
+    ComposeLocalAccount,
+    ComposeNoRecipients,
+    ComposeInvalidAddress,
 }
 
 impl Key {
@@ -305,7 +329,55 @@ impl Key {
             (NoticeCrashed, P) => "O BGMail fechou ao exibir esta mensagem, por isso ela é exibida como texto simples.",
             (NoticeShowFormatted, E) => "Show formatted",
             (NoticeShowFormatted, P) => "Mostrar formatada",
+            (StatusBodyFailed, E) => "Could not download the message",
+            (StatusBodyFailed, P) => "Não foi possível baixar a mensagem",
+            (StatusMessageSent, E) => "Message sent",
+            (StatusMessageSent, P) => "Mensagem enviada",
+            (StatusSendFailed, E) => "Sending failed",
+            (StatusSendFailed, P) => "Falha no envio",
+            (StatusSendRetrying, E) => "Sending failed, will retry",
+            (StatusSendRetrying, P) => "Falha no envio, nova tentativa em breve",
+            (StatusSyncing, E) => "Updating…",
+            (StatusSyncing, P) => "Atualizando…",
+            (StatusOffline, E) => "Offline, retrying",
+            (StatusOffline, P) => "Sem conexão, tentando novamente",
+            (StatusAuthFailed, E) => "Sign-in failed",
+            (StatusAuthFailed, P) => "Falha ao entrar na conta",
+            (StatusSyncError, E) => "Sync error",
+            (StatusSyncError, P) => "Erro de sincronização",
+            (ReaderLoadingBody, E) => "Downloading message…",
+            (ReaderLoadingBody, P) => "Baixando mensagem…",
+            (ReaderTo, E) => "To",
+            (ReaderTo, P) => "Para",
+            (ReaderCc, E) => "Cc",
+            (ReaderCc, P) => "Cc",
+            (WelcomeTitle, E) => "Welcome to BGMail",
+            (WelcomeTitle, P) => "Bem-vindo ao BGMail",
+            (WelcomeBody, E) => "Add an e-mail account to start reading and sending mail.",
+            (WelcomeBody, P) => "Adicione uma conta de e-mail para começar a ler e enviar mensagens.",
+            (CommandMarkRead, E) => "Mark as Read",
+            (CommandMarkRead, P) => "Marcar como lida",
+            (CommandMarkUnread, E) => "Mark as Unread",
+            (CommandMarkUnread, P) => "Marcar como não lida",
+            (CommandSyncNow, E) => "Get New Mail",
+            (CommandSyncNow, P) => "Receber novas mensagens",
 
+            (QuoteFrom, E) => "From",
+            (QuoteFrom, P) => "De",
+            (QuoteDate, E) => "Date",
+            (QuoteDate, P) => "Data",
+            (QuoteSubject, E) => "Subject",
+            (QuoteSubject, P) => "Assunto",
+            (QuoteTo, E) => "To",
+            (QuoteTo, P) => "Para",
+            (ForwardHeader, E) => "---------- Forwarded message ----------",
+            (ForwardHeader, P) => "---------- Mensagem encaminhada ----------",
+            (ComposeLocalAccount, E) => "This account is local and can't send mail. Add an e-mail account in Settings.",
+            (ComposeLocalAccount, P) => "Esta conta é local e não envia e-mails. Adicione uma conta de e-mail nas Configurações.",
+            (ComposeNoRecipients, E) => "Add at least one recipient.",
+            (ComposeNoRecipients, P) => "Adicione pelo menos um destinatário.",
+            (ComposeInvalidAddress, E) => "Invalid address",
+            (ComposeInvalidAddress, P) => "Endereço inválido",
         }
     }
 }
@@ -339,11 +411,27 @@ pub fn status_search_counts(
     }
 }
 
-/// Status bar (right): unread count plus a "synced" hint.
+/// Status bar (right): unread count.
 pub fn status_unread(language: Language, unread: usize) -> String {
     match language {
-        Language::English => format!("{unread} unread · Updated just now"),
-        Language::Portuguese => format!("{unread} não lidas · Atualizado agora"),
+        Language::English => format!("{unread} unread"),
+        Language::Portuguese => format!("{unread} não lidas"),
+    }
+}
+
+/// Attribution line above a quoted reply.
+pub fn reply_attribution(language: Language, date: &str, sender: &str) -> String {
+    match language {
+        Language::English => format!("On {date}, {sender} wrote:"),
+        Language::Portuguese => format!("Em {date}, {sender} escreveu:"),
+    }
+}
+
+/// Status bar (right): time of the last completed sync (`time` preformatted).
+pub fn status_updated_at(language: Language, time: &str) -> String {
+    match language {
+        Language::English => format!("Updated at {time}"),
+        Language::Portuguese => format!("Atualizado às {time}"),
     }
 }
 
@@ -390,7 +478,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 70] = [
+    const ALL_KEYS: [Key; 94] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -461,6 +549,30 @@ mod tests {
         Key::CommandPrint,
         Key::PrintFrom,
         Key::PrintDate,
+        Key::StatusBodyFailed,
+        Key::StatusMessageSent,
+        Key::StatusSendFailed,
+        Key::StatusSendRetrying,
+        Key::StatusSyncing,
+        Key::StatusOffline,
+        Key::StatusAuthFailed,
+        Key::StatusSyncError,
+        Key::ReaderLoadingBody,
+        Key::ReaderTo,
+        Key::ReaderCc,
+        Key::WelcomeTitle,
+        Key::WelcomeBody,
+        Key::CommandMarkRead,
+        Key::CommandMarkUnread,
+        Key::CommandSyncNow,
+        Key::QuoteFrom,
+        Key::QuoteDate,
+        Key::QuoteSubject,
+        Key::QuoteTo,
+        Key::ForwardHeader,
+        Key::ComposeLocalAccount,
+        Key::ComposeNoRecipients,
+        Key::ComposeInvalidAddress,
     ];
 
     #[test]
@@ -500,5 +612,17 @@ mod tests {
         let pt = status_unread(Language::Portuguese, 9);
         assert!(pt.contains('9') && pt.contains("não lidas"));
         assert_eq!(status_zoom(Language::English, 1.25), "Zoom 125%");
+        assert_eq!(
+            status_updated_at(Language::Portuguese, "14:05"),
+            "Atualizado às 14:05"
+        );
+        assert_eq!(
+            status_updated_at(Language::English, "9:00"),
+            "Updated at 9:00"
+        );
+        assert_eq!(
+            reply_attribution(Language::Portuguese, "31/10/2026 14:07", "Ana"),
+            "Em 31/10/2026 14:07, Ana escreveu:"
+        );
     }
 }

@@ -21,6 +21,11 @@ pub enum CommandId {
     MessageMarkJunk,
     MessageToggleFlag,
     MessagePrint,
+    MessageToggleRead,
+    MessageReply,
+    MessageReplyAll,
+    MessageForward,
+    SyncNow,
     MoveToFolder(SharedString),
 }
 
@@ -49,6 +54,12 @@ impl CommandContext {
         self.message_detail
             .as_ref()
             .is_some_and(|detail| message_has_folder(&detail.folders_csv, system::ARCHIVE))
+    }
+
+    pub fn message_unread(&self) -> bool {
+        self.message_detail
+            .as_ref()
+            .is_some_and(|detail| detail.unread)
     }
 
     pub fn message_starred(&self) -> bool {
@@ -124,6 +135,12 @@ fn label_for(id: &CommandId, language: Language, ctx: &CommandContext) -> Shared
         CommandId::MessageToggleFlag if ctx.message_starred() => Key::CommandUnflag.tr(language),
         CommandId::MessageToggleFlag => Key::CommandFlag.tr(language),
         CommandId::MessagePrint => Key::CommandPrint.tr(language),
+        CommandId::MessageToggleRead if ctx.message_unread() => Key::CommandMarkRead.tr(language),
+        CommandId::MessageToggleRead => Key::CommandMarkUnread.tr(language),
+        CommandId::MessageReply => Key::ToolbarReply.tr(language),
+        CommandId::MessageReplyAll => Key::ToolbarReplyAll.tr(language),
+        CommandId::MessageForward => Key::ToolbarForward.tr(language),
+        CommandId::SyncNow => Key::CommandSyncNow.tr(language),
         CommandId::MoveToFolder(path) => {
             let folder = ctx
                 .folders_by_account
@@ -142,7 +159,10 @@ fn label_for(id: &CommandId, language: Language, ctx: &CommandContext) -> Shared
 /// Whether `id` can run in the current context.
 pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool {
     match id {
-        CommandId::ComposeNew | CommandId::OpenSettings | CommandId::ToggleSidebar => true,
+        CommandId::ComposeNew
+        | CommandId::OpenSettings
+        | CommandId::ToggleSidebar
+        | CommandId::SyncNow => true,
         CommandId::MessageDelete => ctx.selected_message_id.is_some() && !ctx.message_in_trash(),
         CommandId::MessageDeletePermanent | CommandId::MessageRestore => {
             ctx.selected_message_id.is_some() && ctx.message_in_trash()
@@ -155,7 +175,11 @@ pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool {
         CommandId::MessageMarkJunk => {
             ctx.selected_message_id.is_some() && !ctx.message_in_trash() && !ctx.message_in_junk()
         }
-        CommandId::MessagePrint => ctx.selected_message_id.is_some(),
+        CommandId::MessagePrint
+        | CommandId::MessageToggleRead
+        | CommandId::MessageReply
+        | CommandId::MessageReplyAll
+        | CommandId::MessageForward => ctx.selected_message_id.is_some(),
         CommandId::MessageToggleFlag | CommandId::MoveToFolder(_) => {
             ctx.selected_message_id.is_some() && !ctx.message_in_trash()
         }
@@ -169,9 +193,14 @@ pub fn palette_commands(language: Language, ctx: &CommandContext) -> Vec<Command
         CommandId::ComposeNew,
         CommandId::OpenSettings,
         CommandId::ToggleSidebar,
+        CommandId::SyncNow,
     ];
     if has_message {
         ids.extend([
+            CommandId::MessageReply,
+            CommandId::MessageReplyAll,
+            CommandId::MessageForward,
+            CommandId::MessageToggleRead,
             CommandId::MessageDelete,
             CommandId::MessageDeletePermanent,
             CommandId::MessageRestore,
@@ -269,6 +298,37 @@ mod tests {
             }),
             folders_by_account,
         }
+    }
+
+    #[test]
+    fn read_toggle_label_follows_unread_state() {
+        let mut ctx = ctx_with_message(false, false);
+        ctx.message_detail.as_mut().unwrap().unread = true;
+        assert_eq!(
+            label_for(&CommandId::MessageToggleRead, Language::English, &ctx).as_ref(),
+            "Mark as Read"
+        );
+        ctx.message_detail.as_mut().unwrap().unread = false;
+        assert_eq!(
+            label_for(&CommandId::MessageToggleRead, Language::English, &ctx).as_ref(),
+            "Mark as Unread"
+        );
+    }
+
+    #[test]
+    fn reply_commands_need_a_message_and_sync_never_does() {
+        let empty = CommandContext::default();
+        assert!(!command_enabled(&CommandId::MessageReply, &empty));
+        assert!(!command_enabled(&CommandId::MessageForward, &empty));
+        assert!(command_enabled(&CommandId::SyncNow, &empty));
+        let ctx = ctx_with_message(true, false);
+        assert!(command_enabled(&CommandId::MessageReplyAll, &ctx));
+        let ids: Vec<_> = palette_commands(Language::English, &ctx)
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert!(ids.contains(&CommandId::MessageReply));
+        assert!(ids.contains(&CommandId::MessageToggleRead));
     }
 
     #[test]

@@ -61,6 +61,24 @@ pub fn compose_position_is_unset(origin: Point<gpui::Pixels>) -> bool {
     f32::from(origin.x) < 0.0 || f32::from(origin.y) < 0.0
 }
 
+/// An account the compose window can send from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposeAccount {
+    pub id: i64,
+    pub name: String,
+    pub email: String,
+    /// Local/demo accounts have no server to send through.
+    pub can_send: bool,
+}
+
+/// Content the compose window opens with (reply, reply all, forward).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ComposeInit {
+    /// Account to send from (the one the original message belongs to).
+    pub account_id: Option<i64>,
+    pub draft: mail_core::Draft,
+}
+
 /// Fixed width of the field labels column (From, To, Cc, …), in pixels.
 const FIELD_LABEL_WIDTH: f32 = 72.0;
 

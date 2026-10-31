@@ -14,11 +14,15 @@ mod compose;
 mod config;
 mod crash_guard;
 mod data;
+mod dates;
 mod db_seed;
 mod locale;
 mod mail_html;
+mod mail_service;
+mod notifications;
 mod print;
 mod root;
+mod settings;
 mod shortcuts;
 mod startup;
 mod window_drag;
@@ -254,6 +258,9 @@ fn main() {
                             RootView::new(settings)
                         });
                         view.update(cx, |view, cx| {
+                            // Sync starts after the window exists; it never
+                            // blocks the first frame (threads + async keychain).
+                            view.start_mail(cx);
                             cx.observe_window_activation(window, |this, window, cx| {
                                 if window.is_window_active() {
                                     this.on_main_window_activated(cx);

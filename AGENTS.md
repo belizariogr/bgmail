@@ -82,18 +82,20 @@ BGMail/
     ├── ui/ ← reusable visual components
     ├── storage/ ← SQLite persistence (mail.db)
     ├── mail_core/ ← mail domain: addresses, MIME, reply/forward, remote traits
+    ├── protocols/ ← IMAP/SMTP clients, Gmail OAuth2, presets/autoconfig
+    ├── mail_sync/ ← sync engine (worker/IDLE threads, op queue, outbox)
     ├── html_view/ ← native GPUI HTML (mail body) rendering on Blitz
     └── bgmail/ ← binary (window + layout + state + localization)
 ```
 
 ## Scope limits (current)
 
-- **Stage 1 (visual mock)** is largely done; **Stage 2 (domain/storage)** is in
-  progress — see `TODO.md`.
-- Do **not** implement networking, OAuth, IMAP/POP3/SMTP, or Gmail API yet
-  (Stage 3). Keep protocol code out until Stage 2 sync/storage is stable.
-  Exception (user decision): remote images in the reader, fetched by
-  `html_view` only when the user allows them (per message or always).
+- **Stage 1 (visual mock)** and **Stage 2 (domain/storage/sync)** are done;
+  **Stage 3 (connectivity)** is in progress — see `TODO.md`.
+- Networking is allowed (user decision): IMAP/SMTP and Gmail (OAuth2 +
+  XOAUTH2) live in `crates/protocols`, driven by `crates/mail_sync`; remote
+  images are fetched by `html_view` only when the user allows them. All
+  network IO runs off the UI thread. POP3 is postponed.
 - Sample / seed data stays isolated (`crates/bgmail/src/data.rs`,
   `crates/bgmail/src/db_seed.rs`, `storage::seed`) so it can be replaced by the
   real mail layer later.

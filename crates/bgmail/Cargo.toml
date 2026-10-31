@@ -17,6 +17,18 @@ gpui.workspace = true
 theme.workspace = true
 ui.workspace = true
 storage.workspace = true
+# Mail domain, protocol clients and the background sync engine.
+mail_core.workspace = true
+protocols.workspace = true
+mail_sync.workspace = true
+# Message actions return storage's error type (same version as `storage`).
+rusqlite = "0.37"
+# Sync events are pushed from engine threads and awaited by a GPUI task.
+async-channel = "2"
+# Desktop notifications (D-Bus / macOS / WinRT behind one API).
+notify-rust = "4.18"
+# Local-time formatting of message dates (`clock` = local zone on every OS).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Native HTML mail rendering (Blitz layout painted by GPUI).
 html_view.workspace = true
 
