@@ -217,6 +217,8 @@ fn replace_unavailable_images(
             alt: String,
             style: String,
             attrs: Vec<blitz_dom::Attribute>,
+            /// Whether the broken-image icon precedes the text.
+            icon: bool,
         },
         /// Keep the image, restyled.
         Restyle(String),
@@ -299,17 +301,21 @@ fn replace_unavailable_images(
                     || compact.contains("float:left")
                     || compact.contains("float:right")
                     || matches!(align_attr.as_deref(), Some("left" | "right"));
+                // Chromium frames a quirks-mode box and shows its icon only
+                // when the icon fits (18px each way); smaller boxes show just
+                // the clipped alt text.
+                let (w, h) = (width.unwrap_or(16.0), height.unwrap_or(16.0));
+                let icon = !quirks_box || (w >= 18.0 && h >= 18.0);
                 let style = if quirks_box {
                     let display = if compact.contains("display:block") {
                         "block"
                     } else {
                         "inline-block"
                     };
+                    let frame = if icon { IMAGE_FRAME } else { "" };
                     format!(
-                        "{own};display:{display};overflow:hidden;width:{}px;height:{}px;\
-                         vertical-align:bottom;{IMAGE_FRAME}{align}",
-                        width.unwrap_or(16.0),
-                        height.unwrap_or(16.0)
+                        "{own};display:{display};overflow:hidden;width:{w}px;height:{h}px;\
+                         vertical-align:bottom;{frame}{align}"
                     )
                 } else if block {
                     // Keep the block's width; its height follows the
@@ -335,6 +341,7 @@ fn replace_unavailable_images(
                     alt: alt.to_string(),
                     style,
                     attrs,
+                    icon,
                 }
             }
             _ => match (width, height) {
@@ -371,6 +378,7 @@ fn replace_unavailable_images(
                 alt,
                 style,
                 mut attrs,
+                icon,
             } => {
                 if !style.is_empty() {
                     attrs.push(blitz_dom::Attribute {
@@ -379,15 +387,19 @@ fn replace_unavailable_images(
                     });
                 }
                 let span = mutator.create_element(blitz_dom::qual_name!("span", html), attrs);
-                let icon = mutator.create_element(
-                    blitz_dom::qual_name!("span", html),
-                    vec![blitz_dom::Attribute {
-                        name: blitz_dom::qual_name!("style"),
-                        value: IMAGE_ICON.to_string(),
-                    }],
-                );
                 let text = mutator.create_text_node(&alt);
-                mutator.append_children(span, &[icon, text]);
+                if icon {
+                    let icon = mutator.create_element(
+                        blitz_dom::qual_name!("span", html),
+                        vec![blitz_dom::Attribute {
+                            name: blitz_dom::qual_name!("style"),
+                            value: IMAGE_ICON.to_string(),
+                        }],
+                    );
+                    mutator.append_children(span, &[icon, text]);
+                } else {
+                    mutator.append_children(span, &[text]);
+                }
                 mutator.replace_node_with(img, &[span]);
             }
         }
@@ -2184,5 +2196,40 @@ mod tests {
             })
             .collect();
         assert_eq!(weights, [900.0]);
+    }
+
+    #[test]
+    fn rowspan_heights_and_overlaps_follow_the_html_table_model() {
+        // The extra height of a tall rowspan cell goes to the row where
+        // another rowspan cell starts (Chromium), not to every row.
+        let html = "<!DOCTYPE html><body style=\"margin:0\"><table cellpadding=0 cellspacing=0>\
+            <tr><td rowspan=4 height=200>x</td><td id=a height=19>a</td></tr>\
+            <tr><td rowspan=2 height=59>b</td><td id=b height=24>b</td></tr>\
+            <tr><td id=c height=35>c</td></tr><tr><td id=d>d</td></tr></table>";
+        assert_eq!(box_of(html, "a").3, 19.0);
+        assert_eq!(box_of(html, "b").3, 128.0);
+        assert_eq!(box_of(html, "c").3, 35.0);
+        // A colspan overlapping a rowspan cell stays at its HTML column.
+        let html = "<!DOCTYPE html><body style=\"margin:0\"><table cellpadding=0 cellspacing=0>\
+            <tr><td width=10>a</td><td width=10>b</td><td rowspan=2 width=10>c</td></tr>\
+            <tr><td id=s colspan=3>s</td></tr></table>";
+        assert_eq!(box_of(html, "s").0, 0.0);
+    }
+
+    #[test]
+    fn small_quirks_alt_boxes_show_only_text() {
+        let html = format!("{QUIRKS}<body style=\"margin:0\"><img id=\"s\" alt=\"Books\" src=\"https://t.test/b.png\" width=\"35\" height=\"15\"><img id=\"l\" alt=\"Books\" src=\"https://t.test/b.png\" width=\"60\" height=\"40\">");
+        let doc = laid_out(&html);
+        let blitz = doc.blitz();
+        let children = |id: &str| {
+            blitz
+                .get_node(blitz.get_element_by_id(id).unwrap())
+                .unwrap()
+                .children
+                .len()
+        };
+        // Too small for the icon: just the (clipped) text; else icon + text.
+        assert_eq!(children("s"), 1);
+        assert_eq!(children("l"), 2);
     }
 }

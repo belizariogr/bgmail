@@ -101,6 +101,21 @@ repository instead of living in someone's checkout.
       - `TableCell::span` = (colspan, rowspan), so paint can draw collapsed
         borders per cell.
       - Collapsed-border tables have no padding.
+      - Cells are placed at the column the HTML table model gives them
+        (`ColumnCursor`), not by Taffy's auto-placement. A colspan
+        overlapping a rowspan cell stays put instead of jumping past the
+        table.
+      - In automatic layout, tables with rowspan cells get their row heights
+        from `rowspan_row_heights`:
+        - cells are measured at their column widths;
+        - rowspan cells, narrowest spans first, spread what they lack with
+          `distribute_rowspan_height`, measured in Chromium:
+          1. rows where another rowspan cell starts, equally;
+          2. else unconstrained non-empty rows, by height;
+          3. else non-empty rows, by height;
+          4. else all rows.
+        - The results become the row tracks' minimums. Taffy alone spread
+          the excess over every spanned track.
     - `layout/inline/build.rs` (`LineHeightQuirk`): under the line height
       quirk:
       - an inline box, or the root strut, with no direct text and no vertical

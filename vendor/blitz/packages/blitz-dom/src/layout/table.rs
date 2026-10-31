@@ -902,13 +902,13 @@ fn collect_table_cells(
                 style.margin.bottom = style_helpers::length(0.0);
             }
 
-            // Let Taffy auto-place the column. Combined with
-            // `grid_auto_flow: RowDense` set on the table root, each cell
-            // scans from the first track in its row for a free position,
-            // which makes cells automatically skip columns occupied by
-            // rowspan cells from earlier rows.
+            // BGMail: place the cell at the column the HTML table model gives
+            // it (`cursor`, which skips columns held by rowspan cells). Taffy's
+            // auto-placement would instead move a colspan that overlaps a
+            // rowspan cell to the next free run of columns, past the table
+            // (browsers let the cells overlap).
             style.grid_column = taffy::Line {
-                start: style_helpers::auto(),
+                start: style_helpers::line(col as i16 + 1),
                 end: style_helpers::span(colspan),
             };
             style.grid_row = taffy::Line {
@@ -1431,17 +1431,186 @@ impl TableTreeWrapper<'_, '_> {
         if min_width.is_none_or(|m| m < min_outer) {
             style.min_size.width = style_helpers::length(min_outer);
         }
+        // BGMail: rowspan cells spread their extra height like Chromium (see
+        // `distribute_rowspan_height`); Taffy's grid would spread it over
+        // every spanned track instead.
+        if ctx.cells.iter().any(|cell| cell.span.1 > 1) {
+            let gap_y = style
+                .gap
+                .height
+                .resolve_or_zero(parent_width, resolve_calc_value);
+            let rows = self.rowspan_row_heights(&ctx, &widths, gap, gap_y);
+            for (track, height) in style.grid_template_rows.iter_mut().zip(rows) {
+                if let GridTemplateComponent::Single(track) = track {
+                    if height > 0.0 {
+                        track.min = taffy::MinTrackSizingFunction::length(height);
+                    }
+                }
+            }
+        }
         style.grid_template_columns = widths
             .into_iter()
             .map(|w| GridTemplateComponent::Single(style_helpers::length(w)))
             .collect();
         Some(style)
     }
+
+    /// BGMail: row heights of a table with rowspan cells, from every cell's
+    /// height at its columns' `widths`: single-row cells set their row's
+    /// height, then rowspan cells (narrowest spans first) add what they lack
+    /// with `distribute_rowspan_height`.
+    fn rowspan_row_heights(
+        &mut self,
+        ctx: &TableContext,
+        widths: &[f32],
+        gap_x: f32,
+        gap_y: f32,
+    ) -> Vec<f32> {
+        use taffy::{AvailableSpace, LayoutInput, Line, RequestedAxis, RunMode, Size, SizingMode};
+        let n = ctx.rows.len();
+        let mut heights: Vec<f32> = ctx
+            .rows
+            .iter()
+            .map(|row| row.height.unwrap_or(0.0))
+            .collect();
+        let mut origins = vec![false; n];
+        let mut spanning = Vec::new();
+        for idx in 0..ctx.cells.len() {
+            let cell = &ctx.cells[idx];
+            let (colspan, rowspan) = cell.span;
+            let (row, col) = (cell.row as usize, cell.column as usize);
+            if row >= n {
+                continue;
+            }
+            let cols = col.min(widths.len())..(col + colspan as usize).min(widths.len());
+            let width = widths[cols.clone()].iter().sum::<f32>()
+                + gap_x * cols.len().saturating_sub(1) as f32;
+            // The cell's height (its declared `height` being a minimum).
+            let height = self
+                .compute_child_layout(
+                    idx.into(),
+                    LayoutInput {
+                        run_mode: RunMode::ComputeSize,
+                        sizing_mode: SizingMode::InherentSize,
+                        axis: RequestedAxis::Vertical,
+                        known_dimensions: Size {
+                            width: Some(width),
+                            height: None,
+                        },
+                        known_dimensions_are_definite: Size {
+                            width: true,
+                            height: false,
+                        },
+                        parent_size: Size {
+                            width: Some(width),
+                            height: None,
+                        },
+                        available_space: Size {
+                            width: AvailableSpace::Definite(width),
+                            height: AvailableSpace::MaxContent,
+                        },
+                        vertical_margins_are_collapsible: Line::FALSE,
+                    },
+                )
+                .size
+                .height;
+            if rowspan > 1 {
+                origins[row] = true;
+                let end = (row + rowspan as usize).min(n);
+                spanning.push((end - row, row, end, height));
+            } else {
+                heights[row] = heights[row].max(height);
+            }
+        }
+        spanning.sort_by_key(|&(span, row, _, _)| (span, row));
+        let constrained: Vec<bool> = ctx.rows.iter().map(|row| row.is_constrained).collect();
+        for (span, start, end, need) in spanning {
+            let have = heights[start..end].iter().sum::<f32>() + gap_y * (span - 1) as f32;
+            if need > have {
+                distribute_rowspan_height(
+                    &mut heights[start..end],
+                    &origins[start..end],
+                    &constrained[start..end],
+                    need - have,
+                );
+            }
+        }
+        heights
+    }
+}
+
+/// BGMail: spreads `extra` height a rowspan cell needs over its rows
+/// (`rows[0]` is its own row), like Chromium:
+/// 1. rows (other than its own) where another rowspan cell starts, equally;
+/// 2. else non-empty rows without a declared height, by their height;
+/// 3. else non-empty rows, by their height;
+/// 4. else every row, equally.
+fn distribute_rowspan_height(rows: &mut [f32], origins: &[bool], constrained: &[bool], extra: f32) {
+    let starts: Vec<usize> = (1..rows.len()).filter(|&i| origins[i]).collect();
+    if !starts.is_empty() {
+        for &i in &starts {
+            rows[i] += extra / starts.len() as f32;
+        }
+        return;
+    }
+    let by_height = |rows: &mut [f32], targets: &[usize]| {
+        let total: f32 = targets.iter().map(|&i| rows[i]).sum();
+        for &i in targets {
+            rows[i] += extra * rows[i] / total;
+        }
+    };
+    let free: Vec<usize> = (0..rows.len())
+        .filter(|&i| rows[i] > 0.0 && !constrained[i])
+        .collect();
+    if !free.is_empty() {
+        return by_height(rows, &free);
+    }
+    let filled: Vec<usize> = (0..rows.len()).filter(|&i| rows[i] > 0.0).collect();
+    if !filled.is_empty() {
+        return by_height(rows, &filled);
+    }
+    let share = extra / rows.len() as f32;
+    for row in rows.iter_mut() {
+        *row += share;
+    }
 }
 
 #[cfg(test)]
 mod auto_table_tests {
-    use super::{ColumnCursor, distribute_auto_columns, distribute_span_excess};
+    use super::{
+        ColumnCursor, distribute_auto_columns, distribute_rowspan_height, distribute_span_excess,
+    };
+
+    #[test]
+    fn rowspan_height_prefers_rows_starting_rowspans() {
+        // Measured in Chromium: rows where another rowspan cell starts take
+        // the extra equally, even over auto rows.
+        let mut rows = [19.0, 24.0, 35.0, 18.0];
+        distribute_rowspan_height(
+            &mut rows,
+            &[true, true, false, false],
+            &[true, true, true, false],
+            104.0,
+        );
+        assert!(close(&rows, &[19.0, 128.0, 35.0, 18.0]));
+        // Else unconstrained non-empty rows, by their height...
+        let mut rows = [19.0, 24.0, 18.0];
+        distribute_rowspan_height(
+            &mut rows,
+            &[true, false, false],
+            &[true, true, false],
+            139.0,
+        );
+        assert!(close(&rows, &[19.0, 24.0, 157.0]));
+        // ...else every non-empty row by its height (an empty one stays empty).
+        let mut rows = [19.0, 24.0, 35.0, 0.0];
+        distribute_rowspan_height(&mut rows, &[true, false, false, false], &[true; 4], 122.0);
+        assert!(close(&rows, &[48.72, 61.54, 89.74, 0.0]));
+        // ...else all rows equally.
+        let mut rows = [0.0, 0.0];
+        distribute_rowspan_height(&mut rows, &[true, false], &[false; 2], 10.0);
+        assert!(close(&rows, &[5.0, 5.0]));
+    }
 
     #[test]
     fn span_minimums_fill_fixed_columns_first() {

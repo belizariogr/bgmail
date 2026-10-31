@@ -498,9 +498,9 @@
        - the reader keeping the message's doctype.
      - Next:
        - recapture and re-review;
-       - ham-17 (4.5): rowspan cells with a declared height push their
-         extra height into constrained rows (Taffy's spanning-item
-         distribution); Chromium gives it to unconstrained rows;
+       - ✅ ham-17: rowspan cells spread their extra height like Chromium
+         (rows starting other rowspans first) and colspans overlapping
+         rowspan cells keep their HTML column;
        - remaining drift in ham-01, ham-16 and ham-05 (fonts missing here,
          iframe ads, listbox `<select size>`);
        - alt-text boxes: clipping and wrapping match Chromium; only in

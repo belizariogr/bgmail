@@ -108,8 +108,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
       `hspace`/`vspace` margins (quirks: 3px toward the text).
     - Block-level ones (`display:block`, floated, `align=left/right`) keep
       their width, with the height from the attributes' ratio.
-    - In quirks mode, any declared size wins: a framed box (square from one
-      dimension) clipping the alt text.
+    - In quirks mode, any declared size wins: a box (square from one
+      dimension) clipping the alt text, framed with the icon only from 18px
+      each way.
   - Without alt (or with `alt=""`):
     - Both dimensions declared: a box of that size, framed only from 18px
       each way (smaller spacer GIFs show nothing).
@@ -224,7 +225,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   inline alt text keeping the image's font, collapsed borders per cell, C1
   controls repaired, collapsed tables without padding, alt text in links
   underlined, plain `<hr>` bevel, `align=justify`, "Arial Black" drawn at
-  900 when filed under Arial,
+  900 when filed under Arial, rowspan heights and overlapping colspans,
+  small quirks alt boxes showing only text,
   root background filling a requested height, relative URLs neither panicking
   nor counted as remote, XHTML mail keeps block `<p>`, blocked remote image
   recording, text runs carry ordered words + face.
