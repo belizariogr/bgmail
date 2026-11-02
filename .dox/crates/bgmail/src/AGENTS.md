@@ -34,7 +34,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ## API Catalog
 
-_723 functions/methods documented._
+_729 functions/methods documented._
 
 ### `src/account_setup.rs`
 
@@ -2874,6 +2874,12 @@ First-run setup view; see the crate doc for its contract.
 - **`RootView::render_onboarding(window, cx)`**: the setup under a draggable title bar with the window controls.
 - **`RootView::window_drag_bar(bar, cx)`**: makes an element act as the title bar (shared with the toolbar).
 - **`RootView::toggle_command_palette`**: does nothing during the setup.
+- **`app_zoom::step(current, steps)`**: the level `steps` away, stopping at both ends.
+- **`app_zoom::sanitize(saved)`**: the nearest level to a config value; 1 if not finite.
+- **`app_zoom::nearest(value)`** (private): index of the closest level.
+- **`RootView::zoom_app(steps, window, cx)`**: steps the zoom (`0` = normal) in every open window, notes it in the status bar and saves it.
+- **`schedule_app_zoom(steps, cx)`** (`main.rs`): defers `zoom_app` until no window is dispatching.
+- **`window_frame::logical_window_size(window)`**: the window size in element coordinates.
 - **`CommandContext::selection_movable()`**: false in Sent or when the selection has a sent-only message; Archive, Junk and Move require it.
 - **`message_only_in_sent(folders_csv)`**: in Sent and not in the Inbox.
 - **`RootView::showing_sent()`**: the list shows Sent (unified or an account's).

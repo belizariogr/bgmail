@@ -16,6 +16,9 @@ repository instead of living in someone's checkout.
   - `vendor/taffy/` (DioxusLabs/taffy rev `c256056`, MIT), wired by
     `[patch."https://github.com/DioxusLabs/taffy"]` in the root `Cargo.toml`
     and in `vendor/blitz/Cargo.toml`.
+  - `vendor/gpui/` (gpui 0.2.2 from crates.io, Apache-2.0, without `examples/`,
+    `tests/` and their manifest targets), wired by `[patch.crates-io]` in the root
+    `Cargo.toml`; its own workspace, listed in `[workspace] exclude`.
 - Does not own: code vendored inside a crate (e.g.
   `crates/html_view/src/blitz_paint/`, documented there).
 
@@ -27,6 +30,13 @@ repository instead of living in someone's checkout.
 - `serde_fmt`: upstream `impl From<serde_fmt::Error> for core::fmt::Error`
   removed. GPUI 0.2.2 enables `log/kv_unstable_serde`, which pulls
   `serde_fmt`; that foreign impl makes `?` ambiguous in Stylo's `ToCss` derive.
+- `gpui`: per-window content scale, for the zoom of the whole app (no public API
+  can scale a window's rendering and input together). `Window::set_content_scale`
+  multiplies the scale factor and divides the viewport and event positions
+  (`scale_event_positions`); what goes back to the platform (IME position, window
+  menu position, client inset) is multiplied again. `Window::content_scale`,
+  `Window::platform_viewport_size` expose it. `window_bounds`/`bounds` stay in
+  platform coordinates.
 - `blitz` (HTML e-mail fidelity, measured in `spikes/html_render`):
   - `layout/table.rs`: non-cell children of a row become anonymous cells
     (`<td style="display:block">`); browser automatic table layout

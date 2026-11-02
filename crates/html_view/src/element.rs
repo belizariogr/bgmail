@@ -30,12 +30,6 @@ actions!(
         PageDown,
         ScrollToTop,
         ScrollToBottom,
-        /// Zooms the page in one step.
-        ZoomIn,
-        /// Zooms the page out one step.
-        ZoomOut,
-        /// Back to 100%.
-        ResetZoom,
     ]
 );
 
@@ -85,10 +79,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-space", PageUp, context),
         KeyBinding::new("home", ScrollToTop, context),
         KeyBinding::new("end", ScrollToBottom, context),
-        KeyBinding::new("secondary-=", ZoomIn, context),
-        KeyBinding::new("secondary-+", ZoomIn, context),
-        KeyBinding::new("secondary--", ZoomOut, context),
-        KeyBinding::new("secondary-0", ResetZoom, context),
     ]);
 }
 
@@ -724,9 +714,6 @@ impl Render for HtmlView {
             }))
             .on_action(cx.listener(|this, _: &ScrollToTop, _, cx| this.scroll_by(f32::MIN, cx)))
             .on_action(cx.listener(|this, _: &ScrollToBottom, _, cx| this.scroll_by(f32::MAX, cx)))
-            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(1, cx)))
-            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(-1, cx)))
-            .on_action(cx.listener(|this, _: &ResetZoom, _, cx| this.set_zoom(1.0, cx)))
             .child(
                 HtmlElement::new(self.document.clone(), self.cache.clone())
                     .interactive(cx.weak_entity()),

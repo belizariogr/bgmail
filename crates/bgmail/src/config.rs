@@ -67,6 +67,8 @@ pub struct Config {
     pub compose_width: f32,
     /// Height of the compose window.
     pub compose_height: f32,
+    /// Zoom of the whole app (1 = normal); see `app_zoom`.
+    pub ui_scale: f32,
     /// Whether the app uses the light theme. Off by default (dark).
     pub light_theme: bool,
     /// Whether the first-run setup was finished, even with no account added.
@@ -97,6 +99,7 @@ impl Default for Config {
             compose_y: compose::COMPOSE_POSITION_UNSET,
             compose_width: compose::COMPOSE_DEFAULT_WIDTH,
             compose_height: compose::COMPOSE_DEFAULT_HEIGHT,
+            ui_scale: 1.0,
             light_theme: false,
             onboarding_completed: false,
         }
@@ -194,6 +197,7 @@ mod tests {
             compose_y: 80.0,
             compose_width: 790.0,
             compose_height: 720.0,
+            ui_scale: 1.25,
             light_theme: true,
             onboarding_completed: true,
         };
@@ -306,6 +310,7 @@ mod tests {
             compose_y: 50.0,
             compose_width: 800.0,
             compose_height: 600.0,
+            ui_scale: 1.25,
             light_theme: true,
             onboarding_completed: true,
         };

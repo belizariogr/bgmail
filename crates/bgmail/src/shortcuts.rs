@@ -6,10 +6,11 @@
 use gpui::{App, KeyBinding, KeybindingKeystroke, Keystroke};
 
 use crate::actions::{
-    ComposeClose, ComposeNew, ExtendSelectionDown, ExtendSelectionUp, FindInMessage, GetNewMail,
-    MessageArchive, MessageDelete, MessageForward, MessageMarkJunk, MessagePrint, MessageReply,
-    MessageReplyAll, MessageToggleFlag, MessageToggleRead, OpenSettings, Quit, SelectAllMessages,
-    SelectNextMessage, SelectPreviousMessage, ToggleCommandPalette, ToggleSidebar,
+    AppZoomIn, AppZoomOut, AppZoomReset, ComposeClose, ComposeNew, ExtendSelectionDown,
+    ExtendSelectionUp, FindInMessage, GetNewMail, MessageArchive, MessageDelete, MessageForward,
+    MessageMarkJunk, MessagePrint, MessageReply, MessageReplyAll, MessageToggleFlag,
+    MessageToggleRead, OpenSettings, Quit, SelectAllMessages, SelectNextMessage,
+    SelectPreviousMessage, ToggleCommandPalette, ToggleSidebar,
 };
 
 /// Key context of the focused message list: plain-key navigation and
@@ -102,6 +103,10 @@ pub fn bind_app_shortcuts(cx: &mut App) {
         KeyBinding::new(COMPOSE_OTHER, ComposeNew, None),
         KeyBinding::new(SETTINGS_MAC, OpenSettings, None),
         KeyBinding::new(SETTINGS_OTHER, OpenSettings, None),
+        KeyBinding::new("secondary-=", AppZoomIn, None),
+        KeyBinding::new("secondary-+", AppZoomIn, None),
+        KeyBinding::new("secondary--", AppZoomOut, None),
+        KeyBinding::new("secondary-0", AppZoomReset, None),
         KeyBinding::new(TOGGLE_SIDEBAR_MAC, ToggleSidebar, None),
         KeyBinding::new(TOGGLE_SIDEBAR_OTHER, ToggleSidebar, None),
         KeyBinding::new(COMMAND_PALETTE_MAC, ToggleCommandPalette, None),
@@ -187,6 +192,29 @@ const GLOBAL_CHORDS: [(&str, &str); 17] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn plus_minus_and_zero_zoom_the_app_from_anywhere(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            bind_app_shortcuts(cx);
+            for (id, step) in [(0, 1), (1, -1), (2, 0)] {
+                let seen = seen.clone();
+                let record = move || seen.borrow_mut().push(step);
+                match id {
+                    0 => cx.on_action(move |_: &AppZoomIn, _| record()),
+                    1 => cx.on_action(move |_: &AppZoomOut, _| record()),
+                    _ => cx.on_action(move |_: &AppZoomReset, _| record()),
+                };
+            }
+        });
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        cx.simulate_keystrokes("secondary-= secondary-+ secondary-- secondary-0");
+        assert_eq!(*seen.borrow(), [1, 1, -1, 0]);
+    }
 
     #[test]
     fn format_binding_parses_compose_shortcut() {

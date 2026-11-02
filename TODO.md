@@ -379,6 +379,8 @@
       (`Config::light_theme`, also from Settings).
 - ✅ Sent mail can only be deleted: Archive, Junk, Move and dragging are blocked
       for it (`commands::message_only_in_sent`, `selection_movable`).
+- ✅ Zoom of the whole app with Ctrl/Cmd `+`/`-`/`0` in every window, persisted
+      (`app_zoom`, content scale patched into `vendor/gpui`).
 - ⬜ Persist the UI language (`locale` always starts in English, so the setup does
       too); consider a language picker on the welcome step.
 

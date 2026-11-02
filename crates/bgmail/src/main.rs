@@ -8,6 +8,7 @@
 mod account_setup;
 mod actions;
 mod app_menus;
+mod app_zoom;
 mod attachments;
 mod command_palette;
 mod command_palette_overlay;
@@ -43,9 +44,9 @@ use gpui::{
 
 use crate::commands::CommandId;
 use actions::{
-    ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, FindInMessage,
-    GetNewMail, MessageArchive, MessageDelete, MessageDeletePermanent, MessageForward,
-    MessageMarkJunk, MessagePrint, MessageReply, MessageReplyAll, MessageRestore,
+    AppZoomIn, AppZoomOut, AppZoomReset, ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew,
+    ComposeSend, FindInMessage, GetNewMail, MessageArchive, MessageDelete, MessageDeletePermanent,
+    MessageForward, MessageMarkJunk, MessagePrint, MessageReply, MessageReplyAll, MessageRestore,
     MessageToggleFlag, MessageToggleRead, MoveMessageToFolder, OpenSettings, Quit,
     ToggleCommandPalette, ToggleSidebar,
 };
@@ -122,6 +123,15 @@ fn schedule_find_in_message(cx: &mut App) {
     });
 }
 
+/// Steps the zoom of the whole app; `0` goes back to normal. Deferred because the
+/// window the key went to is busy dispatching it, and all of them have to change.
+fn schedule_app_zoom(steps: i32, cx: &mut App) {
+    let main = cx.global::<MainWindow>().0;
+    cx.defer(move |cx| {
+        let _ = main.update(cx, |root, window, cx| root.zoom_app(steps, window, cx));
+    });
+}
+
 /// Global handlers keep macOS menu items enabled when focus is outside the main
 /// view tree (compose/settings windows).
 fn register_global_menu_actions(cx: &mut App) {
@@ -129,6 +139,9 @@ fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &ComposeNew, cx| schedule_menu_command(CommandId::ComposeNew, cx));
     cx.on_action(|_: &OpenSettings, cx| schedule_menu_command(CommandId::OpenSettings, cx));
     cx.on_action(|_: &ToggleSidebar, cx| schedule_menu_command(CommandId::ToggleSidebar, cx));
+    cx.on_action(|_: &AppZoomIn, cx| schedule_app_zoom(1, cx));
+    cx.on_action(|_: &AppZoomOut, cx| schedule_app_zoom(-1, cx));
+    cx.on_action(|_: &AppZoomReset, cx| schedule_app_zoom(0, cx));
     cx.on_action(|_: &MessageDelete, cx| {
         let main = cx.global::<MainWindow>().0;
         cx.defer(move |cx| {
@@ -222,6 +235,7 @@ fn main() {
     application.run(move |cx: &mut App| {
         startup::log_milestone("application run callback");
         let settings = config::load();
+        let ui_scale = app_zoom::sanitize(settings.ui_scale);
         theme::init(settings.appearance(), cx);
         // Initialize localization (English by default).
         locale::init(locale::Language::default(), cx);
@@ -276,6 +290,7 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
+                    window.set_content_scale(ui_scale, cx);
                     let view = cx.new(|cx| {
                         // Flush the latest layout synchronously when the app quits
                         // (e.g. Cmd+Q), so a move/resize made right before quitting
@@ -348,13 +363,13 @@ fn main() {
                                     let settled = cx
                                         .update(|window, _| {
                                             let actual = window.bounds().size;
-                                            if window.viewport_size() != actual {
+                                            if window.platform_viewport_size() != actual {
                                                 window_drag::nudge_window_resize(window);
                                             }
                                             window_drag::window_layout_settled(
                                                 open_maximized,
                                                 window.is_maximized(),
-                                                window.viewport_size(),
+                                                window.platform_viewport_size(),
                                                 actual,
                                             )
                                         })

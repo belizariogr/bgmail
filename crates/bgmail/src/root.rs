@@ -892,6 +892,8 @@ pub struct RootView {
     /// Whether the compose message body uses a white background. Persisted; off
     /// by default.
     pub(crate) compose_white_background: bool,
+    /// Zoom of the whole app, applied to every window it opens.
+    ui_scale: f32,
     /// Persisted copy of the theme choice (the theme itself is an app global,
     /// which the settings snapshot can't read).
     light_theme: bool,
@@ -1322,6 +1324,7 @@ impl RootView {
             remote_allowed: HashSet::new(),
             reader_white_background: settings.reader_white_background,
             compose_white_background: settings.compose_white_background,
+            ui_scale: crate::app_zoom::sanitize(settings.ui_scale),
             light_theme: settings.light_theme,
             onboarding_completed,
             onboarding: None,
@@ -2996,6 +2999,7 @@ impl RootView {
             notifications_enabled: self.notifications_enabled,
             reader_white_background: self.reader_white_background,
             compose_white_background: self.compose_white_background,
+            ui_scale: self.ui_scale,
             light_theme: self.light_theme,
             onboarding_completed: self.onboarding_completed,
             collapsed_accounts: {
@@ -3554,6 +3558,27 @@ impl RootView {
 
     /// Toggles whether the compose body forces a white background, persisting
     /// the preference and updating an open compose window.
+    /// Steps the zoom of the whole app (`0` = back to normal), in every window, and
+    /// remembers it. `window` is the main one, whose handle is busy with this update.
+    pub(crate) fn zoom_app(&mut self, steps: i32, window: &mut Window, cx: &mut Context<Self>) {
+        self.ui_scale = if steps == 0 {
+            1.0
+        } else {
+            crate::app_zoom::step(self.ui_scale, steps)
+        };
+        let scale = self.ui_scale;
+        window.set_content_scale(scale, cx);
+        if let Some(handle) = self.settings_window {
+            let _ = handle.update(cx, |_, window, cx| window.set_content_scale(scale, cx));
+        }
+        if let Some(handle) = self.compose_window {
+            let _ = handle.update(cx, |_, window, cx| window.set_content_scale(scale, cx));
+        }
+        self.set_status_note(locale::status_zoom(cx.language(), scale), cx);
+        self.request_save(cx);
+        cx.notify();
+    }
+
     /// Switches the app theme and remembers it for the next launch.
     pub(crate) fn set_appearance(&mut self, appearance: theme::Appearance, cx: &mut Context<Self>) {
         self.light_theme = appearance.is_light();
@@ -3646,6 +3671,7 @@ impl RootView {
 
         let accounts = ui_accounts(&self.accounts);
         let root = cx.entity().downgrade();
+        let ui_scale = self.ui_scale;
         let bounds = Bounds::centered(None, size(px(760.0), px(560.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -3666,6 +3692,7 @@ impl RootView {
             let root_for_close = root.clone();
             let root_for_handle = root.clone();
             let Ok(handle) = cx.open_window(options, |window, cx| {
+                window.set_content_scale(ui_scale, cx);
                 let view = cx.new(|_| {
                     let mut view = SettingsView::new(accounts, root);
                     view.section = section;
@@ -3924,7 +3951,9 @@ impl RootView {
             ..Default::default()
         };
 
+        let ui_scale = self.ui_scale;
         if let Ok(handle) = cx.open_window(options, |window, cx| {
+            window.set_content_scale(ui_scale, cx);
             let root_for_close = root.clone();
             let view = cx.new(|cx| {
                 ComposeView::new(accounts, contacts, root, compose_white, init, window, cx)
@@ -7861,6 +7890,29 @@ mod tests {
             view.archive_message(cx);
             let after = view.db.get_message(id).unwrap().unwrap().folders_csv;
             assert_ne!(before, after);
+        });
+    }
+
+    #[gpui::test]
+    fn zooming_changes_the_window_and_is_remembered(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        view.update_in(cx, |view, window, cx| {
+            view.zoom_app(1, window, cx);
+            assert_eq!(window.content_scale(), 1.1);
+            assert_eq!(view.current_config().ui_scale, 1.1);
+            view.zoom_app(-1, window, cx);
+            view.zoom_app(-1, window, cx);
+            assert_eq!(window.content_scale(), 0.9);
+            view.zoom_app(0, window, cx);
+            assert_eq!(window.content_scale(), 1.0);
+            assert_eq!(view.current_config().ui_scale, 1.0);
         });
     }
 

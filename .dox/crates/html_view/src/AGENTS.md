@@ -470,14 +470,14 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 
 ### `element.rs`
 - `actions!(html_view, [Copy, SelectAll, ScrollUp, ScrollDown, PageUp,
-  PageDown, ScrollToTop, ScrollToBottom, ZoomIn, ZoomOut, ResetZoom])`;
+  PageDown, ScrollToTop, ScrollToBottom])`;
   `const KEY_CONTEXT = "HtmlView"`; `const LINE_SCROLL` (40px, private).
 - `const ZOOM_LEVELS`: Chromium's zoom levels, 25%–500%.
 - `fn zoom_step(zoom, steps)`: the level `steps` away (from between two
   levels, the next one in the step's direction), clamped to the range.
 - `fn init(cx)`: binds `secondary-c`/`secondary-a`, arrows, page keys,
-  space/shift-space, home/end, `secondary-=`/`secondary-+` (zoom in),
-  `secondary--` (out), `secondary-0` (100%) in the `HtmlView` context.
+  space/shift-space, home/end in the `HtmlView` context. Page zoom has no keys: they
+  zoom the whole app (`bgmail`); it is Ctrl/Cmd + wheel.
 - `enum HtmlViewEvent { ZoomChanged(f32), LinkHovered(Option<String>),
   LinkActivated(String), ContextMenu { position, hit } }`.
 - `const FALLBACK_WIDTH` (private), `fn layout_width(known, available)`: known

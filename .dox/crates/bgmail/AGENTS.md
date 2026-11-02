@@ -48,6 +48,13 @@ wiring to `storage`.
     exists; unpackaged runs keep notify-rust's PowerShell id (Windows drops
     toasts from an unregistered id). WiX shortcuts are assumed to carry the
     same id.
+- Zoom of the whole app (user decision): Ctrl/Cmd `+`/`-`/`0` (global actions
+  `AppZoomIn`/`AppZoomOut`/`AppZoomReset`, also in the View menu) step
+  `app_zoom`'s levels (75%–200%) through `RootView::zoom_app`, applied to every open
+  window with `Window::set_content_scale` (`vendor/gpui`) and on opening a new one,
+  persisted as `Config::ui_scale`. Coordinates from `window_bounds()` aren't scaled;
+  compare them with `window_frame::logical_window_size`. The page zoom of the reader
+  remains on Ctrl/Cmd + wheel only.
 - Sent mail can only be deleted (user decision): Archive, Junk, Move and dragging
   are unavailable while the list shows Sent, and everywhere for a message that is
   in Sent but not in the Inbox (`commands::message_only_in_sent`; Gmail's All Mail
@@ -73,7 +80,7 @@ wiring to `storage`.
   `mail_html::is_openable_link` (http/https/mailto), secondary clicks open a
   `ui::ContextMenu` (open/copy link, copy, select all), and Cmd/Ctrl+F
   (`FindInMessage`, also a global action) opens the find bar. The reader
-  zoom (Ctrl/Cmd `+`/`-`/`0`, Ctrl/Cmd + wheel; `HtmlView`) shows in the
+  zoom (Ctrl/Cmd + wheel; `HtmlView`) shows in the
   status bar when not 100%.
   `html_view::init` is called at startup.
 - Printing (`MessagePrint`, Cmd/Ctrl+P) goes through the system browser

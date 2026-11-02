@@ -61,6 +61,9 @@ pub enum Key {
     VersionLabel,
     LanguageLabel,
     AddAccount,
+    ViewZoomIn,
+    ViewZoomOut,
+    ViewZoomReset,
     OnboardingWelcomeTitle,
     OnboardingWelcomeBody,
     OnboardingFastTitle,
@@ -396,6 +399,12 @@ impl Key {
             (OnboardingBack, P) => "Voltar",
             (OnboardingContinue, E) => "Continue",
             (OnboardingContinue, P) => "Continuar",
+            (ViewZoomIn, E) => "Zoom In",
+            (ViewZoomIn, P) => "Aumentar zoom",
+            (ViewZoomOut, E) => "Zoom Out",
+            (ViewZoomOut, P) => "Diminuir zoom",
+            (ViewZoomReset, E) => "Actual Size",
+            (ViewZoomReset, P) => "Tamanho real",
             (AddAccount, E) => "Add account…",
             (AddAccount, P) => "Adicionar conta…",
 
@@ -980,7 +989,10 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 241] = [
+    const ALL_KEYS: [Key; 244] = [
+        Key::ViewZoomIn,
+        Key::ViewZoomOut,
+        Key::ViewZoomReset,
         Key::OnboardingWelcomeTitle,
         Key::OnboardingWelcomeBody,
         Key::OnboardingFastTitle,
