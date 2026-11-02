@@ -16,6 +16,13 @@ use std::sync::Arc;
 
 use gpui::{rgb, App, Global, Hsla};
 
+/// Colors offered for text in a message, as `0xRRGGBB`. They belong to the mail
+/// (they are sent with it), so they don't follow the theme.
+pub const MAIL_TEXT_COLORS: [u32; 12] = [
+    0x000000, 0x5f6368, 0xb7b7b7, 0xd93025, 0xe8710a, 0xf9ab00, 0x188038, 0x12a4af, 0x1a73e8,
+    0x3f51b5, 0x9334e6, 0xd01884,
+];
+
 /// Converts a hexadecimal color (`0xRRGGBB`) into [`Hsla`].
 ///
 /// Centralizes the conversion so palettes can be declared readably using

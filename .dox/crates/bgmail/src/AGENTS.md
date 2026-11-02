@@ -482,6 +482,7 @@ window.
 - **`default_mail_app`**: `status()` / `set_default()` (pub, per OS), enums `Status`, `Outcome`, `Error`; on Linux `status_with` / `set_default_with` / `status_from_query` / `application_dirs`.
 - **`instance`**: `mailto_argument` / `forward` / `listen` (pub); `forward_through`, `serve`, `read_message`, `new_token`, `write_private`, `instance_file` (private): hand-off of links to the running process.
 - **`refresh_default_app`** / **`make_default_app`** / **`render_default_mail_app`** / **`default_app_message`** (private, `settings`): the Settings row.
+- **`render_format_bar`** / **`render_style_button`** / **`render_menu_button`** / **`format_dropdown`** / **`format_menu_of`** / **`render_font_picker`** / **`render_size_picker`** / **`render_align_picker`** / **`render_color_picker`** / **`format_body`** / **`toggle_format_menu`** / enum **`FormatMenu`** / **`message_html`** / **`body_selection_color`** (private, `compose`): the formatting bar, and what is sent.
 - **`has_edits`** (`pub(crate)`, `compose`): whether replacing the content would lose typed text.
 - **`quotable_text`** (pub, `mail_html`): a plain-text original for a reply's quote.
 - **`quotable_html`** (pub, `mail_html`): the original's sanitized body for a reply's quote, without `cid:` images.
@@ -1552,10 +1553,6 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Purpose: Moves selected message to trash.
   - Behavior: No-op without selection; `run_message_action(mail_actions::trash)` (next row selected and revealed).
 
-- **`delete_message_permanently`** (pub(crate), L838)
-  - Signature: `pub(crate) fn delete_message_permanently(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Permanently deletes selected message.
-  - Behavior: Clears selection on success, then refreshes.
 
 - **`restore_message`** (pub(crate), L848)
   - Signature: `pub(crate) fn restore_message(&mut self, cx: &mut Context<Self>)`

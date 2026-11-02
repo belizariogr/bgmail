@@ -36,6 +36,15 @@ impl IconSize {
 /// call sites stay stable if an icon's artwork is swapped in the future.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IconName {
+    FormatUndo,
+    FormatRedo,
+    FormatAlignLeft,
+    FormatAlignCenter,
+    FormatAlignRight,
+    FormatListBullet,
+    FormatListNumbered,
+    FormatIndentMore,
+    FormatIndentLess,
     Inbox,
     Sent,
     Drafts,
@@ -97,6 +106,15 @@ impl IconName {
     /// Asset path of the icon's SVG, resolvable by [`crate::Assets`].
     pub fn path(self) -> &'static str {
         match self {
+            IconName::FormatUndo => crate::FORMAT_UNDO,
+            IconName::FormatRedo => crate::FORMAT_REDO,
+            IconName::FormatAlignLeft => crate::FORMAT_ALIGN_LEFT,
+            IconName::FormatAlignCenter => crate::FORMAT_ALIGN_CENTER,
+            IconName::FormatAlignRight => crate::FORMAT_ALIGN_RIGHT,
+            IconName::FormatListBullet => crate::FORMAT_LIST_BULLET,
+            IconName::FormatListNumbered => crate::FORMAT_LIST_NUMBERED,
+            IconName::FormatIndentMore => crate::FORMAT_INDENT_MORE,
+            IconName::FormatIndentLess => crate::FORMAT_INDENT_LESS,
             IconName::Inbox => crate::INBOX,
             IconName::Sent => crate::SEND,
             IconName::Drafts => crate::FILE_PEN,
@@ -206,7 +224,16 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 42] = [
+    const ALL: [IconName; 51] = [
+        IconName::FormatUndo,
+        IconName::FormatRedo,
+        IconName::FormatAlignLeft,
+        IconName::FormatAlignCenter,
+        IconName::FormatAlignRight,
+        IconName::FormatListBullet,
+        IconName::FormatListNumbered,
+        IconName::FormatIndentMore,
+        IconName::FormatIndentLess,
         IconName::Inbox,
         IconName::Sent,
         IconName::Drafts,

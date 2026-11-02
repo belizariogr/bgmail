@@ -24,6 +24,7 @@
 //! ```
 
 mod buffer;
+pub mod rich;
 mod rows;
 
 use std::cell::RefCell;
@@ -37,6 +38,7 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, ScrollHandle, SharedString,
     Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
+use rich::{Align, CharStyle, FontFamily, Format, ListKind, ParaStyle, RichText, TextSize};
 use theme::ActiveTheme;
 
 use crate::prelude::*;
@@ -89,8 +91,44 @@ actions!(
         Paste,
         Undo,
         Redo,
+        ToggleBold,
+        ToggleItalic,
+        ToggleUnderline,
     ]
 );
+
+/// Width of one indent level, in pixels.
+const INDENT_STEP: f32 = 28.0;
+/// Room for the marker of a list item, in pixels.
+const LIST_GUTTER: f32 = 24.0;
+/// Narrowest a deeply indented line may wrap at, in pixels.
+const MIN_WRAP_WIDTH: f32 = 40.0;
+/// Steps of formatting history kept, as the text's.
+const MAX_RICH_UNDO: usize = 1000;
+/// Installed fonts tried for the serif and fixed-width families, by preference.
+const SANS_FONTS: [&str; 6] = [
+    "Helvetica",
+    "Arial",
+    "Liberation Sans",
+    "Noto Sans",
+    "DejaVu Sans",
+    "Ubuntu",
+];
+const SERIF_FONTS: [&str; 5] = [
+    "Georgia",
+    "Times New Roman",
+    "Liberation Serif",
+    "Noto Serif",
+    "DejaVu Serif",
+];
+const MONO_FONTS: [&str; 6] = [
+    "Courier New",
+    "Menlo",
+    "Consolas",
+    "Liberation Mono",
+    "Noto Sans Mono",
+    "DejaVu Sans Mono",
+];
 
 /// Registers the key bindings consumed by [`TextArea`] (key context
 /// `"TextArea"`). Called by [`crate::bind_keys`]; Tab moves focus between fields
@@ -125,6 +163,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-c", Copy, CONTEXT),
         KeyBinding::new("cmd-x", Cut, CONTEXT),
         KeyBinding::new("ctrl-x", Cut, CONTEXT),
+        KeyBinding::new("cmd-b", ToggleBold, CONTEXT),
+        KeyBinding::new("ctrl-b", ToggleBold, CONTEXT),
+        KeyBinding::new("cmd-i", ToggleItalic, CONTEXT),
+        KeyBinding::new("ctrl-i", ToggleItalic, CONTEXT),
+        KeyBinding::new("cmd-u", ToggleUnderline, CONTEXT),
+        KeyBinding::new("ctrl-u", ToggleUnderline, CONTEXT),
         KeyBinding::new("cmd-z", Undo, CONTEXT),
         KeyBinding::new("cmd-shift-z", Redo, CONTEXT),
     ]);
@@ -220,6 +264,8 @@ pub enum TextAreaEvent {
 #[derive(Clone, Debug, PartialEq)]
 struct LayoutKey {
     revision: u64,
+    /// Changes with the formatting.
+    format_revision: u64,
     /// `Some` while the (empty) area shows its placeholder.
     placeholder: Option<SharedString>,
     marked: Option<Range<usize>>,
@@ -230,60 +276,254 @@ struct LayoutKey {
     color: Hsla,
 }
 
+/// Where a logical line goes and how it is drawn.
+#[derive(Clone, Debug)]
+struct LineGeometry {
+    /// Start of its text, after indent and list marker.
+    left: Pixels,
+    /// Width it wraps and aligns in.
+    width: Option<Pixels>,
+    align: TextAlign,
+    font_size: Pixels,
+    line_height: Pixels,
+    /// Top of its first row.
+    top: Pixels,
+    /// List marker, drawn left of its text.
+    marker: Option<SharedString>,
+}
+
 /// Shaped lines + visual rows of the last layout, shared between the
 /// [`TextArea`] (hit testing, vertical movement) and its element (painting).
 #[derive(Default)]
 struct TextLayout {
     key: Option<LayoutKey>,
     lines: Vec<WrappedLine>,
+    geometry: Vec<LineGeometry>,
     rows: Vec<VisualRow>,
+    /// Top of each row of `rows`.
+    row_tops: Vec<Pixels>,
+    height: Pixels,
     max_width: Pixels,
     /// The last measure pass had no definite width, so the height it reported
     /// may be stale; prepaint schedules one more frame.
     measured_without_width: bool,
+    /// Resolved once: fonts installed don't change while the app runs.
+    families: Option<Families>,
+}
+
+/// Runs of `range` of the text: its styles over the key's font and color, with
+/// the IME marked range underlined.
+fn line_runs(
+    key: &LayoutKey,
+    rich: &RichText,
+    range: Range<usize>,
+    families: &Families,
+) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    for (run, style) in rich.runs_in(range.clone()) {
+        let marked = key.marked.as_ref().and_then(|marked| {
+            let clipped = marked.start.max(run.start)..marked.end.min(run.end);
+            (clipped.start < clipped.end)
+                .then(|| clipped.start - run.start..clipped.end - run.start)
+        });
+        runs.extend(marked_text_runs(
+            run.len(),
+            marked.as_ref(),
+            styled_run(key, &style, families),
+        ));
+    }
+    runs
+}
+
+/// Families used for text, by [`FontFamily`].
+#[derive(Clone, Debug)]
+struct Families {
+    sans: SharedString,
+    serif: SharedString,
+    mono: SharedString,
+}
+
+impl Families {
+    /// An inherited or listed family can resolve to a fallback font without
+    /// weights and styles, even while being listed as installed, which would lose
+    /// bold and italic. A family counts only if its bold is a different face.
+    fn resolve(inherited: &SharedString, window: &Window) -> Self {
+        let has_bold = |family: &SharedString| {
+            let regular = gpui::Font {
+                family: family.clone(),
+                ..gpui::font(family.clone())
+            };
+            let bold = gpui::Font {
+                weight: gpui::FontWeight::BOLD,
+                ..regular.clone()
+            };
+            let system = window.text_system();
+            system.resolve_font(&regular) != system.resolve_font(&bold)
+        };
+        let pick = |wanted: &[&'static str]| {
+            wanted
+                .iter()
+                .map(|family| SharedString::from(*family))
+                .find(|family| has_bold(family))
+        };
+        let sans = if has_bold(inherited) {
+            inherited.clone()
+        } else {
+            pick(&SANS_FONTS).unwrap_or_else(|| inherited.clone())
+        };
+        Self {
+            serif: pick(&SERIF_FONTS).unwrap_or_else(|| sans.clone()),
+            mono: pick(&MONO_FONTS).unwrap_or_else(|| sans.clone()),
+            sans,
+        }
+    }
+
+    fn get(&self, family: FontFamily) -> SharedString {
+        match family {
+            FontFamily::Sans => self.sans.clone(),
+            FontFamily::Serif => self.serif.clone(),
+            FontFamily::Mono => self.mono.clone(),
+        }
+    }
+}
+
+fn styled_run(key: &LayoutKey, style: &CharStyle, families: &Families) -> TextRun {
+    let mut font = key.font.clone();
+    font.family = families.get(style.family);
+    if style.bold {
+        font.weight = gpui::FontWeight::BOLD;
+    }
+    if style.italic {
+        font.style = gpui::FontStyle::Italic;
+    }
+    let color = style.color.map_or(key.color, |rgb| gpui::rgb(rgb).into());
+    TextRun {
+        len: 0,
+        font,
+        color,
+        background_color: None,
+        underline: style.underline.then_some(UnderlineStyle {
+            color: Some(color),
+            thickness: px(1.0),
+            wavy: false,
+        }),
+        strikethrough: None,
+    }
+}
+
+/// Space a line's text starts at: its indent and the room for its list marker.
+fn line_left(para: &ParaStyle) -> f32 {
+    f32::from(para.indent) * INDENT_STEP
+        + if para.list.is_some() {
+            LIST_GUTTER
+        } else {
+            0.0
+        }
 }
 
 impl TextLayout {
-    /// Reshapes `text()` when `key` differs from the cached one.
-    fn ensure(&mut self, key: LayoutKey, text: impl FnOnce() -> SharedString, window: &Window) {
+    /// Reshapes when `key` differs from the cached one. Lines are shaped one by
+    /// one, each at its own size and width.
+    fn ensure(
+        &mut self,
+        key: LayoutKey,
+        source: impl FnOnce() -> (SharedString, RichText),
+        window: &Window,
+    ) {
         if self.key.as_ref() == Some(&key) {
             return;
         }
-        let text = text();
-        let run = TextRun {
-            len: text.len(),
-            font: key.font.clone(),
-            color: key.color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let runs = marked_text_runs(text.len(), key.marked.as_ref(), run);
-        let lines: Vec<WrappedLine> = window
-            .text_system()
-            .shape_text(text, key.font_size, &runs, key.wrap_width, None)
-            .map(|lines| lines.into_iter().collect())
-            .unwrap_or_default();
-        self.rows = build_rows(lines.iter().map(|line| {
-            let wraps = line
+        let (text, rich) = source();
+        let families = self
+            .families
+            .get_or_insert_with(|| Families::resolve(&key.font.family, window))
+            .clone();
+        let mut lines = Vec::new();
+        let mut geometry = Vec::new();
+        let mut row_tops = Vec::new();
+        let mut rows_input = Vec::new();
+        let mut top = Pixels::ZERO;
+        let mut start = 0;
+        for (ix, content) in text.split('\n').enumerate() {
+            let para = rich.para(ix);
+            let scale = para.size.scale();
+            let font_size = key.font_size * scale;
+            let line_height = key.line_height * scale;
+            let left = px(line_left(&para));
+            let width = key
+                .wrap_width
+                .map(|width| (width - left).max(px(MIN_WRAP_WIDTH)));
+            let runs = line_runs(&key, &rich, start..start + content.len(), &families);
+            let line = window
+                .text_system()
+                .shape_text(
+                    SharedString::from(content.to_string()),
+                    font_size,
+                    &runs,
+                    width,
+                    None,
+                )
+                .ok()
+                .and_then(|shaped| shaped.into_iter().next());
+            start += content.len() + 1;
+            let Some(line) = line else {
+                continue;
+            };
+            let wraps: Vec<usize> = line
                 .wrap_boundaries()
                 .iter()
                 .map(|boundary| {
                     line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
                 })
                 .collect();
-            (line.len(), wraps)
-        }));
+            let row_count = wraps.iter().filter(|&&w| w > 0 && w < line.len()).count() + 1;
+            for row in 0..row_count {
+                row_tops.push(top + line_height * row as f32);
+            }
+            geometry.push(LineGeometry {
+                left,
+                width,
+                align: match para.align {
+                    Align::Left => TextAlign::Left,
+                    Align::Center => TextAlign::Center,
+                    Align::Right => TextAlign::Right,
+                },
+                font_size,
+                line_height,
+                top,
+                marker: rich.list_marker(ix).map(SharedString::from),
+            });
+            rows_input.push((line.len(), wraps));
+            top += line_height * row_count as f32;
+            lines.push(line);
+        }
+        self.rows = build_rows(rows_input);
+        self.row_tops = row_tops;
+        self.height = top;
         self.max_width = lines
             .iter()
-            .map(|line| line.width())
+            .zip(&geometry)
+            .map(|(line, geometry)| line.width() + geometry.left)
             .fold(Pixels::ZERO, Pixels::max);
         self.lines = lines;
+        self.geometry = geometry;
         self.key = Some(key);
     }
 
     fn line_height(&self) -> Pixels {
         self.key.as_ref().map_or(px(16.), |key| key.line_height)
+    }
+
+    /// Line height of row `row_ix`.
+    fn row_height(&self, row_ix: usize) -> Pixels {
+        self.rows
+            .get(row_ix)
+            .and_then(|row| self.geometry.get(row.line))
+            .map_or_else(|| self.line_height(), |geometry| geometry.line_height)
+    }
+
+    fn row_top(&self, row_ix: usize) -> Pixels {
+        self.row_tops.get(row_ix).copied().unwrap_or(Pixels::ZERO)
     }
 
     fn showing_placeholder(&self) -> bool {
@@ -294,10 +534,34 @@ impl TextLayout {
 
     /// Height of the laid-out content, at least `min_lines` rows.
     fn content_height(&self, min_lines: usize) -> Pixels {
-        self.line_height() * self.rows.len().max(min_lines).max(1) as f32
+        self.height
+            .max(self.line_height() * min_lines.max(1) as f32)
     }
 
-    /// X of `offset` relative to the start of row `row_ix`.
+    /// Where the text of row `row_ix` starts: its line's indent and alignment.
+    fn row_left(&self, row_ix: usize) -> Pixels {
+        let Some(row) = self.rows.get(row_ix) else {
+            return Pixels::ZERO;
+        };
+        let (Some(line), Some(geometry)) = (self.lines.get(row.line), self.geometry.get(row.line))
+        else {
+            return Pixels::ZERO;
+        };
+        let layout = &line.unwrapped_layout;
+        let row_width = layout.x_for_index(row.range.end - row.line_start)
+            - layout.x_for_index(row.range.start - row.line_start);
+        let free = geometry
+            .width
+            .map_or(Pixels::ZERO, |width| (width - row_width).max(Pixels::ZERO));
+        geometry.left
+            + match geometry.align {
+                TextAlign::Left => Pixels::ZERO,
+                TextAlign::Center => free / 2.,
+                TextAlign::Right => free,
+            }
+    }
+
+    /// X of `offset` relative to the element origin, on row `row_ix`.
     fn x_for_offset(&self, row_ix: usize, offset: usize) -> Pixels {
         let (Some(row), true) = (self.rows.get(row_ix), !self.showing_placeholder()) else {
             return Pixels::ZERO;
@@ -306,17 +570,14 @@ impl TextLayout {
             return Pixels::ZERO;
         };
         let layout = &line.unwrapped_layout;
-        layout.x_for_index(offset.saturating_sub(row.line_start))
+        self.row_left(row_ix) + layout.x_for_index(offset.saturating_sub(row.line_start))
             - layout.x_for_index(row.range.start - row.line_start)
     }
 
     /// Caret position of `offset`, relative to the element origin.
     fn position_for_offset(&self, offset: usize) -> Point<Pixels> {
         let row_ix = row_index_for_offset(&self.rows, offset);
-        point(
-            self.x_for_offset(row_ix, offset),
-            self.line_height() * row_ix as f32,
-        )
+        point(self.x_for_offset(row_ix, offset), self.row_top(row_ix))
     }
 
     /// Closest caret offset to `x` on row `row_ix`.
@@ -332,7 +593,8 @@ impl TextLayout {
         };
         let layout = &line.unwrapped_layout;
         let row_x = layout.x_for_index(row.range.start - row.line_start);
-        let index = row.line_start + layout.closest_index_for_x(row_x + x.max(Pixels::ZERO));
+        let x = (x - self.row_left(row_ix)).max(Pixels::ZERO);
+        let index = row.line_start + layout.closest_index_for_x(row_x + x);
         clamp_offset_to_row(text, row, index)
     }
 
@@ -341,7 +603,10 @@ impl TextLayout {
         if self.rows.is_empty() {
             return 0;
         }
-        let row = (position.y / self.line_height()).floor().max(0.) as usize;
+        let row = self
+            .row_tops
+            .partition_point(|top| *top <= position.y)
+            .saturating_sub(1);
         self.offset_for_x(text, row.min(self.rows.len() - 1), position.x)
     }
 }
@@ -362,6 +627,14 @@ pub struct TextArea {
     /// Selection highlight when it isn't the theme's: the text may sit on a page
     /// of another color.
     selection_color: Option<Hsla>,
+    /// Formatting of the text.
+    rich: RichText,
+    format_revision: u64,
+    /// Style the next typed text takes, chosen with nothing selected.
+    pending_style: Option<CharStyle>,
+    /// `rich` before each undo step of the buffer, and after each undone one.
+    rich_undo: Vec<RichText>,
+    rich_redo: Vec<RichText>,
     /// Set by keyboard moves/edits; consumed by the next paint to scroll the
     /// tracked container so the caret stays visible.
     autoscroll_requested: bool,
@@ -383,6 +656,11 @@ impl TextArea {
             goal_x: None,
             scroll_handle: None,
             selection_color: None,
+            rich: RichText::default(),
+            format_revision: 0,
+            pending_style: None,
+            rich_undo: Vec::new(),
+            rich_redo: Vec::new(),
             autoscroll_requested: false,
         }
     }
@@ -426,6 +704,11 @@ impl TextArea {
     /// resets undo history. Does not emit [`TextAreaEvent::Changed`].
     pub fn set_content(&mut self, text: impl AsRef<str>, cx: &mut Context<Self>) {
         self.buffer.set_text(text.as_ref());
+        self.rich = RichText::new(self.buffer.text());
+        self.format_revision += 1;
+        self.pending_style = None;
+        self.rich_undo.clear();
+        self.rich_redo.clear();
         self.goal_x = None;
         self.autoscroll_requested = true;
         cx.notify();
@@ -457,12 +740,218 @@ impl TextArea {
         self.buffer.selected_range()
     }
 
-    fn display_text(&self) -> SharedString {
+    fn display_text(&self) -> (SharedString, RichText) {
         if self.buffer.text().is_empty() {
-            self.placeholder.clone()
+            (self.placeholder.clone(), RichText::new(&self.placeholder))
         } else {
-            SharedString::from(self.buffer.text().to_owned())
+            (
+                SharedString::from(self.buffer.text().to_owned()),
+                self.rich.clone(),
+            )
         }
+    }
+
+    /// Formatting at the caret, or at the start of the selection.
+    pub fn format(&self) -> Format {
+        let selected = self.buffer.selected_range();
+        let chars = match self.pending_style {
+            Some(style) => style,
+            None if selected.is_empty() => self.rich.style_at(selected.start),
+            // The style of the first selected character, not the one before it.
+            None => self
+                .rich
+                .runs_in(selected.clone())
+                .first()
+                .map(|(_, style)| *style)
+                .unwrap_or_default(),
+        };
+        Format {
+            chars,
+            para: self.rich.para(self.first_selected_line()),
+        }
+    }
+
+    /// The text as e-mail HTML, when anything is formatted.
+    pub fn formatted_html(&self) -> Option<String> {
+        (!self.rich.is_plain()).then(|| self.rich.to_html(self.buffer.text()))
+    }
+
+    /// The text for the plain-text version of an e-mail: lists and indents
+    /// written out.
+    pub fn plain_export(&self) -> String {
+        self.rich.to_plain(self.buffer.text())
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.buffer.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.buffer.can_redo()
+    }
+
+    pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
+        self.toggle_chars(|style| style.bold, |style, on| style.bold = on, cx);
+    }
+
+    pub fn toggle_italic(&mut self, cx: &mut Context<Self>) {
+        self.toggle_chars(|style| style.italic, |style, on| style.italic = on, cx);
+    }
+
+    pub fn toggle_underline(&mut self, cx: &mut Context<Self>) {
+        self.toggle_chars(
+            |style| style.underline,
+            |style, on| style.underline = on,
+            cx,
+        );
+    }
+
+    pub fn set_font_family(&mut self, family: FontFamily, cx: &mut Context<Self>) {
+        self.update_chars(move |style| style.family = family, cx);
+    }
+
+    /// Sets the text color (`0xRRGGBB`; `None`: the page's).
+    pub fn set_text_color(&mut self, color: Option<u32>, cx: &mut Context<Self>) {
+        self.update_chars(move |style| style.color = color, cx);
+    }
+
+    pub fn set_text_size(&mut self, size: TextSize, cx: &mut Context<Self>) {
+        self.update_paras(move |para| para.size = size, cx);
+    }
+
+    pub fn set_align(&mut self, align: Align, cx: &mut Context<Self>) {
+        self.update_paras(move |para| para.align = align, cx);
+    }
+
+    /// Makes the selected lines items of `kind`, or plain lines when they are.
+    pub fn toggle_list(&mut self, kind: ListKind, cx: &mut Context<Self>) {
+        let list = (self.format().para.list != Some(kind)).then_some(kind);
+        self.update_paras(move |para| para.list = list, cx);
+    }
+
+    /// Indents the selected lines one more (`1`) or one less (`-1`) level.
+    pub fn indent(&mut self, delta: i8, cx: &mut Context<Self>) {
+        self.update_paras(
+            move |para| {
+                para.indent = para
+                    .indent
+                    .saturating_add_signed(delta)
+                    .min(rich::MAX_INDENT);
+            },
+            cx,
+        );
+    }
+
+    /// Reverts the last step, of the text or its formatting.
+    pub fn undo_step(&mut self, cx: &mut Context<Self>) {
+        if self.buffer.undo() {
+            let previous = self.rich_undo.pop();
+            self.restore_rich(previous, true);
+            self.after_format(cx);
+        }
+    }
+
+    /// Reapplies the last undone step.
+    pub fn redo_step(&mut self, cx: &mut Context<Self>) {
+        if self.buffer.redo() {
+            let next = self.rich_redo.pop();
+            self.restore_rich(next, false);
+            self.after_format(cx);
+        }
+    }
+
+    /// Makes `state` the formatting, keeping the current one for the other
+    /// direction. A missing or stale state falls back to no formatting rather
+    /// than styling the wrong bytes.
+    fn restore_rich(&mut self, state: Option<RichText>, undoing: bool) {
+        let state = state
+            .filter(|state| state.matches(self.buffer.text()))
+            .unwrap_or_else(|| RichText::new(self.buffer.text()));
+        let current = std::mem::replace(&mut self.rich, state);
+        if undoing {
+            self.rich_redo.push(current);
+        } else {
+            self.rich_undo.push(current);
+        }
+        self.pending_style = None;
+    }
+
+    fn first_selected_line(&self) -> usize {
+        let start = self.buffer.selected_range().start;
+        self.buffer.text()[..start].matches('\n').count()
+    }
+
+    /// Lines the selection touches (the caret's, without a selection).
+    fn selected_lines(&self) -> Range<usize> {
+        let selected = self.buffer.selected_range();
+        let text = self.buffer.text();
+        let first = text[..selected.start].matches('\n').count();
+        first..first + text[selected].matches('\n').count() + 1
+    }
+
+    fn toggle_chars(
+        &mut self,
+        get: fn(&CharStyle) -> bool,
+        set: fn(&mut CharStyle, bool),
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self.buffer.selected_range();
+        let on = if selected.is_empty() {
+            !get(&self.format().chars)
+        } else {
+            !self.rich.all_chars(selected, get)
+        };
+        self.update_chars(move |style| set(style, on), cx);
+    }
+
+    /// With a selection, changes it; with only a caret, what is typed next.
+    fn update_chars(&mut self, update: impl Fn(&mut CharStyle), cx: &mut Context<Self>) {
+        let selected = self.buffer.selected_range();
+        if selected.is_empty() {
+            let mut style = self.format().chars;
+            update(&mut style);
+            self.pending_style = Some(style);
+            cx.notify();
+            return;
+        }
+        self.record_format_step();
+        self.rich.update_chars(selected, update);
+        self.after_format(cx);
+    }
+
+    fn update_paras(&mut self, update: impl Fn(&mut ParaStyle), cx: &mut Context<Self>) {
+        self.record_format_step();
+        self.rich.update_paras(self.selected_lines(), update);
+        self.after_format(cx);
+    }
+
+    fn record_format_step(&mut self) {
+        self.buffer.add_undo_step();
+        self.push_rich_undo(self.rich.clone());
+    }
+
+    fn push_rich_undo(&mut self, state: RichText) {
+        self.rich_undo.push(state);
+        if self.rich_undo.len() > MAX_RICH_UNDO {
+            self.rich_undo.remove(0);
+        }
+        self.rich_redo.clear();
+    }
+
+    fn after_format(&mut self, cx: &mut Context<Self>) {
+        self.format_revision += 1;
+        self.autoscroll_requested = true;
+        cx.notify();
+        cx.emit(TextAreaEvent::Changed);
+    }
+
+    /// An empty list item: Enter there ends the list instead of adding one.
+    fn ends_list_on_newline(&self) -> bool {
+        let selected = self.buffer.selected_range();
+        let line = self.first_selected_line();
+        selected.is_empty()
+            && self.rich.para(line).list.is_some()
+            && line_range_at(self.buffer.text(), selected.start).is_empty()
     }
 
     /// Re-shapes with the last frame's style and width when the text changed
@@ -473,6 +962,7 @@ impl TextArea {
             return;
         };
         key.revision = self.buffer.revision();
+        key.format_revision = self.format_revision;
         key.marked = self.buffer.marked_range();
         if self.buffer.text().is_empty() {
             key.placeholder
@@ -494,6 +984,7 @@ impl TextArea {
     }
 
     fn after_move(&mut self, cx: &mut Context<Self>) {
+        self.pending_style = None;
         self.goal_x = None;
         self.autoscroll_requested = true;
         cx.notify();
@@ -503,7 +994,21 @@ impl TextArea {
     /// [`TextAreaEvent::Changed`].
     fn edit(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut TextBuffer)) {
         let revision = self.buffer.revision();
+        let steps = self.buffer.undo_steps();
+        let before_text = self.buffer.text().to_owned();
+        let before_rich = self.rich.clone();
+        let typed = self
+            .pending_style
+            .unwrap_or_else(|| self.rich.style_at(self.buffer.selected_range().start));
         f(&mut self.buffer);
+        if self.buffer.revision() != revision {
+            self.rich
+                .apply_edit(&before_text, self.buffer.text(), typed);
+            if self.buffer.undo_steps() != steps {
+                self.push_rich_undo(before_rich);
+            }
+            self.format_revision += 1;
+        }
         self.after_move(cx);
         if self.buffer.revision() != revision {
             cx.emit(TextAreaEvent::Changed);
@@ -694,19 +1199,31 @@ impl TextArea {
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if self.ends_list_on_newline() {
+            self.update_paras(|para| para.list = None, cx);
+            return;
+        }
         self.edit(cx, |buffer| buffer.replace(None, "\n", EditKind::Typing));
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit(cx, |buffer| {
-            buffer.undo();
-        });
+        self.undo_step(cx);
     }
 
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit(cx, |buffer| {
-            buffer.redo();
-        });
+        self.redo_step(cx);
+    }
+
+    fn bold_action(&mut self, _: &ToggleBold, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_bold(cx);
+    }
+
+    fn italic_action(&mut self, _: &ToggleItalic, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_italic(cx);
+    }
+
+    fn underline_action(&mut self, _: &ToggleUnderline, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_underline(cx);
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
@@ -886,7 +1403,11 @@ impl EntityInputHandler for TextArea {
         let end_x = if end.y == start.y { end.x } else { start.x };
         Some(Bounds::from_corners(
             element_bounds.origin + start,
-            element_bounds.origin + point(end_x.max(start.x), start.y + layout.line_height()),
+            element_bounds.origin
+                + point(
+                    end_x.max(start.x),
+                    start.y + layout.row_height(row_index_for_offset(&layout.rows, range.start)),
+                ),
         ))
     }
 
@@ -919,6 +1440,7 @@ impl TextAreaElement {
         let empty = area.buffer.text().is_empty();
         LayoutKey {
             revision: area.buffer.revision(),
+            format_revision: area.format_revision,
             placeholder: empty.then(|| area.placeholder.clone()),
             marked: area.buffer.marked_range(),
             wrap_width,
@@ -1009,7 +1531,6 @@ impl Element for TextAreaElement {
         let mut layout = area.layout.borrow_mut();
         layout.ensure(key, || area.display_text(), window);
 
-        let line_height = layout.line_height();
         if std::mem::take(&mut layout.measured_without_width) {
             // The height was guessed without a width; lay out again now that
             // the real wrap width is known.
@@ -1019,7 +1540,7 @@ impl Element for TextAreaElement {
 
         let colors = cx.theme().colors();
         let selected = area.buffer.selected_range();
-        let row_origin = |row: usize| bounds.origin + point(Pixels::ZERO, line_height * row as f32);
+        let row_origin = |row: usize| bounds.origin + point(Pixels::ZERO, layout.row_top(row));
         // A selected newline shows as a sliver past the line end.
         let newline_width = key_font_size(&layout) * 0.4;
         // Off-screen rows of a large selection (select-all on a long reply)
@@ -1029,7 +1550,7 @@ impl Element for TextAreaElement {
             .into_iter()
             .filter(|span| {
                 let top = row_origin(span.row).y;
-                top + line_height >= visible.top() && top <= visible.bottom()
+                top + layout.row_height(span.row) >= visible.top() && top <= visible.bottom()
             })
             .map(|span| {
                 let origin = row_origin(span.row);
@@ -1041,14 +1562,21 @@ impl Element for TextAreaElement {
                 fill(
                     Bounds::from_corners(
                         origin + point(start_x, Pixels::ZERO),
-                        origin + point(end_x, line_height),
+                        origin + point(end_x, layout.row_height(span.row)),
                     ),
                     area.selection_color.unwrap_or(colors.element_selected),
                 )
             })
             .collect();
 
-        let caret_height = (key_font_size(&layout) * 1.3).min(line_height);
+        let caret_row = row_index_for_offset(&layout.rows, area.buffer.cursor());
+        let line_height = layout.row_height(caret_row);
+        let caret_size = layout
+            .rows
+            .get(caret_row)
+            .and_then(|row| layout.geometry.get(row.line))
+            .map_or_else(|| key_font_size(&layout), |geometry| geometry.font_size);
+        let caret_height = (caret_size * 1.3).min(line_height);
         let caret_origin = bounds.origin
             + layout.position_for_offset(area.buffer.cursor())
             + point(Pixels::ZERO, (line_height - caret_height) / 2.);
@@ -1096,26 +1624,57 @@ impl Element for TextAreaElement {
         // have thousands of rows of which a screenful is on screen.
         {
             let layout = layout.borrow();
-            let line_height = layout.line_height();
             let visible = window.content_mask().bounds;
-            let mut y = bounds.top();
-            for line in &layout.lines {
-                let height = line_height * (line.wrap_boundaries().len() + 1) as f32;
+            let marker_color = layout
+                .key
+                .as_ref()
+                .map_or_else(|| window.text_style().color, |key| key.color);
+            for (line, geometry) in layout.lines.iter().zip(&layout.geometry) {
+                let y = bounds.top() + geometry.top;
+                let height = geometry.line_height * (line.wrap_boundaries().len() + 1) as f32;
                 if y > visible.bottom() {
                     break;
                 }
-                if y + height >= visible.top() {
-                    line.paint(
-                        point(bounds.left(), y),
-                        line_height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    )
-                    .ok();
+                if y + height < visible.top() {
+                    continue;
                 }
-                y += height;
+                let origin = point(bounds.left() + geometry.left, y);
+                let align_bounds = geometry
+                    .width
+                    .map(|width| Bounds::new(origin, size(width, height)));
+                line.paint(
+                    origin,
+                    geometry.line_height,
+                    geometry.align,
+                    align_bounds,
+                    window,
+                    cx,
+                )
+                .ok();
+                if let Some(marker) = &geometry.marker {
+                    let run = TextRun {
+                        len: marker.len(),
+                        font: window.text_style().font(),
+                        color: marker_color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let shaped = window.text_system().shape_line(
+                        marker.clone(),
+                        geometry.font_size,
+                        &[run],
+                        None,
+                    );
+                    shaped
+                        .paint(
+                            point(origin.x - shaped.width - px(6.0), y),
+                            geometry.line_height,
+                            window,
+                            cx,
+                        )
+                        .ok();
+                }
             }
         }
 
@@ -1217,6 +1776,9 @@ impl Render for TextArea {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
+            .on_action(cx.listener(Self::bold_action))
+            .on_action(cx.listener(Self::italic_action))
+            .on_action(cx.listener(Self::underline_action))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1245,6 +1807,116 @@ mod tests {
             underline: None,
             strikethrough: None,
         }
+    }
+
+    fn area(cx: &mut gpui::TestAppContext, text: &str) -> Entity<TextArea> {
+        let area = cx.new(|cx| TextArea::new("", cx));
+        area.update(cx, |area, cx| area.set_content(text, cx));
+        area
+    }
+
+    #[gpui::test]
+    fn formatting_a_selection_toggles_and_undoes(cx: &mut gpui::TestAppContext) {
+        let area = area(cx, "hello world");
+        area.update(cx, |area, cx| {
+            area.buffer.select_range(0, 5);
+            area.toggle_bold(cx);
+            assert!(area.format().chars.bold);
+            assert!(area.formatted_html().unwrap().contains("<b>hello</b>"));
+
+            area.toggle_bold(cx);
+            assert!(!area.format().chars.bold);
+            assert_eq!(area.formatted_html(), None);
+
+            area.undo_step(cx);
+            assert!(area.format().chars.bold);
+            area.undo_step(cx);
+            assert_eq!(area.formatted_html(), None);
+            assert!(!area.can_undo());
+            area.redo_step(cx);
+            assert!(area.formatted_html().is_some());
+            assert_eq!(area.buffer.text(), "hello world");
+        });
+    }
+
+    #[gpui::test]
+    fn with_only_a_caret_the_style_applies_to_what_is_typed(cx: &mut gpui::TestAppContext) {
+        let area = area(cx, "a");
+        area.update(cx, |area, cx| {
+            area.buffer.move_to(1);
+            area.toggle_italic(cx);
+            assert!(area.format().chars.italic);
+            assert_eq!(area.formatted_html(), None);
+            area.edit(cx, |buffer| buffer.replace(None, "b", EditKind::Typing));
+            assert!(area.formatted_html().unwrap().contains("<i>b</i>"));
+            // Moving the caret forgets a style nothing was typed with.
+            area.toggle_underline(cx);
+            area.move_to(0, cx);
+            assert!(!area.format().chars.underline);
+        });
+    }
+
+    #[gpui::test]
+    fn undo_restores_the_formatting_of_deleted_text(cx: &mut gpui::TestAppContext) {
+        let area = area(cx, "hello");
+        area.update(cx, |area, cx| {
+            area.buffer.select_range(0, 5);
+            area.set_text_color(Some(0xff0000), cx);
+            area.buffer.select_range(0, 5);
+            area.edit(cx, |buffer| buffer.replace(None, "", EditKind::Other));
+            assert_eq!(area.buffer.text(), "");
+            assert!(area.rich.matches(""));
+            area.undo_step(cx);
+            assert_eq!(area.buffer.text(), "hello");
+            assert!(area.formatted_html().unwrap().contains("#ff0000"));
+        });
+    }
+
+    #[gpui::test]
+    fn paragraph_styles_cover_the_selected_lines(cx: &mut gpui::TestAppContext) {
+        let area = area(cx, "one\ntwo\nthree");
+        area.update(cx, |area, cx| {
+            area.buffer.select_range(1, 5);
+            area.set_align(Align::Center, cx);
+            assert_eq!(area.rich.para(0).align, Align::Center);
+            assert_eq!(area.rich.para(1).align, Align::Center);
+            assert_eq!(area.rich.para(2).align, Align::Left);
+            area.indent(1, cx);
+            area.indent(-1, cx);
+            area.indent(-1, cx);
+            assert_eq!(area.rich.para(0).indent, 0);
+            area.set_text_size(TextSize::Huge, cx);
+            assert_eq!(area.format().para.size, TextSize::Huge);
+        });
+    }
+
+    #[gpui::test]
+    fn lists_toggle_and_enter_on_an_empty_item_ends_them(cx: &mut gpui::TestAppContext) {
+        let area = area(cx, "a");
+        area.update(cx, |area, cx| {
+            area.toggle_list(ListKind::Bullet, cx);
+            assert_eq!(area.format().para.list, Some(ListKind::Bullet));
+            area.toggle_list(ListKind::Numbered, cx);
+            assert_eq!(area.format().para.list, Some(ListKind::Numbered));
+            area.buffer.move_to(1);
+            assert_eq!(area.plain_export(), "1. a");
+            area.edit(cx, |buffer| buffer.replace(None, "\n", EditKind::Typing));
+            assert_eq!(area.format().para.list, Some(ListKind::Numbered));
+            assert!(area.ends_list_on_newline());
+            assert_eq!(area.plain_export(), "1. a\n2. ");
+        });
+    }
+
+    #[gpui::test]
+    fn set_content_forgets_the_formatting(cx: &mut gpui::TestAppContext) {
+        let area = area(cx, "a");
+        area.update(cx, |area, cx| {
+            area.buffer.select_range(0, 1);
+            area.toggle_bold(cx);
+            area.set_content("b", cx);
+            assert_eq!(area.formatted_html(), None);
+            assert!(!area.can_undo());
+        });
     }
 
     #[test]

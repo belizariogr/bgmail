@@ -80,8 +80,10 @@ wiring to `storage`.
 - Compose (`compose::ComposeView`, one window at a time): real editors
   (`ui::TextInput` To/Cc/Bcc/Subject, `ui::TextArea` body), From picker
   (`ui::ContextMenu`; local accounts listed but can't send), attachments via
-  picker / drag-and-drop read off the UI thread (25 MB total cap), plain-text
-  send only. Send (button, `ComposeSend`, Cmd/Ctrl+Enter) validates with
+  picker / drag-and-drop read off the UI thread (25 MB total cap). A formatting bar
+  as Gmail's (undo, font, size, B/I/U, color, align, lists, indent) drives
+  `ui::TextArea`; formatted text is sent as HTML with a plain-text version, and
+  unformatted new mail stays plain text. Send (button, `ComposeSend`, Cmd/Ctrl+Enter) validates with
   `mail_core::parse_address_list` (inline per-field errors) and hands the
   `Draft` to `RootView::send_draft` in a task (never while root is leased);
   success closes the window, errors show in a banner. Replies prefill from

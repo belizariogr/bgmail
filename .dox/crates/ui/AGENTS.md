@@ -45,13 +45,21 @@ an e-mail client, without Zed-scale bloat.
 - `IconButton::compact`: the button is exactly its icon's size.
 - `Scrollbar::always_visible` / `thumb_colors`: for content that doesn't follow
   the theme (the reader's page).
-- `TextArea` (compose body): plain text with `\n` line endings only (`\r\n`
+- `TextArea` (compose body): text with `\n` line endings only (`\r\n`
   normalized on load/paste/input), soft-wraps to its width and grows to its
   content height (`min_lines` floor) — the caller provides the scroll
   container and may pass its `ScrollHandle` via `track_scroll` for caret
   autoscroll. Tab and Shift+Tab move focus to the next/previous field. Its actions are
   namespaced under `ui::text_area::*`; only `TextArea` / `TextAreaEvent` are
   re-exported at the crate root.
+- `TextArea` formatting (`text_area/rich.rs`, GPUI-free): character styles (bold,
+  italic, underline, family, color) and paragraph styles (align, list, indent,
+  size) over the buffer's text, followed by diffing each edit; undo keeps a
+  `RichText` per buffer step. Size is per paragraph because GPUI shapes a line at
+  one font size, so lines are shaped one by one, each with its own height and left
+  edge. A family counts only if its bold resolves to a different face: GPUI
+  fallbacks have no weights, even for families it lists as installed. Export:
+  `formatted_html` (`None` when plain) and `plain_export`.
 - `TextArea` keeps GPUI-free editing logic (text/selection/undo in
   `text_area/buffer.rs`, soft-wrap row math in `text_area/rows.rs`) separate
   from the element so it is unit-tested without a window; reshaping happens

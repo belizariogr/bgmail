@@ -407,7 +407,12 @@
       of their images on first paint still happens on the UI thread
 - ✅ Reply composer as in Gmail: quote out of the editor, behind a `⋯` button,
       rendered with its formatting
-- ⬜ Drafts (save/resume) and HTML composing (plain text only today)
+- ✅ HTML composing: formatting bar in the compose window (font, size, B/I/U, color,
+      alignment, lists, indent, undo/redo)
+- ⬜ Text size within a line (per paragraph today: GPUI shapes a line at one size);
+      links and images in the editor; pasting with formatting; editing an unsent
+      message loses its formatting
+- ⬜ Drafts (save/resume)
 - ⬜ Set `\\Answered` on the original after a reply is sent
 - ✅ Move / delete / archive / junk, reflected on the server (optimistic
       local change + queued op, MOVE or COPY/EXPUNGE)

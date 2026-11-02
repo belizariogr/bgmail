@@ -166,6 +166,9 @@ struct History {
     /// Whether the next typing edit may merge into the top undo entry. Cleared
     /// by caret moves and non-typing edits so each "burst" is one step.
     coalesce: bool,
+    /// Undo steps ever added: tells whether an edit started a new one, even
+    /// with the stack at its size limit.
+    steps: u64,
 }
 
 impl History {
@@ -179,6 +182,7 @@ impl History {
                 .last_mut()
                 .is_some_and(|last| last.try_merge(&edit));
         if !merged {
+            self.steps += 1;
             self.undo.push(edit);
             if self.undo.len() > MAX_UNDO_ENTRIES {
                 self.undo.remove(0);
@@ -360,6 +364,31 @@ impl TextBuffer {
 
     /// Reverts the last edit and restores the selection it started from.
     /// Returns whether anything was undone.
+    /// Undo steps ever added.
+    pub(crate) fn undo_steps(&self) -> u64 {
+        self.history.steps
+    }
+
+    pub(crate) fn can_undo(&self) -> bool {
+        !self.history.undo.is_empty()
+    }
+
+    pub(crate) fn can_redo(&self) -> bool {
+        !self.history.redo.is_empty()
+    }
+
+    /// An undo step that changes no text, for changes kept outside the buffer.
+    pub(crate) fn add_undo_step(&mut self) {
+        let edit = Edit {
+            range: self.selected_range.start..self.selected_range.start,
+            old_text: String::new(),
+            new_text: String::new(),
+            selection_before: self.selected_range.clone(),
+            reversed_before: self.selection_reversed,
+        };
+        self.history.record(edit, EditKind::Other);
+    }
+
     pub(crate) fn undo(&mut self) -> bool {
         let Some(edit) = self.history.undo.pop() else {
             return false;
@@ -423,6 +452,22 @@ impl TextBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_undo_step_keeps_text_and_counts_as_a_step() {
+        let mut buffer = TextBuffer::default();
+        buffer.replace(None, "ab", EditKind::Other);
+        let steps = buffer.undo_steps();
+        buffer.select_range(0, 1);
+        buffer.add_undo_step();
+        assert_eq!(buffer.undo_steps(), steps + 1);
+        assert!(buffer.undo());
+        assert_eq!(buffer.text(), "ab");
+        assert_eq!(buffer.selected_range(), 0..1);
+        assert!(buffer.can_redo());
+        assert!(buffer.redo());
+        assert_eq!(buffer.text(), "ab");
+    }
 
     fn buffer(text: &str) -> TextBuffer {
         let mut buffer = TextBuffer::default();

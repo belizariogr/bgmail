@@ -9,24 +9,25 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    anchored, black, deferred, size, white, AnyWindowHandle, App, Bounds, ClickEvent, Context,
-    Corner, Entity, ExternalPaths, FocusHandle, Focusable, Global, Hsla, KeyBinding, MouseButton,
-    PathPromptOptions, Point, PromptButton, PromptLevel, Render, ScrollHandle, Size, Subscription,
-    Task, WeakEntity, Window, WindowBounds,
+    anchored, black, deferred, size, white, AnyElement, AnyWindowHandle, App, Bounds, ClickEvent,
+    Context, Corner, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Global, Hsla,
+    KeyBinding, MouseButton, PathPromptOptions, Point, PromptButton, PromptLevel, Render,
+    ScrollHandle, Size, Subscription, Task, WeakEntity, Window, WindowBounds,
 };
 use html_view::{
     Appearance as PageAppearance, DetachedDocument, DocumentOptions, HtmlDocument, HtmlView,
     Resources,
 };
 use mail_core::{Address, Draft, OutgoingAttachment};
-use theme::{ActiveTheme, Theme, ThemeColors};
+use theme::{ActiveTheme, Theme, ThemeColors, MAIL_TEXT_COLORS};
 
 use crate::data::MessageBody;
 use crate::mail_html::{email_document, DocumentColors};
 use ui::prelude::*;
 use ui::{
-    Button, ButtonStyle, Color, ContextMenu, Icon, IconButton, IconName, IconSize, Label,
-    LabelSize, TextArea, TextAreaEvent, TextInput, TextInputEvent, Tooltip,
+    Align, Button, ButtonStyle, Color, ContextMenu, FontFamily, Icon, IconButton, IconName,
+    IconSize, Label, LabelSize, ListKind, TextArea, TextAreaEvent, TextInput, TextInputEvent,
+    TextSize, Tooltip, MAX_INDENT,
 };
 
 use crate::actions::{ComposeAttach, ComposeClose, ComposeDiscard, ComposeSend};
@@ -116,6 +117,15 @@ pub struct ComposeInit {
     pub quoted_original: Option<QuotedOriginal>,
 }
 
+/// A dropdown of the formatting toolbar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FormatMenu {
+    Font,
+    Size,
+    Color,
+    Align,
+}
+
 /// Width the quoted original is first laid out at, before the real one is known.
 const QUOTE_FIRST_LAYOUT_WIDTH: f32 = 800.0;
 
@@ -152,7 +162,10 @@ struct ComposeFields {
     cc: String,
     bcc: String,
     subject: String,
+    /// Plain-text version of what was written.
     body: String,
+    /// HTML of what was written, when anything is formatted.
+    body_html: Option<String>,
 }
 
 /// Threading headers carried over from the message being answered.
@@ -255,6 +268,8 @@ pub struct ComposeView {
     white_background: bool,
     /// The quoted original shows, as in Gmail, only after asking for it.
     quote_expanded: bool,
+    /// Formatting dropdown open in the toolbar.
+    format_menu: Option<FormatMenu>,
     /// The quoted original, parsed the first time it is shown.
     quote_view: Option<Entity<HtmlView>>,
     _quote_task: Option<Task<()>>,
@@ -330,6 +345,7 @@ impl ComposeView {
             last_title: String::new(),
             white_background,
             quote_expanded: false,
+            format_menu: None,
             quote_view: None,
             _quote_task: None,
             _subscriptions: subscriptions,
@@ -371,6 +387,7 @@ impl ComposeView {
         self._quote_task = None;
         self.errors = ComposeErrors::default();
         self.from_menu_open = false;
+        self.format_menu = None;
         self.edited = false;
         let handle = match focus {
             ComposeFocus::To => self.to.focus_handle(cx),
@@ -478,6 +495,7 @@ impl ComposeView {
 
     fn close_from_menu(&mut self, cx: &mut Context<Self>) {
         self.from_menu_open = false;
+        self.format_menu = None;
         cx.notify();
     }
 
@@ -500,7 +518,8 @@ impl ComposeView {
             cc: self.cc.read(cx).content().to_string(),
             bcc: self.bcc.read(cx).content().to_string(),
             subject: self.subject.read(cx).content().to_string(),
-            body: self.body.read(cx).content().to_string(),
+            body: self.body.read(cx).plain_export(),
+            body_html: self.body.read(cx).formatted_html(),
         }
     }
 
@@ -694,6 +713,445 @@ impl ComposeView {
             window.set_window_title(&title);
             self.last_title = title;
         }
+    }
+
+    /// Runs `apply` on the body and keeps typing there: the toolbar's clicks must
+    /// not take the caret away.
+    fn format_body(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        apply: impl FnOnce(&mut TextArea, &mut Context<TextArea>),
+    ) {
+        self.format_menu = None;
+        self.body.update(cx, apply);
+        window.focus(&self.body.focus_handle(cx));
+        cx.notify();
+    }
+
+    fn toggle_format_menu(&mut self, menu: FormatMenu, cx: &mut Context<Self>) {
+        self.format_menu = (self.format_menu != Some(menu)).then_some(menu);
+        cx.notify();
+    }
+
+    /// The formatting bar above the send button, laid out as Gmail's.
+    fn render_format_bar(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let (bar_bg, border) = (colors.element_background, colors.border);
+        let area = self.body.read(cx);
+        let format = area.format();
+        let (can_undo, can_redo) = (area.can_undo(), area.can_redo());
+        let icon = |id: &'static str,
+                    label: Key,
+                    shortcut: Option<(&str, &str)>,
+                    icon: IconName,
+                    active: bool,
+                    enabled: bool,
+                    cx: &mut Context<Self>,
+                    apply: fn(&mut TextArea, &mut Context<TextArea>)| {
+            let holder = div().id(id);
+            let holder = match shortcut {
+                Some((mac, other)) => holder.tooltip(Tooltip::with_shortcut(
+                    label.tr(language),
+                    crate::shortcuts::format_binding(crate::shortcuts::primary_binding(mac, other)),
+                )),
+                None => holder.tooltip(Tooltip::text(label.tr(language))),
+            };
+            holder.child(
+                IconButton::new(id, icon)
+                    .size(IconSize::Small)
+                    .selected(active)
+                    .disabled(!enabled)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.format_body(window, cx, apply);
+                    })),
+            )
+        };
+        let separator = || div().w(px(1.0)).h(px(18.0)).mx_1().bg(border);
+        let chars = format.chars;
+        let para = format.para;
+        h_flex()
+            .flex_shrink_0()
+            .justify_center()
+            .px_3()
+            .pt_2()
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .justify_center()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_lg()
+                    .bg(bar_bg)
+                    .child(icon(
+                        "format-undo",
+                        Key::FormatUndo,
+                        Some(("cmd-z", "ctrl-z")),
+                        IconName::FormatUndo,
+                        false,
+                        can_undo,
+                        cx,
+                        TextArea::undo_step,
+                    ))
+                    .child(icon(
+                        "format-redo",
+                        Key::FormatRedo,
+                        Some(("cmd-shift-z", "ctrl-y")),
+                        IconName::FormatRedo,
+                        false,
+                        can_redo,
+                        cx,
+                        TextArea::redo_step,
+                    ))
+                    .child(separator())
+                    .child(self.render_font_picker(chars.family, language, cx))
+                    .child(separator())
+                    .child(self.render_size_picker(para.size, language, cx))
+                    .child(separator())
+                    .child(self.render_style_button(
+                        "format-bold",
+                        Key::FormatBold,
+                        ("cmd-b", "ctrl-b"),
+                        chars.bold,
+                        language,
+                        cx,
+                        TextArea::toggle_bold,
+                    ))
+                    .child(self.render_style_button(
+                        "format-italic",
+                        Key::FormatItalic,
+                        ("cmd-i", "ctrl-i"),
+                        chars.italic,
+                        language,
+                        cx,
+                        TextArea::toggle_italic,
+                    ))
+                    .child(self.render_style_button(
+                        "format-underline",
+                        Key::FormatUnderline,
+                        ("cmd-u", "ctrl-u"),
+                        chars.underline,
+                        language,
+                        cx,
+                        TextArea::toggle_underline,
+                    ))
+                    .child(self.render_color_picker(chars.color, language, cx))
+                    .child(separator())
+                    .child(self.render_align_picker(para.align, language, cx))
+                    .child(icon(
+                        "format-numbered",
+                        Key::FormatNumbered,
+                        None,
+                        IconName::FormatListNumbered,
+                        para.list == Some(ListKind::Numbered),
+                        true,
+                        cx,
+                        |area, cx| area.toggle_list(ListKind::Numbered, cx),
+                    ))
+                    .child(icon(
+                        "format-bullets",
+                        Key::FormatBullets,
+                        None,
+                        IconName::FormatListBullet,
+                        para.list == Some(ListKind::Bullet),
+                        true,
+                        cx,
+                        |area, cx| area.toggle_list(ListKind::Bullet, cx),
+                    ))
+                    .child(icon(
+                        "format-indent-less",
+                        Key::FormatIndentLess,
+                        None,
+                        IconName::FormatIndentLess,
+                        false,
+                        para.indent > 0,
+                        cx,
+                        |area, cx| area.indent(-1, cx),
+                    ))
+                    .child(icon(
+                        "format-indent-more",
+                        Key::FormatIndentMore,
+                        None,
+                        IconName::FormatIndentMore,
+                        false,
+                        para.indent < MAX_INDENT,
+                        cx,
+                        |area, cx| area.indent(1, cx),
+                    )),
+            )
+    }
+
+    /// B, I or U: a letter showing the style it applies.
+    #[allow(clippy::too_many_arguments)]
+    fn render_style_button(
+        &self,
+        id: &'static str,
+        label: Key,
+        shortcut: (&str, &str),
+        active: bool,
+        language: Language,
+        cx: &mut Context<Self>,
+        apply: fn(&mut TextArea, &mut Context<TextArea>),
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let (hover, selected, accent, text) = (
+            colors.element_hover,
+            colors.element_active,
+            colors.text_accent,
+            colors.text,
+        );
+        let (letter, weight, italic, underline) = match id {
+            "format-bold" => ("B", FontWeight::BOLD, false, false),
+            "format-italic" => ("I", FontWeight::NORMAL, true, false),
+            _ => ("U", FontWeight::NORMAL, false, true),
+        };
+        let binding = crate::shortcuts::format_binding(crate::shortcuts::primary_binding(
+            shortcut.0, shortcut.1,
+        ));
+        h_flex()
+            .id(id)
+            .size(px(28.0))
+            .justify_center()
+            .rounded_md()
+            .cursor_pointer()
+            .when(active, |el| el.bg(selected))
+            .hover(move |el| el.bg(hover))
+            .tooltip(Tooltip::with_shortcut(label.tr(language), binding))
+            .text_color(if active { accent } else { text })
+            .font_weight(weight)
+            .when(italic, |el| el.italic())
+            .when(underline, |el| el.underline())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.format_body(window, cx, apply);
+            }))
+            .child(letter)
+    }
+
+    /// A button with text that opens one of the formatting dropdowns above it.
+    #[allow(clippy::too_many_arguments)]
+    fn render_menu_button(
+        &self,
+        id: &'static str,
+        menu: FormatMenu,
+        tooltip: Key,
+        content: impl IntoElement,
+        dropdown: Option<AnyElement>,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let hover = cx.theme().colors().element_hover;
+        h_flex()
+            .id(id)
+            .h(px(28.0))
+            .px_1p5()
+            .gap_1()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |el| el.bg(hover))
+            .tooltip(Tooltip::text(tooltip.tr(language)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_format_menu(menu, cx)))
+            .child(content)
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .children(dropdown.filter(|_| self.format_menu == Some(menu)))
+    }
+
+    /// Opens upward: the toolbar is at the bottom of the window.
+    fn format_dropdown(content: impl IntoElement) -> AnyElement {
+        deferred(
+            anchored()
+                .anchor(Corner::BottomLeft)
+                .snap_to_window_with_margin(px(8.0))
+                .child(div().mb_1().child(content)),
+        )
+        .with_priority(1)
+        .into_any_element()
+    }
+
+    /// A menu whose entries run `apply` on the body with their value, the
+    /// current one checked.
+    fn format_menu_of<T: Copy + PartialEq + 'static>(
+        &self,
+        options: &[(T, Key)],
+        current: T,
+        language: Language,
+        cx: &mut Context<Self>,
+        apply: fn(&mut TextArea, T, &mut Context<TextArea>),
+    ) -> AnyElement {
+        let view = cx.weak_entity();
+        let mut menu = ContextMenu::new();
+        for (value, key) in options.iter().copied() {
+            let view = view.clone();
+            let handler = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.format_body(window, cx, |area, cx| apply(area, value, cx));
+                });
+            };
+            menu = if value == current {
+                menu.entry_with_key_hint(key.tr(language), "✓", handler)
+            } else {
+                menu.entry(key.tr(language), handler)
+            };
+        }
+        Self::format_dropdown(menu)
+    }
+
+    fn render_font_picker(
+        &self,
+        current: FontFamily,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const OPTIONS: [(FontFamily, Key); 3] = [
+            (FontFamily::Sans, Key::FormatSansSerif),
+            (FontFamily::Serif, Key::FormatSerif),
+            (FontFamily::Mono, Key::FormatFixedWidth),
+        ];
+        let dropdown =
+            self.format_menu_of(&OPTIONS, current, language, cx, TextArea::set_font_family);
+        let label = OPTIONS
+            .iter()
+            .find(|(family, _)| *family == current)
+            .map_or(Key::FormatSansSerif, |(_, key)| *key);
+        self.render_menu_button(
+            "format-font",
+            FormatMenu::Font,
+            Key::FormatFont,
+            Label::new(label.tr(language)).size(LabelSize::Small),
+            Some(dropdown),
+            language,
+            cx,
+        )
+    }
+
+    fn render_size_picker(
+        &self,
+        current: TextSize,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const OPTIONS: [(TextSize, Key); 4] = [
+            (TextSize::Small, Key::FormatSmall),
+            (TextSize::Normal, Key::FormatNormal),
+            (TextSize::Large, Key::FormatLarge),
+            (TextSize::Huge, Key::FormatHuge),
+        ];
+        let dropdown =
+            self.format_menu_of(&OPTIONS, current, language, cx, TextArea::set_text_size);
+        self.render_menu_button(
+            "format-size",
+            FormatMenu::Size,
+            Key::FormatSize,
+            div().font_weight(FontWeight::BOLD).child("TT"),
+            Some(dropdown),
+            language,
+            cx,
+        )
+    }
+
+    fn render_align_picker(
+        &self,
+        current: Align,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const OPTIONS: [(Align, Key); 3] = [
+            (Align::Left, Key::FormatAlignLeft),
+            (Align::Center, Key::FormatAlignCenter),
+            (Align::Right, Key::FormatAlignRight),
+        ];
+        let dropdown = self.format_menu_of(&OPTIONS, current, language, cx, TextArea::set_align);
+        let icon = match current {
+            Align::Left => IconName::FormatAlignLeft,
+            Align::Center => IconName::FormatAlignCenter,
+            Align::Right => IconName::FormatAlignRight,
+        };
+        self.render_menu_button(
+            "format-align",
+            FormatMenu::Align,
+            Key::FormatAlign,
+            Icon::new(icon).size(IconSize::Small),
+            Some(dropdown),
+            language,
+            cx,
+        )
+    }
+
+    /// "A" underlined with the current color, and a grid of colors.
+    fn render_color_picker(
+        &self,
+        current: Option<u32>,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let (surface, border, accent, text) = (
+            colors.elevated_surface_background,
+            colors.border,
+            colors.accent,
+            colors.text,
+        );
+        let swatch = |id: usize, color: Option<u32>, cx: &mut Context<Self>| {
+            h_flex()
+                .id(("format-color", id))
+                .size(px(22.0))
+                .justify_center()
+                .rounded_sm()
+                .cursor_pointer()
+                .border_1()
+                .border_color(if color == current { accent } else { border })
+                .when_some(color, |el, rgb_value| el.bg(gpui::rgb(rgb_value)))
+                .when(color.is_none(), |el| {
+                    el.child(Icon::new(IconName::Clear).size(IconSize::XSmall))
+                })
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.format_body(window, cx, |area, cx| area.set_text_color(color, cx));
+                }))
+        };
+        let mut grid = div()
+            .occlude()
+            .w(px(166.0))
+            .p_1()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .bg(surface)
+            .border_1()
+            .border_color(border)
+            .rounded_md()
+            .shadow_lg()
+            .child(swatch(0, None, cx));
+        for (ix, color) in MAIL_TEXT_COLORS.into_iter().enumerate() {
+            grid = grid.child(swatch(ix + 1, Some(color), cx));
+        }
+        self.render_menu_button(
+            "format-color-menu",
+            FormatMenu::Color,
+            Key::FormatColor,
+            v_flex()
+                .items_center()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .line_height(px(16.0))
+                        .child("A"),
+                )
+                .child(
+                    div()
+                        .w(px(12.0))
+                        .h(px(2.0))
+                        .bg(current.map_or(text, |rgb_value| gpui::rgb(rgb_value).into())),
+                ),
+            Some(Self::format_dropdown(grid)),
+            language,
+            cx,
+        )
     }
 
     fn render_toolbar(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1230,10 +1688,11 @@ impl Render for ComposeView {
             })
             .child(self.render_body(cx))
             .children(self.render_error_banner(cx))
+            .child(self.render_format_bar(language, cx))
             .child(self.render_toolbar(language, cx))
             // Outside clicks close the From picker (the picker itself is
             // deferred, so it paints above this catcher).
-            .when(self.from_menu_open, |el| {
+            .when(self.from_menu_open || self.format_menu.is_some(), |el| {
                 el.child(
                     div()
                         .absolute()
@@ -1327,13 +1786,23 @@ fn parse_field(input: &str, language: Language) -> (Vec<Address>, Option<String>
 /// Validates the fields and builds the outgoing draft (plain text). Errors:
 /// invalid addresses per field, then "no recipients", then a missing or
 /// local (can't send) From account.
-/// HTML of a reply: what was written, and the original with its formatting.
-fn reply_html(reply: &ReplyHeaders, body: &str) -> String {
+/// HTML of a message: what was written, with its formatting, and the original
+/// of a reply. A plain new message has none.
+fn message_html(reply: &ReplyHeaders, fields: &ComposeFields) -> Option<String> {
+    let written = || {
+        fields
+            .body_html
+            .clone()
+            .unwrap_or_else(|| mail_core::reply_html(&fields.body))
+    };
     match &reply.quoted {
-        Some(quoted) => {
-            mail_core::reply_html_with_original(body, &quoted.attribution, &quoted.html)
-        }
-        None => mail_core::reply_html(body),
+        Some(quoted) => Some(mail_core::reply_html_with_original(
+            &written(),
+            &quoted.attribution,
+            &quoted.html,
+        )),
+        None if reply.in_reply_to.is_some() => Some(written()),
+        None => fields.body_html.clone(),
     }
 }
 
@@ -1380,10 +1849,7 @@ fn build_draft(
         subject: fields.subject.trim().to_string(),
         text: reply_text(reply, &fields.body),
         // Same structure as Gmail's replies, which it collapses in conversations.
-        html: reply
-            .in_reply_to
-            .is_some()
-            .then(|| reply_html(reply, &fields.body)),
+        html: message_html(reply, fields),
         in_reply_to: reply.in_reply_to.clone(),
         references: reply.references.clone(),
         attachments: attachments.to_vec(),
@@ -1643,11 +2109,28 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(reply_text(&reply, "Hi\n\n"), "Hi\n\nAnn wrote:\n> Hello");
-        let html = reply_html(&reply, "Hi");
+        let mut written = ComposeFields {
+            body: "Hi".into(),
+            ..Default::default()
+        };
+        let html = message_html(&reply, &written).unwrap();
         assert!(html.contains("<b>Hello</b>") && html.contains("Hi"));
+        written.body_html = Some("<div dir=\"ltr\"><i>Hi</i></div>".into());
+        assert!(message_html(&reply, &written)
+            .unwrap()
+            .starts_with("<div dir=\"ltr\"><i>Hi</i></div><br><div class=\"gmail_quote\">"));
 
         let plain = ReplyHeaders::default();
         assert_eq!(reply_text(&plain, "Hi\n"), "Hi\n");
+        assert_eq!(message_html(&plain, &ComposeFields::default()), None);
+        let formatted = ComposeFields {
+            body_html: Some("<b>x</b>".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            message_html(&plain, &formatted).as_deref(),
+            Some("<b>x</b>")
+        );
     }
 
     #[test]

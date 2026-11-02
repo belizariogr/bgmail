@@ -442,6 +442,10 @@ _300 functions/methods documented._
   - Purpose: Inert state (as Zed's `Disableable`), e.g. message actions with no selection.
   - Behavior: Render uses `Color::Disabled`, no hover/selected background, drops the click handler, but still swallows left mouse-down (no title-bar drag).
 
+- **`text_area::rich`** (GPUI-free): `RichText` (`new`, `matches`, `is_plain`, `apply_edit`, `style_at`, `para`, `runs_in`, `all_chars`, `update_chars`, `update_paras`, `list_number`, `list_marker`, `to_plain`, `to_html`), `CharStyle`, `ParaStyle`, `Format`, `FontFamily`, `TextSize` (`scale`), `Align`, `ListKind`, `MAX_INDENT`.
+- **`TextArea` formatting** (pub): `format`, `formatted_html`, `plain_export`, `can_undo`, `can_redo`, `toggle_bold`, `toggle_italic`, `toggle_underline`, `set_font_family`, `set_text_color`, `set_text_size`, `set_align`, `toggle_list`, `indent`, `undo_step`, `redo_step`, `set_selection_color`. Actions `ToggleBold`, `ToggleItalic`, `ToggleUnderline` (Cmd/Ctrl+B, I, U).
+- **`Families`** / **`styled_run`** / **`line_runs`** / **`line_left`** / **`LineGeometry`** (private, `text_area`): fonts with real bold faces, runs of a line, and where each line goes.
+- **`TextBuffer::undo_steps`** / **`can_undo`** / **`can_redo`** / **`add_undo_step`** (pub(crate)): history counters and an undo step without a text change.
 - **`IconButton::hover_color`** (pub): brightens the icon on hover instead of showing a background.
 - **`IconButton::compact`** (pub) / **`side`** (private): makes the button its icon's size / side of the button's square.
 - **`Icon::group_hover_color`** (pub): icon color while the named group is hovered.

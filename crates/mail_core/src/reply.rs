@@ -229,10 +229,14 @@ pub fn reply_html(text: &str) -> String {
     out
 }
 
-/// [`reply_html`] of what the user wrote, followed by a Gmail quote of the
+/// What the user wrote, already as HTML, followed by a Gmail quote of the
 /// original's HTML, which must already be safe to send on.
-pub fn reply_html_with_original(reply: &str, attribution: &str, original_html: &str) -> String {
-    let mut out = reply_html(reply);
+pub fn reply_html_with_original(
+    written_html: &str,
+    attribution: &str,
+    original_html: &str,
+) -> String {
+    let mut out = written_html.to_string();
     out.push_str("<br><div class=\"gmail_quote\"><div dir=\"ltr\" class=\"gmail_attr\">");
     out.push_str(&html_escape::encode_text(attribution));
     out.push_str("<br></div><blockquote class=\"gmail_quote\" style=\"");
@@ -427,7 +431,8 @@ mod reply_format_tests {
 
     #[test]
     fn reply_quotes_the_original_html_below_what_was_written() {
-        let html = reply_html_with_original("My <answer>", "On Ann wrote:", "<b>Hello</b>");
+        let html =
+            reply_html_with_original(&reply_html("My <answer>"), "On Ann wrote:", "<b>Hello</b>");
         assert!(html.starts_with("<div dir=\"ltr\">My &lt;answer&gt;<br></div>"));
         assert!(html.contains("class=\"gmail_attr\">On Ann wrote:<br></div>"));
         assert!(html.ends_with("<b>Hello</b></blockquote></div>"));
