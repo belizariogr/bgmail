@@ -393,6 +393,11 @@
 - ✅ One BGMail per profile: a later launch activates the running window and exits
       (`instance::lock_profile`), since two processes undid each other's Moves.
 - ✅ "Open" refuses attachments that can run code; Save still works.
+- ✅ Review round 2: a Content-ID alone no longer hides an attachment (rows stored
+      before keep `inline`); `\All` over a label named Archive and shallow folder
+      names over nested ones in the role mapping; temporary `NO` to LOGIN retries;
+      transparent mail text stays hidden on dark pages; bulk actions off the UI
+      thread; a forward waits for the body.
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
 - ✅ Read / mark read-unread (opening marks read on the server; toggle via
