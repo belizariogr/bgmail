@@ -920,9 +920,24 @@ fn no_kind(information: &str, code: Option<&ResponseCode<'_>>) -> RemoteErrorKin
 /// the credentials were rejected.
 pub fn map_login_error(err: imap::Error) -> RemoteError {
     match err {
-        imap::Error::No(no) => RemoteError::new(RemoteErrorKind::Auth, no.information),
+        imap::Error::No(no) => {
+            RemoteError::new(login_refusal_kind(&no.information), no.information)
+        }
         imap::Error::Bad(bad) => RemoteError::new(RemoteErrorKind::Auth, bad.information),
         other => map_error(other),
+    }
+}
+
+/// Why a server said `NO` to a login. RFC 5530 codes for a passing problem aren't a
+/// verdict on the password: treated as one, the account would stop syncing until the
+/// user intervened. They arrive in the text, since the parser doesn't know them.
+fn login_refusal_kind(information: &str) -> RemoteErrorKind {
+    let text = information.trim_start().to_ascii_uppercase();
+    let passing = ["[UNAVAILABLE]", "[SERVERBUG]", "[INUSE]", "[LIMIT]"];
+    if passing.iter().any(|code| text.starts_with(code)) {
+        RemoteErrorKind::Network
+    } else {
+        RemoteErrorKind::Auth
     }
 }
 
@@ -1025,6 +1040,21 @@ pub(crate) mod test_server {
 mod tests {
     use super::test_server::{start, Step};
     use super::*;
+
+    #[test]
+    fn a_passing_login_refusal_is_not_a_verdict_on_the_password() {
+        for passing in [
+            "[UNAVAILABLE] Temporary authentication failure",
+            "[serverbug] oops",
+            "  [INUSE] try later",
+            "[LIMIT] too many",
+        ] {
+            assert_eq!(login_refusal_kind(passing), RemoteErrorKind::Network);
+        }
+        for refused in ["[AUTHENTICATIONFAILED] nope", "Invalid credentials", ""] {
+            assert_eq!(login_refusal_kind(refused), RemoteErrorKind::Auth);
+        }
+    }
     use std::ops::RangeInclusive;
     use std::thread;
     use std::time::Instant;

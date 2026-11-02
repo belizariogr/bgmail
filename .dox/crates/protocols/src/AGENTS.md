@@ -214,7 +214,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`classify`** (pub) — `pub fn classify(err, phase: SendPhase) -> SendError`: `Connect` phase and auth replies → transient; `4xx` → transient; other codes → permanent; local client errors → permanent; no code in `Envelope` → transient; no code in `Message` → **uncertain** (the terminator may have reached the server).
 - **`map_error`** (pub) — `pub fn map_error(err: imap::Error) -> RemoteError`: `Io` → `tls::io_error`; `No` → `no_kind`; `Bad` → `Protocol`; `Bye` / `ConnectionLost` → `Network`; `Validate` → `Other`; rest (parse, append, unexpected) → `Protocol`. (The crate reports an unparseable line as a `Bye` "no explanation given".)
 - **`no_kind`** (private) — `[TRYCREATE]` or text containing nonexist / not exist / doesn't exist / no such / unknown mailbox / not found → `NotFound`, else `Protocol`.
-- **`map_login_error`** (pub) — `NO`/`BAD` → `Auth`; others as `map_error`.
+- **`map_login_error`** (pub) — `NO`/`BAD` → `Auth`, except a `NO` with an RFC 5530 passing code (`login_refusal_kind`: `[UNAVAILABLE]`, `[SERVERBUG]`, `[INUSE]`, `[LIMIT]` in the text) → `Network`, which retries; others as `map_error`.
 
 ##### Context: `test_server` (`#[cfg(test)]`, pub(crate))
 
