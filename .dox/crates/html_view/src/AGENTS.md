@@ -379,6 +379,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   use; `worker(rx)`: a `ureq` agent (timeout, generic user agent, HTTP
   errors as errors) fetching jobs, caching bodies, answering the handler and
   finishing the load; `get(agent, url)`: body capped at `MAX_BODY`.
+- `is_reachable_from_mail` (private): refuses loopback, `0.0.0.0/8`, `::`, link-local (IPv6-mapped too); private ranges pass (user decision). `struct OffThisMachine` (private `ureq` resolver, used for every request and redirect): filters resolved addresses with it, `HostNotFound` when none is left; a configured proxy is exempt.
 - `struct BodyCache` (private): `get`, `insert`/`insert_capped` (oldest
   evicted past the cap; bodies over the cap or already cached skipped);
   `cache()`.
