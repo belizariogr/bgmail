@@ -171,9 +171,17 @@ struct ResizeDrag(ResizeHandle);
 /// Hover group of a message row; reveals its action buttons.
 const MESSAGE_ROW_GROUP: &str = "message-row";
 
+/// The rows selected in a mailbox when the user left it.
+#[derive(Debug, Clone)]
+struct RememberedSelection {
+    ids: Vec<i64>,
+    anchor: Option<i64>,
+    focus: Option<i64>,
+}
+
 /// What is currently selected in the sidebar: a global (unified) mailbox at the
 /// top, or a specific folder within an account group.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Selection {
     /// A unified mailbox spanning all accounts.
     Global(GlobalMailbox),
@@ -840,6 +848,8 @@ pub struct RootView {
     /// Fixed end of a Shift selection and the end that moves.
     selection_anchor: Option<i64>,
     selection_focus: Option<i64>,
+    /// What each mailbox had selected, for coming back to it (this session only).
+    remembered_selections: HashMap<Selection, RememberedSelection>,
     /// Message whose recipients show in full.
     expanded_recipients: Option<i64>,
     /// Row under the mouse, whose text makes room for its action buttons.
@@ -1301,6 +1311,7 @@ impl RootView {
             multi_selection: Vec::new(),
             multi_preview: None,
             selection_anchor: None,
+            remembered_selections: HashMap::new(),
             selection_focus: None,
             expanded_recipients: None,
             hovered_row: None,
@@ -1605,7 +1616,6 @@ impl RootView {
             return;
         };
         let (id, account_id) = (detail.id, detail.account_id);
-        let needs_body = detail.body_state == storage::BODY_STATE_HEADERS;
         if detail.unread {
             if let Ok(outcome) = mail_actions::set_read(&self.db, id, true) {
                 self.after_action(account_id, outcome);
@@ -1615,10 +1625,21 @@ impl RootView {
             }
             self.reload_selected_detail();
         }
-        if needs_body {
-            if let Some(mail) = &self.mail {
-                mail.engine().send(account_id, Command::FetchBody(id));
-            }
+        self.request_selected_body();
+    }
+
+    /// Fetches the selected message's body, if it was not downloaded yet.
+    fn request_selected_body(&self) {
+        let Some(detail) = self
+            .selected_detail
+            .as_ref()
+            .filter(|detail| detail.body_state == storage::BODY_STATE_HEADERS)
+        else {
+            return;
+        };
+        if let Some(mail) = &self.mail {
+            mail.engine()
+                .send(detail.account_id, Command::FetchBody(detail.id));
         }
     }
 
@@ -3983,11 +4004,62 @@ impl RootView {
             }
             self.last_search_query.clear();
             self.pre_search_mailbox = None;
+        } else {
+            self.remember_selection();
         }
         self.clear_message_selection();
         self.apply_mailbox_selection(selection);
         self.reload_message_list();
+        self.restore_selection();
+        self.sync_app_menus(cx);
         cx.notify();
+    }
+
+    /// Notes what the current mailbox has selected, before leaving it.
+    fn remember_selection(&mut self) {
+        let ids = self.selected_ids();
+        let mailbox = self.selected_mailbox.clone();
+        if ids.is_empty() {
+            self.remembered_selections.remove(&mailbox);
+        } else {
+            self.remembered_selections.insert(
+                mailbox,
+                RememberedSelection {
+                    ids,
+                    anchor: self.selection_anchor,
+                    focus: self.selection_focus,
+                },
+            );
+        }
+    }
+
+    /// Selects again what the current mailbox had when the user left it, as far as
+    /// those rows are still listed. Returning isn't opening: a message the user marked
+    /// unread stays so, as it would have had they never left.
+    fn restore_selection(&mut self) {
+        let Some(saved) = self.remembered_selections.get(&self.selected_mailbox) else {
+            return;
+        };
+        let listed: HashSet<i64> = self.list_messages.iter().map(|m| m.id).collect();
+        let ids: Vec<i64> = saved
+            .ids
+            .iter()
+            .copied()
+            .filter(|id| listed.contains(id))
+            .collect();
+        let (anchor, focus) = (saved.anchor, saved.focus);
+        let Some(&first) = ids.first() else {
+            return;
+        };
+        let still_selected = |id: Option<i64>| id.filter(|id| ids.contains(id)).or(Some(first));
+        let (anchor, focus) = (still_selected(anchor), still_selected(focus));
+        self.selection_anchor = anchor;
+        self.selection_focus = focus;
+        if self.apply_selection(ids) {
+            self.reload_selected_detail();
+            self.request_selected_body();
+        }
+        self.reveal_selected_message();
     }
 
     /// Core of [`Self::select_mailbox`], without the redraw (so it is unit-testable
@@ -7890,6 +7962,139 @@ mod tests {
             view.archive_message(cx);
             let after = view.db.get_message(id).unwrap().unwrap().folders_csv;
             assert_ne!(before, after);
+        });
+    }
+
+    /// A view on the seeded mail with a message selected in the Inbox and the user gone
+    /// to another mailbox, through the path the sidebar takes.
+    fn switch_mailbox(view: &mut RootView, selection: Selection) {
+        view.remember_selection();
+        view.clear_message_selection();
+        view.apply_mailbox_selection(selection);
+        view.reload_message_list();
+        view.restore_selection();
+    }
+
+    fn a_folder_with_mail(view: &RootView) -> (Selection, Vec<i64>) {
+        view.accounts
+            .iter()
+            .map(|account| Selection::Mailbox {
+                account_id: account.id,
+                folder_path: storage::system::INBOX.into(),
+            })
+            .find_map(|selection| {
+                let query = mail_list_query(&selection, "");
+                let ids: Vec<i64> = view
+                    .db
+                    .list_messages(&query)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|m| m.id)
+                    .collect();
+                (ids.len() >= 2).then_some((selection, ids))
+            })
+            .expect("seeded mail")
+    }
+
+    #[test]
+    fn each_mailbox_gets_its_selected_message_back() {
+        let (_dir, mut view) = test_view();
+        let global = Selection::Global(GlobalMailbox::Inbox);
+        let global_id = view.list_messages[1].id;
+        view.selected_message_id = Some(global_id);
+        view.reload_selected_detail();
+
+        let (folder, ids) = a_folder_with_mail(&view);
+        switch_mailbox(&mut view, folder.clone());
+        // Nothing was selected here yet.
+        assert_eq!(view.selected_message_id, None);
+        view.selected_message_id = Some(ids[1]);
+        view.reload_selected_detail();
+
+        switch_mailbox(&mut view, global.clone());
+        assert_eq!(view.selected_message_id, Some(global_id));
+        assert_eq!(view.selected_detail.as_ref().map(|d| d.id), Some(global_id));
+
+        switch_mailbox(&mut view, folder);
+        assert_eq!(view.selected_message_id, Some(ids[1]));
+    }
+
+    #[test]
+    fn leaving_with_nothing_selected_stays_that_way() {
+        let (_dir, mut view) = test_view();
+        let global = Selection::Global(GlobalMailbox::Inbox);
+        let (folder, _) = a_folder_with_mail(&view);
+        switch_mailbox(&mut view, folder.clone());
+        switch_mailbox(&mut view, global.clone());
+        assert!(view.selected_message_id.is_some());
+
+        view.clear_message_selection();
+        switch_mailbox(&mut view, folder);
+        switch_mailbox(&mut view, global);
+        assert_eq!(view.selected_message_id, None);
+    }
+
+    #[test]
+    fn a_selected_message_that_left_the_mailbox_is_not_restored() {
+        let (_dir, mut view) = test_view();
+        let id = view.list_messages[1].id;
+        view.selected_message_id = Some(id);
+        view.reload_selected_detail();
+        let (folder, _) = a_folder_with_mail(&view);
+        switch_mailbox(&mut view, folder);
+        view.db.move_message_to_trash(id).unwrap();
+
+        switch_mailbox(&mut view, Selection::Global(GlobalMailbox::Inbox));
+        assert_eq!(view.selected_message_id, None);
+        assert!(view.selected_detail.is_none());
+    }
+
+    #[test]
+    fn coming_back_does_not_mark_a_message_read() {
+        let (_dir, mut view) = test_view();
+        let id = view.list_messages[1].id;
+        view.db.set_message_unread(id, true).unwrap();
+        view.selected_message_id = Some(id);
+        view.reload_selected_detail();
+        let (folder, _) = a_folder_with_mail(&view);
+        switch_mailbox(&mut view, folder);
+
+        switch_mailbox(&mut view, Selection::Global(GlobalMailbox::Inbox));
+        assert_eq!(view.selected_message_id, Some(id));
+        assert!(view.db.get_message(id).unwrap().unwrap().unread);
+    }
+
+    #[test]
+    fn a_multiple_selection_comes_back_too() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.apply_selection(ids[..3].to_vec());
+        view.selection_focus = Some(ids[2]);
+        let (folder, _) = a_folder_with_mail(&view);
+        switch_mailbox(&mut view, folder);
+        assert!(view.multi_selection.is_empty());
+
+        switch_mailbox(&mut view, Selection::Global(GlobalMailbox::Inbox));
+        assert_eq!(view.multi_selection, ids[..3]);
+        assert_eq!(view.selection_focus, Some(ids[2]));
+        assert_eq!(view.multi_preview.as_ref().map(|d| d.id), Some(ids[2]));
+    }
+
+    #[gpui::test]
+    fn the_sidebar_path_restores_the_selection(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            let id = view.selected_message_id.expect("seeded mail");
+            let (folder, _) = a_folder_with_mail(view);
+            view.select_mailbox(folder, cx);
+            view.select_mailbox(Selection::Global(GlobalMailbox::Inbox), cx);
+            assert_eq!(view.selected_message_id, Some(id));
         });
     }
 

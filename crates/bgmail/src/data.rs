@@ -62,7 +62,7 @@ impl MailboxKind {
 /// groups. It aggregates the same logical mailbox across every account (e.g. a
 /// single inbox spanning all accounts). For now it is just a label + icon in the
 /// mock; the actual aggregation arrives with the real mail layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GlobalMailbox {
     Inbox,
     Flagged,

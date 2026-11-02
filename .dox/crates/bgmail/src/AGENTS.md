@@ -34,7 +34,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ## API Catalog
 
-_729 functions/methods documented._
+_732 functions/methods documented._
 
 ### `src/account_setup.rs`
 
@@ -2874,6 +2874,9 @@ First-run setup view; see the crate doc for its contract.
 - **`RootView::render_onboarding(window, cx)`**: the setup under a draggable title bar with the window controls.
 - **`RootView::window_drag_bar(bar, cx)`**: makes an element act as the title bar (shared with the toolbar).
 - **`RootView::toggle_command_palette`**: does nothing during the setup.
+- **`RootView::remember_selection()`**: notes the current mailbox's selected rows, or forgets them if none.
+- **`RootView::restore_selection()`**: selects them again if still listed, without marking read; fetches a missing body and reveals the row.
+- **`RootView::request_selected_body()`**: fetches the selected message's body when only headers are stored.
 - **`app_zoom::step(current, steps)`**: the level `steps` away, stopping at both ends.
 - **`app_zoom::sanitize(saved)`**: the nearest level to a config value; 1 if not finite.
 - **`app_zoom::nearest(value)`** (private): index of the closest level.

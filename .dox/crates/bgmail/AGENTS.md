@@ -48,6 +48,9 @@ wiring to `storage`.
     exists; unpackaged runs keep notify-rust's PowerShell id (Windows drops
     toasts from an unregistered id). WiX shortcuts are assumed to carry the
     same id.
+- Each mailbox remembers its selection for the session (`remembered_selections`,
+  user decision): switching away and back selects the same rows again if still
+  listed, without marking them read. Not persisted; searches don't record one.
 - Zoom of the whole app (user decision): Ctrl/Cmd `+`/`-`/`0` (global actions
   `AppZoomIn`/`AppZoomOut`/`AppZoomReset`, also in the View menu) step
   `app_zoom`'s levels (75%–200%) through `RootView::zoom_app`, applied to every open
