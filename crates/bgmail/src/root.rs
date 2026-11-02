@@ -380,6 +380,15 @@ struct DraggedMessages {
 }
 
 impl DraggedMessages {
+    /// Sets the cursor once the drag counts. GPUI takes the drag out of the app while
+    /// drawing its view, so this can't happen there.
+    fn update_cursor(&self, position: Point<Pixels>, window: &mut Window, cx: &mut App) {
+        let cursor = drag_cursor(DRAG_DRAWS_HAND);
+        if self.progress.counts_at(position) && cx.active_drag_cursor_style() != Some(cursor) {
+            cx.set_active_drag_cursor_style(cursor, window);
+        }
+    }
+
     /// Whether they can be dropped on `folder_path` of `account_id` right now.
     fn can_drop_on(&self, account_id: i64, folder_path: &str, position: Point<Pixels>) -> bool {
         self.progress.counts_at(position)
@@ -405,6 +414,15 @@ fn drag_cursor(draws_hand: bool) -> CursorStyle {
     }
 }
 
+/// Height of the card following the pointer, in pixels.
+const DRAG_CARD_HEIGHT: f32 = 56.0;
+
+/// Where the card goes for its center to be under the pointer, relative to where GPUI
+/// places a drag: the pointer minus where the row was grabbed.
+fn drag_card_origin(grab: Point<Pixels>, width: Pixels) -> Point<Pixels> {
+    point(grab.x - width / 2.0, grab.y - px(DRAG_CARD_HEIGHT / 2.0))
+}
+
 /// The row that follows the pointer: nothing until the drag counts.
 struct DragPreview {
     progress: Rc<DragProgress>,
@@ -421,11 +439,8 @@ impl Render for DragPreview {
         if !self.progress.counts_at(window.mouse_position()) {
             return div().into_any_element();
         }
-        let cursor = drag_cursor(self.draws_hand);
-        if cx.active_drag_cursor_style() != Some(cursor) {
-            cx.set_active_drag_cursor_style(cursor, window);
-        }
         let colors = cx.theme().colors();
+        let card = drag_card_origin(self.grab, self.width);
         let hand = |size: f32, color: Hsla| {
             svg()
                 .absolute()
@@ -437,12 +452,15 @@ impl Render for DragPreview {
         };
         div()
             .relative()
-            .w(self.width)
             .child(
                 v_flex()
-                    .w_full()
+                    .absolute()
+                    .left(card.x)
+                    .top(card.y)
+                    .w(self.width)
+                    .h(px(DRAG_CARD_HEIGHT))
                     .px_3()
-                    .py_2()
+                    .justify_center()
                     .gap_0p5()
                     .rounded_md()
                     .border_1()
@@ -6629,6 +6647,10 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
+            .on_drag_move(|event: &DragMoveEvent<DraggedMessages>, window, cx| {
+                let dragged = event.drag(cx).clone();
+                dragged.update_cursor(event.event.position, window, cx);
+            })
             .capture_action(cx.listener(|this, _: &FocusNext, _, cx| {
                 if this.palette_traps_tab() {
                     cx.stop_propagation();
@@ -7229,6 +7251,14 @@ mod tests {
     fn the_drag_cursor_is_the_closed_hand_or_hidden_for_a_painted_one() {
         assert_eq!(drag_cursor(false), CursorStyle::ClosedHand);
         assert_eq!(drag_cursor(true), CursorStyle::None);
+    }
+
+    #[test]
+    fn the_drag_card_is_centered_on_the_pointer() {
+        let grab = point(px(40.0), px(10.0));
+        let card = drag_card_origin(grab, px(200.0));
+        assert_eq!(card.x + px(100.0), grab.x);
+        assert_eq!(card.y + px(DRAG_CARD_HEIGHT / 2.0), grab.y);
     }
 
     #[test]
