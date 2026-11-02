@@ -421,6 +421,19 @@
       an account still returns at once and detaches the worker
 - ⬜ Threads/conversations view (thread ids are stored; list is flat)
 
+- ✅ Tab / Shift+Tab move between text fields (`ui::FocusNext`/`FocusPrevious`;
+      `TextInput`/`TextArea` are tab stops; the command palette traps Tab)
+- ✅ Message list rows show Reply and Delete on hover (right edge); Delete keeps
+      the selection and is omitted in Trash
+- ✅ New-mail notifications carry the app icon on Linux (bundle icon or theme
+      name + `desktop-entry` hint)
+- ✅ Gmail: new mail met in All Mail before the Inbox is still announced
+      (`plan::is_new_arrival`)
+- 🔄 Confirm why a Gmail message arrived with no notification on 2026-11-02:
+      delivery works and config is on, but the cause wasn't reproduced. Errors go
+      only to stderr (`/dev/null` when launched from the desktop); log them if it
+      happens again
+
 ## Stage 5 — Polish
 - ✅ Rename product to **BGMail** (binary, window/menu titles, themes, docs;
       config/db under `~/.config/BGMail/`)

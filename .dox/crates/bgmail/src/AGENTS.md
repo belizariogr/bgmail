@@ -1227,8 +1227,9 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **const `WINDOW_APP_ID`** = `io.github.belizariogr.bgmail` (packager `identifier`; the NSIS shortcut's AppUserModelID).
 - **`shortcut_candidates(programs_dirs)`** (private): `BGMail.lnk` and `BGMail\BGMail.lnk` under each Start Menu `Programs` folder.
 - **`windows_app_id()`** (private, Windows only): `Some(WINDOW_APP_ID)` when an installer shortcut exists under `%APPDATA%` / `%PROGRAMDATA%` Start Menu, else `None` (unpackaged runs keep notify-rust's PowerShell id: Windows drops toasts from an unregistered id).
-- **`show(notice)`** (private): `notify_rust::Notification` with app name "BGMail"; on Windows also `.app_id(windows_app_id())` when registered.
-- Tests: empty, per-message notices with fallbacks, burst summary, shortcut candidates + app id value.
+- **`linux_icon(exe)`** (private): `file://` URI of `<exe prefix>/share/icons/hicolor/128x128/apps/bgmail.png` when it exists (bundles outside the icon theme path), else the theme name `bgmail`.
+- **`show(notice)`** (private): `notify_rust::Notification` with app name "BGMail"; on Windows also `.app_id(windows_app_id())` when registered; on Linux/BSD also `.icon(linux_icon(current_exe))` and the `desktop-entry` hint `BGMail`.
+- Tests: empty, per-message notices with fallbacks, burst summary, shortcut candidates + app id value, icon lookup.
 
 ### `src/main.rs`
 
@@ -1903,7 +1904,32 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_message_row`** (private, L2847)
   - Signature: `fn render_message_row(&self, message, cx) -> impl IntoElement`
   - Purpose: Single message list row.
-  - Behavior: Sender, subject preview, date, unread/flag/attachment indicators; click focuses the list and selects/opens the message.
+  - Behavior: Sender, subject preview, date, unread/flag/attachment indicators; click calls `select_message_row`. Hover group `MESSAGE_ROW_GROUP` reveals `render_message_row_actions`.
+- **`select_message_row`** (private)
+  - Signature: `fn select_message_row(&mut self, id: i64, window, cx)`
+  - Purpose: Selects and opens a list row (focuses the list first).
+- **`render_message_row_actions`** (private)
+  - Signature: `fn render_message_row_actions(&self, message_id: i64, bg: Hsla, cx) -> impl IntoElement`
+  - Purpose: Reply and Delete buttons over the row's right edge, visible only while the row is hovered (`invisible` + `group_hover`).
+  - Behavior: `bg` is opaque (row color blended on the list background). Reply selects/opens the row, then `reply_to_selected(Reply)`. Delete calls `delete_row_message` and is omitted when `showing_trash`.
+- **`delete_row_message`** (private)
+  - Signature: `fn delete_row_message(&mut self, id: i64, cx)`
+  - Purpose: Trashes that row without changing the selection; no-op unless `row_can_be_trashed`, so it never deletes permanently.
+- **`row_can_be_trashed`** (private)
+  - Signature: `fn row_can_be_trashed(&self, id: i64) -> bool`
+  - Behavior: True only when storage reports the message outside Trash.
+- **`showing_trash`** (private)
+  - Signature: `fn showing_trash(&self) -> bool`
+  - Behavior: The selected mailbox is an account's Trash folder.
+- **`run_action_on_message`** (private)
+  - Signature: `fn run_action_on_message(&mut self, id: i64, cx, action)`
+  - Purpose: Runs a message action on any message; failures become a localized status note. `run_message_action` delegates here with the selected id.
+- **`apply_message_action`** (private)
+  - Signature: `fn apply_message_action(&mut self, id: i64, action) -> rusqlite::Result<()>`
+  - Behavior: Runs the action, wakes the account's queue when needed, reloads the list; the selection moves to the neighbor only when the selected message left the list.
+- **`palette_traps_tab`** (private)
+  - Signature: `fn palette_traps_tab(&self) -> bool`
+  - Purpose: While the palette is open, root's `capture_action` stops `ui::FocusNext`/`FocusPrevious` so Tab can't reach the fields behind it.
 
 - **`render_attachments`** (private)
   - Signature: `fn render_attachments(&self, cx) -> Option<impl IntoElement>`

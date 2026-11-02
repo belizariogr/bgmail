@@ -95,6 +95,28 @@ pub(crate) fn previous_word_start(content: &str, offset: usize) -> usize {
     }
 }
 
+gpui::actions!(
+    ui,
+    [
+        /// Moves focus to the next text field of the window (Tab).
+        FocusNext,
+        /// Moves focus to the previous text field of the window (Shift+Tab).
+        FocusPrevious,
+    ]
+);
+
+/// Tab handler shared by the text components.
+pub(crate) fn focus_next_field(_: &FocusNext, window: &mut Window, _: &mut App) {
+    window.focus_next();
+    set_native_text_focus(window);
+}
+
+/// Shift+Tab handler shared by the text components.
+pub(crate) fn focus_previous_field(_: &FocusPrevious, window: &mut Window, _: &mut App) {
+    window.focus_prev();
+    set_native_text_focus(window);
+}
+
 /// Byte offset of the next word start (Windows-style Ctrl+Right).
 pub(crate) fn next_word_start(content: &str, offset: usize) -> usize {
     let len = content.len();
@@ -148,6 +170,8 @@ pub fn bind_keys(cx: &mut App) {
     const CONTEXT: Option<&str> = Some("TextInput");
 
     cx.bind_keys([
+        KeyBinding::new("tab", FocusNext, CONTEXT),
+        KeyBinding::new("shift-tab", FocusPrevious, CONTEXT),
         KeyBinding::new("backspace", Backspace, CONTEXT),
         KeyBinding::new("delete", Delete, CONTEXT),
         KeyBinding::new("left", Left, CONTEXT),
@@ -235,7 +259,7 @@ impl TextInput {
     /// Creates an empty field with the given placeholder.
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: SharedString::default(),
             placeholder: placeholder.into(),
             selected_range: 0..0,
@@ -846,6 +870,8 @@ impl Render for TextInput {
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
+            .on_action(focus_next_field)
+            .on_action(focus_previous_field)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
@@ -875,6 +901,79 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::text_area::TextArea;
+
+    struct Form {
+        first: Entity<TextInput>,
+        second: Entity<TextInput>,
+        body: Entity<TextArea>,
+    }
+
+    impl Render for Form {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .child(self.first.clone())
+                .child(self.second.clone())
+                .child(self.body.clone())
+        }
+    }
+
+    fn form(cx: &mut TestAppContext) -> (Entity<Form>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            crate::bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|_, cx| Form {
+            first: cx.new(|cx| TextInput::new("", cx)),
+            second: cx.new(|cx| TextInput::new("", cx)),
+            body: cx.new(|cx| TextArea::new("", cx)),
+        });
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    #[gpui::test]
+    fn tab_walks_the_text_fields_and_wraps(cx: &mut TestAppContext) {
+        let (view, cx) = form(cx);
+        let (first, second, body) = view.read_with(cx, |form, cx| {
+            (
+                form.first.focus_handle(cx),
+                form.second.focus_handle(cx),
+                form.body.focus_handle(cx),
+            )
+        });
+        cx.update(|window, _| window.focus(&first));
+        cx.run_until_parked();
+
+        for expected in [&second, &body, &first] {
+            cx.simulate_keystrokes("tab");
+            cx.update(|window, _| assert!(expected.is_focused(window)));
+        }
+        for expected in [&body, &second, &first] {
+            cx.simulate_keystrokes("shift-tab");
+            cx.update(|window, _| assert!(expected.is_focused(window)));
+        }
+    }
+
+    #[gpui::test]
+    fn tab_does_not_change_the_text(cx: &mut TestAppContext) {
+        let (view, cx) = form(cx);
+        let body = view.read_with(cx, |form, cx| form.body.focus_handle(cx));
+        cx.update(|window, _| window.focus(&body));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("tab");
+        view.read_with(cx, |form, cx| {
+            assert_eq!(form.body.read(cx).content(), "");
+            assert_eq!(form.first.read(cx).content(), "");
+        });
     }
 }
 

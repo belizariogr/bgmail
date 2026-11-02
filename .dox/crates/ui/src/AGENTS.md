@@ -786,6 +786,12 @@ _300 functions/methods documented._
 
 #### Types / constants
 
+- **actions `ui`**: `FocusNext`, `FocusPrevious` — Tab navigation between text
+  fields. `TextInput` and `TextArea` focus handles are tab stops; order follows
+  paint order and wraps. Handled by `focus_next_field` / `focus_previous_field`
+  (pub(crate)), which also call `set_native_text_focus`. A view can veto them with
+  `capture_action` (the command palette does). Tests: `focus_tests` (walk + wrap,
+  Tab leaves the text untouched).
 - **actions `text_input`**: GPUI actions — `Backspace`, `Delete`, `Left`, `Right`,
   `WordLeft`, `WordRight`, `SelectLeft`, `SelectRight`, `SelectWordLeft`,
   `SelectWordRight`, `SelectAll`, `Home`, `End`, `SelectHome`, `SelectEnd`,
@@ -852,7 +858,7 @@ _300 functions/methods documented._
 - **`bind_keys`** (pub, L120)
   - Signature: `pub fn bind_keys(cx: &mut App)`
   - Purpose: Registers all keyboard shortcuts for `TextInput` focus context.
-  - Behavior: Binds editing/navigation keys under context `"TextInput"`. Includes
+  - Behavior: Binds Tab/Shift+Tab (`FocusNext`/`FocusPrevious`) and editing/navigation keys under context `"TextInput"`. Includes
     platform-specific word and document navigation — Ctrl on Windows/Linux,
     Option/Command variants on macOS. Call once at app startup before views use
     `TextInput`.
@@ -1229,7 +1235,7 @@ core lives in `text_area/buffer.rs` and `text_area/rows.rs` (below).
 - **`bind_keys`** (pub, L94)
   - Signature: `pub fn bind_keys(cx: &mut App)`
   - Purpose: Registers `TextArea` bindings under context `"TextArea"`.
-  - Behavior: Common: backspace/shift-backspace, delete, arrows (+shift),
+  - Behavior: Common: tab/shift-tab → `FocusNext`/`FocusPrevious` (never inserts a tab), backspace/shift-backspace, delete, arrows (+shift),
     home/end (+shift, visual row), enter/shift-enter → `Newline`, cmd-a, cmd/ctrl
     c/x/v, cmd-z / cmd-shift-z. Non-macOS: ctrl-a, ctrl-z, ctrl-y /
     ctrl-shift-z (redo), ctrl-left/right (+shift) words, ctrl-home/end (+shift)

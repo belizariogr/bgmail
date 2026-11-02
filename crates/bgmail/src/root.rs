@@ -22,8 +22,8 @@ use crate::command_palette_overlay;
 use theme::ActiveTheme;
 use ui::prelude::*;
 use ui::{
-    set_native_text_focus, Button, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize,
-    ListItem, Scrollbar, ScrollbarState, TextInput, Tooltip,
+    set_native_text_focus, Button, Color, FocusNext, FocusPrevious, Icon, IconButton, IconName,
+    IconSize, Label, LabelSize, ListItem, Scrollbar, ScrollbarState, TextInput, Tooltip,
 };
 
 use crate::actions::{
@@ -146,6 +146,9 @@ enum ResizeHandle {
 /// Drag payload used to resize a column by dragging its right-edge handle.
 #[derive(Debug, Clone, Copy)]
 struct ResizeDrag(ResizeHandle);
+
+/// Hover group of a message row; reveals its action buttons.
+const MESSAGE_ROW_GROUP: &str = "message-row";
 
 /// What is currently selected in the sidebar: a global (unified) mailbox at the
 /// top, or a specific folder within an account group.
@@ -1029,22 +1032,52 @@ impl RootView {
         let Some(id) = self.selected_message_id else {
             return;
         };
-        let account_id = self
-            .selected_detail
-            .as_ref()
-            .map(|detail| detail.account_id);
-        let position = self.list_messages.iter().position(|m| m.id == id);
-        match action(&self.db, id) {
-            Ok(outcome) => {
-                if let Some(account_id) = account_id {
-                    self.after_action(account_id, outcome);
-                }
-            }
-            Err(error) => self.set_status_note(
+        self.run_action_on_message(id, cx, action);
+    }
+
+    /// [`Self::run_message_action`] for any message, selected or not.
+    fn run_action_on_message(
+        &mut self,
+        id: i64,
+        cx: &mut Context<Self>,
+        action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
+    ) {
+        if let Err(error) = self.apply_message_action(id, action) {
+            self.set_status_note(
                 format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
                 cx,
-            ),
+            );
         }
+        self.sync_app_menus(cx);
+        self.last_reader_sig = None;
+        cx.notify();
+    }
+
+    /// Runs `action` on message `id` and refreshes the list. The selection
+    /// only moves when the selected message itself left the list; then the
+    /// message that took its place is selected.
+    fn apply_message_action(
+        &mut self,
+        id: i64,
+        action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
+    ) -> rusqlite::Result<()> {
+        let account_id = self
+            .list_messages
+            .iter()
+            .find(|message| message.id == id)
+            .map(|message| message.account_id)
+            .or_else(|| {
+                self.selected_detail
+                    .as_ref()
+                    .filter(|detail| detail.id == id)
+                    .map(|detail| detail.account_id)
+            });
+        let position = self.list_messages.iter().position(|m| m.id == id);
+        let result = action(&self.db, id).map(|outcome| {
+            if let Some(account_id) = account_id {
+                self.after_action(account_id, outcome);
+            }
+        });
         self.reload_message_list();
         if self.selected_message_id.is_none() {
             if let Some(next) = position.and_then(|ix| {
@@ -1059,9 +1092,7 @@ impl RootView {
                 self.reveal_selected_message();
             }
         }
-        self.sync_app_menus(cx);
-        self.last_reader_sig = None;
-        cx.notify();
+        result
     }
 
     /// Toggles read/unread of the selected message (it stays selected).
@@ -1926,6 +1957,26 @@ impl RootView {
         self.run_message_action(cx, mail_actions::trash);
     }
 
+    /// Delete button of a list row: acts on that row, leaving the selection
+    /// alone. Never deletes for good, as trashing a trashed message would.
+    fn delete_row_message(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self.row_can_be_trashed(id) {
+            self.run_action_on_message(id, cx, mail_actions::trash);
+        }
+    }
+
+    fn row_can_be_trashed(&self, id: i64) -> bool {
+        self.db.message_is_in_trash(id) == Ok(false)
+    }
+
+    /// Whether the list shows a Trash folder, whose rows offer no delete button.
+    fn showing_trash(&self) -> bool {
+        matches!(
+            &self.selected_mailbox,
+            Selection::Mailbox { folder_path, .. } if folder_path == storage::system::TRASH
+        )
+    }
+
     pub(crate) fn delete_message_permanently(&mut self, cx: &mut Context<Self>) {
         if !self.command_context().message_in_trash() {
             return;
@@ -1958,6 +2009,11 @@ impl RootView {
         self.run_message_action(cx, move |db, id| {
             mail_actions::move_to_folder(db, id, &target)
         });
+    }
+
+    /// The palette is modal: Tab must not move focus to the fields behind it.
+    fn palette_traps_tab(&self) -> bool {
+        self.command_palette.as_ref().is_some_and(|p| p.open)
     }
 
     pub(crate) fn handle_command_palette_key(
@@ -4139,8 +4195,13 @@ impl RootView {
         );
 
         let message_id = message.id;
+        let actions_bg = colors
+            .background
+            .blend(if selected { bg_selected } else { hover });
         h_flex()
             .id(("message", message_id as u64))
+            .group(MESSAGE_ROW_GROUP)
+            .relative()
             .w_full()
             .items_start()
             .gap_2()
@@ -4181,14 +4242,65 @@ impl RootView {
                             .single_line(),
                     ),
             )
+            .child(self.render_message_row_actions(message_id, actions_bg, cx))
             .on_click(cx.listener(move |this, _, window, cx| {
-                if let Some(focus) = &this.list_focus {
-                    window.focus(focus);
-                }
-                this.selected_message_id = Some(message_id);
-                this.last_reader_sig = None;
-                this.on_message_selection_changed(cx);
+                this.select_message_row(message_id, window, cx);
             }))
+    }
+
+    /// Selects and opens a row of the list.
+    fn select_message_row(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = &self.list_focus {
+            window.focus(focus);
+        }
+        self.selected_message_id = Some(id);
+        self.last_reader_sig = None;
+        self.on_message_selection_changed(cx);
+    }
+
+    /// Reply and Delete, over the right edge of a row while the mouse is on it.
+    /// `bg` is opaque so the text underneath doesn't show through.
+    fn render_message_row_actions(
+        &self,
+        message_id: i64,
+        bg: Hsla,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let language = cx.language();
+        h_flex()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .px_2()
+            .gap_1()
+            .items_center()
+            .bg(bg)
+            .invisible()
+            .group_hover(MESSAGE_ROW_GROUP, |style| style.visible())
+            .child(Self::icon_button_with_tooltip(
+                "row-reply",
+                Key::ToolbarReply.tr(language),
+                None,
+                IconButton::new("row-reply-button", IconName::Reply).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        // Replying opens the message first, so its body gets
+                        // fetched and the reader shows what is being answered.
+                        this.select_message_row(message_id, window, cx);
+                        this.reply_to_selected(ReplyKind::Reply, window, cx);
+                    },
+                )),
+            ))
+            .when(!self.showing_trash(), |el| {
+                el.child(Self::icon_button_with_tooltip(
+                    "row-delete",
+                    Key::CommandDelete.tr(language),
+                    None,
+                    IconButton::new("row-delete-button", IconName::Trash).on_click(
+                        cx.listener(move |this, _, _, cx| this.delete_row_message(message_id, cx)),
+                    ),
+                ))
+            })
     }
 
     // ----- Reading pane ---------------------------------------------------
@@ -5120,6 +5232,16 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
+            .capture_action(cx.listener(|this, _: &FocusNext, _, cx| {
+                if this.palette_traps_tab() {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &FocusPrevious, _, cx| {
+                if this.palette_traps_tab() {
+                    cx.stop_propagation();
+                }
+            }))
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.blur_search_if_focused(window, cx);
             }))
@@ -5588,6 +5710,74 @@ mod tests {
         view.sync_layout(px(1600.0));
         view.search_force_expanded = true;
         assert!(!view.should_collapse_search_after_blur(""));
+    }
+
+    #[test]
+    fn row_action_on_another_message_keeps_the_selection() {
+        let (_dir, mut view) = test_view();
+        let selected = view.selected_message_id.expect("seed selects a message");
+        let other = view
+            .list_messages
+            .iter()
+            .map(|message| message.id)
+            .find(|id| *id != selected)
+            .expect("seed has more messages");
+        view.apply_message_action(other, mail_actions::trash)
+            .unwrap();
+        assert_eq!(view.selected_message_id, Some(selected));
+        assert!(view.list_messages.iter().all(|m| m.id != other));
+        assert!(view.db.message_is_in_trash(other).unwrap());
+    }
+
+    #[test]
+    fn row_action_on_the_selected_message_selects_its_neighbor() {
+        let (_dir, mut view) = test_view();
+        let selected = view.selected_message_id.expect("seed selects a message");
+        let position = view
+            .list_messages
+            .iter()
+            .position(|m| m.id == selected)
+            .unwrap();
+        let neighbor = view.list_messages.get(position + 1).map(|m| m.id);
+        view.apply_message_action(selected, mail_actions::trash)
+            .unwrap();
+        assert_ne!(view.selected_message_id, Some(selected));
+        if neighbor.is_some() {
+            assert_eq!(view.selected_message_id, neighbor);
+        }
+    }
+
+    #[test]
+    fn row_delete_refuses_a_message_already_in_trash() {
+        let (_dir, view) = test_view();
+        let id = view.selected_message_id.expect("seed selects a message");
+        assert!(view.row_can_be_trashed(id));
+        view.db.move_message_to_trash(id).unwrap();
+        assert!(!view.row_can_be_trashed(id));
+    }
+
+    #[test]
+    fn showing_trash_follows_the_mailbox_selection() {
+        let (_dir, mut view) = test_view();
+        assert!(!view.showing_trash());
+        view.apply_mailbox_selection(Selection::Mailbox {
+            account_id: 1,
+            folder_path: storage::system::TRASH.into(),
+        });
+        assert!(view.showing_trash());
+    }
+
+    #[test]
+    fn palette_traps_tab_only_while_open() {
+        let (_dir, mut view) = test_view();
+        assert!(!view.palette_traps_tab());
+        view.command_palette = Some(CommandPaletteState {
+            open: true,
+            ..Default::default()
+        });
+        assert!(view.palette_traps_tab());
+        view.command_palette.as_mut().unwrap().open = false;
+        assert!(!view.palette_traps_tab());
     }
 
     #[test]

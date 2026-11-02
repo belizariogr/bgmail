@@ -40,7 +40,10 @@ use gpui::{
 use theme::ActiveTheme;
 
 use crate::prelude::*;
-use crate::text_input::{next_word_start, previous_word_start, set_native_text_focus};
+use crate::text_input::{
+    focus_next_field, focus_previous_field, next_word_start, previous_word_start,
+    set_native_text_focus, FocusNext, FocusPrevious,
+};
 
 use buffer::{
     line_range_at, next_grapheme_boundary, offset_from_utf16, offset_to_utf16,
@@ -89,12 +92,14 @@ actions!(
 );
 
 /// Registers the key bindings consumed by [`TextArea`] (key context
-/// `"TextArea"`). Called by [`crate::bind_keys`]; Tab is deliberately unbound
-/// so focus navigation stays with the parent view.
+/// `"TextArea"`). Called by [`crate::bind_keys`]; Tab moves focus between fields
+/// and never inserts a tab character.
 pub fn bind_keys(cx: &mut App) {
     const CONTEXT: Option<&str> = Some(KEY_CONTEXT);
 
     cx.bind_keys([
+        KeyBinding::new("tab", FocusNext, CONTEXT),
+        KeyBinding::new("shift-tab", FocusPrevious, CONTEXT),
         KeyBinding::new("backspace", Backspace, CONTEXT),
         KeyBinding::new("shift-backspace", Backspace, CONTEXT),
         KeyBinding::new("delete", Delete, CONTEXT),
@@ -364,7 +369,7 @@ impl TextArea {
     /// Creates an empty area with the given placeholder and a one-line minimum height.
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             buffer: TextBuffer::default(),
             placeholder: placeholder.into(),
             min_lines: 1,
@@ -826,8 +831,8 @@ impl EntityInputHandler for TextArea {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Tab is left to the parent for focus navigation; some platforms still
-        // deliver it as text input when unbound.
+        // Tab is bound to focus navigation; a platform may still deliver it as
+        // text input (e.g. through an IME).
         if new_text == "\t" {
             return;
         }
@@ -1167,6 +1172,8 @@ impl Render for TextArea {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
+            .on_action(focus_next_field)
+            .on_action(focus_previous_field)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
