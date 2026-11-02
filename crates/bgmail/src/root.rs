@@ -2210,6 +2210,29 @@ impl RootView {
         }
     }
 
+    /// Moves off the mailboxes of an account going away: the one shown and the one a
+    /// search returns to.
+    fn forget_removed_account_mailboxes(&mut self, account_id: i64) {
+        let inbox = Selection::Global(GlobalMailbox::Inbox);
+        let of_account = |mailbox: &Selection| matches!(mailbox, Selection::Mailbox { account_id: id, .. } if *id == account_id);
+        if of_account(&self.selected_mailbox) {
+            self.selected_mailbox = inbox.clone();
+        }
+        if self.pre_search_mailbox.as_ref().is_some_and(of_account) {
+            self.pre_search_mailbox = Some(inbox);
+        }
+    }
+
+    /// Whether an account still in the database uses the secret of `config`.
+    fn secret_is_shared(&self, config: &AccountConfig) -> bool {
+        self.db.list_accounts().is_ok_and(|accounts| {
+            accounts.iter().any(|account| {
+                AccountConfig::from_json(&account.config_json)
+                    .is_some_and(|other| other.secret_key() == config.secret_key())
+            })
+        })
+    }
+
     /// Keeps the unsent list current on its own: a message can get stuck with no event
     /// to tell, as when its account is offline.
     pub(crate) fn watch_unsent(&self, cx: &mut Context<Self>) {
@@ -2374,10 +2397,7 @@ impl RootView {
         {
             self.clear_message_selection();
         }
-        if matches!(self.selected_mailbox, Selection::Mailbox { account_id: selected, .. } if selected == account_id)
-        {
-            self.selected_mailbox = Selection::Global(GlobalMailbox::Inbox);
-        }
+        self.forget_removed_account_mailboxes(account_id);
         self.collapsed_accounts.clear();
         self.reload_from_database();
         self.sync_app_menus(cx);
@@ -2399,12 +2419,15 @@ impl RootView {
                     let failed = Key::StatusRemoveAccountFailed.tr(cx.language());
                     this.set_status_note(format!("{failed}: {error}"), cx);
                 } else if let Some(config) = AccountConfig::from_json(&account.config_json) {
-                    // Only now: a failed removal keeps a working account.
-                    let delete = cx.delete_credentials(&config.secret_key());
-                    cx.background_spawn(async move {
-                        delete.await.ok();
-                    })
-                    .detach();
+                    // Only now: a failed removal keeps a working account. And only if
+                    // no other account logs in with the same secret.
+                    if !this.secret_is_shared(&config) {
+                        let delete = cx.delete_credentials(&config.secret_key());
+                        cx.background_spawn(async move {
+                            delete.await.ok();
+                        })
+                        .detach();
+                    }
                 }
                 this.reload_from_database();
                 if failure.is_some() {
