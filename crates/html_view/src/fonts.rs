@@ -35,6 +35,9 @@ const SINGLE_FONT_GENERICS: &[GenericFamily] = &[
 /// Scripts without a sample in fontique's table that still key fallbacks.
 const EXTRA_FALLBACK_SCRIPTS: &[[u8; 4]] = &[*b"Zyyy", *b"Zinh", *b"Zzzz"];
 
+/// Lightest face accepted as "black" (ExtraBold is 800, Black 900).
+const BLACK_FACE_MIN_WEIGHT: f32 = 850.0;
+
 /// Font context shared by every document: the system font scan runs once per
 /// process (it is the slowest part of creating a document). Also installs the
 /// generic family names in Blitz.
@@ -61,11 +64,13 @@ pub(crate) fn font_context() -> FontContext {
 }
 
 /// Installed family names "<Family> Black" whose prefix is exactly an
-/// installed family ("Arial Black" → "Arial"), aliased to that family at
-/// weight 900. Platforms that file the face under its base family (Windows
-/// fonts on Linux: "Arial Black" is family "Arial", style Black) would
-/// otherwise give the regular face; at 900 the family picks the black one.
-/// Only names are scanned (no font files are read).
+/// installed family holding a black face ("Arial Black" → "Arial"), aliased
+/// to that family at weight 900. Platforms that file the face under its base
+/// family (Windows fonts on Linux: "Arial Black" is family "Arial", style
+/// Black) would otherwise give the regular face; at 900 the family picks the
+/// black one. Where it is a family of its own (macOS) the base family stops
+/// at Bold, so an alias would make the text lighter: no alias there.
+/// Only names and scanned attributes are used (no font files are read).
 pub(crate) fn weight_aliases(collection: &mut Collection) -> Vec<(String, String, f32)> {
     const SUFFIX: &str = " black";
     let names: Vec<String> = collection
@@ -83,13 +88,18 @@ pub(crate) fn weight_aliases(collection: &mut Collection) -> Vec<(String, String
         .filter_map(|name| {
             let prefix = &name[..name.len() - SUFFIX.len()];
             let id = collection.family_id(prefix)?;
+            let info = collection.family(id)?;
+            let heavy = has_black_face(info.fonts().iter().map(|font| font.weight().value()));
+            let family = info.name().to_string();
             // The exact family, not a fuzzy match.
-            let family = collection.family(id)?.name().to_string();
-            family
-                .eq_ignore_ascii_case(prefix)
-                .then(|| (name.clone(), family, 900.0))
+            (heavy && family.eq_ignore_ascii_case(prefix)).then(|| (name.clone(), family, 900.0))
         })
         .collect()
+}
+
+/// Whether a family with faces of these weights can render weight 900.
+fn has_black_face(mut weights: impl Iterator<Item = f32>) -> bool {
+    weights.any(|weight| weight >= BLACK_FACE_MIN_WEIGHT)
 }
 
 /// One family name per generic family: the platform's choice (`preferred`)
@@ -272,6 +282,14 @@ mod tests {
         c.set_fallbacks(key, std::iter::once(a));
         set_fallback_order(&mut c, &[]);
         assert_eq!(c.fallback_families(key).collect::<Vec<_>>(), [a]);
+    }
+
+    #[test]
+    fn black_faces_are_at_least_850() {
+        assert!(has_black_face([400.0, 700.0, 900.0].into_iter()));
+        assert!(has_black_face([850.0].into_iter()));
+        assert!(!has_black_face([400.0, 700.0, 800.0].into_iter()));
+        assert!(!has_black_face(std::iter::empty()));
     }
 
     #[test]

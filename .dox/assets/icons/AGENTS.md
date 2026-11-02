@@ -19,6 +19,10 @@ theme tinting.
   disclosure).
 - Adding an icon requires: new SVG here, `IconName` variant, and embed entry in
   `crates/ui/src/assets.rs`.
+- Narrow FA glyphs are centered in a square box by widening the `viewBox`
+  (448-wide → `-32 0 512 512`; 384-wide file icons → `-64 0 512 512`).
+- Attachment chips use the FA 6.7.2 file family: `file`, `file-image`,
+  `file-pdf`, `file-zipper`, `file-audio`, `file-video`, `file-lines`.
 - Do not switch back to icon fonts for cross-platform consistency.
 
 ## Work Guidance

@@ -2226,12 +2226,11 @@ mod tests {
 
     #[test]
     fn aliased_faces_render_heavy() {
+        // Holds both where the face is filed under "Arial" (alias) and where
+        // "Arial Black" is a family of its own.
         let mut collection = crate::fonts::font_context().collection;
-        if !crate::fonts::weight_aliases(&mut collection)
-            .iter()
-            .any(|(face, _, _)| face == "Arial Black")
-        {
-            return; // Arial Black is installed as its own family, or Arial is missing.
+        if collection.family_id("Arial Black").is_none() {
+            return; // Not installed.
         }
         let mut doc =
             laid_out("<!DOCTYPE html><body><p style=\"font-family:'arial black',arial\">Heavy</p>");
@@ -2251,12 +2250,15 @@ mod tests {
     fn rowspan_heights_and_overlaps_follow_the_html_table_model() {
         // The extra height of a tall rowspan cell goes to the row where
         // another rowspan cell starts (Chromium), not to every row.
-        let html = "<!DOCTYPE html><body style=\"margin:0\"><table cellpadding=0 cellspacing=0>\
+        // A fixed line height: the text row must not depend on the platform's
+        // default font.
+        let html = "<!DOCTYPE html><body style=\"margin:0;font:10px/10px serif\">\
+            <table cellpadding=0 cellspacing=0>\
             <tr><td rowspan=4 height=200>x</td><td id=a height=19>a</td></tr>\
             <tr><td rowspan=2 height=59>b</td><td id=b height=24>b</td></tr>\
             <tr><td id=c height=35>c</td></tr><tr><td id=d>d</td></tr></table>";
         assert_eq!(box_of(html, "a").3, 19.0);
-        assert_eq!(box_of(html, "b").3, 128.0);
+        assert_eq!(box_of(html, "b").3, 136.0);
         assert_eq!(box_of(html, "c").3, 35.0);
         // A colspan overlapping a rowspan cell stays at its HTML column.
         let html = "<!DOCTYPE html><body style=\"margin:0\"><table cellpadding=0 cellspacing=0>\

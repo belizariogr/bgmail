@@ -5,8 +5,10 @@
 //! The domain layer will be added in later stages (see `docs/PLANEJAMENTO.md` and
 //! `TODO.md`).
 
+mod account_setup;
 mod actions;
 mod app_menus;
+mod attachments;
 mod command_palette;
 mod command_palette_overlay;
 mod commands;
@@ -14,11 +16,15 @@ mod compose;
 mod config;
 mod crash_guard;
 mod data;
+mod dates;
 mod db_seed;
 mod locale;
 mod mail_html;
+mod mail_service;
+mod notifications;
 mod print;
 mod root;
+mod settings;
 mod shortcuts;
 mod startup;
 mod window_drag;
@@ -34,8 +40,9 @@ use gpui::{
 use crate::commands::CommandId;
 use actions::{
     ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, FindInMessage,
-    MessageArchive, MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessagePrint,
-    MessageRestore, MessageToggleFlag, MoveMessageToFolder, OpenSettings, Quit,
+    GetNewMail, MessageArchive, MessageDelete, MessageDeletePermanent, MessageForward,
+    MessageMarkJunk, MessagePrint, MessageReply, MessageReplyAll, MessageRestore,
+    MessageToggleFlag, MessageToggleRead, MoveMessageToFolder, OpenSettings, Quit,
     ToggleCommandPalette, ToggleSidebar,
 };
 use compose::ComposeView;
@@ -130,6 +137,15 @@ fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &MessageToggleFlag, cx| {
         schedule_menu_command(CommandId::MessageToggleFlag, cx);
     });
+    cx.on_action(|_: &MessageReply, cx| schedule_menu_command(CommandId::MessageReply, cx));
+    cx.on_action(|_: &MessageReplyAll, cx| {
+        schedule_menu_command(CommandId::MessageReplyAll, cx);
+    });
+    cx.on_action(|_: &MessageForward, cx| schedule_menu_command(CommandId::MessageForward, cx));
+    cx.on_action(|_: &MessageToggleRead, cx| {
+        schedule_menu_command(CommandId::MessageToggleRead, cx);
+    });
+    cx.on_action(|_: &GetNewMail, cx| schedule_menu_command(CommandId::SyncNow, cx));
     cx.on_action(|action: &MoveMessageToFolder, cx| {
         schedule_menu_command(CommandId::MoveToFolder(action.path.clone()), cx);
     });
@@ -224,6 +240,7 @@ fn main() {
                         window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
                         titlebar: Some(window_frame::main_titlebar_options()),
                         window_decorations: window_frame::main_window_decorations(),
+                        app_id: Some(root::WINDOW_APP_ID.into()),
                         // Windows opens hidden so we can cloak it and run the
                         // (asynchronous) maximize + first layout off-screen, then reveal
                         // the finished window — see the spawn below. Elsewhere GPUI shows
@@ -254,6 +271,9 @@ fn main() {
                             RootView::new(settings)
                         });
                         view.update(cx, |view, cx| {
+                            // Sync starts after the window exists; it never
+                            // blocks the first frame (threads + async keychain).
+                            view.start_mail(cx);
                             cx.observe_window_activation(window, |this, window, cx| {
                                 if window.is_window_active() {
                                     this.on_main_window_activated(cx);

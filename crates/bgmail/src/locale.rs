@@ -63,9 +63,6 @@ pub enum Key {
     AddAccount,
 
     DesktopNotifications,
-    SoundOnNewEmail,
-    Enabled,
-    Disabled,
 
     RemoteImagesLabel,
     RemoteImagesHint,
@@ -126,6 +123,112 @@ pub enum Key {
     NoticeTooDeep,
     NoticeCrashed,
     NoticeShowFormatted,
+    StatusBodyFailed,
+    StatusMessageSent,
+    StatusSendFailed,
+    StatusSentCopyFailed,
+    ComposeOriginalSending,
+    StatusSendRetrying,
+    StatusSyncing,
+    StatusOffline,
+    StatusAuthFailed,
+    StatusSyncError,
+    ReaderLoadingBody,
+    ReaderTo,
+    ReaderCc,
+    WelcomeTitle,
+    WelcomeBody,
+    CommandMarkRead,
+    CommandMarkUnread,
+    CommandSyncNow,
+    QuoteFrom,
+    QuoteDate,
+    QuoteSubject,
+    QuoteTo,
+    ForwardHeader,
+    ComposeLocalAccount,
+    ComposeNoRecipients,
+    ComposeInvalidAddress,
+    ComposeAttachTooLarge,
+    ComposeAttachReadFailed,
+    ComposeRemoveAttachment,
+    ComposeAttachLoading,
+    ComposeDiscardConfirm,
+    ComposeDiscardDetail,
+    ComposeDiscardButton,
+    ComposeCancelButton,
+    ComposeCannotSend,
+    ComposeNoAccount,
+    AccountAddTitle,
+    AccountFieldName,
+    AccountFieldEmail,
+    AccountFieldPassword,
+    AccountNamePlaceholder,
+    AccountEmailPlaceholder,
+    AccountSignInWithGoogle,
+    AccountUseAppPassword,
+    AccountUseGoogleSignIn,
+    AccountGoogleNotConfigured,
+    AccountWaitingForBrowser,
+    AccountManualSettings,
+    AccountImapServer,
+    AccountSmtpServer,
+    AccountFieldHost,
+    AccountFieldPort,
+    AccountFieldUsername,
+    AccountSecurityNone,
+    AccountConnect,
+    AccountChecking,
+    AccountLookingUp,
+    AccountCancel,
+    AccountSave,
+    AccountUpdatePassword,
+    AccountNewPassword,
+    AccountSignInAgain,
+    AccountRemove,
+    AccountRemoveConfirm,
+    AccountRemoveDetail,
+    AccountBadgeLocal,
+    AccountUpToDate,
+    AccountSyncing,
+    AccountOffline,
+    AccountSignInFailed,
+    AccountPasswordMissing,
+    AccountGoogleUnavailable,
+    AccountLocalOnly,
+    AccountNoteAppPassword,
+    AccountNoteOAuthRequired,
+    AccountNoteProtonBridge,
+    AccountNoteEnableImap,
+    AccountErrInvalidEmail,
+    AccountErrPasswordRequired,
+    AccountErrHostRequired,
+    AccountErrInvalidPort,
+    AccountErrAlreadyAdded,
+    AccountErrWrongPassword,
+    AccountErrGoogleDenied,
+    AccountErrCannotReach,
+    AccountErrCertificate,
+    AccountErrCancelled,
+    AccountErrUnexpected,
+    AccountErrDifferentGoogle,
+    AccountErrSaveFailed,
+    NotificationsHint,
+    AttachmentOpen,
+    AttachmentSaveAs,
+    AttachmentSaveToDownloads,
+    StatusAttachmentSaved,
+    StatusAttachmentFailed,
+    StatusAttachmentOpenFailed,
+    StatusActionFailed,
+    StatusRemoveAccountFailed,
+    UnsentTitle,
+    UnsentNoSubject,
+    UnsentMaybeSent,
+    UnsentRetry,
+    UnsentEdit,
+    UnsentDiscardDetail,
+    UnsentActionFailed,
 }
 
 impl Key {
@@ -184,12 +287,6 @@ impl Key {
 
             (DesktopNotifications, E) => "Desktop notifications",
             (DesktopNotifications, P) => "Notificações na área de trabalho",
-            (SoundOnNewEmail, E) => "Sound on new email",
-            (SoundOnNewEmail, P) => "Som ao receber e-mail",
-            (Enabled, E) => "Enabled",
-            (Enabled, P) => "Ativadas",
-            (Disabled, E) => "Disabled",
-            (Disabled, P) => "Desativado",
 
             (RemoteImagesLabel, E) => "Remote images",
             (RemoteImagesLabel, P) => "Imagens remotas",
@@ -305,25 +402,265 @@ impl Key {
             (NoticeCrashed, P) => "O BGMail fechou ao exibir esta mensagem, por isso ela é exibida como texto simples.",
             (NoticeShowFormatted, E) => "Show formatted",
             (NoticeShowFormatted, P) => "Mostrar formatada",
+            (StatusBodyFailed, E) => "Could not download the message",
+            (StatusBodyFailed, P) => "Não foi possível baixar a mensagem",
+            (StatusMessageSent, E) => "Message sent",
+            (StatusMessageSent, P) => "Mensagem enviada",
+            (StatusSentCopyFailed, E) => "Sent, but no copy could be saved in Sent",
+            (StatusSentCopyFailed, P) => "Enviado, mas sem cópia salva em Enviados",
+            (ComposeOriginalSending, E) => {
+                "The original message is being sent again. Try again when it finishes."
+            }
+            (ComposeOriginalSending, P) => {
+                "A mensagem original está sendo reenviada. Tente de novo quando terminar."
+            }
+            (StatusSendFailed, E) => "Sending failed",
+            (StatusSendFailed, P) => "Falha no envio",
+            (StatusSendRetrying, E) => "Sending failed, will retry",
+            (StatusSendRetrying, P) => "Falha no envio, nova tentativa em breve",
+            (StatusSyncing, E) => "Updating…",
+            (StatusSyncing, P) => "Atualizando…",
+            (StatusOffline, E) => "Offline, retrying",
+            (StatusOffline, P) => "Sem conexão, tentando novamente",
+            (StatusAuthFailed, E) => "Sign-in failed",
+            (StatusAuthFailed, P) => "Falha ao entrar na conta",
+            (StatusSyncError, E) => "Sync error",
+            (StatusSyncError, P) => "Erro de sincronização",
+            (ReaderLoadingBody, E) => "Downloading message…",
+            (ReaderLoadingBody, P) => "Baixando mensagem…",
+            (ReaderTo, E) => "To",
+            (ReaderTo, P) => "Para",
+            (ReaderCc, E) => "Cc",
+            (ReaderCc, P) => "Cc",
+            (WelcomeTitle, E) => "Welcome to BGMail",
+            (WelcomeTitle, P) => "Bem-vindo ao BGMail",
+            (WelcomeBody, E) => "Add an e-mail account to start reading and sending mail.",
+            (WelcomeBody, P) => "Adicione uma conta de e-mail para começar a ler e enviar mensagens.",
+            (CommandMarkRead, E) => "Mark as Read",
+            (CommandMarkRead, P) => "Marcar como lida",
+            (CommandMarkUnread, E) => "Mark as Unread",
+            (CommandMarkUnread, P) => "Marcar como não lida",
+            (CommandSyncNow, E) => "Get New Mail",
+            (CommandSyncNow, P) => "Receber novas mensagens",
 
+            (QuoteFrom, E) => "From",
+            (QuoteFrom, P) => "De",
+            (QuoteDate, E) => "Date",
+            (QuoteDate, P) => "Data",
+            (QuoteSubject, E) => "Subject",
+            (QuoteSubject, P) => "Assunto",
+            (QuoteTo, E) => "To",
+            (QuoteTo, P) => "Para",
+            (ForwardHeader, E) => "---------- Forwarded message ----------",
+            (ForwardHeader, P) => "---------- Mensagem encaminhada ----------",
+            (ComposeLocalAccount, E) => "This account is local and can't send mail. Add an e-mail account in Settings.",
+            (ComposeLocalAccount, P) => "Esta conta é local e não envia e-mails. Adicione uma conta de e-mail nas Configurações.",
+            (ComposeNoRecipients, E) => "Add at least one recipient.",
+            (ComposeNoRecipients, P) => "Adicione pelo menos um destinatário.",
+            (ComposeInvalidAddress, E) => "Invalid address",
+            (ComposeInvalidAddress, P) => "Endereço inválido",
+            (ComposeAttachTooLarge, E) => "Attachments are limited to 25 MB in total.",
+            (ComposeAttachTooLarge, P) => "Os anexos são limitados a 25 MB no total.",
+            (ComposeAttachReadFailed, E) => "Couldn't read the file",
+            (ComposeAttachReadFailed, P) => "Não foi possível ler o arquivo",
+            (ComposeRemoveAttachment, E) => "Remove attachment",
+            (ComposeRemoveAttachment, P) => "Remover anexo",
+            (ComposeAttachLoading, E) => "Loading attachments…",
+            (ComposeAttachLoading, P) => "Carregando anexos…",
+            (ComposeDiscardConfirm, E) => "Discard this message?",
+            (ComposeDiscardConfirm, P) => "Descartar esta mensagem?",
+            (ComposeDiscardDetail, E) => "Your changes will be lost.",
+            (ComposeDiscardDetail, P) => "Suas alterações serão perdidas.",
+            (ComposeDiscardButton, E) => "Discard",
+            (ComposeDiscardButton, P) => "Descartar",
+            (ComposeCancelButton, E) => "Cancel",
+            (ComposeCancelButton, P) => "Cancelar",
+            (ComposeCannotSend, E) => "Can't send",
+            (ComposeCannotSend, P) => "Não envia",
+            (ComposeNoAccount, E) => "No account",
+            (ComposeNoAccount, P) => "Nenhuma conta",
+            (AccountAddTitle, E) => "Add an account",
+            (AccountAddTitle, P) => "Adicionar uma conta",
+            (AccountFieldName, E) => "Name",
+            (AccountFieldName, P) => "Nome",
+            (AccountFieldEmail, E) => "E-mail address",
+            (AccountFieldEmail, P) => "Endereço de e-mail",
+            (AccountFieldPassword, E) => "Password",
+            (AccountFieldPassword, P) => "Senha",
+            (AccountNamePlaceholder, E) => "Your name",
+            (AccountNamePlaceholder, P) => "Seu nome",
+            (AccountEmailPlaceholder, E) => "you@example.com",
+            (AccountEmailPlaceholder, P) => "voce@exemplo.com",
+            (AccountSignInWithGoogle, E) => "Sign in with Google",
+            (AccountSignInWithGoogle, P) => "Entrar com o Google",
+            (AccountUseAppPassword, E) => "Use an app password instead",
+            (AccountUseAppPassword, P) => "Usar uma senha de app",
+            (AccountUseGoogleSignIn, E) => "Sign in with Google instead",
+            (AccountUseGoogleSignIn, P) => "Entrar com o Google",
+            (AccountGoogleNotConfigured, E) => "Google sign-in needs BGMAIL_GOOGLE_CLIENT_ID and BGMAIL_GOOGLE_CLIENT_SECRET to be set. You can still connect Gmail over IMAP with an app password (Google Account, Security, App passwords).",
+            (AccountGoogleNotConfigured, P) => "O login do Google precisa de BGMAIL_GOOGLE_CLIENT_ID e BGMAIL_GOOGLE_CLIENT_SECRET configurados. Você ainda pode conectar o Gmail por IMAP com uma senha de app (Conta do Google, Segurança, Senhas de app).",
+            (AccountWaitingForBrowser, E) => "Finish signing in in your browser…",
+            (AccountWaitingForBrowser, P) => "Conclua o login no navegador…",
+            (AccountManualSettings, E) => "Manual settings",
+            (AccountManualSettings, P) => "Configuração manual",
+            (AccountImapServer, E) => "Incoming mail (IMAP)",
+            (AccountImapServer, P) => "Recebimento (IMAP)",
+            (AccountSmtpServer, E) => "Outgoing mail (SMTP)",
+            (AccountSmtpServer, P) => "Envio (SMTP)",
+            (AccountFieldHost, E) => "Server",
+            (AccountFieldHost, P) => "Servidor",
+            (AccountFieldPort, E) => "Port",
+            (AccountFieldPort, P) => "Porta",
+            (AccountFieldUsername, E) => "User name",
+            (AccountFieldUsername, P) => "Nome de usuário",
+            (AccountSecurityNone, E) => "None",
+            (AccountSecurityNone, P) => "Nenhuma",
+            (AccountConnect, E) => "Connect",
+            (AccountConnect, P) => "Conectar",
+            (AccountChecking, E) => "Checking…",
+            (AccountChecking, P) => "Verificando…",
+            (AccountLookingUp, E) => "Looking up server settings…",
+            (AccountLookingUp, P) => "Procurando as configurações do servidor…",
+            (AccountCancel, E) => "Cancel",
+            (AccountCancel, P) => "Cancelar",
+            (AccountSave, E) => "Save",
+            (AccountSave, P) => "Salvar",
+            (AccountUpdatePassword, E) => "Update password",
+            (AccountUpdatePassword, P) => "Atualizar senha",
+            (AccountNewPassword, E) => "New password",
+            (AccountNewPassword, P) => "Nova senha",
+            (AccountSignInAgain, E) => "Sign in again",
+            (AccountSignInAgain, P) => "Entrar novamente",
+            (AccountRemove, E) => "Remove",
+            (AccountRemove, P) => "Remover",
+            (AccountRemoveConfirm, E) => "Remove this account?",
+            (AccountRemoveConfirm, P) => "Remover esta conta?",
+            (AccountRemoveDetail, E) => "The mail stored on this computer for this account will be deleted. Messages on the server are not affected.",
+            (AccountRemoveDetail, P) => "As mensagens desta conta guardadas neste computador serão apagadas. As mensagens no servidor não são afetadas.",
+            (AccountBadgeLocal, E) => "Local",
+            (AccountBadgeLocal, P) => "Local",
+            (AccountUpToDate, E) => "Up to date",
+            (AccountUpToDate, P) => "Atualizada",
+            (AccountSyncing, E) => "Syncing…",
+            (AccountSyncing, P) => "Sincronizando…",
+            (AccountOffline, E) => "Offline",
+            (AccountOffline, P) => "Sem conexão",
+            (AccountSignInFailed, E) => "Sign-in failed",
+            (AccountSignInFailed, P) => "Falha ao entrar",
+            (AccountPasswordMissing, E) => "Password missing",
+            (AccountPasswordMissing, P) => "Senha ausente",
+            (AccountGoogleUnavailable, E) => "Google sign-in not configured",
+            (AccountGoogleUnavailable, P) => "Login do Google não configurado",
+            (AccountLocalOnly, E) => "Stored on this computer only",
+            (AccountLocalOnly, P) => "Guardada somente neste computador",
+            (AccountNoteAppPassword, E) => "This provider requires an app password, not your regular password. Create one in your account's security settings.",
+            (AccountNoteAppPassword, P) => "Este provedor exige uma senha de app, não a sua senha normal. Crie uma nas configurações de segurança da sua conta.",
+            (AccountNoteOAuthRequired, E) => "This provider only accepts sign-in through its own login page, which BGMail doesn't support yet.",
+            (AccountNoteOAuthRequired, P) => "Este provedor só aceita login pela própria página de acesso, o que o BGMail ainda não suporta.",
+            (AccountNoteProtonBridge, E) => "Proton Mail works through Proton Mail Bridge: keep it running and use the password it shows.",
+            (AccountNoteProtonBridge, P) => "O Proton Mail funciona pelo Proton Mail Bridge: mantenha-o aberto e use a senha que ele mostra.",
+            (AccountNoteEnableImap, E) => "Turn on IMAP access in your webmail settings before connecting.",
+            (AccountNoteEnableImap, P) => "Ative o acesso IMAP nas configurações do seu webmail antes de conectar.",
+            (AccountErrInvalidEmail, E) => "Enter a valid e-mail address.",
+            (AccountErrInvalidEmail, P) => "Digite um endereço de e-mail válido.",
+            (AccountErrPasswordRequired, E) => "Enter your password.",
+            (AccountErrPasswordRequired, P) => "Digite sua senha.",
+            (AccountErrHostRequired, E) => "Enter the incoming and outgoing server names.",
+            (AccountErrHostRequired, P) => "Digite os servidores de recebimento e de envio.",
+            (AccountErrInvalidPort, E) => "Ports must be numbers from 1 to 65535.",
+            (AccountErrInvalidPort, P) => "As portas devem ser números de 1 a 65535.",
+            (AccountErrAlreadyAdded, E) => "This account has already been added.",
+            (AccountErrAlreadyAdded, P) => "Esta conta já foi adicionada.",
+            (AccountErrWrongPassword, E) => "The server rejected the user name or password. If your provider requires an app password, use it here.",
+            (AccountErrWrongPassword, P) => "O servidor recusou o usuário ou a senha. Se o seu provedor exige uma senha de app, use-a aqui.",
+            (AccountErrGoogleDenied, E) => "Google did not grant access. Try signing in again.",
+            (AccountErrGoogleDenied, P) => "O Google não concedeu acesso. Tente entrar novamente.",
+            (AccountErrCannotReach, E) => "Can't reach the server. Check the server name, the port and your connection.",
+            (AccountErrCannotReach, P) => "Não foi possível alcançar o servidor. Verifique o servidor, a porta e sua conexão.",
+            (AccountErrCertificate, E) => "The server's security certificate could not be verified.",
+            (AccountErrCertificate, P) => "Não foi possível verificar o certificado de segurança do servidor.",
+            (AccountErrCancelled, E) => "Sign-in was cancelled or timed out.",
+            (AccountErrCancelled, P) => "O login foi cancelado ou expirou.",
+            (AccountErrUnexpected, E) => "The server answered in an unexpected way.",
+            (AccountErrUnexpected, P) => "O servidor respondeu de forma inesperada.",
+            (AccountErrDifferentGoogle, E) => "You signed in with a different Google account.",
+            (AccountErrDifferentGoogle, P) => "Você entrou com outra conta do Google.",
+            (AccountErrSaveFailed, E) => "Could not save the account.",
+            (AccountErrSaveFailed, P) => "Não foi possível salvar a conta.",
+            (NotificationsHint, E) => "Show a desktop notification when new mail arrives.",
+            (NotificationsHint, P) => "Mostrar uma notificação quando chegarem novas mensagens.",
+            (AttachmentOpen, E) => "Open",
+            (AttachmentOpen, P) => "Abrir",
+            (AttachmentSaveAs, E) => "Save As…",
+            (AttachmentSaveAs, P) => "Salvar como…",
+            (AttachmentSaveToDownloads, E) => "Save to Downloads",
+            (AttachmentSaveToDownloads, P) => "Salvar em Downloads",
+            (StatusAttachmentSaved, E) => "Attachment saved",
+            (StatusAttachmentSaved, P) => "Anexo salvo",
+            (StatusAttachmentFailed, E) => "Could not save the attachment",
+            (StatusAttachmentFailed, P) => "Não foi possível salvar o anexo",
+            (StatusAttachmentOpenFailed, E) => "Could not open the attachment",
+            (StatusAttachmentOpenFailed, P) => "Não foi possível abrir o anexo",
+            (StatusActionFailed, E) => "Could not complete the action",
+            (StatusActionFailed, P) => "Não foi possível concluir a ação",
+            (StatusRemoveAccountFailed, E) => "Could not remove the account",
+            (StatusRemoveAccountFailed, P) => "Não foi possível remover a conta",
+            (UnsentTitle, E) => "Unsent messages",
+            (UnsentTitle, P) => "Mensagens não enviadas",
+            (UnsentNoSubject, E) => "(no subject)",
+            (UnsentNoSubject, P) => "(sem assunto)",
+            (UnsentMaybeSent, E) => "May already have been sent",
+            (UnsentMaybeSent, P) => "Pode já ter sido enviada",
+            (UnsentRetry, E) => "Retry",
+            (UnsentRetry, P) => "Tentar novamente",
+            (UnsentEdit, E) => "Edit",
+            (UnsentEdit, P) => "Editar",
+            (UnsentDiscardDetail, E) => "It will not be sent and cannot be recovered.",
+            (UnsentDiscardDetail, P) => "Ela não será enviada e não poderá ser recuperada.",
+            (UnsentActionFailed, E) => "Could not update the unsent message",
+            (UnsentActionFailed, P) => "Não foi possível atualizar a mensagem não enviada",
         }
+    }
+}
+
+/// Picks the singular or plural form for `count` (both languages use the
+/// singular only for exactly one; PT-BR "0 mensagens" is plural too).
+fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
+    if count == 1 {
+        one
+    } else {
+        many
+    }
+}
+
+/// "`count` message(s)" in `language`.
+fn messages_noun(language: Language, count: usize) -> &'static str {
+    match language {
+        Language::English => plural(count, "message", "messages"),
+        Language::Portuguese => plural(count, "mensagem", "mensagens"),
+    }
+}
+
+/// "`count` account(s)" in `language`.
+fn accounts_noun(language: Language, count: usize) -> &'static str {
+    match language {
+        Language::English => plural(count, "account", "accounts"),
+        Language::Portuguese => plural(count, "conta", "contas"),
     }
 }
 
 /// Message list header: number of messages in the current mailbox.
 pub fn message_count(language: Language, count: usize) -> String {
-    match language {
-        Language::English => format!("{count} messages"),
-        Language::Portuguese => format!("{count} mensagens"),
-    }
+    format!("{count} {}", messages_noun(language, count))
 }
 
 /// Status bar (left): account and message counts.
 pub fn status_counts(language: Language, accounts: usize, messages: usize) -> String {
-    match language {
-        Language::English => format!("{accounts} accounts · {messages} messages"),
-        Language::Portuguese => format!("{accounts} contas · {messages} mensagens"),
-    }
+    format!(
+        "{accounts} {} · {messages} {}",
+        accounts_noun(language, accounts),
+        messages_noun(language, messages)
+    )
 }
 
 /// Status bar (left) while a search filter is active.
@@ -333,17 +670,48 @@ pub fn status_search_counts(
     showing: usize,
     total: usize,
 ) -> String {
+    let of = match language {
+        Language::English => "of",
+        Language::Portuguese => "de",
+    };
+    format!(
+        "{accounts} {} · {showing} {of} {total} {}",
+        accounts_noun(language, accounts),
+        messages_noun(language, total)
+    )
+}
+
+/// Status bar (right): unread count.
+pub fn status_unread(language: Language, unread: usize) -> String {
+    let noun = match language {
+        Language::English => "unread",
+        Language::Portuguese => plural(unread, "não lida", "não lidas"),
+    };
+    format!("{unread} {noun}")
+}
+
+/// Status bar (right): outgoing messages that stopped retrying.
+pub fn status_unsent(language: Language, unsent: usize) -> String {
+    let noun = match language {
+        Language::English => "unsent",
+        Language::Portuguese => plural(unsent, "não enviada", "não enviadas"),
+    };
+    format!("{unsent} {noun}")
+}
+
+/// Attribution line above a quoted reply.
+pub fn reply_attribution(language: Language, date: &str, sender: &str) -> String {
     match language {
-        Language::English => format!("{accounts} accounts · {showing} of {total} messages"),
-        Language::Portuguese => format!("{accounts} contas · {showing} de {total} mensagens"),
+        Language::English => format!("On {date}, {sender} wrote:"),
+        Language::Portuguese => format!("Em {date}, {sender} escreveu:"),
     }
 }
 
-/// Status bar (right): unread count plus a "synced" hint.
-pub fn status_unread(language: Language, unread: usize) -> String {
+/// Status bar (right): time of the last completed sync (`time` preformatted).
+pub fn status_updated_at(language: Language, time: &str) -> String {
     match language {
-        Language::English => format!("{unread} unread · Updated just now"),
-        Language::Portuguese => format!("{unread} não lidas · Atualizado agora"),
+        Language::English => format!("Updated at {time}"),
+        Language::Portuguese => format!("Atualizado às {time}"),
     }
 }
 
@@ -390,7 +758,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 70] = [
+    const ALL_KEYS: [Key; 173] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -414,9 +782,6 @@ mod tests {
         Key::LanguageLabel,
         Key::AddAccount,
         Key::DesktopNotifications,
-        Key::SoundOnNewEmail,
-        Key::Enabled,
-        Key::Disabled,
         Key::RemoteImagesLabel,
         Key::RemoteImagesHint,
         Key::AlwaysLoadRemoteImages,
@@ -461,6 +826,112 @@ mod tests {
         Key::CommandPrint,
         Key::PrintFrom,
         Key::PrintDate,
+        Key::StatusBodyFailed,
+        Key::StatusMessageSent,
+        Key::StatusSendFailed,
+        Key::StatusSentCopyFailed,
+        Key::ComposeOriginalSending,
+        Key::StatusSendRetrying,
+        Key::StatusSyncing,
+        Key::StatusOffline,
+        Key::StatusAuthFailed,
+        Key::StatusSyncError,
+        Key::ReaderLoadingBody,
+        Key::ReaderTo,
+        Key::ReaderCc,
+        Key::WelcomeTitle,
+        Key::WelcomeBody,
+        Key::CommandMarkRead,
+        Key::CommandMarkUnread,
+        Key::CommandSyncNow,
+        Key::QuoteFrom,
+        Key::QuoteDate,
+        Key::QuoteSubject,
+        Key::QuoteTo,
+        Key::ForwardHeader,
+        Key::ComposeLocalAccount,
+        Key::ComposeNoRecipients,
+        Key::ComposeInvalidAddress,
+        Key::ComposeAttachTooLarge,
+        Key::ComposeAttachReadFailed,
+        Key::ComposeRemoveAttachment,
+        Key::ComposeAttachLoading,
+        Key::ComposeDiscardConfirm,
+        Key::ComposeDiscardDetail,
+        Key::ComposeDiscardButton,
+        Key::ComposeCancelButton,
+        Key::ComposeCannotSend,
+        Key::ComposeNoAccount,
+        Key::AccountAddTitle,
+        Key::AccountFieldName,
+        Key::AccountFieldEmail,
+        Key::AccountFieldPassword,
+        Key::AccountNamePlaceholder,
+        Key::AccountEmailPlaceholder,
+        Key::AccountSignInWithGoogle,
+        Key::AccountUseAppPassword,
+        Key::AccountUseGoogleSignIn,
+        Key::AccountGoogleNotConfigured,
+        Key::AccountWaitingForBrowser,
+        Key::AccountManualSettings,
+        Key::AccountImapServer,
+        Key::AccountSmtpServer,
+        Key::AccountFieldHost,
+        Key::AccountFieldPort,
+        Key::AccountFieldUsername,
+        Key::AccountSecurityNone,
+        Key::AccountConnect,
+        Key::AccountChecking,
+        Key::AccountLookingUp,
+        Key::AccountCancel,
+        Key::AccountSave,
+        Key::AccountUpdatePassword,
+        Key::AccountNewPassword,
+        Key::AccountSignInAgain,
+        Key::AccountRemove,
+        Key::AccountRemoveConfirm,
+        Key::AccountRemoveDetail,
+        Key::AccountBadgeLocal,
+        Key::AccountUpToDate,
+        Key::AccountSyncing,
+        Key::AccountOffline,
+        Key::AccountSignInFailed,
+        Key::AccountPasswordMissing,
+        Key::AccountGoogleUnavailable,
+        Key::AccountLocalOnly,
+        Key::AccountNoteAppPassword,
+        Key::AccountNoteOAuthRequired,
+        Key::AccountNoteProtonBridge,
+        Key::AccountNoteEnableImap,
+        Key::AccountErrInvalidEmail,
+        Key::AccountErrPasswordRequired,
+        Key::AccountErrHostRequired,
+        Key::AccountErrInvalidPort,
+        Key::AccountErrAlreadyAdded,
+        Key::AccountErrWrongPassword,
+        Key::AccountErrGoogleDenied,
+        Key::AccountErrCannotReach,
+        Key::AccountErrCertificate,
+        Key::AccountErrCancelled,
+        Key::AccountErrUnexpected,
+        Key::AccountErrDifferentGoogle,
+        Key::AccountErrSaveFailed,
+        Key::NotificationsHint,
+        Key::AttachmentOpen,
+        Key::AttachmentSaveAs,
+        Key::AttachmentSaveToDownloads,
+        Key::StatusAttachmentSaved,
+        Key::StatusAttachmentFailed,
+        Key::StatusAttachmentOpenFailed,
+        Key::StatusActionFailed,
+        Key::StatusRemoveAccountFailed,
+        Key::UnsentTitle,
+        Key::UnsentNoSubject,
+        Key::UnsentMaybeSent,
+        Key::UnsentRetry,
+        Key::UnsentEdit,
+        Key::UnsentDiscardDetail,
+        Key::UnsentActionFailed,
     ];
 
     #[test]
@@ -494,11 +965,48 @@ mod tests {
     }
 
     #[test]
+    fn counts_use_singular_only_for_one() {
+        let (en, pt) = (Language::English, Language::Portuguese);
+        assert_eq!(status_counts(en, 1, 1), "1 account · 1 message");
+        assert_eq!(status_counts(en, 0, 2), "0 accounts · 2 messages");
+        assert_eq!(status_counts(pt, 1, 1), "1 conta · 1 mensagem");
+        assert_eq!(status_counts(pt, 2, 0), "2 contas · 0 mensagens");
+        assert_eq!(
+            status_search_counts(en, 1, 0, 1),
+            "1 account · 0 of 1 message"
+        );
+        assert_eq!(
+            status_search_counts(pt, 3, 1, 5),
+            "3 contas · 1 de 5 mensagens"
+        );
+        assert_eq!(message_count(en, 1), "1 message");
+        assert_eq!(message_count(pt, 7), "7 mensagens");
+        assert_eq!(status_unread(en, 1), "1 unread");
+        assert_eq!(status_unread(pt, 1), "1 não lida");
+        assert_eq!(status_unread(pt, 3), "3 não lidas");
+        assert_eq!(status_unsent(en, 2), "2 unsent");
+        assert_eq!(status_unsent(pt, 1), "1 não enviada");
+        assert_eq!(status_unsent(pt, 4), "4 não enviadas");
+    }
+
+    #[test]
     fn formatted_strings_include_arguments() {
         let en = status_counts(Language::English, 2, 8);
         assert!(en.contains('2') && en.contains('8') && en.contains("accounts"));
         let pt = status_unread(Language::Portuguese, 9);
         assert!(pt.contains('9') && pt.contains("não lidas"));
         assert_eq!(status_zoom(Language::English, 1.25), "Zoom 125%");
+        assert_eq!(
+            status_updated_at(Language::Portuguese, "14:05"),
+            "Atualizado às 14:05"
+        );
+        assert_eq!(
+            status_updated_at(Language::English, "9:00"),
+            "Updated at 9:00"
+        );
+        assert_eq!(
+            reply_attribution(Language::Portuguese, "31/10/2026 14:07", "Ana"),
+            "Em 31/10/2026 14:07, Ana escreveu:"
+        );
     }
 }

@@ -1,0 +1,29 @@
+[package]
+name = "protocols"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mail_core.workspace = true
+# Blocking IMAP client driven over our own rustls stream (no native-tls).
+imap = { version = "3.0.0-alpha.15", default-features = false }
+# Response parser behind `imap`; used directly for raw commands (Gmail ids, COPYUID).
+imap-proto = "0.16"
+# TLS shared by IMAP, SMTP (lettre) and HTTP (ureq): one rustls 0.23 + ring.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# OS trust store (Keychain / Windows cert store / system bundle) on all platforms.
+rustls-platform-verifier = "0.7"
+# SMTP transport only (`send_raw`); messages are built by mail_core.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls", "ring", "rustls-platform-verifier", "hostname"] }
+# OAuth token endpoint + autoconfig lookups (same major as html_view).
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# PKCE S256 challenge and base64url (id_token payload).
+sha2 = "0.10"
+base64 = "0.22"
+# PKCE verifier/state randomness.
+getrandom = "0.3"
+# Autoconfig (Thunderbird clientConfig) XML.
+roxmltree = "0.21"

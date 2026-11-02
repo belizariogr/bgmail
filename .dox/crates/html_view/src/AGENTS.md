@@ -254,6 +254,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `fn set_fallback_order(collection, fallback)` (crate): makes the (deduped,
   installed) family order the default fallback of every script; an empty order
   keeps fontique's per-script fallback.
+- `fn has_black_face(weights) -> bool` (private): any weight ≥ `BLACK_FACE_MIN_WEIGHT` (850); guards `weight_aliases`, since aliasing to a family that stops at Bold (macOS "Arial") would render lighter than the real family.
 - `fn weight_aliases(collection) -> Vec<(name, family, 900.0)>` (crate):
   installed family names "<Family> Black" whose prefix is exactly an
   installed family ("Arial Black" → "Arial"), from a scan of family names
