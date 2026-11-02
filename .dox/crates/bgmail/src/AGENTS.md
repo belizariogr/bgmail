@@ -34,7 +34,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ## API Catalog
 
-_732 functions/methods documented._
+_736 functions/methods documented._
 
 ### `src/account_setup.rs`
 
@@ -2293,7 +2293,6 @@ in `account_setup`.
 - **`render_account_row(account, last, window, cx)`** (private): name + provider badge, e-mail, health text (error/warning/success/muted color; "Finish signing in…" while its sign-in runs). Actions: Cancel (sign-in running) / "Sign in again" (OAuth) / "Update password" (password, non-local), and "Remove" (all, incl. local). Inline password editor (Save / Cancel) and the row's failure message below.
 - **`render_form(has_remote, window, cx)`** (private): title, Name, E-mail, preset note; Google mode: "Sign in with Google" + "Use an app password instead"; otherwise (Gmail without client: the `BGMAIL_GOOGLE_CLIENT_ID/SECRET` explanation) Password (+ "Sign in with Google instead" for Gmail with a client). "Manual settings" disclosure with the "Looking up…" hint (hidden in Google mode). Message, then footer: while signing in "Finish signing in in your browser…" + Cancel; else Cancel (only when a remote account exists) and Connect ("Checking…" and no click while busy).
 - **`render_manual(form, window, cx)`** (private): IMAP and SMTP blocks (host, port, security picker) and the user name.
-- **`render_language_picker(language, cx)`** (private): EN/PT buttons; sets the locale global.
 
 ##### Context: `Drop for SettingsView`
 
@@ -2877,6 +2876,10 @@ First-run setup view; see the crate doc for its contract.
 - **`RootView::remember_selection()`**: notes the current mailbox's selected rows, or forgets them if none.
 - **`RootView::restore_selection()`**: selects them again if still listed, without marking read; fetches a missing body and reveals the row.
 - **`RootView::request_selected_body()`**: fetches the selected message's body when only headers are stored.
+- **`Language::code()` / `from_code(code)`**: the saved form of a language; anything unknown is the default.
+- **`Config::language()`**: the language to start with.
+- **`RootView::set_language(language, cx)`**: applies the language, refreshes the menus and schedules saving it.
+- **`settings::language_picker(id, root, language)`**: language buttons for Settings and the first-run setup.
 - **`app_zoom::step(current, steps)`**: the level `steps` away, stopping at both ends.
 - **`app_zoom::sanitize(saved)`**: the nearest level to a config value; 1 if not finite.
 - **`app_zoom::nearest(value)`** (private): index of the closest level.

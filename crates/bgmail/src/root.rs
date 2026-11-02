@@ -902,6 +902,8 @@ pub struct RootView {
     /// Whether the compose message body uses a white background. Persisted; off
     /// by default.
     pub(crate) compose_white_background: bool,
+    /// Persisted copy of the UI language, a global like the theme.
+    language: Language,
     /// Zoom of the whole app, applied to every window it opens.
     ui_scale: f32,
     /// Persisted copy of the theme choice (the theme itself is an app global,
@@ -1335,6 +1337,7 @@ impl RootView {
             remote_allowed: HashSet::new(),
             reader_white_background: settings.reader_white_background,
             compose_white_background: settings.compose_white_background,
+            language: settings.language(),
             ui_scale: crate::app_zoom::sanitize(settings.ui_scale),
             light_theme: settings.light_theme,
             onboarding_completed,
@@ -3023,6 +3026,7 @@ impl RootView {
             notifications_enabled: self.notifications_enabled,
             reader_white_background: self.reader_white_background,
             compose_white_background: self.compose_white_background,
+            language: self.language.code().to_string(),
             ui_scale: self.ui_scale,
             light_theme: self.light_theme,
             onboarding_completed: self.onboarding_completed,
@@ -3599,6 +3603,15 @@ impl RootView {
             let _ = handle.update(cx, |_, window, cx| window.set_content_scale(scale, cx));
         }
         self.set_status_note(locale::status_zoom(cx.language(), scale), cx);
+        self.request_save(cx);
+        cx.notify();
+    }
+
+    /// Switches the UI language and remembers it for the next launch.
+    pub(crate) fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
+        self.language = language;
+        locale::set_language(language, cx);
+        self.sync_app_menus(cx);
         self.request_save(cx);
         cx.notify();
     }
@@ -8157,6 +8170,33 @@ mod tests {
             view.select_mailbox(Selection::Global(GlobalMailbox::Inbox), cx);
             assert_eq!(view.selected_message_id, Some(id));
         });
+    }
+
+    #[gpui::test]
+    fn choosing_a_language_applies_and_remembers_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            view.set_language(Language::Portuguese, cx);
+            assert_eq!(cx.language(), Language::Portuguese);
+            assert_eq!(view.current_config().language(), Language::Portuguese);
+        });
+    }
+
+    #[test]
+    fn the_saved_language_is_kept_by_later_saves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            language: Language::Portuguese.code().to_string(),
+            ..Config::default()
+        };
+        let view = RootView::new_with_database(config, dir.path().join("mail.db"), true);
+        assert_eq!(view.current_config().language(), Language::Portuguese);
     }
 
     #[gpui::test]

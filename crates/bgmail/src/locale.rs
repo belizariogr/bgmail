@@ -24,6 +24,23 @@ impl Language {
     /// All languages, in the order they should appear in a selector.
     pub const ALL: [Language; 2] = [Language::English, Language::Portuguese];
 
+    /// How the language is saved in the config.
+    pub fn code(self) -> &'static str {
+        match self {
+            Language::English => "en",
+            Language::Portuguese => "pt-BR",
+        }
+    }
+
+    /// The language saved as `code`; the default for anything else, such as a language
+    /// a newer version added.
+    pub fn from_code(code: &str) -> Self {
+        Language::ALL
+            .into_iter()
+            .find(|language| language.code() == code)
+            .unwrap_or_default()
+    }
+
     /// Endonym shown in the UI (a language is always named in itself).
     pub fn label(self) -> &'static str {
         match self {
@@ -988,6 +1005,19 @@ impl ActiveLanguage for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_language_survives_its_saved_code() {
+        for language in Language::ALL {
+            assert_eq!(Language::from_code(language.code()), language);
+        }
+    }
+
+    #[test]
+    fn an_unknown_saved_language_falls_back_to_the_default() {
+        assert_eq!(Language::from_code("xx"), Language::default());
+        assert_eq!(Language::from_code(""), Language::default());
+    }
 
     const ALL_KEYS: [Key; 244] = [
         Key::ViewZoomIn,

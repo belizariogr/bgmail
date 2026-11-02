@@ -54,6 +54,9 @@ wiring to `storage`.
 - Each mailbox remembers its selection for the session (`remembered_selections`,
   user decision): switching away and back selects the same rows again if still
   listed, without marking them read. Not persisted; searches don't record one.
+- The UI language persists as `Config::language` (`Language::code`, a string so an
+  unknown value loses only the language). Change it through `RootView::set_language`,
+  from Settings or the first-run welcome step (`settings::language_picker`).
 - Zoom of the whole app (user decision): Ctrl/Cmd `+`/`-`/`0` (global actions
   `AppZoomIn`/`AppZoomOut`/`AppZoomReset`, also in the View menu) step
   `app_zoom`'s levels (75%–200%) through `RootView::zoom_app`, applied to every open

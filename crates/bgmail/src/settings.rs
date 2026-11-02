@@ -29,7 +29,7 @@ use crate::account_setup::{
 use crate::actions::ComposeClose;
 use crate::data;
 use crate::default_mail_app;
-use crate::locale::{self, ActiveLanguage, Key, Language};
+use crate::locale::{ActiveLanguage, Key, Language};
 use crate::root::RootView;
 
 /// Pause after the last keystroke in the e-mail field before discovering
@@ -984,7 +984,11 @@ impl SettingsView {
                         .gap_4()
                         .py_1()
                         .child(Label::new(Key::LanguageLabel.tr(language)).color(Color::Muted))
-                        .child(self.render_language_picker(language, cx)),
+                        .child(language_picker(
+                            "settings-language",
+                            self.root.clone(),
+                            language,
+                        )),
                 )
                 .child(self.render_default_mail_app(language, cx))
                 .into_any_element(),
@@ -1652,32 +1656,6 @@ impl SettingsView {
                 cx,
             ))
     }
-
-    /// Language selector used in the General section. Switching the language
-    /// re-renders the whole app through the locale global.
-    fn render_language_picker(
-        &self,
-        language: Language,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut row = h_flex().gap_2();
-        for option in Language::ALL {
-            let selected = option == language;
-            row = row.child(
-                Button::new(("language", option as usize), option.label())
-                    .style(if selected {
-                        ButtonStyle::Filled
-                    } else {
-                        ButtonStyle::Subtle
-                    })
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        locale::set_language(option, cx);
-                        cx.notify();
-                    })),
-            );
-        }
-        row
-    }
 }
 
 impl Drop for SettingsView {
@@ -1724,6 +1702,31 @@ impl Render for SettingsView {
             )
             .into_any_element()
     }
+}
+
+/// Language selector (Settings and the first-run setup). Switching re-renders the whole
+/// app through the locale global.
+pub(crate) fn language_picker(
+    id: &'static str,
+    root: WeakEntity<RootView>,
+    language: Language,
+) -> impl IntoElement {
+    let mut row = h_flex().gap_2();
+    for option in Language::ALL {
+        let root = root.clone();
+        row = row.child(
+            Button::new((id, option as usize), option.label())
+                .style(if option == language {
+                    ButtonStyle::Filled
+                } else {
+                    ButtonStyle::Subtle
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = root.update(cx, |root, cx| root.set_language(option, cx));
+                }),
+        );
+    }
+    row
 }
 
 /// A "label → value" row used in the settings.

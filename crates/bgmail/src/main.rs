@@ -237,8 +237,7 @@ fn main() {
         let settings = config::load();
         let ui_scale = app_zoom::sanitize(settings.ui_scale);
         theme::init(settings.appearance(), cx);
-        // Initialize localization (English by default).
-        locale::init(locale::Language::default(), cx);
+        locale::init(settings.language(), cx);
         ui::bind_keys(cx);
         ui::prompt::init(cx);
         html_view::init(cx);

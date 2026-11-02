@@ -252,6 +252,11 @@ impl OnboardingView {
                         cx,
                     )),
             )
+            .child(settings::language_picker(
+                "onboarding-language",
+                self.root.clone(),
+                language,
+            ))
     }
 
     fn render_theme(&self, cx: &mut Context<Self>) -> impl IntoElement {

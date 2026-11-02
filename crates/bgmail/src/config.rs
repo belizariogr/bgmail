@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::compose;
+use crate::locale::Language;
 
 /// Persisted layout settings. Sizes are in logical pixels.
 ///
@@ -67,6 +68,9 @@ pub struct Config {
     pub compose_width: f32,
     /// Height of the compose window.
     pub compose_height: f32,
+    /// UI language, as `locale::Language::code`. A string, so that an unknown value
+    /// loses only the language rather than failing the whole file.
+    pub language: String,
     /// Zoom of the whole app (1 = normal); see `app_zoom`.
     pub ui_scale: f32,
     /// Whether the app uses the light theme. Off by default (dark).
@@ -99,6 +103,7 @@ impl Default for Config {
             compose_y: compose::COMPOSE_POSITION_UNSET,
             compose_width: compose::COMPOSE_DEFAULT_WIDTH,
             compose_height: compose::COMPOSE_DEFAULT_HEIGHT,
+            language: Language::default().code().to_string(),
             ui_scale: 1.0,
             light_theme: false,
             onboarding_completed: false,
@@ -107,6 +112,11 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The UI language to start with.
+    pub fn language(&self) -> Language {
+        Language::from_code(&self.language)
+    }
+
     /// The theme appearance to start with.
     pub fn appearance(&self) -> theme::Appearance {
         if self.light_theme {
@@ -197,6 +207,7 @@ mod tests {
             compose_y: 80.0,
             compose_width: 790.0,
             compose_height: 720.0,
+            language: "pt-BR".to_string(),
             ui_scale: 1.25,
             light_theme: true,
             onboarding_completed: true,
@@ -204,6 +215,21 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn the_language_defaults_to_english_and_follows_the_saved_choice() {
+        assert_eq!(Config::default().language(), Language::English);
+        let config: Config = serde_json::from_str(r#"{"language":"pt-BR"}"#).expect("parse");
+        assert_eq!(config.language(), Language::Portuguese);
+    }
+
+    #[test]
+    fn an_unknown_language_keeps_the_rest_of_the_config() {
+        let config: Config =
+            serde_json::from_str(r#"{"language":"xx","light_theme":true}"#).expect("parse");
+        assert_eq!(config.language(), Language::English);
+        assert!(config.light_theme);
     }
 
     #[test]
@@ -310,6 +336,7 @@ mod tests {
             compose_y: 50.0,
             compose_width: 800.0,
             compose_height: 600.0,
+            language: "pt-BR".to_string(),
             ui_scale: 1.25,
             light_theme: true,
             onboarding_completed: true,

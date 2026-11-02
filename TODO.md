@@ -383,8 +383,7 @@
       (`app_zoom`, content scale patched into `vendor/gpui`).
 - ✅ Each mailbox remembers its selected messages for the session.
 - ✅ Removing the open message leaves nothing open, as in Gmail.
-- ⬜ Persist the UI language (`locale` always starts in English, so the setup does
-      too); consider a language picker on the welcome step.
+- ✅ The UI language persists, with a picker on the first-run welcome step.
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
 - ✅ Read / mark read-unread (opening marks read on the server; toggle via
