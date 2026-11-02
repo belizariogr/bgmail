@@ -4795,6 +4795,9 @@ impl RootView {
                     .child(
                         div()
                             .rounded_md()
+                            // GPUI only applies drag styles to elements with a hitbox,
+                            // and an empty hover style is what gives this one its own.
+                            .group_hover(FOLDER_ROW_GROUP, |style| style)
                             .can_drop(accepts)
                             .group_drag_over::<DraggedMessages>(FOLDER_ROW_GROUP, move |style| {
                                 style.bg(drop_highlight)
