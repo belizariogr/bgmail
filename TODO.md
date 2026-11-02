@@ -405,6 +405,10 @@
       its starting folder's rules, whole-token `cid:` match.
 - ✅ Messages stuck in the queue for 5 minutes show in the unsent panel, whatever the
       cause; retries stop at 3 days of age, counted from creation or the last Retry.
+- ✅ Review round 4: an SVG in a message can't read local files (a device could freeze
+      the app); a doctype with markup can't move the print page's CSP; `math` and
+      `template` dropped and attributes judged decoded in the sanitizer; an image too
+      big to embed stays an attachment; rich-text edits follow the real range.
 - ✅ Remote images can't reach this machine or link-local addresses, resolved by IP;
       private ranges stay reachable for intranet images (user decision).
 

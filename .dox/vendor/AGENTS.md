@@ -56,6 +56,9 @@ repository instead of living in someone's checkout.
     can be built off the UI thread (`html_view::DetachedDocument`).
   - `assets/default.css`: `td, th { padding: 1px }`, cell min/max-height
     neutralised (`!important`).
+  - `util.rs` (`parse_svg_image`): an SVG can't read local files; only `data:` images
+    resolve, since a device or a UNC path in a message's `<image href>` would block
+    the UI or reach the network.
   - `stylo_to_parley.rs`: `-apple-system`/`BlinkMacSystemFont` map to
     `system-ui` on every platform (as Chromium does).
   - `document.rs` + `layout/inline/layout.rs`: `set_line_height_quirk` (lines
