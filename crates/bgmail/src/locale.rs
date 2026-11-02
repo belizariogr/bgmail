@@ -671,6 +671,14 @@ pub fn messages_selected(language: Language, count: usize) -> String {
     }
 }
 
+/// Question before deleting a multiple selection for good.
+pub fn delete_forever_confirm(language: Language, count: usize) -> String {
+    match language {
+        Language::English => format!("Delete {count} messages permanently?"),
+        Language::Portuguese => format!("Excluir {count} mensagens permanentemente?"),
+    }
+}
+
 /// Status bar (left): account and message counts.
 pub fn status_counts(language: Language, accounts: usize, messages: usize) -> String {
     format!(
@@ -1023,6 +1031,14 @@ mod tests {
         assert_eq!(
             status_updated_at(Language::English, "9:00"),
             "Updated at 9:00"
+        );
+        assert_eq!(
+            messages_selected(Language::Portuguese, 3),
+            "3 mensagens selecionadas"
+        );
+        assert_eq!(
+            delete_forever_confirm(Language::English, 2),
+            "Delete 2 messages permanently?"
         );
         assert_eq!(
             reply_attribution(Language::Portuguese, "31/10/2026 14:07", "Ana"),

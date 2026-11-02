@@ -33,8 +33,8 @@ use crate::actions::{
 use crate::app_menus;
 use crate::attachments;
 use crate::command_palette::CommandPaletteState;
-use crate::commands::{self, CommandContext, CommandId};
-use crate::compose::{self, ComposeAccount, ComposeInit, ComposeView};
+use crate::commands::{self, BulkSelection, CommandContext, CommandId};
+use crate::compose::{self, ComposeAccount, ComposeInit, ComposeView, QuotedOriginal};
 use crate::config::{self, Config};
 use crate::crash_guard::CrashGuard;
 use crate::data::{self, GlobalMailbox, MailboxKind, MessageBody};
@@ -42,7 +42,8 @@ use crate::dates;
 use crate::db_seed;
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::mail_html::{
-    email_document, is_openable_link, plain_text, print_document, DocumentColors, PrintHeader,
+    email_document, is_openable_link, plain_text, print_document, quotable_html, DocumentColors,
+    PrintHeader,
 };
 use crate::mail_service::{self, MailService, OverallStatus, StartError};
 use crate::settings::SettingsView;
@@ -785,6 +786,7 @@ fn compose_init_from_outgoing(row: &OutgoingRow, parsed: &ParsedMessage) -> Comp
             attachments: forwarded_attachments(&row.raw, parsed),
         },
         replaces_outgoing: Some(row.id),
+        quoted_original: None,
     }
 }
 
@@ -1080,9 +1082,8 @@ impl RootView {
     /// Drops selected rows that left the list; one survivor is a plain
     /// selection again.
     fn prune_multi_selection(&mut self) {
-        let list = &self.list_messages;
-        self.multi_selection
-            .retain(|id| list.iter().any(|message| message.id == *id));
+        let listed: HashSet<i64> = self.list_messages.iter().map(|m| m.id).collect();
+        self.multi_selection.retain(|id| listed.contains(id));
         if let [only] = self.multi_selection[..] {
             self.selected_message_id = Some(only);
             self.multi_selection.clear();
@@ -1375,6 +1376,36 @@ impl RootView {
         result
     }
 
+    /// Runs `action` on every row of a multiple selection that stays selected
+    /// afterwards, because the rows stay listed (read state, star).
+    fn apply_action_keeping_selection(
+        &mut self,
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
+    ) -> rusqlite::Result<()> {
+        let mut result = Ok(());
+        for id in self.multi_selection.clone() {
+            let outcome = self.act_on_message(id, &action);
+            if result.is_ok() {
+                result = outcome;
+            }
+        }
+        self.reload_message_list();
+        self.last_reader_sig = None;
+        result
+    }
+
+    /// Reports the outcome of a bulk toggle and redraws.
+    fn finish_bulk_toggle(&mut self, result: rusqlite::Result<()>, cx: &mut Context<Self>) {
+        if let Err(error) = result {
+            self.set_status_note(
+                format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
+                cx,
+            );
+        }
+        self.sync_app_menus(cx);
+        cx.notify();
+    }
+
     /// Runs `action` on message `id` and hands its server work to the worker.
     fn act_on_message(
         &self,
@@ -1446,6 +1477,13 @@ impl RootView {
 
     /// Toggles read/unread of the selected message (it stays selected).
     pub(crate) fn toggle_message_read(&mut self, cx: &mut Context<Self>) {
+        if let Some(bulk) = self.bulk_selection() {
+            let read = bulk.has_unread;
+            let result =
+                self.apply_action_keeping_selection(|db, id| mail_actions::set_read(db, id, read));
+            self.finish_bulk_toggle(result, cx);
+            return;
+        }
         let Some(detail) = self.selected_detail.as_ref() else {
             return;
         };
@@ -1928,13 +1966,37 @@ impl RootView {
         .detach();
     }
 
+    /// Summary of a multiple selection for the commands.
+    fn bulk_selection(&self) -> Option<BulkSelection> {
+        if self.multi_selection.is_empty() {
+            return None;
+        }
+        let selected: HashSet<i64> = self.multi_selection.iter().copied().collect();
+        let mut bulk = BulkSelection {
+            all_starred: true,
+            ..Default::default()
+        };
+        for message in self
+            .list_messages
+            .iter()
+            .filter(|m| selected.contains(&m.id))
+        {
+            if !bulk.account_ids.contains(&message.account_id) {
+                bulk.account_ids.push(message.account_id);
+            }
+            bulk.has_unread |= message.unread;
+            bulk.all_starred &= message.starred;
+        }
+        Some(bulk)
+    }
+
     /// Builds the command context snapshot used by menus and the palette.
     pub(crate) fn command_context(&self) -> CommandContext {
         CommandContext {
             selected_message_id: self.selected_message_id,
             message_detail: self.selected_detail.clone(),
             folders_by_account: self.folders_by_account.clone(),
-            bulk_selection: !self.multi_selection.is_empty(),
+            bulk: self.bulk_selection(),
             list_in_trash: self.showing_trash(),
         }
     }
@@ -2115,6 +2177,9 @@ impl RootView {
                 cx.notify();
             }
             CommandId::MessageDelete => self.delete_message_to_trash(cx),
+            CommandId::MessageDeletePermanent if !self.multi_selection.is_empty() => {
+                self.confirm_delete_selection(window, cx)
+            }
             CommandId::MessageDeletePermanent => self.delete_message_permanently(cx),
             CommandId::MessageRestore => self.restore_message(cx),
             CommandId::MessageArchive => self.archive_message(cx),
@@ -2342,6 +2407,37 @@ impl RootView {
         )
     }
 
+    /// Asks before deleting a multiple selection for good, and then deletes only
+    /// the rows the question was about, as long as they are still in the Trash.
+    fn confirm_delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let language = cx.language();
+        let ids = self.multi_selection.clone();
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &locale::delete_forever_confirm(language, ids.len()),
+            None,
+            &[
+                Key::CommandDeletePermanent.tr(language),
+                Key::AccountCancel.tr(language),
+            ],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.multi_selection = ids
+                    .into_iter()
+                    .filter(|id| this.db.message_is_in_trash(*id) == Ok(true))
+                    .collect();
+                this.run_message_action(cx, mail_actions::delete_permanently);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn delete_message_permanently(&mut self, cx: &mut Context<Self>) {
         if !self.command_context().message_in_trash() {
             return;
@@ -2362,6 +2458,14 @@ impl RootView {
     }
 
     pub(crate) fn toggle_message_flag(&mut self, cx: &mut Context<Self>) {
+        if let Some(bulk) = self.bulk_selection() {
+            let starred = !bulk.all_starred;
+            let result = self.apply_action_keeping_selection(|db, id| {
+                mail_actions::set_starred(db, id, starred)
+            });
+            self.finish_bulk_toggle(result, cx);
+            return;
+        }
         let Some(detail) = self.selected_detail.as_ref() else {
             return;
         };
@@ -3176,6 +3280,15 @@ impl RootView {
             formatted_date: date,
         };
         let mut draft = mail_core::prepare_reply(&parsed, kind, &me, &labels);
+        let quoted_original = parsed
+            .html
+            .as_deref()
+            .filter(|_| kind != ReplyKind::Forward)
+            .map(|html| QuotedOriginal {
+                block: draft.text.trim_start().to_string(),
+                attribution: labels.attribution.clone(),
+                html: quotable_html(html),
+            });
         if kind == ReplyKind::Forward {
             if let Some(raw) = raw.as_deref() {
                 draft.attachments = forwarded_attachments(raw, &parsed);
@@ -3185,6 +3298,7 @@ impl RootView {
             account_id: Some(detail.account_id),
             draft,
             replaces_outgoing: None,
+            quoted_original,
         };
         self.open_compose_with(Some(init), window, cx);
     }
@@ -5521,6 +5635,9 @@ impl RootView {
         let (sheet_fill, sheet_edge) = (colors.element_active, colors.text_disabled);
         let language = cx.language();
         let count = self.multi_selection.len();
+        let in_trash = self.showing_trash();
+        let bulk = self.bulk_selection().unwrap_or_default();
+        let (has_unread, all_starred) = (bulk.has_unread, bulk.all_starred);
         let tilts: Vec<f32> = SHEET_TILTS.iter().copied().take(count - 1).collect();
         let sheets = canvas(
             |_, _, _| {},
@@ -5576,13 +5693,32 @@ impl RootView {
             .bg(surface)
             .shadow_md()
             .child(
-                div().when(!self.showing_trash(), |el| el.pr_1()).child(
+                div().pr_1().child(
                     Label::new(locale::messages_selected(language, count))
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 ),
             )
-            .when(!self.showing_trash(), |el| {
+            .when(in_trash, |el| {
+                el.child(action(
+                    "bulk-restore",
+                    IconName::Inbox,
+                    Key::CommandRestore,
+                    Self::restore_message,
+                    cx,
+                ))
+                .child(Self::icon_button_with_tooltip(
+                    "bulk-delete-forever",
+                    Key::CommandDeletePermanent.tr(language),
+                    None,
+                    IconButton::new("bulk-delete-forever", IconName::Trash)
+                        .size(IconSize::Small)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.confirm_delete_selection(window, cx);
+                        })),
+                ))
+            })
+            .when(!in_trash, |el| {
                 el.child(action(
                     "bulk-trash",
                     IconName::Trash,
@@ -5603,6 +5739,39 @@ impl RootView {
                     Key::CommandMarkJunk,
                     Self::mark_message_junk,
                     cx,
+                ))
+                .child(action(
+                    "bulk-star",
+                    star_icon(all_starred),
+                    if all_starred {
+                        Key::CommandUnflag
+                    } else {
+                        Key::CommandFlag
+                    },
+                    Self::toggle_message_flag,
+                    cx,
+                ))
+                .child(action(
+                    "bulk-read",
+                    IconName::Mail,
+                    if has_unread {
+                        Key::CommandMarkRead
+                    } else {
+                        Key::CommandMarkUnread
+                    },
+                    Self::toggle_message_read,
+                    cx,
+                ))
+                .child(Self::icon_button_with_tooltip(
+                    "bulk-move",
+                    Key::ToolbarMove.tr(language),
+                    None,
+                    IconButton::new("bulk-move", IconName::Folder)
+                        .size(IconSize::Small)
+                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                            this.move_menu = Some(event.position());
+                            cx.notify();
+                        })),
                 ))
             });
 
@@ -6446,7 +6615,7 @@ mod tests {
         assert!(!view.apply_selection(vec![ids[0], ids[1]]));
         assert_eq!(view.selected_message_id, None);
         assert!(view.row_is_selected(ids[1]));
-        assert!(view.command_context().bulk_selection);
+        assert!(view.command_context().bulk.is_some());
         assert_eq!(view.selected_detail, None);
         assert_eq!(view.reader_detail().map(|d| d.id), Some(ids[0]));
         view.selection_focus = Some(ids[1]);
@@ -6477,6 +6646,42 @@ mod tests {
         }
         view.clear_message_selection();
         assert!(view.reader_detail().is_none());
+    }
+
+    #[test]
+    fn bulk_toggles_keep_the_selection_and_cover_every_row() {
+        let (_dir, mut view) = test_view();
+        let ids: Vec<i64> = view.list_ids()[..2].to_vec();
+        view.apply_selection(ids.clone());
+
+        let starred = !view.bulk_selection().unwrap().all_starred;
+        assert!(starred);
+        view.apply_action_keeping_selection(|db, id| mail_actions::set_starred(db, id, starred))
+            .unwrap();
+        assert_eq!(view.multi_selection, ids);
+        assert!(view.bulk_selection().unwrap().all_starred);
+
+        view.apply_action_keeping_selection(|db, id| mail_actions::set_read(db, id, true))
+            .unwrap();
+        assert!(!view.bulk_selection().unwrap().has_unread);
+        for id in ids {
+            let detail = view.db.get_message(id).unwrap().unwrap();
+            assert!(detail.starred && !detail.unread);
+        }
+    }
+
+    #[test]
+    fn bulk_restore_brings_trashed_rows_back() {
+        let (_dir, mut view) = test_view();
+        let ids: Vec<i64> = view.list_ids()[..2].to_vec();
+        view.apply_selection(ids.clone());
+        view.apply_action_to_selection(mail_actions::trash).unwrap();
+        view.apply_selection(ids.clone());
+        view.apply_action_to_selection(mail_actions::restore_from_trash)
+            .unwrap();
+        for id in ids {
+            assert_eq!(view.db.message_is_in_trash(id), Ok(false));
+        }
     }
 
     #[test]

@@ -156,6 +156,38 @@ pub fn print_document(
 
 /// The doctype an HTML body starts with (after a BOM, whitespace, an XML
 /// declaration and comments), if any.
+/// The original message's HTML as it goes inside a reply's quote: sanitized,
+/// only what is in its body, and without `cid:` images, which point at parts
+/// of the original that a reply doesn't carry. Empty if it can't be processed.
+pub fn quotable_html(html: &str) -> String {
+    use lol_html::{element, rewrite_str, RewriteStrSettings};
+
+    let (sanitized, _, _) = sanitize_html_inner(html, true, &HashSet::new());
+    let sanitized = match leading_doctype(&sanitized) {
+        Some(doctype) => sanitized.replacen(doctype, "", 1),
+        None => sanitized,
+    };
+    let settings = RewriteStrSettings::new()
+        .append_element_content_handler(element!("head, title", |el| {
+            el.remove();
+            Ok(())
+        }))
+        .append_element_content_handler(element!("html, body", |el| {
+            el.remove_and_keep_content();
+            Ok(())
+        }))
+        .append_element_content_handler(element!("img", |el| {
+            let inline = el
+                .get_attribute("src")
+                .is_some_and(|src| src.trim().to_ascii_lowercase().starts_with("cid:"));
+            if inline {
+                el.remove();
+            }
+            Ok(())
+        }));
+    rewrite_str(&sanitized, settings).unwrap_or_default()
+}
+
 fn leading_doctype(html: &str) -> Option<&str> {
     let mut rest = html.trim_start_matches('\u{feff}').trim_start();
     loop {
@@ -757,6 +789,25 @@ fn escape_html(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quotable_html_keeps_the_body_without_active_content() {
+        let html = "<!DOCTYPE html><html><head><title>T</title><style>p{}</style></head>\
+            <body onload=\"x()\"><p style=\"color:red\">Hi <b>there</b></p>\
+            <img src=\"cid:logo\"><img src=\"https://a.test/x.png\">\
+            <script>bad()</script></body></html>";
+        let quoted = quotable_html(html);
+        assert!(
+            quoted.contains("<p style=\"color:red\">Hi <b>there</b></p>"),
+            "{quoted}"
+        );
+        assert!(quoted.contains("https://a.test/x.png"), "{quoted}");
+        for gone in [
+            "DOCTYPE", "<html", "<head", "<title", "<body", "onload", "cid:", "script",
+        ] {
+            assert!(!quoted.contains(gone), "{gone} in {quoted}");
+        }
+    }
 
     #[test]
     fn remote_images_load_only_when_allowed() {

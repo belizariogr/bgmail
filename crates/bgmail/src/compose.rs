@@ -105,6 +105,17 @@ pub struct ComposeInit {
     /// Outbox row this message re-creates (editing an unsent message);
     /// deleted once the edited copy is queued.
     pub replaces_outgoing: Option<i64>,
+    /// What a reply quotes, to send it with its formatting.
+    pub quoted_original: Option<QuotedOriginal>,
+}
+
+/// The original message of a reply: its quote as prefilled in the body and its
+/// HTML, ready to be sent on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuotedOriginal {
+    pub block: String,
+    pub attribution: String,
+    pub html: String,
 }
 
 /// The recipient fields that are validated as address lists.
@@ -137,6 +148,7 @@ struct ComposeFields {
 struct ReplyHeaders {
     in_reply_to: Option<String>,
     references: Vec<String>,
+    quoted: Option<QuotedOriginal>,
 }
 
 /// Why a draft could not be built: per-field address errors (shown under the
@@ -331,6 +343,7 @@ impl ComposeView {
         self.reply = ReplyHeaders {
             in_reply_to: draft.in_reply_to,
             references: draft.references,
+            quoted: init.quoted_original,
         };
         self.errors = ComposeErrors::default();
         self.from_menu_open = false;
@@ -1127,6 +1140,23 @@ fn parse_field(input: &str, language: Language) -> (Vec<Address>, Option<String>
 /// Validates the fields and builds the outgoing draft (plain text). Errors:
 /// invalid addresses per field, then "no recipients", then a missing or
 /// local (can't send) From account.
+/// HTML of a reply: with the original's formatting while the user left the
+/// quote as it was, otherwise from the text alone.
+fn reply_html(reply: &ReplyHeaders, body: &str) -> String {
+    reply
+        .quoted
+        .as_ref()
+        .and_then(|quoted| {
+            mail_core::reply_html_with_original(
+                body,
+                &quoted.block,
+                &quoted.attribution,
+                &quoted.html,
+            )
+        })
+        .unwrap_or_else(|| mail_core::reply_html(body))
+}
+
 fn build_draft(
     from: Option<&ComposeAccount>,
     fields: &ComposeFields,
@@ -1165,7 +1195,7 @@ fn build_draft(
         html: reply
             .in_reply_to
             .is_some()
-            .then(|| mail_core::reply_html(&fields.body)),
+            .then(|| reply_html(reply, &fields.body)),
         in_reply_to: reply.in_reply_to.clone(),
         references: reply.references.clone(),
         attachments: attachments.to_vec(),
@@ -1389,6 +1419,7 @@ mod tests {
         let reply = ReplyHeaders {
             in_reply_to: Some("parent@x".into()),
             references: vec!["root@x".into(), "parent@x".into()],
+            quoted: None,
         };
         let files = vec![attachment("a.pdf", 3)];
         let draft = build_draft(Some(&from), &input, &reply, &files, Language::English).unwrap();
@@ -1409,6 +1440,22 @@ mod tests {
         );
         assert_eq!(draft.references, reply.references);
         assert_eq!(draft.attachments, files);
+    }
+
+    #[test]
+    fn reply_html_uses_the_original_until_the_quote_is_edited() {
+        let reply = ReplyHeaders {
+            in_reply_to: Some("parent@x".into()),
+            quoted: Some(QuotedOriginal {
+                block: "Ann wrote:\n> Hello".into(),
+                attribution: "Ann wrote:".into(),
+                html: "<b>Hello</b>".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(reply_html(&reply, "Hi\n\nAnn wrote:\n> Hello").contains("<b>Hello</b>"));
+        let edited = reply_html(&reply, "Hi\n\nAnn wrote:\n> Changed");
+        assert!(!edited.contains("<b>Hello</b>") && edited.contains("Changed"));
     }
 
     #[test]

@@ -40,6 +40,6 @@ pub use remote::{
 };
 pub use reply::{
     forward_subject, html_to_text, prepare_reply, quote_text, readable_text, reply_html,
-    reply_subject, QuoteLabels, ReplyKind,
+    reply_html_with_original, reply_subject, QuoteLabels, ReplyKind,
 };
 pub use thread::{normalize_subject, thread_key};

@@ -174,14 +174,17 @@ wiring to `storage`.
   range, Ctrl/Cmd+A selects all (list focus only). Two or more selected rows
   (`multi_selection`, with `selected_message_id` = `None`) show, as in macOS
   Mail, the row picked last (`multi_preview`, not marked read) on a sheet, with
-  tilted sheets behind it and a floating Delete / Archive / Junk bar; a bulk
-  action never deletes for
+  tilted sheets behind it and a floating bar: Delete, Archive, Junk, star,
+  read/unread and Move, or Restore and Delete forever (confirmed) in the Trash.
+  Bulk star and read keep the selection and follow the whole selection (any
+  unread: mark all read; not all starred: star all). Any other bulk action never deletes for
   good and leaves nothing selected. On hover Reply / Delete appear centered at
   the right, icon-sized and with no background (their icons brighten on hover);
   only the subject shrinks for them, so the date and star stay in place. Trash shows no unread badge.
 - Replies carry Gmail's structure: `In-Reply-To`/`References`, a `Re:`
-  subject, Gmail's attribution line and an HTML alternative from
-  `mail_core::reply_html`, built from the edited text.
+  subject, Gmail's attribution line and an HTML alternative: the original's
+  sanitized HTML (`mail_html::quotable_html`, without `cid:` images) while the
+  prefilled quote is intact, otherwise built from the edited text.
 - Command palette: `cmd-k` / `ctrl-k`. Mail shortcuts (mac / other): Reply `cmd-r`/`ctrl-r`, Reply All
   `cmd-shift-r`/`ctrl-shift-r`, Forward `cmd-shift-f`/`ctrl-shift-f`, Mark
   read/unread `cmd-shift-u`/`ctrl-shift-m` (Ctrl+Shift+U is the Linux IME

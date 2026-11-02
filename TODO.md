@@ -392,11 +392,13 @@
       text part, all named entities; stored previews repaired on worker start);
       opaque selection over white pages; web fonts registered per file
       (messages no longer turn italic).
-- ⬜ Bulk mark read / star / move and bulk actions inside Trash (restore, delete
-      for good with confirmation)
+- ✅ Bulk star, read/unread and move; bulk restore and confirmed permanent
+      deletion in the Trash
 - ⬜ Selection on a dark page is still translucent, so a translucent window
       shows the desktop through it
-- ⬜ Replies quote the original as text, not its formatted HTML
+- ✅ Replies quote the original's formatted HTML while the quote is intact
+      (images embedded with `cid:` are left out)
+- ⬜ Confirm on a real account: Archive, Move, Drafts folder, a sent reply
 - ⬜ Parse large HTML bodies off the UI thread (they are always formatted now)
 - ⬜ Drafts (save/resume) and HTML composing (plain text only today)
 - ⬜ Set `\\Answered` on the original after a reply is sent

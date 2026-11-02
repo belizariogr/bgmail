@@ -29,6 +29,14 @@ pub enum CommandId {
     MoveToFolder(SharedString),
 }
 
+/// What the commands need to know about a multiple selection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BulkSelection {
+    pub account_ids: Vec<i64>,
+    pub has_unread: bool,
+    pub all_starred: bool,
+}
+
 /// Snapshot of UI state used to decide which commands are available.
 #[derive(Debug, Clone, Default)]
 pub struct CommandContext {
@@ -36,16 +44,42 @@ pub struct CommandContext {
     pub message_detail: Option<MessageDetail>,
     pub folders_by_account: HashMap<i64, Vec<Folder>>,
     /// Several list rows are selected: only actions that work on all of them
-    /// are available (the reader has no single message then).
-    pub bulk_selection: bool,
+    /// are available.
+    pub bulk: Option<BulkSelection>,
     /// The list shows the Trash, where trashing means deleting for good.
     pub list_in_trash: bool,
 }
 
 impl CommandContext {
+    /// Folders every account of a multiple selection has.
+    fn bulk_move_targets(
+        &self,
+        bulk: &BulkSelection,
+        language: Language,
+    ) -> Vec<(SharedString, SharedString)> {
+        let folders_of = |id: &i64| self.folders_by_account.get(id).into_iter().flatten();
+        let Some((first, others)) = bulk.account_ids.split_first() else {
+            return Vec::new();
+        };
+        folders_of(first)
+            .filter(|folder| !is_manual_move_destination_forbidden(&folder.path))
+            .filter(|folder| {
+                others
+                    .iter()
+                    .all(|id| folders_of(id).any(|other| other.path == folder.path))
+            })
+            .map(|folder| {
+                (
+                    folder_display_name(folder, language).into(),
+                    folder.path.clone().into(),
+                )
+            })
+            .collect()
+    }
+
     /// Whether the action can run on the rows of a bulk selection.
     fn bulk_action_available(&self) -> bool {
-        self.bulk_selection && !self.list_in_trash
+        self.bulk.is_some() && !self.list_in_trash
     }
 
     pub fn message_in_trash(&self) -> bool {
@@ -70,21 +104,36 @@ impl CommandContext {
         })
     }
 
+    /// A multiple selection counts as unread while any of its rows is: the
+    /// toggle then marks them all read.
     pub fn message_unread(&self) -> bool {
-        self.message_detail
-            .as_ref()
-            .is_some_and(|detail| detail.unread)
+        match &self.bulk {
+            Some(bulk) => bulk.has_unread,
+            None => self
+                .message_detail
+                .as_ref()
+                .is_some_and(|detail| detail.unread),
+        }
     }
 
+    /// A multiple selection counts as starred once all its rows are: until
+    /// then the toggle stars them all.
     pub fn message_starred(&self) -> bool {
-        self.message_detail
-            .as_ref()
-            .is_some_and(|detail| detail.starred)
+        match &self.bulk {
+            Some(bulk) => bulk.all_starred,
+            None => self
+                .message_detail
+                .as_ref()
+                .is_some_and(|detail| detail.starred),
+        }
     }
 
     /// Folders the selected message can move to, as (label, path): not the
     /// ones it is already in, except Archive, where Gmail keeps all its mail.
     pub fn move_targets(&self, language: Language) -> Vec<(SharedString, SharedString)> {
+        if let Some(bulk) = &self.bulk {
+            return self.bulk_move_targets(bulk, language);
+        }
         let Some(detail) = &self.message_detail else {
             return Vec::new();
         };
@@ -188,7 +237,8 @@ pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool {
                 || (ctx.selected_message_id.is_some() && !ctx.message_in_trash())
         }
         CommandId::MessageDeletePermanent | CommandId::MessageRestore => {
-            ctx.selected_message_id.is_some() && ctx.message_in_trash()
+            (ctx.bulk.is_some() && ctx.list_in_trash)
+                || (ctx.selected_message_id.is_some() && ctx.message_in_trash())
         }
         CommandId::MessageArchive => {
             ctx.bulk_action_available()
@@ -202,20 +252,21 @@ pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool {
                     && !ctx.message_in_trash()
                     && !ctx.message_in_junk())
         }
+        CommandId::MessageToggleRead => ctx.selected_message_id.is_some() || ctx.bulk.is_some(),
         CommandId::MessagePrint
-        | CommandId::MessageToggleRead
         | CommandId::MessageReply
         | CommandId::MessageReplyAll
         | CommandId::MessageForward => ctx.selected_message_id.is_some(),
         CommandId::MessageToggleFlag | CommandId::MoveToFolder(_) => {
-            ctx.selected_message_id.is_some() && !ctx.message_in_trash()
+            ctx.bulk_action_available()
+                || (ctx.selected_message_id.is_some() && !ctx.message_in_trash())
         }
     }
 }
 
 /// All commands for the palette, filtered by selection and availability.
 pub fn palette_commands(language: Language, ctx: &CommandContext) -> Vec<CommandEntry> {
-    let has_message = ctx.selected_message_id.is_some() || ctx.bulk_selection;
+    let has_message = ctx.selected_message_id.is_some() || ctx.bulk.is_some();
     let mut ids = vec![
         CommandId::ComposeNew,
         CommandId::OpenSettings,
@@ -443,21 +494,85 @@ mod tests {
     #[test]
     fn bulk_selection_offers_only_actions_on_every_row() {
         let mut ctx = CommandContext {
-            bulk_selection: true,
+            bulk: Some(BulkSelection::default()),
             ..Default::default()
         };
+        let enabled = |ctx: &CommandContext, id: CommandId| command_enabled(&id, ctx);
         for id in [
             CommandId::MessageDelete,
             CommandId::MessageArchive,
             CommandId::MessageMarkJunk,
+            CommandId::MessageToggleFlag,
+            CommandId::MessageToggleRead,
+            CommandId::MoveToFolder("x".into()),
         ] {
-            assert!(command_enabled(&id, &ctx), "{id:?}");
+            assert!(enabled(&ctx, id.clone()), "{id:?}");
         }
-        for id in [CommandId::MessageReply, CommandId::MessageToggleFlag] {
-            assert!(!command_enabled(&id, &ctx), "{id:?}");
+        for id in [
+            CommandId::MessageReply,
+            CommandId::MessagePrint,
+            CommandId::MessageRestore,
+            CommandId::MessageDeletePermanent,
+        ] {
+            assert!(!enabled(&ctx, id.clone()), "{id:?}");
         }
+
         ctx.list_in_trash = true;
-        assert!(!command_enabled(&CommandId::MessageDelete, &ctx));
+        for id in [
+            CommandId::MessageDelete,
+            CommandId::MessageArchive,
+            CommandId::MessageToggleFlag,
+            CommandId::MoveToFolder("x".into()),
+        ] {
+            assert!(!enabled(&ctx, id.clone()), "{id:?}");
+        }
+        assert!(enabled(&ctx, CommandId::MessageRestore));
+        assert!(enabled(&ctx, CommandId::MessageDeletePermanent));
+    }
+
+    #[test]
+    fn bulk_toggles_follow_the_whole_selection() {
+        let ctx = CommandContext {
+            bulk: Some(BulkSelection {
+                has_unread: true,
+                all_starred: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(ctx.message_unread() && !ctx.message_starred());
+    }
+
+    #[test]
+    fn bulk_move_targets_are_the_folders_all_accounts_share() {
+        let folder = |account_id, path: String| Folder {
+            id: 0,
+            account_id,
+            path,
+            display_name: String::new(),
+            remote_name: None,
+            role: None,
+        };
+        let mut ctx = CommandContext {
+            bulk: Some(BulkSelection {
+                account_ids: vec![1, 2],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        ctx.folders_by_account.insert(
+            1,
+            vec![
+                folder(1, system::TRASH.into()),
+                folder(1, system::SENT.into()),
+                folder(1, user_folder_path("Only one")),
+            ],
+        );
+        ctx.folders_by_account
+            .insert(2, vec![folder(2, system::TRASH.into())]);
+        let targets = ctx.move_targets(Language::English);
+        let paths: Vec<&str> = targets.iter().map(|(_, path)| path.as_ref()).collect();
+        assert_eq!(paths, vec![system::TRASH]);
     }
 
     #[test]

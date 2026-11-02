@@ -477,6 +477,10 @@ window.
 
 - **`merge_attachments`** (private, L1212) — appends files while the total stays within `cap`; returns whether any was rejected.
 
+- **struct `QuotedOriginal`** / **`reply_html`** (private): what a reply quotes, and its HTML: with the original's formatting while the quote is intact.
+- **`quotable_html`** (pub, `mail_html`): the original's sanitized body for a reply's quote, without `cid:` images.
+- **struct `BulkSelection`** (`commands`) and **`bulk_move_targets`** (private): what commands know about a multiple selection; folders all its accounts share.
+- **`delete_forever_confirm(language, count)`** (pub, `locale`): question before a bulk permanent deletion.
 - **`attachment_error_message`** (private, L1232) — banner text combining `ComposeAttachTooLarge` and `ComposeAttachReadFailed: names`; `None` when nothing failed.
 
 ##### Context: `ComposeView`
@@ -1911,6 +1915,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`click_message_row`** / **`set_selection`** / **`apply_selection`** / **`prune_multi_selection`** / **`selected_ids`** / **`row_is_selected`** / **`list_ids`** / **`extended_selection`** / **`extend_selection`** / **`set_list_filter`** (private): multiple selection and filter state. `apply_selection` returns whether a single message resulted, which `set_selection` then opens.
 - **`apply_action_to_selection`** / **`act_on_message`** (private): runs an action on every selected row (first error returned, nothing left selected) / on one message plus its worker notification.
 - **`render_selection_stack`** / **`reader_detail`** / **`reload_multi_preview`** / **`fetch_multi_preview_body`** / **`sheet_corners`** (private): reader for a multiple selection: the previewed message (never marked read) on a sheet, tilted sheets behind it, floating actions.
+- **`bulk_selection`** / **`apply_action_keeping_selection`** / **`finish_bulk_toggle`** / **`confirm_delete_selection`** (private): summary of a multiple selection for the commands, bulk star/read keeping the selection, and the confirmed permanent deletion.
 - **`render_dropdown`** / **`render_filter_menu`** / **`render_move_menu`** (private): reader card stack for a multiple selection and the toolbar dropdowns.
 - **`select_message_row`** (private)
   - Signature: `fn select_message_row(&mut self, id: i64, window, cx)`
