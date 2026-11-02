@@ -40,6 +40,10 @@ pub(crate) const MAX_OP_ATTEMPTS: u32 = 3;
 pub(crate) const MAX_SEND_ATTEMPTS: u32 = 3;
 /// Failed Sent-copy APPENDs after which the copy is given up.
 pub(crate) const MAX_APPEND_DEFERRALS: u32 = 5;
+/// Failed tries before a message stops being retried and waits for the user: with
+/// the default delays, about three days of trying. Past that it may no longer be what
+/// its author wants sent.
+pub(crate) const MAX_SEND_DEFERRALS: u32 = 72;
 /// A `sending` row older than this belonged to a worker that died mid-send
 /// (longer than any SMTP transaction can take with its I/O timeouts).
 pub(crate) const SEND_LEASE: Duration = Duration::from_secs(10 * 60);
@@ -1187,7 +1191,9 @@ impl Worker {
             SendFailure::Transient => {
                 let next = now + self.send_retry_delay(row.deferrals);
                 self.db.defer_outgoing(row.id, &message, next)?;
-                (false, is_connection_error(error.error.kind))
+                let gave_up =
+                    row.deferrals + 1 >= MAX_SEND_DEFERRALS && self.db.stop_outgoing(row.id)?;
+                (gave_up, is_connection_error(error.error.kind))
             }
             SendFailure::Permanent => {
                 let next = now + self.send_retry_delay(row.attempts);

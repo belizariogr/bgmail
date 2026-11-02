@@ -398,6 +398,9 @@
       names over nested ones in the role mapping; temporary `NO` to LOGIN retries;
       transparent mail text stays hidden on dark pages; bulk actions off the UI
       thread; a forward waits for the body.
+- ✅ Archive with Gmail labels only leaves the Inbox.
+- ✅ A message still being retried shows in the unsent panel, with Edit and Discard;
+      retries stop after about three days.
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
 - ✅ Read / mark read-unread (opening marks read on the server; toggle via

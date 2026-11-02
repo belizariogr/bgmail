@@ -772,14 +772,14 @@ fn send_failures_retry_then_become_permanent() {
     h.sync();
     assert!(sender.sent().is_empty());
     assert_eq!(h.db.outbox_count().unwrap(), 0);
-    let failed = h.db.failed_outgoing().unwrap();
+    let failed = h.db.unsent_outgoing().unwrap();
     assert_eq!(failed.len(), 1);
     assert_eq!(failed[0].state, storage::OutgoingState::Failed);
     // The user retries: sent on the next cycle.
     h.db.retry_outgoing(outbox_id).unwrap();
     h.run(Command::ProcessQueue);
     assert_eq!(sender.sent().len(), 1);
-    assert!(h.db.failed_outgoing().unwrap().is_empty());
+    assert!(h.db.unsent_outgoing().unwrap().is_empty());
 }
 
 #[test]
@@ -1496,6 +1496,41 @@ fn transient_send_failures_back_off_without_using_attempts() {
 }
 
 #[test]
+fn a_message_stops_being_retried_after_about_three_days() {
+    let h = Harness::imap().started();
+    let id =
+        h.db.enqueue_outgoing(
+            h.account,
+            "me@example.com",
+            &strings(&["b@x.com"]),
+            b"raw",
+            None,
+        )
+        .unwrap();
+    h.db.conn()
+        .execute(
+            "UPDATE outbox SET deferrals = ?1 WHERE id = ?2",
+            [i64::from(crate::worker::MAX_SEND_DEFERRALS) - 1, id],
+        )
+        .unwrap();
+    h.connector
+        .sender()
+        .fail_next_with(mail_core::SendError::transient(
+            mail_core::RemoteError::new(RemoteErrorKind::Network, "connect"),
+        ));
+    let events = h.run(Command::ProcessQueue);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        SyncEvent::SendFailed {
+            permanent: true,
+            ..
+        }
+    )));
+    let row = &h.db.outbox(h.account).unwrap()[0];
+    assert_eq!(row.state, storage::OutgoingState::Failed);
+}
+
+#[test]
 fn uncertain_sends_are_never_resent_automatically() {
     let h = Harness::imap().started();
     let id =
@@ -1517,12 +1552,12 @@ fn uncertain_sends_are_never_resent_automatically() {
     h.sync();
     h.sync();
     assert_eq!(sender.sent().len(), 1, "delivered once, never resent");
-    let stuck = h.db.failed_outgoing().unwrap();
+    let stuck = h.db.unsent_outgoing().unwrap();
     assert_eq!(stuck.len(), 1);
     assert_eq!(stuck[0].state, storage::OutgoingState::MaybeSent);
     // The user discards it.
     h.db.delete_outgoing(id).unwrap();
-    assert!(h.db.failed_outgoing().unwrap().is_empty());
+    assert!(h.db.unsent_outgoing().unwrap().is_empty());
 }
 
 #[test]

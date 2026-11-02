@@ -233,12 +233,28 @@ impl Database {
         )
     }
 
-    /// Rows that stopped retrying and wait for a user decision (`failed` or
-    /// `maybe_sent`), across every account, oldest first. `raw` is left
-    /// empty: the UI lists these on every reload and attachments can be
-    /// large, so it gets the bytes from [`Self::outgoing`] only when needed.
-    pub fn failed_outgoing(&self) -> rusqlite::Result<Vec<OutgoingRow>> {
-        self.query_outgoing("X''", "WHERE state IN ('failed', 'maybe_sent')", [])
+    /// Rows the user should know about, across every account, oldest first: those
+    /// that stopped retrying (`failed`, `maybe_sent`) and those still retrying after
+    /// a failure, which could otherwise go out days later with no way to stop them.
+    /// `raw` is left empty: the UI lists these on every reload and attachments can
+    /// be large, so it gets the bytes from [`Self::outgoing`] only when needed.
+    pub fn unsent_outgoing(&self) -> rusqlite::Result<Vec<OutgoingRow>> {
+        self.query_outgoing(
+            "X''",
+            "WHERE state IN ('failed', 'maybe_sent') OR (state = 'queued' AND deferrals > 0)",
+            [],
+        )
+    }
+
+    /// Stops the automatic retries of a queued row: it becomes `failed`, waiting for
+    /// the user. `false` for any other state, such as one being sent right now.
+    pub fn stop_outgoing(&self, id: i64) -> rusqlite::Result<bool> {
+        let changed = self.conn().execute(
+            "UPDATE outbox SET state = 'failed', lease_at = NULL
+             WHERE id = ?1 AND state = 'queued'",
+            params![id],
+        )?;
+        Ok(changed == 1)
     }
 
     /// `raw_column` is the SQL for the `raw` field: the column, or an empty
@@ -389,7 +405,7 @@ impl Database {
     }
 
     /// Marks a row `maybe_sent`: the transaction may have been accepted, so
-    /// it is never resent automatically (see `failed_outgoing`).
+    /// it is never resent automatically (see `unsent_outgoing`).
     pub fn mark_outgoing_maybe_sent(&self, id: i64, error: &str) -> rusqlite::Result<()> {
         self.conn().execute(
             "UPDATE outbox SET state = 'maybe_sent', lease_at = NULL, last_error = ?2
@@ -399,23 +415,29 @@ impl Database {
         Ok(())
     }
 
-    /// User-requested retry of a stopped row: resets attempts, deferrals,
-    /// backoff, lease and error, and puts it back to `queued` so the engine
-    /// sends it on its next cycle. Returns `false` for any other state, so a
+    /// User-requested retry of a row in [`Self::unsent_outgoing`]: resets attempts,
+    /// deferrals, backoff, lease and error, and puts it back to `queued` so the
+    /// engine sends it on its next cycle. Returns `false` for any other state, so a
     /// stale click can't disturb a row already being sent.
     pub fn retry_outgoing(&self, id: i64) -> rusqlite::Result<bool> {
         let changed = self.conn().execute(
             "UPDATE outbox SET state = 'queued', attempts = 0, deferrals = 0,
                     next_attempt_at = 0, lease_at = NULL, last_error = NULL
-             WHERE id = ?1 AND state IN ('failed', 'maybe_sent')",
+             WHERE id = ?1
+               AND (state IN ('failed', 'maybe_sent') OR (state = 'queued' AND deferrals > 0))",
             params![id],
         )?;
         Ok(changed == 1)
     }
 
-    /// User-requested discard of an outbox row (any state).
-    pub fn delete_outgoing(&self, id: i64) -> rusqlite::Result<()> {
-        self.complete_outgoing(id)
+    /// User-requested discard of an outbox row. `false` when it can't be discarded:
+    /// it is being sent, or the server accepted it and only its Sent copy is pending.
+    pub fn delete_outgoing(&self, id: i64) -> rusqlite::Result<bool> {
+        let changed = self.conn().execute(
+            "DELETE FROM outbox WHERE id = ?1 AND state NOT IN ('sending', 'append_pending')",
+            params![id],
+        )?;
+        Ok(changed == 1)
     }
 }
 
@@ -536,6 +558,45 @@ mod tests {
     }
 
     #[test]
+    fn a_retrying_row_is_listed_and_can_be_stopped_or_discarded() {
+        let (_file, db, fx) = remote_db();
+        let id = db
+            .enqueue_outgoing(fx.account, "a@x", &["b@x".into()], b"r", None)
+            .unwrap();
+        assert!(db.unsent_outgoing().unwrap().is_empty());
+
+        db.defer_outgoing(id, "connect", 9_999_999_999).unwrap();
+        assert_eq!(db.unsent_outgoing().unwrap()[0].id, id);
+
+        assert!(db.retry_outgoing(id).unwrap());
+        assert!(db.unsent_outgoing().unwrap().is_empty());
+        db.defer_outgoing(id, "connect", 9_999_999_999).unwrap();
+
+        assert!(db.stop_outgoing(id).unwrap());
+        assert_eq!(
+            db.outgoing(id).unwrap().unwrap().state,
+            OutgoingState::Failed
+        );
+        assert!(!db.stop_outgoing(id).unwrap());
+        assert!(db.delete_outgoing(id).unwrap());
+        assert!(db.outgoing(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_row_being_sent_cannot_be_stopped_or_discarded() {
+        let (_file, db, fx) = remote_db();
+        let id = db
+            .enqueue_outgoing(fx.account, "a@x", &["b@x".into()], b"r", None)
+            .unwrap();
+        db.conn()
+            .execute("UPDATE outbox SET state = 'sending' WHERE id = ?1", [id])
+            .unwrap();
+        assert!(!db.stop_outgoing(id).unwrap());
+        assert!(!db.delete_outgoing(id).unwrap());
+        assert!(db.outgoing(id).unwrap().is_some());
+    }
+
+    #[test]
     fn retry_outgoing_only_touches_stopped_rows() {
         let (_file, db, fx) = remote_db();
         let id = db
@@ -563,7 +624,7 @@ mod tests {
             .enqueue_outgoing(fx.account, "me@x", &["a@x".into()], b"RAW", None)
             .unwrap();
         db.fail_outgoing(id, "550", 0, 1).unwrap();
-        let listed = db.failed_outgoing().unwrap();
+        let listed = db.unsent_outgoing().unwrap();
         assert_eq!((listed[0].id, listed[0].raw.len()), (id, 0));
         assert_eq!(listed[0].recipients, ["a@x"]);
         assert_eq!(db.outgoing(id).unwrap().unwrap().raw, b"RAW");
@@ -711,7 +772,7 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(db.expire_outgoing_leases(fx.account, 101).unwrap(), [id]);
-        let row = &db.failed_outgoing().unwrap()[0];
+        let row = &db.unsent_outgoing().unwrap()[0];
         assert_eq!(row.state, OutgoingState::MaybeSent);
         assert_eq!(row.last_error.as_deref(), Some("interrupted while sending"));
         assert!(!db.claim_outgoing(id, 102).unwrap());
@@ -743,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_outgoing_retry_and_delete() {
+    fn unsent_outgoing_retry_and_delete() {
         let (_file, db, fx) = remote_db();
         let failed = db
             .enqueue_outgoing(fx.account, "me@x", &[], b"A", None)
@@ -759,7 +820,7 @@ mod tests {
         db.mark_outgoing_maybe_sent(maybe, "connection reset")
             .unwrap();
 
-        let stuck = db.failed_outgoing().unwrap();
+        let stuck = db.unsent_outgoing().unwrap();
         assert_eq!(
             stuck
                 .iter()
@@ -789,7 +850,7 @@ mod tests {
 
         db.delete_outgoing(maybe).unwrap();
         db.delete_outgoing(queued).unwrap();
-        assert!(db.failed_outgoing().unwrap().is_empty());
+        assert!(db.unsent_outgoing().unwrap().is_empty());
         assert_eq!(db.outbox(fx.account).unwrap().len(), 1);
     }
 }

@@ -48,7 +48,7 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
   `fail_outgoing`: permanent, `attempts + 1`, `failed` at the caller's
   limit) / `maybe_sent` (`mark_outgoing_maybe_sent`, or a lease older than
   the caller's cutoff via `expire_outgoing_leases`). `failed` and
-  `maybe_sent` are terminal until the user acts: `failed_outgoing` lists
+  `maybe_sent` are terminal until the user acts: `unsent_outgoing` lists
   them (all accounts), `retry_outgoing` resets to `queued`,
   `delete_outgoing` discards. `outbox_count` = `queued` + `sending`. Retry
   policy (delays, limits) belongs to the caller (`mail_sync`).

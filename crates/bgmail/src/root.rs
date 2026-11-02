@@ -989,8 +989,8 @@ fn forwarded_attachments(raw: &[u8], parsed: &ParsedMessage) -> Vec<mail_core::O
         .collect()
 }
 
-/// An outgoing message that stopped retrying (`failed` / `maybe_sent`), as
-/// listed in the status bar's "unsent" panel.
+/// An outgoing message that failed (stopped, or still being retried), as listed in
+/// the status bar's "unsent" panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct UnsentItem {
     id: i64,
@@ -1002,6 +1002,8 @@ struct UnsentItem {
     error: Option<String>,
     /// The connection broke mid-send: the server may have accepted it.
     maybe_sent: bool,
+    /// More tries are coming unless the user stops them.
+    retrying: bool,
 }
 
 /// Summarizes an unsent outbox row (`subject` comes from its parsed raw).
@@ -1018,17 +1020,18 @@ fn unsent_item(row: &OutgoingRow, subject: String) -> UnsentItem {
             .filter(|error| !error.is_empty())
             .map(str::to_string),
         maybe_sent: row.state == OutgoingState::MaybeSent,
+        retrying: row.state == OutgoingState::Queued,
     }
 }
 
-/// Outbox rows that stopped retrying, minus accounts being removed. Subjects
+/// Outbox rows that failed, minus accounts being removed. Subjects
 /// of rows already in `previous` are reused instead of re-parsing the raw.
 fn load_unsent(
     db: &storage::Database,
     removing: &HashSet<i64>,
     previous: Vec<UnsentItem>,
 ) -> Vec<UnsentItem> {
-    let rows = match db.failed_outgoing() {
+    let rows = match db.unsent_outgoing() {
         Ok(rows) => rows,
         Err(error) => {
             eprintln!("BGMail: could not read the outbox: {error}");
@@ -2376,8 +2379,13 @@ impl RootView {
 
     /// Opens compose prefilled with an unsent message. The outbox row stays
     /// until the edited message is queued (`send_draft` replaces it), so
-    /// closing compose loses nothing.
+    /// closing compose loses nothing. A row still being retried stops first: the
+    /// unedited message mustn't go out while it is being edited.
     pub(crate) fn edit_unsent(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(error) = self.db.stop_outgoing(id) {
+            self.report_unsent_error(error, cx);
+            return;
+        }
         let row = match self.db.outgoing(id) {
             Ok(row) => row.filter(|row| row.state.is_stopped()),
             Err(error) => {
@@ -2413,8 +2421,14 @@ impl RootView {
                 return;
             }
             this.update(cx, |this, cx| {
-                if let Err(error) = this.db.delete_outgoing(id) {
-                    this.report_unsent_error(error, cx);
+                match this.db.delete_outgoing(id) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if this.db.outgoing(id).ok().flatten().is_some() {
+                            this.set_status_note(Key::UnsentBusy.tr(cx.language()), cx);
+                        }
+                    }
+                    Err(error) => this.report_unsent_error(error, cx),
                 }
                 this.refresh_unsent();
                 cx.notify();
@@ -6185,6 +6199,13 @@ impl RootView {
                             .color(Color::Warning),
                     )
                 })
+                .when(item.retrying, |el| {
+                    el.child(
+                        Label::new(Key::UnsentRetrying.tr(language))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                })
                 .child(
                     h_flex()
                         .pt_1()
@@ -7923,6 +7944,41 @@ mod tests {
     }
 
     #[gpui::test]
+    fn editing_a_message_still_being_retried_stops_it_first(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        view.update_in(cx, |view, window, cx| {
+            let account = view.accounts[0].id;
+            let id = view
+                .db
+                .enqueue_outgoing(
+                    account,
+                    "a@x.com",
+                    &["b@x.com".into()],
+                    b"Subject: s\r\n\r\nb",
+                    None,
+                )
+                .unwrap();
+            view.db
+                .defer_outgoing(id, "connect", 9_999_999_999)
+                .unwrap();
+            view.refresh_unsent();
+            assert!(view.unsent[0].retrying);
+
+            view.edit_unsent(id, window, cx);
+            let row = view.db.outgoing(id).unwrap().unwrap();
+            assert_eq!(row.state, OutgoingState::Failed);
+            assert!(view.compose_window.is_some());
+        });
+    }
+
+    #[gpui::test]
     fn forwarding_waits_for_the_body(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().expect("tempdir");
         cx.update(|cx| {
@@ -8742,6 +8798,7 @@ mod tests {
                 recipients: "a@x.com, b@y.com".into(),
                 error: Some("550 mailbox unavailable".into()),
                 maybe_sent: true,
+                retrying: false,
             }
         );
         let mut row = outgoing_row(Vec::new(), &[], OutgoingState::Failed);
@@ -8749,6 +8806,7 @@ mod tests {
         let item = unsent_item(&row, String::new());
         assert_eq!(item.error, None);
         assert!(!item.maybe_sent);
+        assert!(!item.retrying);
     }
 
     #[test]

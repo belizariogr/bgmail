@@ -143,7 +143,7 @@ All take the UI's `&storage::Database`, return `rusqlite::Result<ActionOutcome>`
 - **`with_cas_retry`** (private) — runs a round closure (`Ok(None)` = lost a CAS race) up to `CAS_ROUNDS` times; if the last round still loses, returns `changed + needs_sync`.
 - **`move_to_folder`** (pub) — `pub fn move_to_folder(db, message_id, target_path: &str)`: `with_cas_retry(move_to_folder_round)`.
 - **`move_to_folder_round`** (private) — no-op for forbidden targets (`sys:sent`/`drafts`/`flagged`) or when already only there; local → `move_message_to_folder`. Server accounts: target must be an account folder with `remote_name` (else no-op); queued moves of the message are re-pointed at the target with `update_op_if_unchanged` (a move whose source is the target is cancelled with `complete_op_if_unchanged` and its location re-attached unless unresolved); any CAS loss → `None`; each location outside the target gets a queued `Move` (with validity + Message-ID) and `detach_location`, except `role = all` locations when the target is not Trash/Junk and another location moves; finally the local primary-folder move.
-- **`archive`** / **`junk`** (pub) — `move_to_folder` to `sys:archive` / `sys:junk` (Gmail All Mail is mapped to `sys:archive`).
+- **`archive`** (pub): `archive_keeping_labels` (private) for a labeled message of an All Mail account, else `move_to_folder`. **`archive`** / **`junk`** (pub) — `move_to_folder` to `sys:archive` / `sys:junk` (Gmail All Mail is mapped to `sys:archive`).
 - **`trash`** (pub) — in Trash → `delete_permanently`; else `move_to_folder(sys:trash)`.
 - **`restore_from_trash`** (pub) — only from Trash: `move_to_folder(sys:inbox)`.
 - **`delete_permanently`** (pub) — `with_cas_retry(delete_permanently_round)`.

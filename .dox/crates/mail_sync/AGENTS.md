@@ -88,10 +88,12 @@ that edit the database and queue those server ops.
   `connector.saves_sent_copy()`; APPEND failures retry with back-off and are
   given up after `MAX_APPEND_DEFERRALS`, never resending); `Transient` →
   `queued` with back-off (`EngineOptions::send_retry_delays`, default
-  1 m/5 m/15 m/1 h repeating), attempts untouched; `Permanent` → attempts+1,
+  1 m/5 m/15 m/1 h repeating), attempts untouched, `failed` after
+  `MAX_SEND_DEFERRALS` (72, about three days; user decision); `Permanent` → attempts+1,
   back-off, `failed` at `MAX_SEND_ATTEMPTS` (3); `Uncertain` → `maybe_sent`,
-  never retried. `failed` / `maybe_sent` rows wait for the UI
-  (`Database::failed_outgoing` / `retry_outgoing` / `delete_outgoing`);
+  never retried. `failed` / `maybe_sent` rows wait for the UI, which also lists rows
+  still retrying (`Database::unsent_outgoing` / `retry_outgoing` / `stop_outgoing`,
+  and `delete_outgoing`, which refuses a row being sent);
   `SendFailed { permanent }` is `true` exactly when a row stopped retrying.
   `sending` leases older than `SEND_LEASE` (10 min) become `maybe_sent`.
   The worker wakes itself (`ProcessQueue`) when the earliest backed-off row
@@ -105,6 +107,9 @@ that edit the database and queue those server ops.
   concurrently with its successor.
 - **NewMail:** only unread rows *created* (not merged) in the `sys:inbox`
   folder after its first sync, never after a UIDVALIDITY reset.
+- **Archive with labels** (user decision): on an All Mail account a message with
+  labels only leaves the Inbox and keeps them (`actions::archive_keeping_labels`); out
+  of the Inbox, Archive does nothing. Move, Trash and Junk still leave every label.
 - **Folder mapping** (`plan::folder_path_for`, order from `plan_folders`: declared
   SPECIAL-USE first, `\All` after the other declared, then by name nearest the top,
   a leading `INBOX` not counting): first folder per role takes the system path; Gmail `\All` becomes `sys:archive` only when no
