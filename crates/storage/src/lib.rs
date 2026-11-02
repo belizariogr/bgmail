@@ -29,6 +29,6 @@ pub use seed::{
 pub use sync::{BODY_STATE_FULL, BODY_STATE_HEADERS};
 pub use types::{
     Account, AttachmentRow, Folder, FolderSyncState, MailListQuery, MessageDetail, MessageListItem,
-    MessageLocation, NewAttachment, NewRemoteMessage, OutgoingRow, PendingOp, RemoteInsert,
-    PROVIDER_GMAIL, PROVIDER_IMAP, PROVIDER_LOCAL,
+    MessageLocation, NewAttachment, NewRemoteMessage, OutgoingRow, OutgoingState, PendingOp,
+    RemoteInsert, PROVIDER_GMAIL, PROVIDER_IMAP, PROVIDER_LOCAL,
 };

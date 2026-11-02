@@ -3,7 +3,7 @@
 //! The v1 DDL below is the base every database starts from; later versions are
 //! applied as in-place steps by `migration.rs` so existing user data survives.
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub const CREATE_ACCOUNTS: &str = "
 CREATE TABLE IF NOT EXISTS accounts (
@@ -158,4 +158,18 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE OF search_text ON 
     VALUES ('delete', old.id, old.search_text);
     INSERT INTO messages_fts(rowid, search_text) VALUES (new.id, new.search_text);
 END;
+";
+
+/// v2 → v3 outbox columns (delivery state machine + retry backoff):
+/// `(table, column, definition)`.
+pub const V3_COLUMNS: &[(&str, &str, &str)] = &[
+    ("outbox", "state", "TEXT NOT NULL DEFAULT 'queued'"),
+    ("outbox", "next_attempt_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("outbox", "lease_at", "INTEGER"),
+    ("outbox", "deferrals", "INTEGER NOT NULL DEFAULT 0"),
+];
+
+/// v3 indexes (idempotent).
+pub const V3_OBJECTS: &str = "
+CREATE INDEX IF NOT EXISTS idx_outbox_account_state ON outbox(account_id, state);
 ";

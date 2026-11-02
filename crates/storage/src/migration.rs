@@ -8,6 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use crate::schema::{
     CREATE_ACCOUNTS, CREATE_FOLDERS, CREATE_MESSAGES, CREATE_META, INDEX_MESSAGES_ACCOUNT,
     INDEX_MESSAGES_FOLDERS, INDEX_MESSAGES_SEARCH, SCHEMA_VERSION, V2_COLUMNS, V2_OBJECTS,
+    V3_COLUMNS, V3_OBJECTS,
 };
 
 /// Brings the database to [`SCHEMA_VERSION`] inside one `IMMEDIATE` transaction,
@@ -33,6 +34,10 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if version < 2 {
         migrate_v1_to_v2(&tx)?;
         version = 2;
+    }
+    if version < 3 {
+        migrate_v2_to_v3(&tx)?;
+        version = 3;
     }
     if version != start || schema_version(&tx)?.is_none() {
         tx.execute(
@@ -65,6 +70,16 @@ fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()> {
     }
     conn.execute_batch(V2_OBJECTS)?;
     conn.execute_batch("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild');")
+}
+
+/// v3: outbox delivery state (`queued` / `sending` / `maybe_sent` / `failed` /
+/// `append_pending`), retry backoff (`next_attempt_at`, `deferrals`) and the
+/// send lease. Existing rows become `queued`, due immediately.
+fn migrate_v2_to_v3(conn: &Connection) -> rusqlite::Result<()> {
+    for (table, column, definition) in V3_COLUMNS {
+        add_column_if_missing(conn, table, column, definition)?;
+    }
+    conn.execute_batch(V3_OBJECTS)
 }
 
 /// `ALTER TABLE ADD COLUMN` that tolerates a column already being there.
@@ -190,6 +205,36 @@ mod tests {
     }
 
     #[test]
+    fn v2_outbox_rows_migrate_to_queued_v3_rows() {
+        let file = NamedTempFile::new().unwrap();
+        v1_database(file.path());
+        {
+            let conn = Connection::open(file.path()).unwrap();
+            migrate_v1_to_v2(&conn).unwrap();
+            conn.execute(
+                "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO outbox (account_id, sender, recipients, raw, attempts, last_error)
+                 VALUES (1, 'me@test.com', 'a@x', X'52', 2, '550')",
+                [],
+            )
+            .unwrap();
+            assert!(!column_exists(&conn, "outbox", "state").unwrap());
+        }
+        let db = Database::open(file.path()).unwrap();
+        assert_eq!(schema_version(db.conn()).unwrap(), Some(SCHEMA_VERSION));
+        let rows = db.outbox(1).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, crate::types::OutgoingState::Queued);
+        assert_eq!((rows[0].attempts, rows[0].deferrals), (2, 0));
+        assert_eq!(rows[0].next_attempt_at, 0);
+        assert_eq!(rows[0].raw, b"R");
+    }
+
+    #[test]
     fn migration_is_idempotent_across_reopens() {
         let file = NamedTempFile::new().unwrap();
         v1_database(file.path());
@@ -210,6 +255,7 @@ mod tests {
         assert_eq!(schema_version(db.conn()).unwrap(), Some(SCHEMA_VERSION));
         assert!(column_exists(db.conn(), "messages", "gm_msgid").unwrap());
         assert!(column_exists(db.conn(), "accounts", "provider").unwrap());
+        assert!(column_exists(db.conn(), "outbox", "next_attempt_at").unwrap());
     }
 
     #[test]

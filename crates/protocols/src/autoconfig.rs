@@ -80,20 +80,24 @@ struct Server {
     username: String,
 }
 
-/// Parses a clientConfig document: the first usable `incomingServer
-/// type="imap"` and `outgoingServer type="smtp"` (the file lists preferred
-/// ones first), with `%EMAILADDRESS%` / `%EMAILLOCALPART%` / `%EMAILDOMAIN%`
-/// substituted in the username. `None` unless both are present.
+/// Parses a clientConfig document: for `incomingServer type="imap"` and
+/// `outgoingServer type="smtp"` the first usable encrypted (SSL/TLS or
+/// STARTTLS) entry in file order (preferred ones come first); a cleartext
+/// (`plain`) entry is used only when no encrypted one exists.
+/// `%EMAILADDRESS%` / `%EMAILLOCALPART%` / `%EMAILDOMAIN%` are substituted
+/// in the username. `None` unless both are present.
 pub fn parse_autoconfig(xml: &str, email: &str) -> Option<AccountConfig> {
     let document = roxmltree::Document::parse(xml).ok()?;
     let provider = document
         .descendants()
         .find(|node| node.has_tag_name("emailProvider"))?;
     let pick = |tag: &str, kind: &str| {
-        provider
+        let servers: Vec<Server> = provider
             .children()
             .filter(|node| node.has_tag_name(tag) && node.attribute("type") == Some(kind))
-            .find_map(|node| parse_server(node, email))
+            .filter_map(|node| parse_server(node, email))
+            .collect();
+        prefer_encrypted(servers)
     };
     let imap = pick("incomingServer", "imap")?;
     let smtp = pick("outgoingServer", "smtp")?;
@@ -105,6 +109,15 @@ pub fn parse_autoconfig(xml: &str, email: &str) -> Option<AccountConfig> {
         auth: AuthKind::Password,
         sync_window: DEFAULT_SYNC_WINDOW,
     })
+}
+
+/// The first encrypted server, else the first one (cleartext).
+fn prefer_encrypted(servers: Vec<Server>) -> Option<Server> {
+    let encrypted = servers
+        .iter()
+        .position(|server| server.config.security != Security::None);
+    let index = encrypted.unwrap_or(0);
+    servers.into_iter().nth(index)
 }
 
 fn parse_server(node: roxmltree::Node<'_, '_>, email: &str) -> Option<Server> {
@@ -211,6 +224,27 @@ mod tests {
         assert_eq!(config.imap.security, Security::None);
         assert_eq!(config.username, "a@x.org");
         assert_eq!(config.smtp.port, 587);
+    }
+
+    #[test]
+    fn encrypted_servers_win_over_earlier_plain_ones() {
+        let xml = r#"<clientConfig><emailProvider id="x">
+            <incomingServer type="imap"><hostname>plain.x</hostname><port>143</port><socketType>plain</socketType></incomingServer>
+            <incomingServer type="imap"><hostname>starttls.x</hostname><port>143</port><socketType>STARTTLS</socketType></incomingServer>
+            <incomingServer type="imap"><hostname>ssl.x</hostname><port>993</port><socketType>SSL</socketType></incomingServer>
+            <outgoingServer type="smtp"><hostname>plain.x</hostname><port>25</port><socketType>plain</socketType></outgoingServer>
+            <outgoingServer type="smtp"><hostname>ssl.x</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
+            </emailProvider></clientConfig>"#;
+        let config = parse_autoconfig(xml, "a@x").unwrap();
+        assert_eq!(
+            (config.imap.host.as_str(), config.imap.security),
+            ("starttls.x", Security::StartTls),
+            "first encrypted entry in file order"
+        );
+        assert_eq!(
+            (config.smtp.host.as_str(), config.smtp.security),
+            ("ssl.x", Security::Tls)
+        );
     }
 
     #[test]

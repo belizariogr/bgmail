@@ -269,17 +269,50 @@ impl ImapRemote {
         Ok(())
     }
 
+    /// Permanently removes `uids` (already flagged `\Deleted`) from the
+    /// selected folder, never anything else.
+    ///
+    /// With UIDPLUS: `UID EXPUNGE`. Without it a plain `EXPUNGE` would also
+    /// destroy messages another client flagged `\Deleted` (and may still
+    /// want to undelete), so those are found with `UID SEARCH DELETED`,
+    /// unflagged for the `EXPUNGE` and re-flagged right after. Failure modes
+    /// stay non-destructive: if the connection drops before the restore,
+    /// those messages merely lose `\Deleted`. Residual race: a message
+    /// another client flags between our SEARCH and EXPUNGE is still
+    /// expunged (IMAP offers no atomic alternative without UIDPLUS).
     fn expunge(&mut self, uids: &[u32]) -> RemoteResult<()> {
         if self.capabilities.uidplus {
             for set in uid_chunks(uids, COMMAND_CHUNK) {
                 self.run(&format!("UID EXPUNGE {set}"))?;
             }
-        } else {
-            // Without UIDPLUS this also removes other `\Deleted` messages in
-            // the folder; that's standard IMAP semantics.
-            self.run("EXPUNGE")?;
+            return Ok(());
         }
-        Ok(())
+        let ours: HashSet<u32> = uids.iter().copied().collect();
+        let others: Vec<u32> = self
+            .search_uids("UID SEARCH DELETED")?
+            .into_iter()
+            .filter(|uid| !ours.contains(uid))
+            .collect();
+        self.store(&others, '-', &["\\Deleted"])?;
+        let expunged = self.run("EXPUNGE");
+        let restored = self.store(&others, '+', &["\\Deleted"]);
+        expunged?;
+        restored
+    }
+
+    /// Runs a `UID SEARCH …` command; the matching UIDs, ascending.
+    fn search_uids(&mut self, command: &str) -> RemoteResult<Vec<u32>> {
+        let data = self.run(command)?;
+        let mut uids: Vec<u32> = parse_responses(&data)
+            .into_iter()
+            .flat_map(|response| match response {
+                Response::MailboxData(MailboxDatum::Search(uids)) => uids,
+                _ => Vec::new(),
+            })
+            .collect();
+        uids.sort_unstable();
+        uids.dedup();
+        Ok(uids)
     }
 }
 
@@ -323,18 +356,30 @@ impl MailRemote for ImapRemote {
 
     fn uids(&mut self, folder: &str) -> RemoteResult<Vec<u32>> {
         self.ensure_selected(folder)?;
-        let data = self.run("UID SEARCH ALL")?;
-        let responses = parse_responses(&data);
-        let mut uids: Vec<u32> = responses
-            .into_iter()
-            .flat_map(|response| match response {
-                Response::MailboxData(MailboxDatum::Search(uids)) => uids,
-                _ => Vec::new(),
-            })
-            .collect();
-        uids.sort_unstable();
-        uids.dedup();
-        Ok(uids)
+        self.search_uids("UID SEARCH ALL")
+    }
+
+    /// `UID SEARCH HEADER Message-ID "<id>"`; the highest matching UID (the
+    /// newest copy when a folder holds duplicates).
+    fn find_uid_by_message_id(
+        &mut self,
+        folder: &str,
+        message_id: &str,
+    ) -> RemoteResult<Option<u32>> {
+        let message_id = message_id.trim();
+        if message_id.is_empty() {
+            return Ok(None);
+        }
+        // HEADER search is a substring match: the angle brackets keep
+        // `a@x` from matching `<ba@x>`.
+        let bracketed = if message_id.starts_with('<') {
+            message_id.to_string()
+        } else {
+            format!("<{message_id}>")
+        };
+        self.ensure_selected(folder)?;
+        let command = format!("UID SEARCH HEADER Message-ID {}", quote(&bracketed)?);
+        Ok(self.search_uids(&command)?.last().copied())
     }
 
     fn fetch_headers(&mut self, folder: &str, uids: &[u32]) -> RemoteResult<Vec<RemoteHeader>> {
@@ -1405,11 +1450,75 @@ mod tests {
             vec![
                 SELECT_INBOX,
                 ("UID STORE 1 +FLAGS.SILENT (\\Deleted)", "{tag} OK done\r\n"),
+                ("UID SEARCH DELETED", "* SEARCH 1\r\n{tag} OK done\r\n"),
                 ("EXPUNGE", "{tag} OK done\r\n"),
                 ("LOGOUT", "{tag} OK bye\r\n"),
             ],
         );
         remote.delete_messages("INBOX", &[1]).unwrap();
+        finish(remote, handle);
+    }
+
+    #[test]
+    fn expunge_without_uidplus_spares_other_deleted_messages() {
+        let (mut remote, handle) = session(
+            "* CAPABILITY IMAP4rev1\r\n{tag} OK done\r\n",
+            vec![
+                SELECT_INBOX,
+                ("UID STORE 5 +FLAGS.SILENT (\\Deleted)", "{tag} OK done\r\n"),
+                ("UID SEARCH DELETED", "* SEARCH 2 5 9\r\n{tag} OK done\r\n"),
+                (
+                    "UID STORE 2,9 -FLAGS.SILENT (\\Deleted)",
+                    "{tag} OK done\r\n",
+                ),
+                ("EXPUNGE", "* 3 EXPUNGE\r\n{tag} OK done\r\n"),
+                (
+                    "UID STORE 2,9 +FLAGS.SILENT (\\Deleted)",
+                    "{tag} OK done\r\n",
+                ),
+                // Move fallback (no MOVE): COPY, flag, guarded EXPUNGE.
+                ("UID COPY 7 \"Trash\"", "{tag} OK copied\r\n"),
+                ("UID STORE 7 +FLAGS.SILENT (\\Deleted)", "{tag} OK done\r\n"),
+                ("UID SEARCH DELETED", "* SEARCH 4 7\r\n{tag} OK done\r\n"),
+                ("UID STORE 4 -FLAGS.SILENT (\\Deleted)", "{tag} OK done\r\n"),
+                ("EXPUNGE", "{tag} NO busy\r\n"),
+                // Restored even though the EXPUNGE failed.
+                ("UID STORE 4 +FLAGS.SILENT (\\Deleted)", "{tag} OK done\r\n"),
+                ("LOGOUT", "{tag} OK bye\r\n"),
+            ],
+        );
+        remote.delete_messages("INBOX", &[5]).unwrap();
+        let err = remote.move_messages("INBOX", &[7], "Trash").unwrap_err();
+        assert_eq!(err.kind, RemoteErrorKind::Protocol);
+        finish(remote, handle);
+    }
+
+    #[test]
+    fn find_uid_by_message_id_searches_the_bracketed_header() {
+        let (mut remote, handle) = session(
+            BASIC_CAPS,
+            vec![
+                SELECT_INBOX,
+                (
+                    "UID SEARCH HEADER Message-ID \"<a@x>\"",
+                    "* SEARCH 3 8\r\n{tag} OK done\r\n",
+                ),
+                (
+                    "UID SEARCH HEADER Message-ID \"<b@x>\"",
+                    "* SEARCH\r\n{tag} OK done\r\n",
+                ),
+                ("LOGOUT", "{tag} OK bye\r\n"),
+            ],
+        );
+        assert_eq!(
+            remote.find_uid_by_message_id("INBOX", "a@x").unwrap(),
+            Some(8)
+        );
+        assert_eq!(
+            remote.find_uid_by_message_id("INBOX", "<b@x>").unwrap(),
+            None
+        );
+        assert_eq!(remote.find_uid_by_message_id("INBOX", "  ").unwrap(), None);
         finish(remote, handle);
     }
 

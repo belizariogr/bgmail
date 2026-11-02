@@ -34,6 +34,10 @@ pub struct EngineOptions {
     pub retry_base: Duration,
     /// Reconnect delay cap.
     pub retry_max: Duration,
+    /// Outbox back-off: delay before retry `n` of a message that failed `n`
+    /// times (transient failures and permanent rejections counted
+    /// separately); the last entry repeats.
+    pub send_retry_delays: Vec<Duration>,
 }
 
 impl Default for EngineOptions {
@@ -46,6 +50,9 @@ impl Default for EngineOptions {
             max_body_size: 10 * 1024 * 1024,
             retry_base: Duration::from_secs(1),
             retry_max: Duration::from_secs(5 * 60),
+            send_retry_delays: [60, 5 * 60, 15 * 60, 60 * 60]
+                .map(Duration::from_secs)
+                .to_vec(),
         }
     }
 }
@@ -65,6 +72,9 @@ pub struct Engine {
     events: async_channel::Sender<SyncEvent>,
     options: EngineOptions,
     accounts: Mutex<HashMap<i64, AccountWorker>>,
+    /// Per-account lock handed to every worker of the account (see
+    /// [`Engine::start_account`]); kept for the engine's lifetime.
+    account_locks: Mutex<HashMap<i64, Arc<Mutex<()>>>>,
 }
 
 impl Engine {
@@ -78,6 +88,7 @@ impl Engine {
             events,
             options,
             accounts: Mutex::new(HashMap::new()),
+            account_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -85,8 +96,26 @@ impl Engine {
         self.accounts.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The lock every worker of `account_id` holds while replaying queued
+    /// ops or sending.
+    pub(crate) fn account_lock(&self, account_id: i64) -> Arc<Mutex<()>> {
+        self.account_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(account_id)
+            .or_default()
+            .clone()
+    }
+
     /// Starts syncing `account_id` (replacing a running worker). The worker
     /// opens its own database connection and begins with a full sync.
+    ///
+    /// Handover: the old worker is cancelled and joined for up to
+    /// [`STOP_TIMEOUT`]; one stuck in a blocking call (an SMTP send cannot
+    /// be interrupted) is detached but still holds the account lock until
+    /// that call returns, and the new worker skips queue/outbox work (and
+    /// retries shortly) while it does. Rows being sent are also leased
+    /// (`sending`), so they are never sent twice.
     pub fn start_account(&self, account_id: i64, connector: Arc<dyn MailConnector>) {
         self.stop_account(account_id);
         let (commands, receiver) = mpsc::channel();
@@ -100,6 +129,7 @@ impl Engine {
             cancel: cancel.clone(),
             commands: receiver,
             poke: commands.clone(),
+            account_lock: self.account_lock(account_id),
         };
         let spawned = std::thread::Builder::new()
             .name(format!("bgmail-sync-{account_id}"))
@@ -201,6 +231,19 @@ mod tests {
         assert_eq!(options.max_body_size, 10 * 1024 * 1024);
         assert_eq!(options.retry_base, Duration::from_secs(1));
         assert_eq!(options.retry_max, Duration::from_secs(300));
+        assert_eq!(
+            options.send_retry_delays,
+            [60, 300, 900, 3600].map(Duration::from_secs).to_vec()
+        );
+    }
+
+    #[test]
+    fn account_locks_are_shared_per_account() {
+        let (tx, _rx) = async_channel::unbounded();
+        let engine = Engine::new(PathBuf::from("unused.db"), tx, EngineOptions::default());
+        let first = engine.account_lock(1);
+        assert!(Arc::ptr_eq(&first, &engine.account_lock(1)));
+        assert!(!Arc::ptr_eq(&first, &engine.account_lock(2)));
     }
 
     #[test]

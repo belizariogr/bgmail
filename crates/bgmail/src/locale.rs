@@ -126,6 +126,8 @@ pub enum Key {
     StatusBodyFailed,
     StatusMessageSent,
     StatusSendFailed,
+    StatusSentCopyFailed,
+    ComposeOriginalSending,
     StatusSendRetrying,
     StatusSyncing,
     StatusOffline,
@@ -218,6 +220,15 @@ pub enum Key {
     StatusAttachmentSaved,
     StatusAttachmentFailed,
     StatusAttachmentOpenFailed,
+    StatusActionFailed,
+    StatusRemoveAccountFailed,
+    UnsentTitle,
+    UnsentNoSubject,
+    UnsentMaybeSent,
+    UnsentRetry,
+    UnsentEdit,
+    UnsentDiscardDetail,
+    UnsentActionFailed,
 }
 
 impl Key {
@@ -395,6 +406,14 @@ impl Key {
             (StatusBodyFailed, P) => "Não foi possível baixar a mensagem",
             (StatusMessageSent, E) => "Message sent",
             (StatusMessageSent, P) => "Mensagem enviada",
+            (StatusSentCopyFailed, E) => "Sent, but no copy could be saved in Sent",
+            (StatusSentCopyFailed, P) => "Enviado, mas sem cópia salva em Enviados",
+            (ComposeOriginalSending, E) => {
+                "The original message is being sent again. Try again when it finishes."
+            }
+            (ComposeOriginalSending, P) => {
+                "A mensagem original está sendo reenviada. Tente de novo quando terminar."
+            }
             (StatusSendFailed, E) => "Sending failed",
             (StatusSendFailed, P) => "Falha no envio",
             (StatusSendRetrying, E) => "Sending failed, will retry",
@@ -582,24 +601,66 @@ impl Key {
             (StatusAttachmentFailed, P) => "Não foi possível salvar o anexo",
             (StatusAttachmentOpenFailed, E) => "Could not open the attachment",
             (StatusAttachmentOpenFailed, P) => "Não foi possível abrir o anexo",
+            (StatusActionFailed, E) => "Could not complete the action",
+            (StatusActionFailed, P) => "Não foi possível concluir a ação",
+            (StatusRemoveAccountFailed, E) => "Could not remove the account",
+            (StatusRemoveAccountFailed, P) => "Não foi possível remover a conta",
+            (UnsentTitle, E) => "Unsent messages",
+            (UnsentTitle, P) => "Mensagens não enviadas",
+            (UnsentNoSubject, E) => "(no subject)",
+            (UnsentNoSubject, P) => "(sem assunto)",
+            (UnsentMaybeSent, E) => "May already have been sent",
+            (UnsentMaybeSent, P) => "Pode já ter sido enviada",
+            (UnsentRetry, E) => "Retry",
+            (UnsentRetry, P) => "Tentar novamente",
+            (UnsentEdit, E) => "Edit",
+            (UnsentEdit, P) => "Editar",
+            (UnsentDiscardDetail, E) => "It will not be sent and cannot be recovered.",
+            (UnsentDiscardDetail, P) => "Ela não será enviada e não poderá ser recuperada.",
+            (UnsentActionFailed, E) => "Could not update the unsent message",
+            (UnsentActionFailed, P) => "Não foi possível atualizar a mensagem não enviada",
         }
+    }
+}
+
+/// Picks the singular or plural form for `count` (both languages use the
+/// singular only for exactly one; PT-BR "0 mensagens" is plural too).
+fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
+    if count == 1 {
+        one
+    } else {
+        many
+    }
+}
+
+/// "`count` message(s)" in `language`.
+fn messages_noun(language: Language, count: usize) -> &'static str {
+    match language {
+        Language::English => plural(count, "message", "messages"),
+        Language::Portuguese => plural(count, "mensagem", "mensagens"),
+    }
+}
+
+/// "`count` account(s)" in `language`.
+fn accounts_noun(language: Language, count: usize) -> &'static str {
+    match language {
+        Language::English => plural(count, "account", "accounts"),
+        Language::Portuguese => plural(count, "conta", "contas"),
     }
 }
 
 /// Message list header: number of messages in the current mailbox.
 pub fn message_count(language: Language, count: usize) -> String {
-    match language {
-        Language::English => format!("{count} messages"),
-        Language::Portuguese => format!("{count} mensagens"),
-    }
+    format!("{count} {}", messages_noun(language, count))
 }
 
 /// Status bar (left): account and message counts.
 pub fn status_counts(language: Language, accounts: usize, messages: usize) -> String {
-    match language {
-        Language::English => format!("{accounts} accounts · {messages} messages"),
-        Language::Portuguese => format!("{accounts} contas · {messages} mensagens"),
-    }
+    format!(
+        "{accounts} {} · {messages} {}",
+        accounts_noun(language, accounts),
+        messages_noun(language, messages)
+    )
 }
 
 /// Status bar (left) while a search filter is active.
@@ -609,18 +670,33 @@ pub fn status_search_counts(
     showing: usize,
     total: usize,
 ) -> String {
-    match language {
-        Language::English => format!("{accounts} accounts · {showing} of {total} messages"),
-        Language::Portuguese => format!("{accounts} contas · {showing} de {total} mensagens"),
-    }
+    let of = match language {
+        Language::English => "of",
+        Language::Portuguese => "de",
+    };
+    format!(
+        "{accounts} {} · {showing} {of} {total} {}",
+        accounts_noun(language, accounts),
+        messages_noun(language, total)
+    )
 }
 
 /// Status bar (right): unread count.
 pub fn status_unread(language: Language, unread: usize) -> String {
-    match language {
-        Language::English => format!("{unread} unread"),
-        Language::Portuguese => format!("{unread} não lidas"),
-    }
+    let noun = match language {
+        Language::English => "unread",
+        Language::Portuguese => plural(unread, "não lida", "não lidas"),
+    };
+    format!("{unread} {noun}")
+}
+
+/// Status bar (right): outgoing messages that stopped retrying.
+pub fn status_unsent(language: Language, unsent: usize) -> String {
+    let noun = match language {
+        Language::English => "unsent",
+        Language::Portuguese => plural(unsent, "não enviada", "não enviadas"),
+    };
+    format!("{unsent} {noun}")
 }
 
 /// Attribution line above a quoted reply.
@@ -682,7 +758,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 162] = [
+    const ALL_KEYS: [Key; 173] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -753,6 +829,8 @@ mod tests {
         Key::StatusBodyFailed,
         Key::StatusMessageSent,
         Key::StatusSendFailed,
+        Key::StatusSentCopyFailed,
+        Key::ComposeOriginalSending,
         Key::StatusSendRetrying,
         Key::StatusSyncing,
         Key::StatusOffline,
@@ -845,6 +923,15 @@ mod tests {
         Key::StatusAttachmentSaved,
         Key::StatusAttachmentFailed,
         Key::StatusAttachmentOpenFailed,
+        Key::StatusActionFailed,
+        Key::StatusRemoveAccountFailed,
+        Key::UnsentTitle,
+        Key::UnsentNoSubject,
+        Key::UnsentMaybeSent,
+        Key::UnsentRetry,
+        Key::UnsentEdit,
+        Key::UnsentDiscardDetail,
+        Key::UnsentActionFailed,
     ];
 
     #[test]
@@ -875,6 +962,31 @@ mod tests {
     #[test]
     fn default_language_is_english() {
         assert_eq!(Language::default(), Language::English);
+    }
+
+    #[test]
+    fn counts_use_singular_only_for_one() {
+        let (en, pt) = (Language::English, Language::Portuguese);
+        assert_eq!(status_counts(en, 1, 1), "1 account · 1 message");
+        assert_eq!(status_counts(en, 0, 2), "0 accounts · 2 messages");
+        assert_eq!(status_counts(pt, 1, 1), "1 conta · 1 mensagem");
+        assert_eq!(status_counts(pt, 2, 0), "2 contas · 0 mensagens");
+        assert_eq!(
+            status_search_counts(en, 1, 0, 1),
+            "1 account · 0 of 1 message"
+        );
+        assert_eq!(
+            status_search_counts(pt, 3, 1, 5),
+            "3 contas · 1 de 5 mensagens"
+        );
+        assert_eq!(message_count(en, 1), "1 message");
+        assert_eq!(message_count(pt, 7), "7 mensagens");
+        assert_eq!(status_unread(en, 1), "1 unread");
+        assert_eq!(status_unread(pt, 1), "1 não lida");
+        assert_eq!(status_unread(pt, 3), "3 não lidas");
+        assert_eq!(status_unsent(en, 2), "2 unsent");
+        assert_eq!(status_unsent(pt, 1), "1 não enviada");
+        assert_eq!(status_unsent(pt, 4), "4 não enviadas");
     }
 
     #[test]

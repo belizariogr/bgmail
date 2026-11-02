@@ -86,6 +86,17 @@ impl Database {
         Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
     }
 
+    /// Runs `body` in one write transaction, committed when it returns `Ok`.
+    /// For callers outside this crate whose read-then-write must not
+    /// interleave with the other connection; `body` must not open another
+    /// transaction.
+    pub fn atomically<T>(&self, body: impl FnOnce() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+        let tx = self.write_transaction()?;
+        let value = body()?;
+        tx.commit()?;
+        Ok(value)
+    }
+
     fn migrate(&self) -> rusqlite::Result<()> {
         crate::migration::migrate(&self.conn)?;
         self.repair_starred_folder_membership()

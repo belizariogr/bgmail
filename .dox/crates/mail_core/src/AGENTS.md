@@ -57,6 +57,7 @@ _(none — modules are files; their APIs are cataloged below.)_
   - **`to_json`** (pub) — serde JSON (falls back to `{}`).
   - **`secret_key`** (pub) — `bgmail://<username>@<imap host>`; keychain key of the password/refresh token.
   - **`uses_oauth`** (pub) — whether `auth` is `OAuth2`.
+- **`default_sync_window`** (private) — serde default for `sync_window`: `DEFAULT_SYNC_WINDOW`.
 - Tests: `json_round_trips`, `invalid_or_local_json_is_none`, `missing_auth_and_window_use_defaults`, `oauth_serializes_with_a_kind_tag`, `secret_key_depends_on_login_and_host`, `default_ports_follow_security`.
 
 ### `src/cancel.rs`
@@ -67,6 +68,7 @@ _(none — modules are files; their APIs are cataloged below.)_
   - **`is_cancelled`** (pub).
   - **`on_cancel(hook) -> CancelGuard`** (pub) — registers a hook (runs at once when already cancelled); the guard unregisters it on drop.
   - `lock_hooks` / `remove` (private) — poison-tolerant hook list access; removal by id.
+  - `hook_count` (`cfg(test)`) — registered hooks.
 - **struct `CancelGuard`** — `Drop` unregisters its hook.
 - Tests: `cancel_sets_flag_and_runs_hooks_once`, `dropped_guard_unregisters_hook`, `hook_registered_after_cancel_runs_immediately`, `debug_shows_state`.
 
@@ -271,16 +273,22 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **struct `RemoteFlags { uid, flags, modseq }`**.
 - **struct `Capabilities { idle, r#move, uidplus, condstore, gmail, special_use }`**: Default all false.
 - **enum `IdleOutcome { Changed, Timeout, Stopped }`**.
+- **enum `SendFailure { Transient, Permanent, Uncertain }`**: what a failed submission means for the message. `Transient`: certainly not accepted, likely to work later (connection/TLS/auth before the data, `4xx`). `Permanent`: `5xx` or unsendable. `Uncertain`: broke after the data started, the server may have accepted it; never resent automatically.
+- **struct `SendError { failure, error: RemoteError }`**: Display delegates to `error`, `std::error::Error`.
 
 #### Functions / methods
 
 - **`RemoteErrorKind::as_str`** (pub) — distinct lowercase names (`"not found"` for NotFound).
 - **`RemoteError::new`** (pub) — `pub fn new(kind: RemoteErrorKind, message: impl Into<String>) -> Self`.
 - **`Display for RemoteError::fmt`** — format above.
+- **`SendError::transient`** / **`permanent`** / **`uncertain`** (pub) — `(error: RemoteError) -> Self`.
+- **`From<RemoteError> for SendError`** — errors raised before any message data: `Auth`/`Network`/`Tls`/`Cancelled` → transient, the rest permanent.
 
 #### Trait `MailRemote: Send` (object-safe, blocking)
 
 - `capabilities(&self) -> Capabilities`; `list_folders(&mut self) -> RemoteResult<Vec<RemoteFolder>>`; `select(&mut self, folder) -> RemoteResult<FolderStatus>` (EXAMINE/SELECT); `uids(&mut self, folder) -> RemoteResult<Vec<u32>>` (ascending); `fetch_headers(&mut self, folder, uids) -> RemoteResult<Vec<RemoteHeader>>` (unknown UIDs skipped); `fetch_flags(&mut self, folder, uids, changed_since: Option<u64>) -> RemoteResult<Vec<RemoteFlags>>` (only modseq > since when given); `fetch_body(&mut self, folder, uid) -> RemoteResult<Vec<u8>>` (BODY.PEEK[], never sets `\Seen`); `store_flags(&mut self, folder, uids, add, remove) -> RemoteResult<()>` (only `true` fields applied); `move_messages(&mut self, from, uids, to) -> RemoteResult<Option<Vec<u32>>>` (new UIDs when COPYUID known); `delete_messages(&mut self, folder, uids) -> RemoteResult<()>` (`\Deleted` + expunge); `append(&mut self, folder, flags, raw) -> RemoteResult<()>`; `create_folder(&mut self, name) -> RemoteResult<()>`; `noop(&mut self) -> RemoteResult<()>`; `logout(&mut self)` (infallible); `idle(&mut self, folder, timeout, cancel) -> RemoteResult<IdleOutcome>` (default: `Unsupported`).
+
+- `find_uid_by_message_id(&mut self, folder, message_id) -> RemoteResult<Option<u32>>` — UID of the message with that `Message-ID` (brackets optional), selecting the folder; the highest when several match; the default (servers that can't search) reports `None`. Re-finds a message after its cached UID went stale. `delete_messages` must not expunge other `\Deleted` messages.
 
 #### Trait `MailConnector: Send + Sync`
 
@@ -288,11 +296,11 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 #### Trait `MailSender: Send`
 
-- `send(&mut self, from: &str, recipients: &[String], raw: &[u8]) -> RemoteResult<()>` — `raw` sent as-is; `recipients` is the envelope.
+- `send(&mut self, from: &str, recipients: &[String], raw: &[u8]) -> Result<(), SendError>` — implementors classify failures honestly (`Uncertain` whenever the server may have accepted it); `raw` sent as-is; `recipients` is the envelope.
 
 #### Tests
 
-- `default_idle_is_unsupported`, `error_display_and_source`, `kind_names_are_distinct`, `traits_are_object_safe_and_send`.
+- `default_idle_and_search_are_unsupported`, `send_errors_classify_by_kind`, `error_display_and_source`, `kind_names_are_distinct`, `traits_are_object_safe_and_send`.
 
 ### `src/fake.rs` (`cfg(any(test, feature = "fake"))`)
 
@@ -327,6 +335,8 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`lock`** (private) — locks state, recovering from poison.
 - **`notify`** (private) — `notify_all` on the change condvar (wakes `idle`).
 - **`enter`** (private) — logs the call, then pops a queued failure (→ `Err(kind, "injected failure")`) or returns the guard.
+- **`on_next_call`** (pub) — `(prefix, hook)`: runs `hook` once, the next time a call whose log line starts with `prefix` arrives, before it takes effect and outside the server lock; lets tests act as the UI or another client while the engine is "on the network".
+- **`take_hook`** (private) — removes the first hook registered for a call.
 - **`set_capabilities`** (pub) — replaces advertised capabilities (affects modseq reporting and COPYUID).
 - **`add_folder`** (pub) — `(name, attributes: &[&str]) -> u32`; creates with a new UIDVALIDITY (1, 2, …) and uid_next 1; existing folder untouched; returns its UIDVALIDITY.
 - **`deliver`** (pub) — `(folder, raw, flags) -> u32`; appends server-side; panics if the folder is missing.
@@ -340,8 +350,16 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`selected`** (pub) — last successfully selected folder.
 - **`is_logged_out`** (pub) — whether `logout` was called.
 
+##### Context: `FakeSender` (additions)
+
+- **`fail_next`** (pub) — queues a failure classified by `SendError::from(kind)`.
+- **`fail_next_with`** (pub) — queues an exact `SendError`.
+- **`deliver_then_fail_next`** (pub) — next send is recorded as delivered, then fails `Uncertain` (the duplicate-send scenario).
+- **`sends`** (pub) — `send` calls so far, successful or not.
+
 ##### Context: `impl MailRemote for FakeRemote`
 
+- **`find_uid_by_message_id`** — highest UID whose parsed `Message-ID` matches (brackets optional); blank → `None`; logged as `find_uid <folder> <id>`.
 - All fallible methods go through `enter` (logged + failure injection); unknown folders → `NotFound`.
 - `capabilities` (not logged); `list_folders` (`RemoteFolder::new` with `/`); `select` (status with `highest_modseq` = max message modseq when CONDSTORE; records selection); `uids`; `fetch_headers` (header block, size, modseq when CONDSTORE, `has_attachments` from `parse_message`); `fetch_flags` (filters by `changed_since`); `fetch_body` (raw, flags untouched; missing UID → `NotFound`); `store_flags` (one new modseq for the batch); `move_messages` (removes from source, inserts into target with new UIDs/modseqs; `Some(new_uids)` only with UIDPLUS); `delete_messages`; `append`; `create_folder` (existing → `Protocol`); `noop`; `logout` (logged, sets flag, never fails).
 - `fetch_headers` reports `gm_msgid = fake_gm_msgid(raw)` only when `capabilities.gmail`.

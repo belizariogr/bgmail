@@ -404,8 +404,8 @@ window.
   - Behavior: `can_send == false` for local/demo accounts (listed, marked "Can't send", rejected on Send).
 
 - **`ComposeInit`** (pub, L101)
-  - Signature: `pub struct ComposeInit { account_id: Option<i64>, draft: mail_core::Draft }`
-  - Purpose: Prefill for reply / reply all / forward (built by `RootView::reply_to_selected`).
+  - Signature: `pub struct ComposeInit { account_id: Option<i64>, draft: mail_core::Draft, replaces_outgoing: Option<i64> }`
+  - Purpose: Prefill for reply / reply all / forward (built by `RootView::reply_to_selected`) and for editing an unsent message (`compose_init_from_outgoing`, which sets `replaces_outgoing` to its outbox row id).
 
 - **`AddressField`** (private enum, L109) — `To | Cc | Bcc`, the address-list fields.
 
@@ -487,7 +487,7 @@ window.
   - Behavior: Ensures key bindings, creates the editors (To placeholder `ComposeFieldPlaceholder`, body placeholder `ComposeBodyPlaceholder`, `min_lines(BODY_MIN_LINES)`, `track_scroll`), subscribes to `Changed` (address fields clear their error; all mark edited), picks the From account and calls `apply_init`.
 
 - **`apply_init`** (pub(crate), L305)
-  - Behavior: Replaces every field from `init` (blank when `None`): From via `account_index(init.account_id)`, To/Cc/Bcc via `format_address_list`, subject, body (caret at start), attachments, reply headers; shows Cc/Bcc when prefilled; clears errors, picker and `edited`; focuses per `initial_focus`. Root calls it when a reply is opened while the window is already open.
+  - Behavior: Replaces every field from `init` (blank when `None`): From via `account_index(init.account_id)`, `replaces_outgoing`, To/Cc/Bcc via `format_address_list`, subject, body (caret at start), attachments, reply headers; shows Cc/Bcc when prefilled; clears errors, picker and `edited`; focuses per `initial_focus`. Root calls it when a reply is opened while the window is already open.
 
 - **`set_white_background`** (pub(crate), L340) — updates the cached pref and notifies on change.
 
@@ -509,7 +509,7 @@ window.
 
 - **`send_message`** (pub(crate), L405)
   - Signature: `pub(crate) fn send_message(&mut self, cx: &mut Context<Self>)`
-  - Behavior: No-op unless `can_send_now`. Runs `build_draft`; on errors stores them (showing Cc/Bcc when they hold one). On success sets `sending` and, in a spawned task (the menu action reaches here while `RootView` is leased), calls `RootView::send_draft(account_id, draft)`, then `finish_send`; when sent, notifies `on_compose_window_closed` and removes the window via the stored handle.
+  - Behavior: No-op unless `can_send_now`. Runs `build_draft`; on errors stores them (showing Cc/Bcc when they hold one). On success sets `sending` and, in a spawned task (the menu action reaches here while `RootView` is leased), calls `RootView::send_draft(account_id, draft, replaces_outgoing)`, then `finish_send`; when sent, notifies `on_compose_window_closed` and removes the window via the stored handle.
 
 - **`finish_send`** (private, L454) — clears `sending`; on `Err` shows the message in the banner; returns whether it was sent.
 
@@ -1095,22 +1095,30 @@ Message dates in the local zone (chrono `clock`); the formatting core takes expl
 - **`message_count`** (pub, L295)
   - Signature: `pub fn message_count(language: Language, count: usize) -> String`
   - Purpose: Localized message-list header count.
-  - Behavior: English `"{count} messages"`; Portuguese `"{count} mensagens"`.
+  - Behavior: `"{count} message|messages"` / `"{count} mensagem|mensagens"` (singular only for exactly 1, via `messages_noun`).
 
 - **`status_counts`** (pub, L303)
   - Signature: `pub fn status_counts(language: Language, accounts: usize, messages: usize) -> String`
   - Purpose: Status bar left segment with account and message totals.
-  - Behavior: English `"{accounts} accounts · {messages} messages"`; Portuguese uses "contas" and "mensagens".
+  - Behavior: `"{accounts} account(s) · {messages} message(s)"`; Portuguese "conta(s)" / "mensagem|mensagens"; each noun singular only for 1.
 
 - **`status_search_counts`** (pub, L311)
   - Signature: `pub fn status_search_counts(language: Language, accounts: usize, showing: usize, total: usize) -> String`
   - Purpose: Status bar left segment while search filtering is active.
-  - Behavior: English `"{accounts} accounts · {showing} of {total} messages"`; Portuguese uses "de" phrasing.
+  - Behavior: `"{accounts} account(s) · {showing} of {total} message(s)"` (noun agrees with `total`); Portuguese "de".
 
 - **`status_unread`** (pub, L324)
   - Signature: `pub fn status_unread(language: Language, unread: usize) -> String`
-  - Purpose: Status bar right segment with unread count and sync hint.
-  - Behavior: English `"{unread} unread · Updated just now"`; Portuguese uses "não lidas · Atualizado agora".
+  - Purpose: Status bar right segment with the unread count.
+  - Behavior: English `"{unread} unread"`; Portuguese `"1 não lida"` / `"{n} não lidas"`.
+
+- **`status_updated_at`** (pub) — "Updated at HH:MM" text for the status bar.
+- **`status_unsent`** (pub)
+  - Signature: `pub fn status_unsent(language: Language, unsent: usize) -> String`
+  - Purpose: Status bar indicator of outgoing messages that stopped retrying.
+  - Behavior: English `"{n} unsent"`; Portuguese `"1 não enviada"` / `"{n} não enviadas"`.
+
+- **`plural`** / **`messages_noun`** / **`accounts_noun`** (private): pick singular (count == 1) or plural forms; shared by the count helpers above.
 
 - **`status_zoom`** (pub)
   - Signature: `pub fn status_zoom(language: Language, zoom: f32) -> String`
@@ -1140,6 +1148,8 @@ Message dates in the local zone (chrono `clock`); the formatting core takes expl
   - Signature: `fn default_language_is_english()` (test)
   - Purpose: Confirms `Language::default()` is English.
   - Behavior: Equality assertion on default enum value.
+
+- **`counts_use_singular_only_for_one`** (test): singular/plural of accounts, messages, unread and unsent counts in EN and PT-BR (including "0 … messages", search counts agreeing with the total).
 
 - **`formatted_strings_include_arguments`** (private, L463)
   - Signature: `fn formatted_strings_include_arguments()` (test)
@@ -1202,8 +1212,11 @@ Bridge between the UI and `mail_sync::Engine` (plain Rust; the event loop lives 
 - **`credential_for(config, secret)`** (pub): keychain bytes → `protocols::Credential` (password, or OAuth refresh token + provider from `oauth_provider`); empty/non-UTF-8 → `MissingSecret`.
 - **`connector_for(config_json, secret)`** (pub): `AccountConfig` JSON + secret → `Arc<dyn MailConnector>` (`ImapSmtpConnector`, default `ConnectOptions`); local `{}` → `NotRemote`.
 - **enum `OverallStatus { None, Syncing, UpToDate(ts), Offline(msg), AuthFailed(id), Error(msg) }`** and **`overall_status(statuses)`** (pub): folds per-account statuses, most urgent first (auth → error → offline → syncing → up to date, newest `last_sync`).
-- **struct `MailService`**: `new(db_path) -> (Self, Receiver<SyncEvent>)` (unbounded channel, default `EngineOptions`); `engine()`; `start_account(id, connector)` (status `Connecting`); `stop_account(id)` (stops threads, forgets status); `set_status(id, status)` (ignored for accounts not running); `status(id)`; `overall()`; `process_queue(id)` (`Command::ProcessQueue`).
-- Tests: password credential, missing/invalid secret, unknown OAuth provider, local accounts, status folding order, statuses only for running accounts.
+- **type `BlockingJob = Box<dyn FnOnce() + Send>`**: worker start/stop work that may wait up to `mail_sync::STOP_TIMEOUT`; callers run it off the UI thread (`cx.background_spawn`).
+- **struct `MailService`** (engine held in an `Arc` shared with its jobs): `new(db_path) -> (Self, Receiver<SyncEvent>)` (unbounded channel, default `EngineOptions`); `engine()`; `start_account(id, connector) -> BlockingJob` (status `Connecting` now; the job (re)starts the worker); `stop_account(id) -> BlockingJob` (forgets the status now; the job stops the threads); `set_status(id, status)` (ignored for accounts not running); `status(id)`; `overall()`; `process_queue(id)` (`Command::ProcessQueue`).
+- **`job(id, work)`** (private): wraps `work(&Engine)` in a `BlockingJob` tagged with a new generation; jobs run one at a time (`job_serial`) and a job whose generation is no longer the account's newest is skipped (last request wins, no two jobs race on one worker slot).
+- **`lock(mutex)`** (private): poison-tolerant `Mutex::lock`.
+- Tests: password credential, missing/invalid secret, unknown OAuth provider, local accounts, status folding order, statuses only for running accounts, only the newest job per account runs.
 
 ### `src/notifications.rs`
 
@@ -1211,8 +1224,11 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **struct `Notice { summary, body }`**.
 - **`notices_for(account, messages, language)`** (pub): one notice per message (sender or account name; subject or "(no subject)"/"(sem assunto)") up to 3; a burst becomes one "N new messages" summary.
 - **`notify_new_mail(account, messages, language)`** (pub): spawns a short-lived thread showing the notices (errors logged).
-- **`show(notice)`** (private): `notify_rust::Notification` with app name "BGMail".
-- Tests: empty, per-message notices with fallbacks, burst summary.
+- **const `WINDOW_APP_ID`** = `io.github.belizariogr.bgmail` (packager `identifier`; the NSIS shortcut's AppUserModelID).
+- **`shortcut_candidates(programs_dirs)`** (private): `BGMail.lnk` and `BGMail\BGMail.lnk` under each Start Menu `Programs` folder.
+- **`windows_app_id()`** (private, Windows only): `Some(WINDOW_APP_ID)` when an installer shortcut exists under `%APPDATA%` / `%PROGRAMDATA%` Start Menu, else `None` (unpackaged runs keep notify-rust's PowerShell id: Windows drops toasts from an unregistered id).
+- **`show(notice)`** (private): `notify_rust::Notification` with app name "BGMail"; on Windows also `.app_id(windows_app_id())` when registered.
+- Tests: empty, per-message notices with fallbacks, burst summary, shortcut candidates + app id value.
 
 ### `src/main.rs`
 
@@ -1273,7 +1289,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`main`** (private, L181)
   - Signature: `fn main()`
   - Purpose: Application entry point.
-  - Behavior: Startup milestones, theme/locale init, window open with persisted bounds, Windows cloaked maximize sequence, persistence hooks and globals.
+  - Behavior: Startup milestones, theme/locale init, window open with persisted bounds (main window `app_id` `root::WINDOW_APP_ID` = Wayland app_id / X11 WM_CLASS, matching the packaged `BGMail.desktop`), Windows cloaked maximize sequence, persistence hooks and globals.
 
 - **`command_palette_shortcut_matches_ctrl_p_and_cmd_p`** (private, L391)
   - Signature: `fn command_palette_shortcut_matches_ctrl_p_and_cmd_p()`
@@ -1288,6 +1304,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **const `LIST_MIN_WIDTH`**: Minimum message-list column width (350px).
 - **const `READER_MIN_WIDTH`**: Minimum reading-pane width (550px).
 - **const `WINDOW_MIN_WIDTH` / `WINDOW_MIN_HEIGHT`**: Minimum main window size (950×480px); exported for startup clamping.
+- **const `WINDOW_APP_ID`** = `"BGMail"`: Wayland app_id / X11 WM_CLASS of the main, compose and settings windows (matches the packaged `BGMail.desktop`).
 - **const `NARROW_BREAKPOINT`**: Window width (1200px) below which sidebar auto-collapses and floats when reopened.
 - **const `RESIZE_HANDLE_WIDTH`**: Hit width of column resize dividers (6px).
 - **const `FOLD_ANIM_MS`**: Fixed sidebar account fold animation duration (90ms).
@@ -1741,7 +1758,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`open_compose_with`** (pub(crate))
   - Signature: `pub(crate) fn open_compose_with(&mut self, init: Option<ComposeInit>, _window, cx: &mut Context<Self>)`
   - Purpose: Opens the compose window, optionally prefilled (reply / reply all / forward).
-  - Behavior: When a compose window is open, hands a `Some(init)` to it via `ComposeView::apply_init` and activates it. Otherwise opens a window with persisted bounds, the localized title and `ComposeView::new(self.compose_accounts(), root, compose_white_background, init, window, cx)`; `on_window_should_close` notifies `on_compose_window_closed`.
+  - Behavior: New windows carry `app_id: WINDOW_APP_ID`. When a compose window is open, hands a `Some(init)` to it via `ComposeView::apply_init` and activates it. Otherwise opens a window with persisted bounds, the localized title and `ComposeView::new(self.compose_accounts(), root, compose_white_background, init, window, cx)`; `on_window_should_close` notifies `on_compose_window_closed`.
 
 - **`select_mailbox`** (private, L1780)
   - Signature: `fn select_mailbox(&mut self, selection: Selection, cx: &mut Context<Self>)`
@@ -1925,7 +1942,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_status_bar`** (private, L3300)
   - Signature: `fn render_status_bar(&self, cx) -> impl IntoElement`
   - Purpose: Bottom status bar.
-  - Behavior: Counts on the left; on the right the reader zoom (`status_zoom`, only when not 100%) and the unread count; the hovered link URL centered when present.
+  - Behavior: Counts on the left; on the right the reader zoom (`status_zoom`, only when not 100%), "N unsent" (`status_unsent`, `Color::Warning`, click → `toggle_unsent_panel`) while `unsent` is non-empty, the sync text and the unread count; the hovered link URL centered when present.
 ##### Context: `Render for RootView`
 
 - **`render`** (private, L3697)
@@ -2135,30 +2152,38 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 
 - **`start_mail(cx)`** (pub(crate)): creates `MailService` once (engine on `db_path`), spawns the task awaiting `SyncEvent`s into `on_sync_event`, and starts every remote account. Called from `main` after the window exists (never blocks the first frame).
 - **`start_account(account, cx)`** (private): skips `local` accounts; reads the secret with `cx.read_credentials(config.secret_key())` asynchronously, then `start_account_with_secret`.
-- **`start_account_with_secret(id, config_json, secret, cx)`** (private): builds the connector (`mail_service::connector_for`) and starts it, or records a `StartError` (status bar / settings show it).
-- **`on_sync_event(event, cx)`** (private): `Status` → service status; `MailboxChanged`/`FoldersChanged`/`BodyReady`/`Sent` → `schedule_reload` (BodyReady also re-renders the open message); `NewMail` → desktop notifications when `notifications_enabled`; `BodyFailed`/`Sent`/`SendFailed` → status notes.
+- **`start_account_with_secret(id, config_json, secret, cx)`** (private): returns when the id is no longer in `accounts` (removed while its keychain read was pending; a new worker would outlive it); builds the connector (`mail_service::connector_for`) and runs `MailService::start_account`'s job on `cx.background_spawn` (replacing a worker waits for the old one), or records a `StartError` (status bar / settings show it).
+- **`on_sync_event(event, cx)`** (private): `Status` → service status (ignored for accounts being removed); `Sent`/`SendFailed` also `refresh_unsent`; `SentCopyFailed` → `StatusSentCopyFailed` note; `MailboxChanged`/`FoldersChanged`/`BodyReady`/`Sent` → `schedule_reload` (BodyReady also re-renders the open message); `NewMail` → desktop notifications when `notifications_enabled`; `BodyFailed`/`Sent`/`SendFailed` → status notes.
 - **`set_status_note(note, cx)`** (private): shows a note in the status bar for 6 s (token-guarded timer).
 - **`schedule_reload(cx)`** (private): coalesces event bursts into one `reload_from_database` 250 ms later.
-- **`reload_from_database()`** (pub(crate)): re-reads accounts, folders and the current list.
+- **`reload_from_database()`** (pub(crate)): re-reads accounts (minus `removing_accounts`), folders, the current list (also minus removing accounts, in `reload_message_list`) and the unsent rows (`refresh_unsent`).
+- **`refresh_unsent()`** (private): `load_unsent` into `unsent`, reusing parsed subjects; closes the panel when empty.
 - **`sync_now(cx)`** (pub(crate)): `Command::Reconnect` for every account (clears back-off/auth failure and syncs).
 - **`accounts()`**, **`account_status(id)`**, **`account_start_error(id)`** (pub(crate)): read access for the settings window.
-- **`add_remote_account(name, config, secret, cx)`** (pub(crate)): creates the account (`imap`/`gmail` provider), writes the secret to the keychain (`store_secret`), reloads, starts syncing at once with the in-memory secret and requests `SyncNow`.
-- **`update_account_secret(id, secret, cx)`** (pub(crate)): rewrites the keychain secret and restarts the account.
+- **`add_remote_account(name, config, secret, cx)`** (pub(crate)): creates the account (`imap`/`gmail` provider), writes the secret to the keychain (`store_secret`), reloads and starts syncing with the in-memory secret (the new worker begins with a full sync).
+- **`update_account_secret(id, secret, cx)`** (pub(crate)): rewrites the keychain secret and restarts the account (worker restart off the UI thread via `start_account_with_secret`).
 - **`store_secret(config, secret, cx)`** (private): `cx.write_credentials` on a background task (errors logged).
-- **`remove_account(id, cx)`** (pub(crate)): stops the worker, deletes the keychain secret and the account's local data, fixes selection/mailbox, reloads.
+- **`remove_account(id, cx)`** (pub(crate)): never blocks the UI thread. Immediately: takes `MailService::stop_account`'s job, adds the id to `removing_accounts` (hidden from accounts/folders/list/unsent), fixes selection/mailbox, reloads. Background: runs the stop job, then `storage::Database::open(db_path)?.delete_account(id)` on its own connection. Afterwards: drops the id from `removing_accounts`, on success deletes the keychain secret; a failure becomes a `StatusRemoveAccountFailed` note and the account comes back working (secret kept, worker restarted after the reload). The status-bar unread total may still count its mail until the delete finishes.
+- **`toggle_unsent_panel(cx)`** (pub(crate)): opens/closes the unsent panel (only opens with rows).
+- **`report_unsent_error(error, cx)`** (private): `UnsentActionFailed: {error}` status note.
+- **`retry_unsent(id, cx)`** (pub(crate)): `storage::Database::retry_outgoing(id)`; when it changed the row, `MailService::process_queue(account)` + "Updating…" note; error → note; refreshes.
+- **`edit_unsent(id, window, cx)`** (pub(crate)): reads the row with `outgoing` (ignored unless stopped), parses its raw (`parse_message`, default when unparseable), closes the panel and opens compose with `compose_init_from_outgoing`. The row is kept until the edited copy is queued (`send_draft` replaces it), so closing compose loses nothing.
+- **`discard_unsent(id, window, cx)`** (pub(crate)): `window.prompt` (Warning; `ComposeDiscardConfirm` / `UnsentDiscardDetail`, Discard / Cancel); Discard → `delete_outgoing(id)` (error → note), refreshes.
+- **`render_unsent_panel(cx)`** (private): full-window occluder (mouse-down outside closes) with a scrollable elevated panel above the status bar's right edge: title, then per row the subject (or "(no subject)"), "To: recipients", `last_error` (`Color::Error`), the "May already have been sent" hint (`Color::Warning`) for `maybe_sent`, and Retry / Edit / Discard buttons.
 - **`open_selected_message()`** (private): marks the opened message read (`mail_sync::actions::set_read` + queue) and asks for its body (`Command::FetchBody`) when only headers are stored.
 - **`after_action(account_id, outcome)`** (private): wakes the account's worker when an action queued server work.
-- **`run_message_action(cx, action)`** (private): runs a `mail_sync::actions` function on the selected message, reloads the list and selects the message that took its place (opening it).
+- **`run_message_action(cx, action)`** (private): runs a `mail_sync::actions` function on the selected message (an error, e.g. "database is locked", becomes a `StatusActionFailed: {error}` status note), reloads the list and selects the message that took its place (opening it).
 - **`toggle_message_read(cx)`** (pub(crate)): read ↔ unread for the selected message (stays selected).
 - Message actions `delete_message_to_trash`, `restore_message`, `archive_message`, `mark_message_junk`, `toggle_message_flag`, `move_message_to_folder`, `delete_message_permanently` (only in Trash) all go through `run_message_action` (local change now, server op queued).
 - **`compose_accounts()`** (pub(crate)): `ComposeAccount`s (sending accounts first; local ones `can_send = false`).
 - **`reply_to_selected(kind, window, cx)`** (pub(crate)): parses the stored raw message (or `parsed_from_detail`), builds a `mail_core::prepare_reply` draft with localized quote labels (`locale::reply_attribution`, `Key::Quote*`, `Key::ForwardHeader`), carries attachments on forward, opens compose with it.
-- **`send_draft(account_id, draft, cx)`** (pub(crate)): refuses local accounts / no recipients (localized errors), builds the RFC 822 message (`new_message_id` + `unique_token`, `build_message`), enqueues it in the outbox and wakes the worker.
-- **`open_settings_section(section, window, cx)`** (pub(crate)): focuses the open settings window on `section`, or opens a new one **deferred** (`cx.defer`) — the settings view reads `RootView` while rendering and GPUI renders a new window synchronously, which would re-enter the entity being updated (panic found in the GUI run).
+- **`send_draft(account_id, draft, replaces_outgoing, cx)`** (pub(crate)): refuses local accounts / no recipients (localized errors), builds the RFC 822 message (`new_message_id` + `unique_token`, `build_message`), then queues it and wakes the worker. With `replaces_outgoing` (an edited unsent message) queueing is `replace_outgoing`, atomic with removing the original; when the original was retried meanwhile nothing is queued and `ComposeOriginalSending` is returned, so both can't go out.
+- **`open_settings_section(section, window, cx)`** (pub(crate)): focuses the open settings window on `section`, or opens a new one **deferred** (`cx.defer`) — the settings view reads `RootView` while rendering and GPUI renders a new window synchronously, which would re-enter the entity being updated (panic found in the GUI run). The settings window carries `app_id: WINDOW_APP_ID`.
 - **`render_recipients(message, cx)`** (private): "To:"/"Cc:" lines under the sender (hidden when empty).
 - **`sync_status_text(language)`** (private): status bar sync text: a recent note, else start errors, else `OverallStatus` (Updating… / Updated at HH:MM / Offline / Sign-in failed: email / Sync error).
 - **`render_welcome(cx)`** (private): shown instead of list + reader while no account exists; "Add account…" opens Settings ▸ Accounts.
-- Module helpers: **`parsed_from_detail(detail)`** (stored detail → minimal `ParsedMessage` for reply/forward of local/demo mail), **`forwarded_attachments(raw, parsed)`** (non-inline parts as `OutgoingAttachment`s), **`unique_token()`** (random-seeded hash of a counter + time for Message-IDs).
+- Module helpers: **`parsed_from_detail(detail)`** (stored detail → minimal `ParsedMessage` for reply/forward of local/demo mail), **`forwarded_attachments(raw, parsed)`** (non-inline parts as `OutgoingAttachment`s), **`unique_token()`** (random-seeded hash of a counter + time for Message-IDs), **struct `UnsentItem { id, account_id, subject, recipients, error, maybe_sent }`**, **`unsent_item(row, subject)`** (outbox row → panel summary: recipients comma-joined, blank `last_error` → `None`, `maybe_sent` from `OutgoingState::MaybeSent`), **`load_unsent(db, removing, previous)`** (`failed_outgoing` minus removing accounts; subjects reused from `previous` by id, else parsed from one `outgoing` read (the listing has no raw); read error logged and `previous` kept), **`compose_init_from_outgoing(row, parsed)`** (`ComposeInit` for Edit: from/to/cc/subject/text/threading headers/attachments from the parsed raw, envelope recipients missing from To/Cc restored as Bcc, `replaces_outgoing = row.id`).
+- Tests: `unsent_item_summarizes_the_row`, `compose_init_from_outgoing_restores_the_draft`, `removing_an_account_hides_it_until_reload_clears_it` (see the tests module).
 - Tests (existing, still contracts): `find_steps_wrap_around`, `plain_text_reasons_follow_crash_size_and_override`, `reader_selection_is_a_translucent_accent`, plus the layout/selection/action tests listed above.
 
 ### `src/settings.rs`

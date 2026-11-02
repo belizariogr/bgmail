@@ -22,10 +22,12 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
 
 - DB path: `~/.config/BGMail/mail.db` via `database_path` (portable home
   resolution; no GPUI).
-- **Schema v2** (`schema.rs`, `SCHEMA_VERSION = 2`). `migration.rs` applies
+- **Schema v3** (`schema.rs`, `SCHEMA_VERSION = 3`). `migration.rs` applies
   steps by `meta.schema_version` inside one `BEGIN IMMEDIATE` transaction:
   base v1 DDL (`CREATE … IF NOT EXISTS`), then v1→v2 = `ALTER TABLE ADD COLUMN`
-  (skipped when the column exists) + new tables/indexes/FTS + FTS `rebuild`.
+  (skipped when the column exists) + new tables/indexes/FTS + FTS `rebuild`,
+  then v2→v3 = outbox `state`, `next_attempt_at`, `lease_at`, `deferrals` +
+  `idx_outbox_account_state` (old rows become `queued`, due now).
   Never drop/recreate tables: user mail must survive. v1 accounts become
   `provider = 'local'`; v1 messages get `date_ts = 0`, `body_state = 1`.
   New versions = new step function + bumped constant + migration test built
@@ -38,6 +40,21 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
   `messages` so list queries stay small), `attachments`, `pending_ops`
   (`message_id` has no FK: ops must outlive deleted messages), `outbox`. Every
   child table cascades from its account/message.
+- **Outbox states** (`OutgoingState`, `outbox.state`): `queued` (due when
+  `next_attempt_at <= now`) → `sending` (`claim_outgoing`, atomic, leased)
+  → deleted (`complete_outgoing`) or `append_pending` (sent; raw kept for the
+  Sent copy) / `queued` again (`defer_outgoing`: transient, `deferrals + 1`;
+  `fail_outgoing`: permanent, `attempts + 1`, `failed` at the caller's
+  limit) / `maybe_sent` (`mark_outgoing_maybe_sent`, or a lease older than
+  the caller's cutoff via `expire_outgoing_leases`). `failed` and
+  `maybe_sent` are terminal until the user acts: `failed_outgoing` lists
+  them (all accounts), `retry_outgoing` resets to `queued`,
+  `delete_outgoing` discards. `outbox_count` = `queued` + `sending`. Retry
+  policy (delays, limits) belongs to the caller (`mail_sync`).
+- **Queued op concurrency:** UI and worker edit `pending_ops` from two
+  connections; `complete_op_if_unchanged` / `update_op_if_unchanged` are
+  compare-and-swap on `(id, kind, payload)` so a stale reader never
+  overwrites or completes a newer intent.
 - **Connections:** `Database::open` sets `busy_timeout` 5000 ms + WAL so the UI
   and a background sync thread each hold their own connection to one file.
   Multi-statement writes use `write_transaction()` (`BEGIN IMMEDIATE`); a
@@ -50,7 +67,9 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
   the `folders_csv` the UI last wrote.
 - **Orphans:** when locations are removed (`remove_locations`,
   `clear_folder_locations`, `delete_folder`), messages of non-`local` accounts
-  left with no location are deleted; `local` accounts never lose mail this way.
+  left with no location are deleted (whole-folder removals commit every
+  `LOCATION_BATCH` = 500 messages so the other connection's writes never wait
+  for one huge transaction); `local` accounts never lose mail this way.
   `purge_orphans(account)` (run by the sync engine after a full cycle) deletes
   remaining location-less remote messages that no `pending_ops` row
   references (a queued op means the message is in flight).
@@ -66,7 +85,7 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
 - Types returned to UI/sync: `Account`, `Folder`, `MessageListItem`,
   `MessageDetail`, `MailListQuery`, `FolderSyncState`, `MessageLocation`,
   `NewRemoteMessage`, `RemoteInsert`, `NewAttachment`, `AttachmentRow`, `PendingOp`,
-  `OutgoingRow` — UI-agnostic plain data owned by this crate (no `mail_core`
+  `OutgoingRow`, `OutgoingState` — UI-agnostic plain data owned by this crate (no `mail_core`
   dependency).
 - Folder paths: system (`sys:inbox`, …) vs user (`user:…`); helpers in
   `folder.rs` own path rules and forbidden move targets.
@@ -88,8 +107,8 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
 
 ## Verification
 
-- `cargo test -p storage` (migration v1→v2, seed, FTS/LIKE search parity,
-  message ops, membership, sync merges/orphans, queues, WAL two-connection).
+- `cargo test -p storage` (migrations v1→v3 and v2→v3, seed, FTS/LIKE search parity,
+  message ops, membership, sync merges/orphans, batched clears, op CAS, outbox state machine, WAL two-connection).
 - `cargo clippy -p storage --all-targets -- -D warnings`.
 - Workspace clippy/fmt as in parent.
 

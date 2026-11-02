@@ -74,7 +74,8 @@ BGMail/
 ├── TODO.md ← living progress
 ├── docs/
 │ └── PLANEJAMENTO.md ← vision, architecture and scope
-├── assets/ ← shared icons, fonts, app icon
+├── .github/ ← CI and release workflows (GitHub Actions)
+├── assets/ ← shared icons, fonts, app icon (+ generated PNG/ICO/ICNS)
 ├── spikes/ ← throwaway evaluations (own workspaces, not shipped)
 ├── vendor/ ← patched third-party crates (serde_fmt, Blitz, Taffy)
 └── crates/
@@ -85,7 +86,7 @@ BGMail/
     ├── protocols/ ← IMAP/SMTP clients, Gmail OAuth2, presets/autoconfig
     ├── mail_sync/ ← sync engine (worker/IDLE threads, op queue, outbox)
     ├── html_view/ ← native GPUI HTML (mail body) rendering on Blitz
-    └── bgmail/ ← binary (window + layout + state + localization)
+    └── bgmail/ ← binary (window + layout + state + localization; packaging config)
 ```
 
 ## Scope limits (current)
@@ -223,5 +224,6 @@ When the user requests a durable behavior change, record it here or in the relev
 | `docs/` | [`.dox/docs/AGENTS.md`](.dox/docs/AGENTS.md) | Planning and durable human/agent guidance docs |
 | `assets/` | [`.dox/assets/AGENTS.md`](.dox/assets/AGENTS.md) | Shared binary assets (icons, fonts, app icon) |
 | `.cargo/` | [`.dox/.cargo/AGENTS.md`](.dox/.cargo/AGENTS.md) | Workspace Cargo/build environment overrides |
+| `.github/` | [`.dox/.github/AGENTS.md`](.dox/.github/AGENTS.md) | CI checks and release packaging workflows (cargo-packager), their secrets |
 | `spikes/` | [`.dox/spikes/AGENTS.md`](.dox/spikes/AGENTS.md) | Throwaway technical evaluations (self-contained, never built with the workspace) |
 | `vendor/` | [`.dox/vendor/AGENTS.md`](.dox/vendor/AGENTS.md) | Patched third-party crates (serde_fmt, Blitz subset, Taffy) and their BGMail fixes |

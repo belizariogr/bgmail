@@ -55,7 +55,10 @@ presets, Thunderbird autoconfig, guess).
   otherwise) with compressed sets (`1:3,5`). `move_messages` returns the new
   UIDs from `COPYUID` (MOVE's untagged OK or COPY's tagged OK); `None` when
   the server sends none. Without MOVE: `UID COPY` + `\Deleted` + `UID EXPUNGE`
-  (or plain `EXPUNGE` without UIDPLUS).
+  (without UIDPLUS, a plain `EXPUNGE` guarded so other clients' `\Deleted`
+  messages survive). When COPY worked but the expunge failed, a replay copies
+  again: accepted, because skipping the copy when the source is already
+  `\Deleted` could lose mail another client flagged.
 - **Secrets:** `Secret`/`Credential` `Debug` never prints values. Google's
   client id/secret come from `BGMAIL_GOOGLE_CLIENT_ID` /
   `BGMAIL_GOOGLE_CLIENT_SECRET` (runtime, then build-time `option_env!`); never

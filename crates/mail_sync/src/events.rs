@@ -78,6 +78,13 @@ pub enum SyncEvent {
         error: String,
         permanent: bool,
     },
+    /// The message was delivered, but the engine gave up filing its copy in
+    /// the Sent folder (the outbox row is gone).
+    SentCopyFailed {
+        account_id: i64,
+        outbox_id: i64,
+        error: String,
+    },
 }
 
 /// UI → worker requests. Duplicates waiting in the queue are coalesced.

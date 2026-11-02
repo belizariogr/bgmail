@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use mail_core::{AccountConfig, AuthKind, MailConnector};
 use mail_sync::{AccountStatus, Engine, EngineOptions, SyncEvent};
@@ -121,10 +121,26 @@ pub fn overall_status<'a>(
     }
 }
 
+/// Work that must run off the UI thread (it may wait up to
+/// `mail_sync::STOP_TIMEOUT` for a worker to wind down).
+pub type BlockingJob = Box<dyn FnOnce() + Send + 'static>;
+
 /// The running engine plus the last status reported by each account.
 pub struct MailService {
-    engine: Engine,
+    /// Shared with the [`BlockingJob`]s that start/stop workers.
+    engine: Arc<Engine>,
     statuses: HashMap<i64, AccountStatus>,
+    /// Newest start/stop request per account: an older job that runs late
+    /// is skipped, so the last request wins.
+    latest_job: Arc<Mutex<HashMap<i64, u64>>>,
+    /// Held while a job runs, so two jobs never race on the same worker
+    /// slot (that would leak a worker the engine no longer tracks).
+    job_serial: Arc<Mutex<()>>,
+    job_seq: u64,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl MailService {
@@ -134,8 +150,11 @@ impl MailService {
         let engine = Engine::new(db_path, sender, EngineOptions::default());
         (
             Self {
-                engine,
+                engine: Arc::new(engine),
                 statuses: HashMap::new(),
+                latest_job: Arc::default(),
+                job_serial: Arc::default(),
+                job_seq: 0,
             },
             receiver,
         )
@@ -145,16 +164,46 @@ impl MailService {
         &self.engine
     }
 
-    /// Starts (or restarts) syncing `account_id` with `connector`.
-    pub fn start_account(&mut self, account_id: i64, connector: Arc<dyn MailConnector>) {
-        self.statuses.insert(account_id, AccountStatus::Connecting);
-        self.engine.start_account(account_id, connector);
+    /// Wraps `work` in a [`BlockingJob`] that runs only if no newer job for
+    /// `account_id` was requested meanwhile, one job at a time.
+    fn job(&mut self, account_id: i64, work: impl FnOnce(&Engine) + Send + 'static) -> BlockingJob {
+        self.job_seq += 1;
+        let generation = self.job_seq;
+        lock(&self.latest_job).insert(account_id, generation);
+        let (engine, latest, serial) = (
+            self.engine.clone(),
+            self.latest_job.clone(),
+            self.job_serial.clone(),
+        );
+        Box::new(move || {
+            let _serial = lock(&serial);
+            if lock(&latest).get(&account_id) == Some(&generation) {
+                work(&engine);
+            }
+        })
     }
 
-    /// Stops an account's threads and forgets its status.
-    pub fn stop_account(&mut self, account_id: i64) {
-        self.engine.stop_account(account_id);
+    /// Marks `account_id` as connecting and returns the job that (re)starts
+    /// its worker with `connector`. Replacing a running worker waits for the
+    /// old one, so run the job off the UI thread.
+    pub fn start_account(
+        &mut self,
+        account_id: i64,
+        connector: Arc<dyn MailConnector>,
+    ) -> BlockingJob {
+        self.statuses.insert(account_id, AccountStatus::Connecting);
+        self.job(account_id, move |engine| {
+            engine.start_account(account_id, connector)
+        })
+    }
+
+    /// Forgets the account's status now and returns the job that stops its
+    /// threads (blocking; run it off the UI thread).
+    pub fn stop_account(&mut self, account_id: i64) -> BlockingJob {
         self.statuses.remove(&account_id);
+        self.job(account_id, move |engine| {
+            engine.stop_account(account_id);
+        })
     }
 
     /// Records a status event (ignored for accounts that were stopped).
@@ -273,7 +322,31 @@ mod tests {
         service.set_status(7, AccountStatus::Connecting);
         assert_eq!(service.status(7), None);
         assert_eq!(service.overall(), OverallStatus::None);
-        service.stop_account(7);
+        service.stop_account(7)();
+        service.engine().shutdown();
+    }
+
+    #[test]
+    fn only_the_newest_account_job_runs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        storage::Database::open(&path).unwrap();
+        let (mut service, _events) = MailService::new(path);
+        let ran = Arc::new(AtomicUsize::new(0));
+        let job = |service: &mut MailService, account_id: i64, mark: usize| {
+            let ran = ran.clone();
+            service.job(account_id, move |_| {
+                ran.fetch_add(mark, Ordering::SeqCst);
+            })
+        };
+        let older = job(&mut service, 1, 1);
+        let newer = job(&mut service, 1, 10);
+        let other_account = job(&mut service, 2, 100);
+        newer();
+        older();
+        other_account();
+        assert_eq!(ran.load(Ordering::SeqCst), 110);
         service.engine().shutdown();
     }
 }

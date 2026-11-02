@@ -46,12 +46,24 @@ fn is_local(account: &Account) -> bool {
     account.provider == PROVIDER_LOCAL
 }
 
+/// Rounds of [`move_to_folder`] / [`delete_permanently`] retried when the
+/// worker changed a queued op between our read and our compare-and-swap.
+const CAS_ROUNDS: usize = 8;
+
+/// A queued op as read, so it can be rewritten with a compare-and-swap.
+struct QueuedMove {
+    id: i64,
+    kind: String,
+    payload: String,
+    action: PendingAction,
+}
+
 /// Queued Move ops of the message (it is in flight), oldest first.
 fn pending_moves(
     db: &Database,
     account_id: i64,
     message_id: i64,
-) -> rusqlite::Result<Vec<(i64, PendingAction)>> {
+) -> rusqlite::Result<Vec<QueuedMove>> {
     Ok(db
         .pending_ops(account_id)?
         .into_iter()
@@ -59,59 +71,99 @@ fn pending_moves(
         .filter_map(|op| {
             PendingAction::decode(&op.payload)
                 .filter(|action| matches!(action, PendingAction::Move { .. }))
-                .map(|action| (op.id, action))
+                .map(|action| QueuedMove {
+                    id: op.id,
+                    kind: op.kind,
+                    payload: op.payload,
+                    action,
+                })
         })
         .collect())
 }
 
-/// Where a flag change must be stored: the first server location, or — for
-/// a message in flight — the source of its last queued move (the worker
-/// re-points the flag op once the move reports the new UID).
+/// The server folder of a message with neither a location nor a queued move:
+/// a move that reported no COPYUID left it there until a sync re-attaches it.
+/// Ops go there with UID 0, found by Message-ID when they run. `None` without
+/// a Message-ID, which could never resolve.
+fn unresolved_folder(
+    db: &Database,
+    account_id: i64,
+    message: &MessageDetail,
+) -> rusqlite::Result<Option<String>> {
+    if message.message_id_hdr.is_none() {
+        return Ok(None);
+    }
+    let folders = db.list_folders(account_id)?;
+    Ok(primary_folders(message).into_iter().find_map(|path| {
+        folders
+            .iter()
+            .find(|folder| folder.path == path)
+            .and_then(|folder| folder.remote_name.clone())
+    }))
+}
+
+/// Where a queued op for the message must act: `(folder, uid, uid_validity)`
+/// of the first server location; for a message in flight, the source of its
+/// last queued move (the worker re-points the op once the move reports the
+/// new UID); else its [`unresolved_folder`].
 fn flags_target(
     db: &Database,
     account_id: i64,
-    message_id: i64,
-) -> rusqlite::Result<Option<(String, u32)>> {
+    message: &MessageDetail,
+) -> rusqlite::Result<Option<(String, u32, Option<u32>)>> {
+    let message_id = message.id;
     if let Some(location) = db
         .message_locations(message_id)?
         .into_iter()
         .find(|l| l.remote_name.is_some())
     {
-        return Ok(location.remote_name.map(|name| (name, location.uid)));
+        let validity = db.folder_sync_state(location.folder_id)?.uid_validity;
+        return Ok(location
+            .remote_name
+            .map(|name| (name, location.uid, validity)));
     }
-    Ok(pending_moves(db, account_id, message_id)?
-        .pop()
-        .map(|(_, action)| {
-            let (folder, uid) = action.source();
-            (folder.to_string(), uid)
-        }))
+    if let Some(queued) = pending_moves(db, account_id, message_id)?.pop() {
+        let (folder, uid) = queued.action.source();
+        return Ok(Some((
+            folder.to_string(),
+            uid,
+            queued.action.uid_validity(),
+        )));
+    }
+    Ok(unresolved_folder(db, account_id, message)?.map(|folder| (folder, 0, None)))
 }
 
 /// Queues a flag change for one location of the message; whether one was
-/// queued.
+/// queued. Reading the target and queueing are one transaction: otherwise the
+/// worker could finish a move in between, and an op pointing at the expunged
+/// source would "succeed" without flagging anything.
 fn enqueue_flags(
     db: &Database,
     account_id: i64,
-    message_id: i64,
+    message: &MessageDetail,
     add: MessageFlags,
     remove: MessageFlags,
 ) -> rusqlite::Result<bool> {
-    let Some((folder, uid)) = flags_target(db, account_id, message_id)? else {
-        return Ok(false);
-    };
-    let action = PendingAction::Flags {
-        folder,
-        uid,
-        add,
-        remove,
-    };
-    db.enqueue_op(
-        account_id,
-        action.kind(),
-        Some(message_id),
-        &action.encode(),
-    )?;
-    Ok(true)
+    db.atomically(|| {
+        let Some((folder, uid, uid_validity)) = flags_target(db, account_id, message)? else {
+            return Ok(false);
+        };
+        let action = PendingAction::Flags {
+            folder,
+            uid,
+            add,
+            remove,
+            uid_validity,
+            message_id_hdr: message.message_id_hdr.clone(),
+        };
+        db.enqueue_op(
+            account_id,
+            action.kind(),
+            Some(message.id),
+            &action.encode(),
+        )?;
+        Ok(true)
+    })
 }
 
 /// `(add, remove)` masks setting or clearing one flag.
@@ -138,7 +190,7 @@ pub fn set_read(db: &Database, message_id: i64, read: bool) -> rusqlite::Result<
             ..Default::default()
         };
         let (add, remove) = flag_change(seen, read);
-        needs_sync = enqueue_flags(db, account.id, message_id, add, remove)?;
+        needs_sync = enqueue_flags(db, account.id, &message, add, remove)?;
     }
     db.set_message_unread(message_id, !read)?;
     Ok(ActionOutcome {
@@ -166,7 +218,7 @@ pub fn set_starred(
             ..Default::default()
         };
         let (add, remove) = flag_change(flagged, starred);
-        needs_sync = enqueue_flags(db, account.id, message_id, add, remove)?;
+        needs_sync = enqueue_flags(db, account.id, &message, add, remove)?;
     }
     db.toggle_message_starred(message_id)?;
     Ok(ActionOutcome {
@@ -184,35 +236,63 @@ fn primary_folders(message: &MessageDetail) -> Vec<&str> {
         .collect()
 }
 
+/// Runs `round` until it completes without losing a compare-and-swap race
+/// against the worker (bounded; the last round's outcome wins).
+fn with_cas_retry(
+    mut round: impl FnMut() -> rusqlite::Result<Option<ActionOutcome>>,
+) -> rusqlite::Result<ActionOutcome> {
+    for _ in 1..CAS_ROUNDS {
+        if let Some(outcome) = round()? {
+            return Ok(outcome);
+        }
+    }
+    Ok(round()?.unwrap_or(ActionOutcome {
+        changed: true,
+        needs_sync: true,
+    }))
+}
+
 /// Moves the message to `target_path` (a folder of its account). Server
 /// accounts: the target needs a server mailbox; every location outside the
 /// target is detached and gets a queued Move. Gmail-style "All Mail"
 /// locations stay attached unless the target is Trash/Junk (All Mail keeps
 /// every non-trash message). Moves still queued for the message are
 /// re-pointed at the new target (or cancelled when it is their source).
+/// Queued ops are rewritten with compare-and-swap: if the worker completed
+/// or re-pointed one meanwhile, the whole decision is taken again from the
+/// fresh state.
 pub fn move_to_folder(
     db: &Database,
     message_id: i64,
     target_path: &str,
 ) -> rusqlite::Result<ActionOutcome> {
+    with_cas_retry(|| move_to_folder_round(db, message_id, target_path))
+}
+
+/// One attempt of [`move_to_folder`]; `None` = lost a race, retry.
+fn move_to_folder_round(
+    db: &Database,
+    message_id: i64,
+    target_path: &str,
+) -> rusqlite::Result<Option<ActionOutcome>> {
     let Some((message, account)) = context(db, message_id)? else {
-        return Ok(ActionOutcome::default());
+        return Ok(Some(ActionOutcome::default()));
     };
     if is_manual_move_destination_forbidden(target_path)
         || primary_folders(&message) == [target_path]
     {
-        return Ok(ActionOutcome::default());
+        return Ok(Some(ActionOutcome::default()));
     }
     if is_local(&account) {
         db.move_message_to_folder(message_id, target_path)?;
-        return Ok(ActionOutcome::LOCAL);
+        return Ok(Some(ActionOutcome::LOCAL));
     }
     let folders = db.list_folders(account.id)?;
     let Some(target) = folders
         .iter()
         .find(|f| f.path == target_path && f.remote_name.is_some())
     else {
-        return Ok(ActionOutcome::default());
+        return Ok(Some(ActionOutcome::default()));
     };
     let to = target.remote_name.clone().unwrap_or_default();
     let removes_everywhere = matches!(target_path, system::TRASH | system::JUNK);
@@ -223,16 +303,29 @@ pub fn move_to_folder(
         .collect();
 
     let mut needs_sync = false;
+    let queued_moves = pending_moves(db, account.id, message_id)?;
+    let in_flight = !queued_moves.is_empty();
     // Moves still queued for this message now go to the new target.
-    for (op_id, action) in pending_moves(db, account.id, message_id)? {
-        let PendingAction::Move { from, uid, .. } = action else {
+    for queued in queued_moves {
+        let PendingAction::Move {
+            from,
+            uid,
+            uid_validity,
+            message_id_hdr,
+            ..
+        } = queued.action
+        else {
             continue;
         };
         if from == to {
             // Back where the server still has it: cancel the move and
             // re-attach the location so later actions see it again.
-            db.complete_op(op_id)?;
-            db.attach_location(message_id, target.id, uid)?;
+            if !db.complete_op_if_unchanged(queued.id, &queued.kind, &queued.payload)? {
+                return Ok(None);
+            }
+            if uid != 0 {
+                db.attach_location(message_id, target.id, uid)?;
+            }
             continue;
         }
         let retargeted = PendingAction::Move {
@@ -240,11 +333,41 @@ pub fn move_to_folder(
             uid,
             to: to.clone(),
             to_folder_id: target.id,
+            uid_validity,
+            message_id_hdr,
         };
-        db.update_op(op_id, retargeted.kind(), &retargeted.encode())?;
+        if !db.update_op_if_unchanged(
+            queued.id,
+            &queued.kind,
+            &queued.payload,
+            retargeted.kind(),
+            &retargeted.encode(),
+        )? {
+            return Ok(None);
+        }
         needs_sync = true;
     }
     let locations = db.message_locations(message_id)?;
+    if locations.is_empty() && !in_flight {
+        if let Some(from) = unresolved_folder(db, account.id, &message)?.filter(|from| *from != to)
+        {
+            let action = PendingAction::Move {
+                from,
+                uid: 0,
+                to: to.clone(),
+                to_folder_id: target.id,
+                uid_validity: None,
+                message_id_hdr: message.message_id_hdr.clone(),
+            };
+            db.enqueue_op(
+                account.id,
+                action.kind(),
+                Some(message_id),
+                &action.encode(),
+            )?;
+            needs_sync = true;
+        }
+    }
     let has_other_than_all = locations
         .iter()
         .any(|l| l.folder_id != target.id && !all_mail_ids.contains(&l.folder_id));
@@ -262,6 +385,8 @@ pub fn move_to_folder(
             uid: location.uid,
             to: to.clone(),
             to_folder_id: target.id,
+            uid_validity: db.folder_sync_state(location.folder_id)?.uid_validity,
+            message_id_hdr: message.message_id_hdr.clone(),
         };
         db.enqueue_op(
             account.id,
@@ -273,10 +398,10 @@ pub fn move_to_folder(
         needs_sync = true;
     }
     db.move_message_to_folder(message_id, target_path)?;
-    Ok(ActionOutcome {
+    Ok(Some(ActionOutcome {
         changed: true,
         needs_sync,
-    })
+    }))
 }
 
 /// Moves to the Archive folder (Gmail: All Mail, which sync maps there).
@@ -307,14 +432,65 @@ pub fn restore_from_trash(db: &Database, message_id: i64) -> rusqlite::Result<Ac
 
 /// Deletes the message locally and queues a server delete for each of its
 /// locations; queued moves of an in-flight message become deletes at their
-/// source.
+/// source (compare-and-swap, retried like [`move_to_folder`]).
 pub fn delete_permanently(db: &Database, message_id: i64) -> rusqlite::Result<ActionOutcome> {
-    let Some((_, account)) = context(db, message_id)? else {
-        return Ok(ActionOutcome::default());
+    with_cas_retry(|| delete_permanently_round(db, message_id))
+}
+
+/// One attempt of [`delete_permanently`]; `None` = lost a race, retry.
+fn delete_permanently_round(
+    db: &Database,
+    message_id: i64,
+) -> rusqlite::Result<Option<ActionOutcome>> {
+    let Some((message, account)) = context(db, message_id)? else {
+        return Ok(Some(ActionOutcome::default()));
     };
     let mut needs_sync = false;
     if !is_local(&account) {
         let locations = db.message_locations(message_id)?;
+        if locations.is_empty() {
+            let queued_moves = pending_moves(db, account.id, message_id)?;
+            if queued_moves.is_empty() {
+                if let Some(folder) = unresolved_folder(db, account.id, &message)? {
+                    let action = PendingAction::Delete {
+                        folder,
+                        uid: 0,
+                        uid_validity: None,
+                        message_id_hdr: message.message_id_hdr.clone(),
+                    };
+                    db.enqueue_op(
+                        account.id,
+                        action.kind(),
+                        Some(message_id),
+                        &action.encode(),
+                    )?;
+                    needs_sync = true;
+                }
+            }
+            for queued in queued_moves {
+                let (folder, uid) = queued.action.source();
+                let delete = PendingAction::Delete {
+                    folder: folder.to_string(),
+                    uid,
+                    uid_validity: queued.action.uid_validity(),
+                    message_id_hdr: queued
+                        .action
+                        .message_id_hdr()
+                        .map(str::to_string)
+                        .or_else(|| message.message_id_hdr.clone()),
+                };
+                if !db.update_op_if_unchanged(
+                    queued.id,
+                    &queued.kind,
+                    &queued.payload,
+                    delete.kind(),
+                    &delete.encode(),
+                )? {
+                    return Ok(None);
+                }
+                needs_sync = true;
+            }
+        }
         for location in &locations {
             let Some(folder) = location.remote_name.clone() else {
                 continue;
@@ -322,6 +498,8 @@ pub fn delete_permanently(db: &Database, message_id: i64) -> rusqlite::Result<Ac
             let action = PendingAction::Delete {
                 folder,
                 uid: location.uid,
+                uid_validity: db.folder_sync_state(location.folder_id)?.uid_validity,
+                message_id_hdr: message.message_id_hdr.clone(),
             };
             db.enqueue_op(
                 account.id,
@@ -331,29 +509,18 @@ pub fn delete_permanently(db: &Database, message_id: i64) -> rusqlite::Result<Ac
             )?;
             needs_sync = true;
         }
-        if locations.is_empty() {
-            for (op_id, action) in pending_moves(db, account.id, message_id)? {
-                let (folder, uid) = action.source();
-                let delete = PendingAction::Delete {
-                    folder: folder.to_string(),
-                    uid,
-                };
-                db.update_op(op_id, delete.kind(), &delete.encode())?;
-                needs_sync = true;
-            }
-        }
     }
     let changed = db.delete_message(message_id)?;
-    Ok(ActionOutcome {
+    Ok(Some(ActionOutcome {
         changed,
         needs_sync,
-    })
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use storage::{NewRemoteMessage, PendingOp, PROVIDER_GMAIL, PROVIDER_IMAP};
+    use storage::{FolderSyncState, NewRemoteMessage, PendingOp, PROVIDER_GMAIL, PROVIDER_IMAP};
     use tempfile::NamedTempFile;
 
     struct Fx {
@@ -373,9 +540,17 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let db = Database::open(file.path()).unwrap();
         let account = db.create_account("A", "a@x.com", provider, "{}").unwrap();
+        // Every server folder has been synced once (UIDVALIDITY 7).
         let folder = |path: &str, remote: &str, role: Option<&str>| {
-            db.upsert_remote_folder(account, path, "", remote, role)
-                .unwrap()
+            let id = db
+                .upsert_remote_folder(account, path, "", remote, role)
+                .unwrap();
+            let state = FolderSyncState {
+                uid_validity: Some(7),
+                ..Default::default()
+            };
+            db.set_folder_sync_state(id, &state).unwrap();
+            id
         };
         let inbox = folder(system::INBOX, "INBOX", Some("inbox"));
         let archive = if provider == PROVIDER_GMAIL {
@@ -472,6 +647,8 @@ mod tests {
                 uid: 5,
                 add: seen(),
                 remove: MessageFlags::default(),
+                uid_validity: Some(7),
+                message_id_hdr: Some("a@x".into()),
             }
         );
         assert_eq!(
@@ -544,6 +721,8 @@ mod tests {
                 uid: 5,
                 to: "Work".into(),
                 to_folder_id: fx.work,
+                uid_validity: Some(7),
+                message_id_hdr: Some("a@x".into()),
             }
         );
         // Already there, forbidden, unknown or local-only targets: nothing.
@@ -579,6 +758,8 @@ mod tests {
                 uid: 5,
                 to: "Archive".into(),
                 to_folder_id: fx.archive,
+                uid_validity: Some(7),
+                message_id_hdr: Some("a@x".into()),
             }
         );
         // Back to where the server still has it: the move is dropped.
@@ -670,7 +851,9 @@ mod tests {
             queued[0].1,
             PendingAction::Delete {
                 folder: "INBOX".into(),
-                uid: 5
+                uid: 5,
+                uid_validity: Some(7),
+                message_id_hdr: Some("a@x".into()),
             }
         );
     }
@@ -697,11 +880,15 @@ mod tests {
             vec![
                 PendingAction::Delete {
                     folder: "Trash".into(),
-                    uid: 3
+                    uid: 3,
+                    uid_validity: Some(7),
+                    message_id_hdr: Some("a@x".into()),
                 },
                 PendingAction::Delete {
                     folder: "[Gmail]/All Mail".into(),
-                    uid: 4
+                    uid: 4,
+                    uid_validity: Some(7),
+                    message_id_hdr: Some("a@x".into()),
                 },
             ]
         );
@@ -710,6 +897,79 @@ mod tests {
             ActionOutcome::default()
         );
         let _ = fx.trash;
+    }
+
+    #[test]
+    fn move_retries_when_the_worker_changed_the_queued_op() {
+        let fx = fixture(PROVIDER_IMAP);
+        let id = message(&fx, fx.inbox, 5, "a");
+        move_to_folder(&fx.db, id, "user:Work").unwrap();
+        let (op, _) = ops(&fx).remove(0);
+        // The worker ran the move and completed the op, attaching the new
+        // location, between our read and our rewrite.
+        let mut calls = 0;
+        let outcome = with_cas_retry(|| {
+            calls += 1;
+            if calls == 1 {
+                fx.db.complete_op(op.id).unwrap();
+                fx.db.attach_location(id, fx.work, 40).unwrap();
+                return Ok(None);
+            }
+            move_to_folder_round(&fx.db, id, system::ARCHIVE)
+        })
+        .unwrap();
+        assert_eq!(outcome, QUEUED);
+        let queued = ops(&fx);
+        assert_eq!(queued.len(), 1);
+        assert!(matches!(
+            &queued[0].1,
+            PendingAction::Move { from, uid: 40, to, .. } if from == "Work" && to == "Archive"
+        ));
+        assert_eq!(csv(&fx, id), ",sys:archive,");
+    }
+
+    #[test]
+    fn stale_op_rewrite_restarts_the_round() {
+        let fx = fixture(PROVIDER_IMAP);
+        let id = message(&fx, fx.inbox, 5, "a");
+        move_to_folder(&fx.db, id, "user:Work").unwrap();
+        let (op, mut action) = ops(&fx).remove(0);
+        // Rewritten behind our back: the round reports a lost race.
+        action.retarget("Work", 41, Some(7));
+        fx.db
+            .update_op_if_unchanged(
+                op.id,
+                &op.kind,
+                &op.payload,
+                action.kind(),
+                &action.encode(),
+            )
+            .unwrap();
+        let stale = QueuedMove {
+            id: op.id,
+            kind: op.kind.clone(),
+            payload: op.payload.clone(),
+            action: PendingAction::decode(&op.payload).unwrap(),
+        };
+        assert!(!fx
+            .db
+            .update_op_if_unchanged(stale.id, &stale.kind, &stale.payload, "move", "{}")
+            .unwrap());
+        // A full call converges on the fresh state.
+        assert_eq!(move_to_folder(&fx.db, id, system::ARCHIVE).unwrap(), QUEUED);
+        assert!(matches!(
+            &ops(&fx)[0].1,
+            PendingAction::Move { uid: 41, to, .. } if to == "Archive"
+        ));
+        // Every round losing still terminates.
+        let mut rounds = 0;
+        let outcome = with_cas_retry(|| {
+            rounds += 1;
+            Ok(None)
+        })
+        .unwrap();
+        assert_eq!(rounds, CAS_ROUNDS);
+        assert_eq!(outcome, QUEUED);
     }
 
     #[test]
@@ -722,14 +982,30 @@ mod tests {
         let fx = fixture(PROVIDER_IMAP);
         let id = message(&fx, fx.inbox, 5, "a");
         assert_eq!(
-            flags_target(&fx.db, fx.account, id).unwrap(),
-            Some(("INBOX".into(), 5))
+            flags_target(&fx.db, fx.account, &fx.db.get_message(id).unwrap().unwrap()).unwrap(),
+            Some(("INBOX".into(), 5, Some(7)))
         );
         assert!(pending_moves(&fx.db, fx.account, id).unwrap().is_empty());
         fx.db.detach_locations(id).unwrap();
-        assert_eq!(flags_target(&fx.db, fx.account, id).unwrap(), None);
-        assert!(!enqueue_flags(&fx.db, fx.account, id, seen(), seen()).unwrap());
         let detail = fx.db.get_message(id).unwrap().unwrap();
+        assert_eq!(
+            flags_target(&fx.db, fx.account, &detail).unwrap(),
+            Some(("INBOX".into(), 0, None)),
+            "no location, no queued move: found by Message-ID when it runs"
+        );
+        assert_eq!(
+            unresolved_folder(&fx.db, fx.account, &detail)
+                .unwrap()
+                .as_deref(),
+            Some("INBOX")
+        );
+        let no_header = MessageDetail {
+            message_id_hdr: None,
+            ..detail.clone()
+        };
+        assert_eq!(flags_target(&fx.db, fx.account, &no_header).unwrap(), None);
+        assert!(!enqueue_flags(&fx.db, fx.account, &no_header, seen(), seen()).unwrap());
+        assert!(enqueue_flags(&fx.db, fx.account, &detail, seen(), seen()).unwrap());
         assert_eq!(primary_folders(&detail), vec![system::INBOX]);
         assert!(context(&fx.db, 9999).unwrap().is_none());
         assert!(is_local(&Account {

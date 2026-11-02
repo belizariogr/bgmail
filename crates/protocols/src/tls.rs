@@ -264,6 +264,13 @@ pub(crate) mod test_support {
     use rustls::pki_types::PrivateKeyDer;
     use rustls::{ServerConfig, ServerConnection};
 
+    /// A loopback port nothing listens on. Tests must not "reserve" a port
+    /// by binding `:0` and dropping the listener: another test thread's
+    /// server can get the same ephemeral port and then receives the stray
+    /// connection (that is what made the OAuth flow test flaky). Port 1 is
+    /// outside every OS's ephemeral range, so no test server ever gets it.
+    pub const REFUSED_PORT: u16 = 1;
+
     pub fn server_config() -> Arc<ServerConfig> {
         let cert =
             CertificateDer::from_pem_slice(include_bytes!("../tests/fixtures/test-cert.pem"))
@@ -327,8 +334,7 @@ mod tests {
         let stream = connect_tcp("127.0.0.1", port).unwrap();
         assert_eq!(stream.read_timeout().unwrap(), Some(IO_TIMEOUT));
         assert_eq!(stream.write_timeout().unwrap(), Some(IO_TIMEOUT));
-        drop(listener);
-        let err = connect_tcp("127.0.0.1", port).unwrap_err();
+        let err = connect_tcp("127.0.0.1", test_support::REFUSED_PORT).unwrap_err();
         assert_eq!(err.kind, RemoteErrorKind::Network);
         let err = connect_tcp("no-such-host.invalid", 1).unwrap_err();
         assert_eq!(err.kind, RemoteErrorKind::Network);

@@ -36,7 +36,7 @@ pub use parse::{
 };
 pub use remote::{
     Capabilities, FolderStatus, IdleOutcome, MailConnector, MailRemote, MailSender, RemoteError,
-    RemoteErrorKind, RemoteFlags, RemoteHeader, RemoteResult,
+    RemoteErrorKind, RemoteFlags, RemoteHeader, RemoteResult, SendError, SendFailure,
 };
 pub use reply::{
     forward_subject, html_to_text, prepare_reply, quote_text, reply_subject, QuoteLabels, ReplyKind,

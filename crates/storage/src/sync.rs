@@ -7,7 +7,9 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::membership::{message_ids_in_folder, refresh_membership_in, settle_after_location_loss};
+use crate::membership::{
+    message_ids_in_folder_limit, refresh_membership_in, settle_after_location_loss, LOCATION_BATCH,
+};
 use crate::search::build_search_text;
 use crate::types::{
     AttachmentRow, MessageLocation, NewAttachment, NewRemoteMessage, RemoteInsert, PROVIDER_LOCAL,
@@ -213,15 +215,26 @@ impl Database {
 
     /// Forgets every location of the folder (UIDVALIDITY changed), with the
     /// same orphan rules as [`Self::remove_locations`].
+    ///
+    /// Commits every [`LOCATION_BATCH`] messages: one transaction over a
+    /// huge folder would hold the write lock long enough for the UI
+    /// connection's writes to hit `busy_timeout`.
     pub fn clear_folder_locations(&self, folder_id: i64) -> rusqlite::Result<()> {
-        let tx = self.write_transaction()?;
-        let affected = message_ids_in_folder(&tx, folder_id)?;
-        tx.execute(
-            "DELETE FROM message_locations WHERE folder_id = ?1",
-            params![folder_id],
-        )?;
-        settle_after_location_loss(&tx, &affected)?;
-        tx.commit()
+        loop {
+            let tx = self.write_transaction()?;
+            let batch = message_ids_in_folder_limit(&tx, folder_id, LOCATION_BATCH)?;
+            if batch.is_empty() {
+                return tx.commit();
+            }
+            for &message_id in &batch {
+                tx.execute(
+                    "DELETE FROM message_locations WHERE folder_id = ?1 AND message_id = ?2",
+                    params![folder_id, message_id],
+                )?;
+            }
+            settle_after_location_loss(&tx, &batch)?;
+            tx.commit()?;
+        }
     }
 
     /// Applies server flags to the message at `(folder_id, uid)`. Returns
@@ -736,6 +749,47 @@ mod tests {
             ",sys:trash,"
         );
         assert_eq!(db.max_uid(fx.inbox).unwrap(), None);
+    }
+
+    #[test]
+    fn clear_folder_locations_spans_several_batches() {
+        let (_file, db, fx) = remote_db();
+        let total = crate::membership::LOCATION_BATCH * 2 + 3;
+        for uid in 1..=total as u32 {
+            db.insert_remote_message(
+                fx.account,
+                fx.inbox,
+                uid,
+                &remote_message(&format!("m{uid}"), None),
+            )
+            .unwrap();
+        }
+        let kept = db
+            .insert_remote_message(fx.account, fx.trash, 1, &remote_message("kept", None))
+            .unwrap();
+        db.clear_folder_locations(fx.inbox).unwrap();
+        assert_eq!(db.max_uid(fx.inbox).unwrap(), None);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM messages WHERE account_id = 1"),
+            1
+        );
+        assert!(db.get_message(kept).unwrap().is_some());
+
+        // delete_folder goes through the same batches.
+        for uid in 1..=total as u32 {
+            db.insert_remote_message(
+                fx.account,
+                fx.archive,
+                uid,
+                &remote_message(&format!("a{uid}"), None),
+            )
+            .unwrap();
+        }
+        db.delete_folder(fx.archive).unwrap();
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM messages WHERE account_id = 1"),
+            1
+        );
     }
 
     #[test]

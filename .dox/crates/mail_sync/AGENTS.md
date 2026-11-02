@@ -48,18 +48,61 @@ that edit the database and queue those server ops.
   (IDLE only covers the Inbox).
 - **In-flight rule:** UIDs referenced by queued ops are never fetched or
   flag-checked (`in_flight_uids`), and flags are re-checked against a fresh
-  op list, so optimistic edits are not reverted. Actions queue the op
-  *before* the local write.
+  op list, so optimistic edits are not reverted. Messages with a queued
+  `Flags` op (wherever it points, `messages_with_pending_flags`) never get
+  server flags applied — neither on header merges nor in flag checks.
+  Actions queue the op *before* the local write.
+- **Op payload** (`PendingAction`, JSON `type` = `flags` | `move` |
+  `delete`): source `(folder, uid)` plus `uid_validity` of that folder when
+  recorded and the message's `message_id_hdr`; both `#[serde(default)]`
+  (older payloads decode with `None`). `uid == 0` = unresolved (a move
+  without COPYUID). **Replay check:** the worker SELECTs each source folder
+  once per pass; the recorded UID is used only when its UIDVALIDITY matches,
+  otherwise it is re-resolved (stored location with a matching checkpoint →
+  `MailRemote::find_uid_by_message_id` → legacy: recorded UID while the
+  stored checkpoint matches). Not found: `Flags` count a failed attempt (they
+  wait for a sync/lookup); `Move`/`Delete` are dropped and both folders
+  resynced. Ops are re-read before each run.
+- **Op completion is compare-and-swap** (`complete_op_if_unchanged` /
+  `update_op_if_unchanged`), on both sides: UI actions (`move_to_folder`,
+  `delete_permanently`) restart their decision (bounded `CAS_ROUNDS`) when
+  the worker changed an op meanwhile; the worker, when the UI rewrote or
+  cancelled an op while its server call ran, reconciles to the UI's latest
+  intent (`reconcile_move`: a rewrite now starts where the message landed; a
+  cancel queues a compensating Move back). A Move attaches its new location
+  *before* completing, and re-points later ops of the message (CAS) to the
+  new location (unresolved without COPYUID, so flag edits survive).
 - **Errors:** Network/TLS/Cancelled → drop connection, `Offline` with
   exponential back-off (`retry_base` doubling to `retry_max`) and automatic
   retry; Auth → `AuthFailed`, no retries (queue/folder commands ignored)
   until `SyncNow` / `Reconnect`; other errors on one folder skip that folder;
   database errors → `Status Error`. Ops failing with non-connection errors are
-  dropped after 3 attempts (folder modseq cleared + `SyncFolder` queued);
-  outgoing mail: connection errors keep the row untouched, others count
-  attempts and stop after 3 (`SendFailed { permanent: true }`, row kept).
-  Sent copies are APPENDed (`\Seen`) to the `sys:sent` folder after
-  `complete_outgoing`, unless `connector.saves_sent_copy()`.
+  dropped after 3 attempts (folder modseq cleared + `SyncFolder` queued); a
+  dropped Move/Delete restores its source first (re-attach the location, or
+  re-fetch the header when the row was deleted — regardless of the sync
+  window) so `purge_orphans` cannot lose mail that is still on the server.
+- **Outbox state machine** (storage `OutgoingState`; `MailSender::send`
+  returns `SendError { failure: SendFailure }`): due `queued` rows are
+  claimed (`sending` + lease) → accepted: `append_pending` (raw kept) until
+  the Sent copy is APPENDed (`\Seen`, `sys:sent`; deleted at once when
+  `connector.saves_sent_copy()`; APPEND failures retry with back-off and are
+  given up after `MAX_APPEND_DEFERRALS`, never resending); `Transient` →
+  `queued` with back-off (`EngineOptions::send_retry_delays`, default
+  1 m/5 m/15 m/1 h repeating), attempts untouched; `Permanent` → attempts+1,
+  back-off, `failed` at `MAX_SEND_ATTEMPTS` (3); `Uncertain` → `maybe_sent`,
+  never retried. `failed` / `maybe_sent` rows wait for the UI
+  (`Database::failed_outgoing` / `retry_outgoing` / `delete_outgoing`);
+  `SendFailed { permanent }` is `true` exactly when a row stopped retrying.
+  `sending` leases older than `SEND_LEASE` (10 min) become `maybe_sent`.
+  The worker wakes itself (`ProcessQueue`) when the earliest backed-off row
+  is due.
+- **Handover / one sender per account:** `Engine` keeps one
+  `Arc<Mutex<()>>` per account id for its lifetime and hands it to every
+  worker of that account; `process_queue` and `process_outbox` run only
+  while holding it (`try_lock`; busy → skipped, `SyncNow` retried after
+  `HANDOVER_RETRY` 2 s). A replaced worker that `stop_account` had to
+  detach (e.g. blocked in an SMTP send) therefore never replays or sends
+  concurrently with its successor.
 - **NewMail:** only unread rows *created* (not merged) in the `sys:inbox`
   folder after its first sync, never after a UIDVALIDITY reset.
 - **Folder mapping** (`plan::folder_path_for`): first folder per role takes
@@ -79,8 +122,13 @@ that edit the database and queue those server ops.
 - Every function gets a test; engine behavior gets an end-to-end test in
   `src/tests.rs` (real worker + `FakeConnector` + temp DB, waiting on events
   with timeouts — no fixed sleeps).
-- New server ops: add a `PendingAction` variant (serde-tagged `type`), its
-  replay in `Worker::process_queue`, and the producing action.
+- New server ops: add a `PendingAction` variant (serde-tagged `type`, with
+  `uid_validity` / `message_id_hdr`), its replay in `Worker::process_queue`,
+  and the producing action. Never drop/rename payload fields: queued rows
+  outlive upgrades (`#[serde(default)]` for additions).
+- Races between the UI and the worker are tested deterministically with
+  `FakeRemote::on_next_call` hooks (the hook acts as the UI on its own
+  connection while the worker is "on the network").
 
 ## Verification
 

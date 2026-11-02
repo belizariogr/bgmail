@@ -64,6 +64,23 @@ pub(crate) fn settle_after_location_loss(
     Ok(())
 }
 
+/// Messages per write transaction when a whole folder loses its locations
+/// (`clear_folder_locations`, `delete_folder`).
+pub(crate) const LOCATION_BATCH: usize = 500;
+
+/// Up to `limit` ids of messages with a location in `folder_id`.
+pub(crate) fn message_ids_in_folder_limit(
+    conn: &Connection,
+    folder_id: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT message_id FROM message_locations WHERE folder_id = ?1 LIMIT ?2",
+    )?;
+    let ids = stmt.query_map(params![folder_id, limit as i64], |row| row.get(0))?;
+    ids.collect()
+}
+
 /// Ids of messages with a location in `folder_id`.
 pub(crate) fn message_ids_in_folder(
     conn: &Connection,

@@ -163,6 +163,9 @@ impl Database {
     /// without any location are deleted; the rest get their membership
     /// refreshed. Location-less (local) messages keep their `folders_csv`.
     pub fn delete_folder(&self, folder_id: i64) -> rusqlite::Result<()> {
+        // Locations go first in batches (see `clear_folder_locations`) so the
+        // final transaction stays short.
+        self.clear_folder_locations(folder_id)?;
         let tx = self.write_transaction()?;
         let message_ids = message_ids_in_folder(&tx, folder_id)?;
         tx.execute("DELETE FROM folders WHERE id = ?1", params![folder_id])?;

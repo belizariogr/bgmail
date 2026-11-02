@@ -142,6 +142,19 @@ pub trait MailRemote: Send {
         uids: &[u32],
         changed_since: Option<u64>,
     ) -> RemoteResult<Vec<RemoteFlags>>;
+    /// UID of the message whose `Message-ID` header is `message_id` (with or
+    /// without angle brackets) in `folder`, selecting it; the highest UID
+    /// when several match. Used to re-find a message after its cached UID
+    /// went stale (UIDVALIDITY change, move without COPYUID). The default
+    /// (servers that cannot search) reports `None`.
+    fn find_uid_by_message_id(
+        &mut self,
+        folder: &str,
+        message_id: &str,
+    ) -> RemoteResult<Option<u32>> {
+        let _ = (folder, message_id);
+        Ok(None)
+    }
     /// Full raw message via `BODY.PEEK[]`; must not set `\Seen`.
     fn fetch_body(&mut self, folder: &str, uid: u32) -> RemoteResult<Vec<u8>>;
     /// Only `true` fields of `add` / `remove` are applied.
@@ -159,7 +172,9 @@ pub trait MailRemote: Send {
         uids: &[u32],
         to: &str,
     ) -> RemoteResult<Option<Vec<u32>>>;
-    /// `\Deleted` + `UID EXPUNGE` (or `EXPUNGE` without UIDPLUS).
+    /// `\Deleted` + `UID EXPUNGE`. Without UIDPLUS implementors must not
+    /// expunge other messages already flagged `\Deleted` (see the IMAP
+    /// client's guarded `EXPUNGE`).
     fn delete_messages(&mut self, folder: &str, uids: &[u32]) -> RemoteResult<()>;
     fn append(&mut self, folder: &str, flags: MessageFlags, raw: &[u8]) -> RemoteResult<()>;
     fn create_folder(&mut self, name: &str) -> RemoteResult<()>;
@@ -199,10 +214,83 @@ pub trait MailConnector: Send + Sync {
     }
 }
 
+/// What a failed submission means for the message (drives the outbox
+/// state machine).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SendFailure {
+    /// Certainly not accepted and likely to work later: connection / TLS /
+    /// auth failures before the message data, `4xx` replies. Retried with
+    /// back-off without using up the message's attempts.
+    Transient,
+    /// Rejected by the server (`5xx`) or unsendable (bad address).
+    Permanent,
+    /// The connection broke after the message data started, so the server
+    /// may have accepted it. Never resent automatically (duplicate risk).
+    Uncertain,
+}
+
+/// A failed [`MailSender::send`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SendError {
+    pub failure: SendFailure,
+    pub error: RemoteError,
+}
+
+impl SendError {
+    pub fn transient(error: RemoteError) -> Self {
+        Self {
+            failure: SendFailure::Transient,
+            error,
+        }
+    }
+
+    pub fn permanent(error: RemoteError) -> Self {
+        Self {
+            failure: SendFailure::Permanent,
+            error,
+        }
+    }
+
+    pub fn uncertain(error: RemoteError) -> Self {
+        Self {
+            failure: SendFailure::Uncertain,
+            error,
+        }
+    }
+}
+
+/// Errors raised before any message data was sent: connection-level kinds
+/// (`Auth`, `Network`, `Tls`, `Cancelled`) are transient, the rest
+/// permanent.
+impl From<RemoteError> for SendError {
+    fn from(error: RemoteError) -> Self {
+        match error.kind {
+            RemoteErrorKind::Auth
+            | RemoteErrorKind::Network
+            | RemoteErrorKind::Tls
+            | RemoteErrorKind::Cancelled => Self::transient(error),
+            RemoteErrorKind::Protocol
+            | RemoteErrorKind::NotFound
+            | RemoteErrorKind::Unsupported
+            | RemoteErrorKind::Other => Self::permanent(error),
+        }
+    }
+}
+
+impl fmt::Display for SendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for SendError {}
+
 /// Message submission (SMTP-shaped). `raw` is sent as-is; `recipients` is the
-/// envelope (see [`crate::compose::envelope_recipients`]).
+/// envelope (see [`crate::compose::envelope_recipients`]). Implementors must
+/// classify failures honestly: [`SendFailure::Uncertain`] whenever the
+/// server may already have accepted the message.
 pub trait MailSender: Send {
-    fn send(&mut self, from: &str, recipients: &[String], raw: &[u8]) -> RemoteResult<()>;
+    fn send(&mut self, from: &str, recipients: &[String], raw: &[u8]) -> Result<(), SendError>;
 }
 
 #[cfg(test)]
@@ -210,7 +298,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_idle_is_unsupported() {
+    fn default_idle_and_search_are_unsupported() {
         struct Minimal;
         impl MailRemote for Minimal {
             fn capabilities(&self) -> Capabilities {
@@ -274,6 +362,29 @@ mod tests {
             .idle("INBOX", Duration::from_secs(1), &CancelToken::new())
             .unwrap_err();
         assert_eq!(err.kind, RemoteErrorKind::Unsupported);
+        assert_eq!(
+            Minimal.find_uid_by_message_id("INBOX", "<a@x>").unwrap(),
+            None,
+            "default cannot search"
+        );
+    }
+
+    #[test]
+    fn send_errors_classify_by_kind() {
+        use RemoteErrorKind::*;
+        for kind in [Auth, Network, Tls, Cancelled] {
+            let err = SendError::from(RemoteError::new(kind, "x"));
+            assert_eq!(err.failure, SendFailure::Transient, "{kind:?}");
+        }
+        for kind in [Protocol, NotFound, Unsupported, Other] {
+            let err = SendError::from(RemoteError::new(kind, "x"));
+            assert_eq!(err.failure, SendFailure::Permanent, "{kind:?}");
+        }
+        let err = SendError::uncertain(RemoteError::new(Network, "reset"));
+        assert_eq!(err.failure, SendFailure::Uncertain);
+        assert_eq!(err.to_string(), "network error: reset");
+        let boxed: Box<dyn std::error::Error> = Box::new(err);
+        assert_eq!(boxed.to_string(), "network error: reset");
     }
 
     #[test]

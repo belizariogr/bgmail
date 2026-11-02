@@ -126,6 +126,8 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ### `src/imap_remote.rs`
 
+- **`Debug::fmt`** — hides the session.
+
 #### Types / constants
 
 - **const `HEADER_CHUNK`** (private): 100 UIDs per header fetch.
@@ -156,7 +158,8 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`ensure_selected`** (private) — SELECTs `folder` unless it is the cached selection.
 - **`fetch_header_chunk`** (private) — one `UID FETCH <set> (<header_items>)`; parses `RemoteHeader`s from FETCH responses (skips those without UID + header).
 - **`store`** (private) — `fn store(&mut self, uids: &[u32], op: char, flags: &[&str]) -> RemoteResult<()>`: no-op for empty UIDs/flags; `UID STORE <set> {+|-}FLAGS.SILENT (<flags>)` per chunk.
-- **`expunge`** (private) — UIDPLUS → `UID EXPUNGE <set>` per chunk; else `EXPUNGE` (removes every `\Deleted` message in the folder).
+- **`expunge`** (private) — removes only `uids`. UIDPLUS → `UID EXPUNGE <set>` per chunk. Without it, other `\Deleted` messages are found (`UID SEARCH DELETED`), unflagged around a plain `EXPUNGE` and re-flagged even when it fails. Failures only lose their `\Deleted`; a message another client flags between SEARCH and EXPUNGE is still removed (IMAP has no atomic alternative).
+- **`search_uids`** (private) — runs a `UID SEARCH …`; matching UIDs ascending, deduplicated.
 
 ##### Context: `impl MailRemote for ImapRemote`
 
@@ -164,6 +167,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`list_folders`** — `LIST "" "*"` → `RemoteFolder::new(raw name, delimiter, attributes as atoms)`.
 - **`select`** — clears the cache; `SELECT "<quoted>"` (+ ` (CONDSTORE)` when announced); caches the folder; `FolderStatus` from `folder_status`. `NO` → `NotFound`/`Protocol` per `no_kind`.
 - **`uids`** — ensure selected; `UID SEARCH ALL`; sorted, deduplicated.
+- **`find_uid_by_message_id`** — blank → `None`; selects; `UID SEARCH HEADER Message-ID "<id>"` with angle brackets (HEADER is a substring match); the highest UID.
 - **`fetch_headers`** — empty input → empty; ensure selected; chunks of `HEADER_CHUNK`; keeps only requested UIDs (unknown/expunged skipped); sorted by UID, deduplicated.
 - **`fetch_flags`** — empty → empty; `UID FETCH <set> (UID FLAGS[ MODSEQ])` with ` (CHANGEDSINCE n)` only under CONDSTORE (otherwise `changed_since` is ignored and all requested UIDs return); requested UIDs only; sorted, deduplicated.
 - **`fetch_body`** — `UID FETCH <uid> (UID BODY.PEEK[])` (never sets `\Seen`); missing → `NotFound`.
@@ -196,6 +200,8 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`has_attachments`** (pub) — `pub fn has_attachments(structure: &BodyStructure<'_>) -> bool`: disposition `attachment` anywhere, any `message/rfc822`, or a non-text leaf that is neither `inline` nor has a Content-ID. Text parts count only with `attachment`.
 - **`expand_uid_set`** (private) — `UidSetMember`s → UIDs (reversed ranges normalized).
 - **`copy_uids`** (private) — all `COPYUID` source→dest pairs from untagged/tagged codes; `None` when none present; mismatched lengths ignored.
+- **`transaction`** (private) — MAIL FROM (+ SMTPUTF8 / 8BITMIME when needed), RCPT TO each, DATA, the message; on failure reports the phase it failed in.
+- **`classify`** (pub) — `pub fn classify(err, phase: SendPhase) -> SendError`: `Connect` phase and auth replies → transient; `4xx` → transient; other codes → permanent; local client errors → permanent; no code in `Envelope` → transient; no code in `Message` → **uncertain** (the terminator may have reached the server).
 - **`map_error`** (pub) — `pub fn map_error(err: imap::Error) -> RemoteError`: `Io` → `tls::io_error`; `No` → `no_kind`; `Bad` → `Protocol`; `Bye` / `ConnectionLost` → `Network`; `Validate` → `Other`; rest (parse, append, unexpected) → `Protocol`. (The crate reports an unparseable line as a `Bye` "no explanation given".)
 - **`no_kind`** (private) — `[TRYCREATE]` or text containing nonexist / not exist / doesn't exist / no such / unknown mailbox / not found → `NotFound`, else `Protocol`.
 - **`map_login_error`** (pub) — `NO`/`BAD` → `Auth`; others as `map_error`.
@@ -219,7 +225,8 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`new`** (pub) — `pub fn new(server: &ServerConfig, username: &str, secret: &Secret, options: ConnectOptions) -> RemoteResult<Self>`
   - Behavior: no network. `Tls` → `Tls::Wrapper`, `StartTls` → `Tls::Required`, `None` → no TLS; rustls params with `accept_invalid_certs` applied to certificates **and** host names; port from config; `IO_TIMEOUT`; `Password` → PLAIN/LOGIN, `AccessToken` → XOAUTH2.
 - **`verify`** (pub) — `pub fn verify(&self) -> RemoteResult<()>`: connect + TLS + AUTH + QUIT via `test_connection`; closed connection → `Network`; errors via `map_error`.
-- **`send`** (`MailSender`) — builds `envelope(from, recipients)` and `send_raw`s the bytes unchanged (one connection per send; no pool).
+- **`send`** (`MailSender`) — builds `envelope(from, recipients)` and runs `transaction` on a fresh connection (no pool), bytes unchanged; failures go through `classify`.
+- **`Debug::fmt`** — hides internals.
 
 ##### Context: module
 
@@ -325,6 +332,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 #### Functions
 
+- **`prefer_encrypted`** (private) — the first encrypted server of the list, else the first (cleartext).
 - **`autoconfig_urls`** (pub) — `pub fn autoconfig_urls(email: &str) -> Vec<String>`: ISPDB `https://autoconfig.thunderbird.net/v1.1/<domain>`, `https://autoconfig.<domain>/mail/config-v1.1.xml?emailaddress=<encoded>`, `https://<domain>/.well-known/autoconfig/mail/config-v1.1.xml`; empty without a domain.
 - **`autoconfig`** (pub) — `pub fn autoconfig(email: &str, timeout: Duration) -> Option<AccountConfig>`: `autoconfig_from(autoconfig_urls(email))`.
 - **`autoconfig_from`** (private) — first URL answering 2xx whose body `parse_autoconfig` accepts; transport errors/non-2xx/unusable documents fall through.

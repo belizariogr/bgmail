@@ -42,7 +42,7 @@ Signatures are authoritative; `Lnn` anchors (where present) are approximate.
 
 ### `src/lib.rs`
 
-- Module declarations (`test_support` only under `cfg(test)`) and re-exports: `Database`, `database_path`, `global_folder_path`, folder helpers, `SCHEMA_VERSION`, search helpers, seed API, `BODY_STATE_FULL` / `BODY_STATE_HEADERS`, and every type in `types.rs` (incl. `RemoteInsert`) plus `PROVIDER_LOCAL` / `PROVIDER_IMAP` / `PROVIDER_GMAIL`. No functions.
+- Module declarations (`test_support` only under `cfg(test)`) and re-exports: `Database`, `database_path`, `global_folder_path`, folder helpers, `SCHEMA_VERSION`, search helpers, seed API, `BODY_STATE_FULL` / `BODY_STATE_HEADERS`, and every type in `types.rs` (incl. `RemoteInsert`, `OutgoingState`) plus `PROVIDER_LOCAL` / `PROVIDER_IMAP` / `PROVIDER_GMAIL`. No functions.
 
 ### `src/types.rs`
 
@@ -61,17 +61,23 @@ Signatures are authoritative; `Lnn` anchors (where present) are approximate.
 - **struct `NewAttachment`** (`Default`): `part_index`, `filename`, `mime_type`, `size`, `content_id`, `inline`.
 - **struct `AttachmentRow`**: stored attachment metadata (`id`, `message_id` + `NewAttachment` fields).
 - **struct `PendingOp`**: queued server action — `id`, `account_id`, `kind`, `message_id`, `payload` (opaque JSON), `attempts`, `last_error`, `created_at` (unix s).
-- **struct `OutgoingRow`**: outbox row — `id`, `account_id`, `sender`, `recipients: Vec<String>`, `raw` bytes, `message_id_hdr`, `attempts`, `last_error`, `created_at`.
+- **enum `OutgoingState`** (`Copy`, `Hash`): `Queued`, `Sending` (claimed, leased), `MaybeSent` (connection lost after the data; never auto-resent), `Failed` (too many permanent rejections), `AppendPending` (sent; Sent copy still due).
+- **`OutgoingState::is_stopped`** (pub) — `pub fn is_stopped(self) -> bool`: `MaybeSent` / `Failed`: no automatic retry is coming.
+  - **`OutgoingState::as_str`** (pub) — `"queued"` / `"sending"` / `"maybe_sent"` / `"failed"` / `"append_pending"` (`outbox.state`).
+  - **`OutgoingState::parse`** (pub) — inverse of `as_str`; unknown values → `Queued` (fail open: never silently stuck).
+- **struct `OutgoingRow`**: outbox row — `id`, `account_id`, `sender`, `recipients: Vec<String>`, `raw` bytes, `message_id_hdr`, `attempts` (permanent rejections only), `last_error`, `created_at`, `state: OutgoingState`, `next_attempt_at` (unix s; 0 = due), `deferrals` (transient failures, drives back-off).
 
 _(No functions.)_
 
 ### `src/schema.rs`
 
-- **const `SCHEMA_VERSION`**: `2`.
+- **const `SCHEMA_VERSION`**: `3`.
 - **const `CREATE_ACCOUNTS` / `CREATE_FOLDERS` / `CREATE_MESSAGES` / `CREATE_META`**: v1 base DDL (`IF NOT EXISTS`), the starting point of every database.
 - **const `INDEX_MESSAGES_SEARCH` / `INDEX_MESSAGES_ACCOUNT` / `INDEX_MESSAGES_FOLDERS`**: v1 indexes.
 - **const `V2_COLUMNS`**: `(table, column, definition)` list added in place by the v1→v2 step (accounts: provider/config_json/sort_order; folders: remote_name/role/uid_validity/uid_next/highest_modseq/synced_at; messages: message_id_hdr/in_reply_to/references_hdr/thread_id/to_addrs/cc_addrs/reply_to/date_ts/answered/body_state/gm_msgid/size).
 - **const `V2_OBJECTS`**: idempotent DDL for `message_locations` (+ index on message_id), `message_bodies`, `attachments` (+ index), `pending_ops` (+ index), `outbox`, message indexes `(account_id, message_id_hdr)`, `(account_id, gm_msgid)`, `(thread_id)`, `(date_ts)`, the `messages_fts` FTS5 trigram external-content table and its insert/delete/update-of-search_text triggers.
+- **const `V3_COLUMNS`**: outbox `state TEXT NOT NULL DEFAULT 'queued'`, `next_attempt_at INTEGER NOT NULL DEFAULT 0`, `lease_at INTEGER`, `deferrals INTEGER NOT NULL DEFAULT 0`.
+- **const `V3_OBJECTS`**: index `idx_outbox_account_state (account_id, state)`.
 
 _(No functions.)_
 
@@ -79,16 +85,18 @@ _(No functions.)_
 
 - **`migrate`** (pub(crate)) — `fn migrate(conn: &Connection) -> rusqlite::Result<()>`
   - Purpose: bring any database to `SCHEMA_VERSION`.
-  - Behavior: one `IMMEDIATE` transaction: runs v1 base DDL, reads `schema_version` (missing → 1), runs `migrate_v1_to_v2` when < 2, upserts `meta.schema_version` when it changed or was missing, commits. Newer versions are left untouched.
+  - Behavior: one `IMMEDIATE` transaction: runs v1 base DDL, reads `schema_version` (missing → 1), runs `migrate_v1_to_v2` when < 2 and `migrate_v2_to_v3` when < 3, upserts `meta.schema_version` when it changed or was missing, commits. Newer versions are left untouched.
 - **`schema_version`** (pub(crate)) — `fn schema_version(conn: &Connection) -> rusqlite::Result<Option<i64>>`
   - Reads and parses `meta.schema_version`; `None` when absent or not an integer.
 - **`migrate_v1_to_v2`** (private) — `fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()>`
   - Adds every `V2_COLUMNS` entry via `add_column_if_missing`, executes `V2_OBJECTS`, then `INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')` so pre-existing rows are searchable.
+- **`migrate_v2_to_v3`** (private) — `fn migrate_v2_to_v3(conn: &Connection) -> rusqlite::Result<()>`
+  - Adds `V3_COLUMNS` (existing outbox rows become `queued`, due now, attempts kept) and runs `V3_OBJECTS`.
 - **`add_column_if_missing`** (private) — `fn add_column_if_missing(conn, table, column, definition) -> rusqlite::Result<()>`
   - `ALTER TABLE {table} ADD COLUMN {column} {definition}` unless `column_exists`.
 - **`column_exists`** (pub(crate)) — `fn column_exists(conn, table, column) -> rusqlite::Result<bool>`
   - Scans `PRAGMA table_info(table)` names.
-- Tests: `v1_database` (fixture: v1 DDL + one account/folder/message, version 1), `v1_database_migrates_in_place_preserving_data` (provider `local`, `config_json {}`, folder role/remote `None`, message fields kept, `body_state 1`, `date_ts 0`, FTS finds old row), `migration_is_idempotent_across_reopens`, `fresh_database_starts_at_current_version`, `add_column_if_missing_tolerates_existing_columns`, `schema_version_is_none_without_row`.
+- Tests: `v1_database` (fixture: v1 DDL + one account/folder/message, version 1), `v1_database_migrates_in_place_preserving_data` (provider `local`, `config_json {}`, folder role/remote `None`, message fields kept, `body_state 1`, `date_ts 0`, FTS finds old row), `v2_outbox_rows_migrate_to_queued_v3_rows` (v2 fixture built by `migrate_v1_to_v2` + version 2 + an outbox row), `migration_is_idempotent_across_reopens`, `fresh_database_starts_at_current_version`, `add_column_if_missing_tolerates_existing_columns`, `schema_version_is_none_without_row`.
 
 ### `src/database.rs`
 
@@ -107,6 +115,7 @@ _(No functions.)_
 - **`Database::open`** (pub) — `pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self>`: creates parent dirs (errors ignored), opens, sets busy timeout, `PRAGMA journal_mode = WAL`, `foreign_keys = ON`, runs `migrate()`.
 - **`Database::open_default`** (pub) — `pub fn open_default() -> rusqlite::Result<Self>`: `open(database_path())`.
 - **`Database::conn`** (pub) — `pub fn conn(&self) -> &Connection`: raw connection (seeding, low-level use).
+- **`Database::atomically`** (pub) — `pub fn atomically<T>(&self, body: impl FnOnce() -> rusqlite::Result<T>) -> rusqlite::Result<T>`: runs `body` in one write transaction, committed on `Ok`, rolled back on `Err`; for read-then-write callers outside this crate. `body` must not open another transaction.
 - **`Database::write_transaction`** (pub(crate)) — `fn write_transaction(&self) -> rusqlite::Result<Transaction<'_>>`: `BEGIN IMMEDIATE` transaction so concurrent writers wait on the busy timeout instead of failing on lock upgrade.
 - **`Database::migrate`** (private) — `fn migrate(&self) -> rusqlite::Result<()>`: `migration::migrate`, then `repair_starred_folder_membership`.
 - **`Database::repair_starred_folder_membership`** (private): appends `sys:flagged` to `folders_csv` of starred rows missing it (sorted/deduped). No-op when nothing to fix.
@@ -136,7 +145,7 @@ _(No functions.)_
 - **`Database::folder_by_remote_name`** (pub) — `pub fn folder_by_remote_name(&self, account_id: i64, remote_name: &str) -> rusqlite::Result<Option<Folder>>`: lowest id match.
 - **`Database::folder_for_role`** (pub) — `pub fn folder_for_role(&self, account_id: i64, role: &str) -> rusqlite::Result<Option<Folder>>`: lowest id with that role.
 - **`Database::upsert_remote_folder`** (pub) — `pub fn upsert_remote_folder(&self, account_id: i64, path: &str, display_name: &str, remote_name: &str, role: Option<&str>) -> rusqlite::Result<i64>`: insert or update display/remote/role keyed by `(account_id, path)`; keeps sync checkpoints; returns id (`RETURNING`).
-- **`Database::delete_folder`** (pub) — `pub fn delete_folder(&self, folder_id: i64) -> rusqlite::Result<()>`: write tx: collects messages located there, deletes the folder (cascade locations), `settle_after_location_loss`. Location-less messages keep their csv.
+- **`Database::delete_folder`** (pub) — `pub fn delete_folder(&self, folder_id: i64) -> rusqlite::Result<()>`: first `clear_folder_locations` (batched commits), then a short write tx: collects any messages still located there, deletes the folder (cascade locations), `settle_after_location_loss`. Location-less messages keep their csv.
 - **`Database::folder_sync_state`** (pub) — `pub fn folder_sync_state(&self, folder_id: i64) -> rusqlite::Result<FolderSyncState>`: stored checkpoint; all `None` for unknown/never-synced folders. Modseq is bit-cast from i64.
 - **`Database::set_folder_sync_state`** (pub) — `pub fn set_folder_sync_state(&self, folder_id: i64, state: &FolderSyncState) -> rusqlite::Result<()>`: overwrites all four columns.
 - Tests: `create_get_update_account`, `delete_account_cascades_everything` (all child tables empty, FTS integrity-check passes, other account kept), `upsert_remote_folder_is_keyed_by_path`, `folder_lookups`, `folder_sync_state_round_trips` (u32::MAX / 63-bit modseq), `delete_folder_drops_remote_orphans_and_refreshes_others`.
@@ -146,6 +155,8 @@ _(No functions.)_
 - **`refresh_membership_in`** (pub(crate)) — `fn refresh_membership_in(conn: &Connection, message_id: i64) -> rusqlite::Result<()>`: when the message has locations, sets `folders_csv` = sorted/deduped location folder paths + `sys:flagged` if starred; no-op without locations or for unknown ids.
 - **`settle_after_location_loss`** (pub(crate)) — `fn settle_after_location_loss(conn: &Connection, message_ids: &[i64]) -> rusqlite::Result<()>`: per id, deletes the message if it has no location and its account's provider is not `local`; otherwise `refresh_membership_in`.
 - **`message_ids_in_folder`** (pub(crate)) — `fn message_ids_in_folder(conn: &Connection, folder_id: i64) -> rusqlite::Result<Vec<i64>>`: distinct message ids located in the folder.
+- **const `LOCATION_BATCH`** (pub(crate)): 500 messages per write transaction when a whole folder loses its locations.
+- **`message_ids_in_folder_limit`** (pub(crate)) — `fn message_ids_in_folder_limit(conn: &Connection, folder_id: i64, limit: usize) -> rusqlite::Result<Vec<i64>>`: up to `limit` distinct message ids located in the folder.
 - **`Database::refresh_membership`** (pub) — `pub fn refresh_membership(&self, message_id: i64) -> rusqlite::Result<()>`: public wrapper of `refresh_membership_in`.
 - Tests: `membership_follows_locations_and_starred`, `membership_without_locations_is_left_alone`, `refresh_membership_of_missing_message_is_noop`.
 
@@ -166,7 +177,7 @@ _(No functions.)_
 - **`Database::folder_uids`** (pub) — `pub fn folder_uids(&self, folder_id: i64) -> rusqlite::Result<Vec<(u32, i64)>>`: `(uid, message_id)` ascending.
 - **`Database::max_uid`** (pub) — `pub fn max_uid(&self, folder_id: i64) -> rusqlite::Result<Option<u32>>`.
 - **`Database::remove_locations`** (pub) — `pub fn remove_locations(&self, folder_id: i64, uids: &[u32]) -> rusqlite::Result<()>`: write tx; deletes known locations, then `settle_after_location_loss` on affected messages. Unknown uids ignored.
-- **`Database::clear_folder_locations`** (pub) — `pub fn clear_folder_locations(&self, folder_id: i64) -> rusqlite::Result<()>`: same as above for every location of the folder (UIDVALIDITY reset).
+- **`Database::clear_folder_locations`** (pub) — `pub fn clear_folder_locations(&self, folder_id: i64) -> rusqlite::Result<()>`: same orphan rules as above for every location of the folder (UIDVALIDITY reset), committed every `LOCATION_BATCH` messages (loop: write tx, next batch of ids, delete their locations in the folder, settle, commit) so the UI connection never waits on one huge transaction.
 - **`Database::apply_remote_flags`** (pub) — `pub fn apply_remote_flags(&self, folder_id: i64, uid: u32, unread: bool, starred: bool, answered: bool) -> rusqlite::Result<bool>`: updates flags only if different, refreshes membership when changed; `false` for unknown location or no change.
 - **`Database::store_body`** (pub) — `pub fn store_body(&self, message_id: i64, raw: &[u8], content: &str, format: &str, plain_text: &str, preview: &str, attachments: &[NewAttachment]) -> rusqlite::Result<()>`: write tx; upserts `message_bodies.raw`, sets raw_content/raw_format (`html`|`text`, CHECK-enforced)/plain_text/preview/search_text (recomputed)/`has_attachment` (any non-inline)/`body_state 1`, replaces attachments. No-op for a deleted message.
 - **`Database::message_raw`** (pub) — `pub fn message_raw(&self, message_id: i64) -> rusqlite::Result<Option<Vec<u8>>>`.
@@ -178,23 +189,40 @@ _(No functions.)_
 - **`Database::detach_location`** (pub) — `pub fn detach_location(&self, message_id: i64, folder_id: i64) -> rusqlite::Result<Option<MessageLocation>>`: write tx; removes the message's first location in that folder and returns it; membership refreshed (no-op when no location remains → in flight, csv kept); `None` when it had none there.
 - **`Database::purge_orphans`** (pub) — `pub fn purge_orphans(&self, account_id: i64) -> rusqlite::Result<usize>`: write tx; deletes the account's messages with no location and no `pending_ops` row referencing them, only for non-`local` providers; returns the count.
 - **`Database::folder_messages_without_body`** (pub) — `pub fn folder_messages_without_body(&self, folder_id: i64, limit: usize, max_size: u64) -> rusqlite::Result<Vec<(i64, u32)>>`: among the folder's `limit` newest located messages (`date_ts DESC, uid DESC`), the `body_state 0` ones with `size <= max_size`, as `(message_id, uid)` newest first (body prefetch).
-- Tests: `insert_creates_headers_only_message_with_location`, `insert_same_location_twice_returns_existing`, `gm_msgid_merges_locations` (no cross-account merge), `message_id_merges_only_in_flight_messages`, `detach_keeps_csv_and_returns_nothing_twice`, `folder_uids_and_max_uid`, `remove_locations_deletes_remote_orphans_only`, `clear_folder_locations_uses_orphan_rules`, `apply_remote_flags_updates_and_reports_change`, `store_body_fills_message_and_attachments`, `store_body_for_missing_message_is_noop`, `messages_without_body_newest_first_with_locations`, `record_remote_message_reports_creation`, `attach_location_adds_and_refreshes_membership`, `detach_location_removes_one_folder_only`, `purge_orphans_spares_located_queued_and_local_mail`, `folder_messages_without_body_limits_to_newest_and_size`, `list_order_is_date_then_sort_order`; helper `count`.
+- Tests: `insert_creates_headers_only_message_with_location`, `insert_same_location_twice_returns_existing`, `gm_msgid_merges_locations` (no cross-account merge), `message_id_merges_only_in_flight_messages`, `detach_keeps_csv_and_returns_nothing_twice`, `folder_uids_and_max_uid`, `remove_locations_deletes_remote_orphans_only`, `clear_folder_locations_uses_orphan_rules`, `clear_folder_locations_spans_several_batches` (also `delete_folder`), `apply_remote_flags_updates_and_reports_change`, `store_body_fills_message_and_attachments`, `store_body_for_missing_message_is_noop`, `messages_without_body_newest_first_with_locations`, `record_remote_message_reports_creation`, `attach_location_adds_and_refreshes_membership`, `detach_location_removes_one_folder_only`, `purge_orphans_spares_located_queued_and_local_mail`, `folder_messages_without_body_limits_to_newest_and_size`, `list_order_is_date_then_sort_order`; helper `count`.
 
 ### `src/queue.rs`
 
 - **`unix_now`** (pub(crate)) — `fn unix_now() -> i64`: current unix seconds (0 before epoch).
+- **const `OP_COLUMNS`** / **`op_from_row`** (private) — `pending_ops` column list and row → `PendingOp`.
 - **`Database::enqueue_op`** (pub) — `pub fn enqueue_op(&self, account_id: i64, kind: &str, message_id: Option<i64>, payload: &str) -> rusqlite::Result<i64>`: inserts with `created_at = now`; returns id.
 - **`Database::pending_ops`** (pub) — `pub fn pending_ops(&self, account_id: i64) -> rusqlite::Result<Vec<PendingOp>>`: oldest first (by id).
-- **`Database::complete_op`** (pub) — `pub fn complete_op(&self, id: i64) -> rusqlite::Result<()>`: deletes the op.
-- **`Database::fail_op`** (pub) — `pub fn fail_op(&self, id: i64, error: &str) -> rusqlite::Result<()>`: `attempts + 1`, `last_error = error`.
+- **`Database::pending_op`** (pub) — `pub fn pending_op(&self, id: i64) -> rusqlite::Result<Option<PendingOp>>`: the op as it is now; `None` once removed.
+- **`Database::complete_op`** (pub) — `pub fn complete_op(&self, id: i64) -> rusqlite::Result<()>`: deletes the op unconditionally.
+- **`Database::complete_op_if_unchanged`** (pub) — `pub fn complete_op_if_unchanged(&self, id: i64, kind: &str, payload: &str) -> rusqlite::Result<bool>`: `DELETE … WHERE id AND kind AND payload`; `false` when the row was rewritten or removed meanwhile (the caller must not apply the executed op's local result).
+- **`Database::fail_op`** (pub) — `pub fn fail_op(&self, id: i64, error: &str) -> rusqlite::Result<()>`: `attempts + 1`, `last_error = error` (kind/payload untouched, so CAS keys stay valid).
 - **`Database::update_op`** (pub) — `pub fn update_op(&self, id: i64, kind: &str, payload: &str) -> rusqlite::Result<()>`: rewrites kind + payload in place (id, attempts, order kept).
+- **`Database::update_op_if_unchanged`** (pub) — `pub fn update_op_if_unchanged(&self, id: i64, old_kind: &str, old_payload: &str, kind: &str, payload: &str) -> rusqlite::Result<bool>`: compare-and-swap rewrite; `false` when another connection changed/removed the row first.
 - **`Database::drop_ops_for_message`** (pub) — `pub fn drop_ops_for_message(&self, message_id: i64) -> rusqlite::Result<()>`: deletes ops targeting the message.
-- **`Database::enqueue_outgoing`** (pub) — `pub fn enqueue_outgoing(&self, account_id: i64, sender: &str, recipients: &[String], raw: &[u8], message_id_hdr: Option<&str>) -> rusqlite::Result<i64>`: recipients stored newline-separated.
-- **`Database::outbox`** (pub) — `pub fn outbox(&self, account_id: i64) -> rusqlite::Result<Vec<OutgoingRow>>`: oldest first; recipients split on lines (empty lines dropped).
-- **`Database::outbox_count`** (pub) — `pub fn outbox_count(&self) -> rusqlite::Result<usize>`: all accounts.
-- **`Database::complete_outgoing`** (pub) — `pub fn complete_outgoing(&self, id: i64) -> rusqlite::Result<()>`: deletes the row.
-- **`Database::fail_outgoing`** (pub) — `pub fn fail_outgoing(&self, id: i64, error: &str) -> rusqlite::Result<()>`: `attempts + 1`, `last_error`.
-- Tests: `unix_now_is_after_2020`, `pending_ops_lifecycle` (incl. `update_op`), `outbox_lifecycle`.
+- **`Database::enqueue_outgoing`** (pub) — `pub fn enqueue_outgoing(&self, account_id: i64, sender: &str, recipients: &[String], raw: &[u8], message_id_hdr: Option<&str>) -> rusqlite::Result<i64>`: recipients stored newline-separated; state `queued`, due now.
+- **`Database::outbox`** (pub) — `pub fn outbox(&self, account_id: i64) -> rusqlite::Result<Vec<OutgoingRow>>`: every row of the account (any state), oldest first; recipients split on lines (empty lines dropped).
+- **`Database::due_outgoing`** (pub) — `pub fn due_outgoing(&self, account_id: i64, now: i64) -> rusqlite::Result<Vec<OutgoingRow>>`: `queued` / `append_pending` rows with `next_attempt_at <= now`, oldest first.
+- **`Database::failed_outgoing`** (pub) — `pub fn failed_outgoing(&self) -> rusqlite::Result<Vec<OutgoingRow>>`: `failed` and `maybe_sent` rows of every account (they stopped retrying; the UI resolves them), oldest first. `raw` is empty: the UI lists these on every reload, attachments can be large.
+- **`Database::outgoing`** (pub) — `pub fn outgoing(&self, id: i64) -> rusqlite::Result<Option<OutgoingRow>>`: one row with its raw bytes.
+- **`Database::next_outgoing_due`** (pub) — `pub fn next_outgoing_due(&self, account_id: i64, now: i64) -> rusqlite::Result<Option<i64>>`: earliest `next_attempt_at` after `now` among `queued` / `append_pending` rows.
+- **`Database::replace_outgoing`** (pub) — `pub fn replace_outgoing(&self, old_id: i64, account_id: i64, sender: &str, recipients: &[String], raw: &[u8], message_id_hdr: Option<&str>) -> rusqlite::Result<Option<i64>>`: one transaction: deletes `old_id` and queues `raw`. `None` (nothing changed) when the old row exists and isn't stopped; a missing old row doesn't block.
+- **`Database::query_outgoing`** (private) — shared `SELECT` with a `WHERE` fragment + params.
+- **`Database::outbox_count`** (pub) — `pub fn outbox_count(&self) -> rusqlite::Result<usize>`: `queued` + `sending` rows of all accounts (still waiting to be sent).
+- **`Database::claim_outgoing`** (pub) — `pub fn claim_outgoing(&self, id: i64, now: i64) -> rusqlite::Result<bool>`: atomic `queued` → `sending` with `lease_at = now`; `false` when not `queued` (claimed elsewhere, cancelled, gone).
+- **`Database::expire_outgoing_leases`** (pub) — `pub fn expire_outgoing_leases(&self, account_id: i64, cutoff: i64) -> rusqlite::Result<Vec<i64>>`: the account's `sending` rows leased before `cutoff` → `maybe_sent` (`last_error` defaults to "interrupted while sending"); ids of the changed rows.
+- **`Database::complete_outgoing`** (pub) — `pub fn complete_outgoing(&self, id: i64) -> rusqlite::Result<()>`: deletes the row (sent and filed).
+- **`Database::mark_outgoing_append_pending`** (pub) — `pub fn mark_outgoing_append_pending(&self, id: i64) -> rusqlite::Result<()>`: accepted by SMTP; keeps the raw for the Sent APPEND (`append_pending`, due now, deferrals/error/lease cleared).
+- **`Database::defer_outgoing`** (pub) — `pub fn defer_outgoing(&self, id: i64, error: &str, next_attempt_at: i64) -> rusqlite::Result<()>`: transient failure: `deferrals + 1`, `last_error`, `next_attempt_at`, lease cleared; `sending` → `queued`, `append_pending` kept; attempts untouched.
+- **`Database::fail_outgoing`** (pub) — `pub fn fail_outgoing(&self, id: i64, error: &str, next_attempt_at: i64, max_attempts: u32) -> rusqlite::Result<OutgoingState>`: permanent rejection: `attempts + 1`, `last_error`, `next_attempt_at`, lease cleared; `failed` once attempts reach `max_attempts`, else `queued`; returns the new state (`Failed` for a missing row).
+- **`Database::mark_outgoing_maybe_sent`** (pub) — `pub fn mark_outgoing_maybe_sent(&self, id: i64, error: &str) -> rusqlite::Result<()>`: `maybe_sent` + `last_error`, lease cleared.
+- **`Database::retry_outgoing`** (pub) — `pub fn retry_outgoing(&self, id: i64) -> rusqlite::Result<bool>`: user retry of a stopped row: `queued`, attempts/deferrals/`next_attempt_at` 0, lease and error cleared. `false` (untouched) for any other state.
+- **`Database::delete_outgoing`** (pub) — `pub fn delete_outgoing(&self, id: i64) -> rusqlite::Result<()>`: user discard (any state).
+- Tests: `unix_now_is_after_2020`, `pending_ops_lifecycle` (incl. `update_op`, `pending_op`), `outbox_lifecycle`, `complete_op_if_unchanged_detects_rewrites_and_removals`, `update_op_if_unchanged_is_a_compare_and_swap`, `due_outgoing_respects_backoff_and_state`, `claim_outgoing_is_exclusive_and_leases_expire_to_maybe_sent`, `fail_outgoing_reaches_failed_after_max_attempts`, `failed_outgoing_retry_and_delete`, `replace_outgoing_only_replaces_stopped_or_missing_rows`, `retry_outgoing_only_touches_stopped_rows`, `stopped_listing_leaves_raw_out_and_outgoing_brings_it`, `next_outgoing_due_is_the_earliest_future_retry`, `atomically_rolls_back_on_error`.
 
 ### `src/message_ops.rs`
 

@@ -52,7 +52,9 @@ use html_view::{
 };
 use mail_core::{AccountConfig, Address, Draft, ParsedMessage, QuoteLabels, ReplyKind};
 use mail_sync::{actions as mail_actions, ActionOutcome, Command, SyncEvent};
-use storage::{AttachmentRow, MailListQuery, MessageDetail, MessageListItem};
+use storage::{
+    AttachmentRow, MailListQuery, MessageDetail, MessageListItem, OutgoingRow, OutgoingState,
+};
 
 /// Minimum width of the accounts/folders sidebar, in pixels.
 const SIDEBAR_MIN_WIDTH: f32 = 150.0;
@@ -67,6 +69,11 @@ const READER_MIN_WIDTH: f32 = 550.0;
 pub(crate) const WINDOW_MIN_WIDTH: f32 = 950.0;
 /// Minimum window height, in pixels.
 pub(crate) const WINDOW_MIN_HEIGHT: f32 = 480.0;
+
+/// Wayland app_id / X11 WM_CLASS of every BGMail window: must match the
+/// packaged `BGMail.desktop` (StartupWMClass) so docks group the main,
+/// compose and settings windows under one icon.
+pub(crate) const WINDOW_APP_ID: &str = "BGMail";
 /// Below this window width the sidebar collapses automatically and, once
 /// reopened, floats over the content instead of pushing the columns.
 const NARROW_BREAKPOINT: f32 = 1200.0;
@@ -323,6 +330,13 @@ pub struct RootView {
     /// token of the timer that clears it.
     status_note: Option<SharedString>,
     status_note_seq: u64,
+    /// Accounts being removed in the background: hidden right away and
+    /// filtered out of every reload until their deletion finishes.
+    removing_accounts: HashSet<i64>,
+    /// Outgoing messages that stopped retrying (status bar "N unsent").
+    unsent: Vec<UnsentItem>,
+    /// The "unsent" panel above the status bar is open.
+    unsent_panel_open: bool,
     accounts: Vec<storage::Account>,
     /// Folders keyed by account id (loaded from SQLite).
     folders_by_account: std::collections::HashMap<i64, Vec<storage::Folder>>,
@@ -527,6 +541,116 @@ fn forwarded_attachments(raw: &[u8], parsed: &ParsedMessage) -> Vec<mail_core::O
         .collect()
 }
 
+/// An outgoing message that stopped retrying (`failed` / `maybe_sent`), as
+/// listed in the status bar's "unsent" panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UnsentItem {
+    id: i64,
+    account_id: i64,
+    /// Parsed from the raw message; empty when it has none.
+    subject: String,
+    /// Envelope recipients (Bcc included), comma-separated.
+    recipients: String,
+    error: Option<String>,
+    /// The connection broke mid-send: the server may have accepted it.
+    maybe_sent: bool,
+}
+
+/// Summarizes an unsent outbox row (`subject` comes from its parsed raw).
+fn unsent_item(row: &OutgoingRow, subject: String) -> UnsentItem {
+    UnsentItem {
+        id: row.id,
+        account_id: row.account_id,
+        subject,
+        recipients: row.recipients.join(", "),
+        error: row
+            .last_error
+            .as_deref()
+            .map(str::trim)
+            .filter(|error| !error.is_empty())
+            .map(str::to_string),
+        maybe_sent: row.state == OutgoingState::MaybeSent,
+    }
+}
+
+/// Outbox rows that stopped retrying, minus accounts being removed. Subjects
+/// of rows already in `previous` are reused instead of re-parsing the raw.
+fn load_unsent(
+    db: &storage::Database,
+    removing: &HashSet<i64>,
+    previous: Vec<UnsentItem>,
+) -> Vec<UnsentItem> {
+    let rows = match db.failed_outgoing() {
+        Ok(rows) => rows,
+        Err(error) => {
+            eprintln!("BGMail: could not read the outbox: {error}");
+            return previous;
+        }
+    };
+    let mut subjects: HashMap<i64, String> = previous
+        .into_iter()
+        .map(|item| (item.id, item.subject))
+        .collect();
+    // The listing has no raw bytes: read them once, for rows new to the list.
+    let subject_of = |id: i64| {
+        db.outgoing(id)
+            .ok()
+            .flatten()
+            .and_then(|row| mail_core::parse_message(&row.raw))
+            .map(|parsed| parsed.subject)
+            .unwrap_or_default()
+    };
+    rows.iter()
+        .filter(|row| !removing.contains(&row.account_id))
+        .map(|row| {
+            let subject = subjects
+                .remove(&row.id)
+                .unwrap_or_else(|| subject_of(row.id));
+            unsent_item(row, subject)
+        })
+        .collect()
+}
+
+/// Compose content that re-creates an unsent message for editing. Bcc never
+/// reaches the headers, so envelope recipients missing from To/Cc are
+/// restored as Bcc. Sending it replaces the outbox row.
+fn compose_init_from_outgoing(row: &OutgoingRow, parsed: &ParsedMessage) -> ComposeInit {
+    let bcc = if parsed.bcc.is_empty() {
+        row.recipients
+            .iter()
+            .filter(|recipient| {
+                !parsed
+                    .to
+                    .iter()
+                    .chain(&parsed.cc)
+                    .any(|address| mail_core::same_email(&address.email, recipient))
+            })
+            .map(|recipient| Address::new(None::<String>, recipient.clone()))
+            .collect()
+    } else {
+        parsed.bcc.clone()
+    };
+    ComposeInit {
+        account_id: Some(row.account_id),
+        draft: Draft {
+            from: parsed
+                .from
+                .clone()
+                .unwrap_or_else(|| Address::new(None::<String>, row.sender.clone())),
+            to: parsed.to.clone(),
+            cc: parsed.cc.clone(),
+            bcc,
+            subject: parsed.subject.clone(),
+            text: parsed.text.clone().unwrap_or_default(),
+            html: None,
+            in_reply_to: parsed.in_reply_to.clone(),
+            references: parsed.references.clone(),
+            attachments: forwarded_attachments(&row.raw, parsed),
+        },
+        replaces_outgoing: Some(row.id),
+    }
+}
+
 /// Process-unique number for Message-IDs (time + counter + random seed).
 fn unique_token() -> u64 {
     use std::hash::{BuildHasher, Hasher};
@@ -690,6 +814,7 @@ impl RootView {
             .flatten();
         let selected_detail = selected_message_id.and_then(|id| db.get_message(id).ok().flatten());
         let attachments = visible_attachments(&db, selected_detail.as_ref());
+        let unsent = load_unsent(&db, &HashSet::new(), Vec::new());
 
         Self {
             db,
@@ -699,6 +824,9 @@ impl RootView {
             reload_scheduled: false,
             status_note: None,
             status_note_seq: 0,
+            removing_accounts: HashSet::new(),
+            unsent,
+            unsent_panel_open: false,
             accounts,
             folders_by_account,
             list_messages,
@@ -773,6 +901,11 @@ impl RootView {
                 .unwrap_or_default();
         } else {
             self.list_messages = self.db.list_messages(&query).unwrap_or_default();
+        }
+        if !self.removing_accounts.is_empty() {
+            let removing = &self.removing_accounts;
+            self.list_messages
+                .retain(|message| !removing.contains(&message.account_id));
         }
         if let Some(selected) = self.selected_message_id {
             if self.list_messages.iter().any(|m| m.id == selected) {
@@ -907,7 +1040,10 @@ impl RootView {
                     self.after_action(account_id, outcome);
                 }
             }
-            Err(error) => eprintln!("BGMail: message action failed: {error}"),
+            Err(error) => self.set_status_note(
+                format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
+                cx,
+            ),
         }
         self.reload_message_list();
         if self.selected_message_id.is_none() {
@@ -994,6 +1130,11 @@ impl RootView {
         secret: Option<&[u8]>,
         cx: &mut Context<Self>,
     ) {
+        // Removed while its keychain read was pending: a worker started now
+        // would outlive the account, the removal's stop job being superseded.
+        if !self.accounts.iter().any(|account| account.id == account_id) {
+            return;
+        }
         let Some(mail) = self.mail.as_mut() else {
             return;
         };
@@ -1003,7 +1144,9 @@ impl RootView {
         match connector {
             Ok(connector) => {
                 self.account_start_errors.remove(&account_id);
-                mail.start_account(account_id, connector);
+                // Replacing a running worker waits for it to wind down.
+                let start = mail.start_account(account_id, connector);
+                cx.background_spawn(async move { start() }).detach();
             }
             Err(error) => {
                 self.account_start_errors.insert(account_id, error);
@@ -1016,6 +1159,9 @@ impl RootView {
     fn on_sync_event(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
         match event {
             SyncEvent::Status { account_id, status } => {
+                if self.removing_accounts.contains(&account_id) {
+                    return;
+                }
                 if let Some(mail) = self.mail.as_mut() {
                     mail.set_status(account_id, status);
                 }
@@ -1056,6 +1202,7 @@ impl RootView {
             }
             SyncEvent::Sent { .. } => {
                 self.set_status_note(Key::StatusMessageSent.tr(cx.language()), cx);
+                self.refresh_unsent();
                 self.schedule_reload(cx);
             }
             SyncEvent::SendFailed {
@@ -1067,6 +1214,11 @@ impl RootView {
                     Key::StatusSendRetrying
                 };
                 self.set_status_note(format!("{}: {error}", key.tr(cx.language())), cx);
+                self.refresh_unsent();
+            }
+            SyncEvent::SentCopyFailed { error, .. } => {
+                let failed = Key::StatusSentCopyFailed.tr(cx.language());
+                self.set_status_note(format!("{failed}: {error}"), cx);
             }
         }
     }
@@ -1115,6 +1267,11 @@ impl RootView {
     /// Re-reads accounts, folders and the current list from the database.
     pub(crate) fn reload_from_database(&mut self) {
         self.accounts = self.db.list_accounts().unwrap_or_default();
+        if !self.removing_accounts.is_empty() {
+            let removing = &self.removing_accounts;
+            self.accounts
+                .retain(|account| !removing.contains(&account.id));
+        }
         self.folders_by_account = self
             .accounts
             .iter()
@@ -1126,6 +1283,17 @@ impl RootView {
             })
             .collect();
         self.reload_message_list();
+        self.refresh_unsent();
+    }
+
+    /// Re-reads the outbox rows that stopped retrying (subjects already
+    /// parsed are reused: the raw may carry large attachments).
+    fn refresh_unsent(&mut self) {
+        let previous = std::mem::take(&mut self.unsent);
+        self.unsent = load_unsent(&self.db, &self.removing_accounts, previous);
+        if self.unsent.is_empty() {
+            self.unsent_panel_open = false;
+        }
     }
 
     /// Asks every account to sync now ("Get mail").
@@ -1184,16 +1352,15 @@ impl RootView {
             .map_err(|error| error.to_string())?;
         self.store_secret(&config, &secret, cx);
         self.reload_from_database();
+        // A new worker begins with a full sync; no `SyncNow` needed (and it
+        // starts off-thread, so it would not be running yet anyway).
         self.start_account_with_secret(account_id, &config_json, Some(secret.as_bytes()), cx);
-        if let Some(mail) = &self.mail {
-            mail.engine().send(account_id, Command::SyncNow);
-        }
         cx.notify();
         Ok(account_id)
     }
 
     /// Replaces an account's secret (e.g. after a password change) and
-    /// reconnects it.
+    /// reconnects it. The worker restart runs off the UI thread.
     pub(crate) fn update_account_secret(
         &mut self,
         account_id: i64,
@@ -1226,24 +1393,17 @@ impl RootView {
     }
 
     /// Stops syncing an account, forgets its secret and deletes its local mail.
+    /// The account disappears from the UI at once; stopping its worker (up to
+    /// a second) and deleting its mail (seconds for a big account) run in the
+    /// background on their own connection, then everything reloads. A failed
+    /// delete brings the account back with a status note.
     pub(crate) fn remove_account(&mut self, account_id: i64, cx: &mut Context<Self>) {
         let Some(account) = self.accounts.iter().find(|a| a.id == account_id).cloned() else {
             return;
         };
-        if let Some(mail) = self.mail.as_mut() {
-            mail.stop_account(account_id);
-        }
-        if let Some(config) = AccountConfig::from_json(&account.config_json) {
-            let delete = cx.delete_credentials(&config.secret_key());
-            cx.background_spawn(async move {
-                delete.await.ok();
-            })
-            .detach();
-        }
+        let stop = self.mail.as_mut().map(|mail| mail.stop_account(account_id));
         self.account_start_errors.remove(&account_id);
-        if let Err(error) = self.db.delete_account(account_id) {
-            eprintln!("BGMail: could not delete the account: {error}");
-        }
+        self.removing_accounts.insert(account_id);
         if self
             .selected_detail
             .as_ref()
@@ -1259,6 +1419,125 @@ impl RootView {
         self.reload_from_database();
         self.sync_app_menus(cx);
         cx.notify();
+
+        let db_path = self.db_path.clone();
+        let removal = cx.background_spawn(async move {
+            if let Some(stop) = stop {
+                stop();
+            }
+            storage::Database::open(&db_path).and_then(|db| db.delete_account(account_id))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = removal.await;
+            this.update(cx, |this, cx| {
+                this.removing_accounts.remove(&account_id);
+                let failure = result.err();
+                if let Some(error) = &failure {
+                    let failed = Key::StatusRemoveAccountFailed.tr(cx.language());
+                    this.set_status_note(format!("{failed}: {error}"), cx);
+                } else if let Some(config) = AccountConfig::from_json(&account.config_json) {
+                    // Only now: a failed removal keeps a working account.
+                    let delete = cx.delete_credentials(&config.secret_key());
+                    cx.background_spawn(async move {
+                        delete.await.ok();
+                    })
+                    .detach();
+                }
+                this.reload_from_database();
+                if failure.is_some() {
+                    this.start_account(&account, cx);
+                }
+                this.sync_app_menus(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    // ----- Unsent mail ----------------------------------------------------------
+
+    pub(crate) fn toggle_unsent_panel(&mut self, cx: &mut Context<Self>) {
+        self.unsent_panel_open = !self.unsent_panel_open && !self.unsent.is_empty();
+        cx.notify();
+    }
+
+    /// Shows a failed unsent-message action as a status note.
+    fn report_unsent_error(&mut self, error: impl std::fmt::Display, cx: &mut Context<Self>) {
+        let failed = Key::UnsentActionFailed.tr(cx.language());
+        self.set_status_note(format!("{failed}: {error}"), cx);
+    }
+
+    /// Puts an unsent message back in the queue and wakes its worker.
+    pub(crate) fn retry_unsent(&mut self, id: i64, cx: &mut Context<Self>) {
+        let account_id = self
+            .unsent
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| item.account_id);
+        match self.db.retry_outgoing(id) {
+            // Not stopped any more: nothing to do, the refresh below shows it.
+            Ok(false) => {}
+            Ok(true) => {
+                if let (Some(mail), Some(account_id)) = (&self.mail, account_id) {
+                    mail.process_queue(account_id);
+                }
+                self.set_status_note(Key::StatusSyncing.tr(cx.language()), cx);
+            }
+            Err(error) => self.report_unsent_error(error, cx),
+        }
+        self.refresh_unsent();
+        cx.notify();
+    }
+
+    /// Opens compose prefilled with an unsent message. The outbox row stays
+    /// until the edited message is queued (`send_draft` replaces it), so
+    /// closing compose loses nothing.
+    pub(crate) fn edit_unsent(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let row = match self.db.outgoing(id) {
+            Ok(row) => row.filter(|row| row.state.is_stopped()),
+            Err(error) => {
+                self.report_unsent_error(error, cx);
+                return;
+            }
+        };
+        let Some(row) = row else {
+            self.refresh_unsent();
+            cx.notify();
+            return;
+        };
+        let parsed = mail_core::parse_message(&row.raw).unwrap_or_default();
+        self.unsent_panel_open = false;
+        self.open_compose_with(Some(compose_init_from_outgoing(&row, &parsed)), window, cx);
+    }
+
+    /// Deletes an unsent message after confirmation.
+    pub(crate) fn discard_unsent(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let language = cx.language();
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            Key::ComposeDiscardConfirm.tr(language),
+            Some(Key::UnsentDiscardDetail.tr(language)),
+            &[
+                Key::ComposeDiscardButton.tr(language),
+                Key::AccountCancel.tr(language),
+            ],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                if let Err(error) = this.db.delete_outgoing(id) {
+                    this.report_unsent_error(error, cx);
+                }
+                this.refresh_unsent();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Builds the command context snapshot used by menus and the palette.
@@ -2388,6 +2667,7 @@ impl RootView {
                 appears_transparent: false,
                 traffic_light_position: None,
             }),
+            app_id: Some(WINDOW_APP_ID.into()),
             ..Default::default()
         };
 
@@ -2493,16 +2773,19 @@ impl RootView {
         let init = ComposeInit {
             account_id: Some(detail.account_id),
             draft,
+            replaces_outgoing: None,
         };
         self.open_compose_with(Some(init), window, cx);
     }
 
-    /// Queues `draft` for sending from `account_id` and wakes its worker.
-    /// Errors are localized, ready for the compose window to show.
+    /// Queues `draft` for sending from `account_id` and wakes its worker;
+    /// `replaces_outgoing` (an edited unsent message) is deleted once the new
+    /// copy is queued. Errors are localized, ready for the compose window.
     pub(crate) fn send_draft(
         &mut self,
         account_id: i64,
         draft: Draft,
+        replaces_outgoing: Option<i64>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let language = cx.language();
@@ -2520,15 +2803,37 @@ impl RootView {
         }
         let message_id = mail_core::new_message_id(&draft.from.email, unique_token());
         let raw = mail_core::build_message(&draft, &message_id, dates::now_unix());
-        self.db
-            .enqueue_outgoing(
-                account_id,
-                &draft.from.email,
-                &recipients,
-                &raw,
-                Some(&message_id),
-            )
-            .map_err(|error| error.to_string())?;
+        match replaces_outgoing {
+            // An edited unsent message: its original goes in the same step.
+            Some(id) => {
+                let replaced = self
+                    .db
+                    .replace_outgoing(
+                        id,
+                        account_id,
+                        &draft.from.email,
+                        &recipients,
+                        &raw,
+                        Some(&message_id),
+                    )
+                    .map_err(|error| error.to_string())?;
+                if replaced.is_none() {
+                    return Err(Key::ComposeOriginalSending.tr(language).to_string());
+                }
+                self.refresh_unsent();
+            }
+            None => {
+                self.db
+                    .enqueue_outgoing(
+                        account_id,
+                        &draft.from.email,
+                        &recipients,
+                        &raw,
+                        Some(&message_id),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         if let Some(mail) = &self.mail {
             mail.process_queue(account_id);
         }
@@ -2576,6 +2881,7 @@ impl RootView {
                 appears_transparent: false,
                 traffic_light_position: None,
             }),
+            app_id: Some(WINDOW_APP_ID.into()),
             ..Default::default()
         };
 
@@ -4225,6 +4531,114 @@ impl RootView {
             .into_any_element()
     }
 
+    /// Panel above the status bar listing unsent messages with Retry / Edit /
+    /// Discard; a mouse-down outside closes it.
+    fn render_unsent_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let language = cx.language();
+        let root = cx.weak_entity();
+        let action = |id: i64, run: fn(&mut RootView, i64, &mut Window, &mut Context<RootView>)| {
+            let root = root.clone();
+            move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                let _ = root.update(cx, |this, cx| run(this, id, window, cx));
+            }
+        };
+        let rows = self.unsent.iter().enumerate().map(|(ix, item)| {
+            let subject = if item.subject.is_empty() {
+                Key::UnsentNoSubject.tr(language).to_string()
+            } else {
+                item.subject.clone()
+            };
+            v_flex()
+                .px_2()
+                .py_1p5()
+                .gap_0p5()
+                .when(ix > 0, |el| el.border_t_1().border_color(colors.border))
+                .child(Label::new(subject).size(LabelSize::Small).single_line())
+                .child(
+                    Label::new(format!(
+                        "{}: {}",
+                        Key::QuoteTo.tr(language),
+                        item.recipients
+                    ))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+                    .single_line(),
+                )
+                .when_some(item.error.clone(), |el, error| {
+                    el.child(
+                        Label::new(error)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Error),
+                    )
+                })
+                .when(item.maybe_sent, |el| {
+                    el.child(
+                        Label::new(Key::UnsentMaybeSent.tr(language))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Warning),
+                    )
+                })
+                .child(
+                    h_flex()
+                        .pt_1()
+                        .gap_1()
+                        .justify_end()
+                        .child(
+                            Button::new(("unsent-retry", ix), Key::UnsentRetry.tr(language))
+                                .on_click(action(item.id, |this, id, _, cx| {
+                                    this.retry_unsent(id, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(("unsent-edit", ix), Key::UnsentEdit.tr(language))
+                                .on_click(action(item.id, Self::edit_unsent)),
+                        )
+                        .child(
+                            Button::new(
+                                ("unsent-discard", ix),
+                                Key::ComposeDiscardButton.tr(language),
+                            )
+                            .style(ui::ButtonStyle::Ghost)
+                            .on_click(action(item.id, Self::discard_unsent)),
+                        ),
+                )
+        });
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.unsent_panel_open = false;
+                cx.notify();
+            }))
+            .child(
+                v_flex()
+                    .id("unsent-panel")
+                    .occlude()
+                    .absolute()
+                    .right(px(8.0))
+                    .bottom(px(28.0))
+                    .w(px(380.0))
+                    .max_h(px(420.0))
+                    .overflow_y_scroll()
+                    .p_1()
+                    .bg(colors.elevated_surface_background)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_md()
+                    .shadow_lg()
+                    .child(
+                        div().px_2().py_1().child(
+                            Label::new(Key::UnsentTitle.tr(language))
+                                .size(LabelSize::Small)
+                                .semibold(),
+                        ),
+                    )
+                    .children(rows),
+            )
+    }
+
     /// Status bar text for the sync engine (or a recent note, which wins).
     fn sync_status_text(&self, language: Language) -> Option<SharedString> {
         if let Some(note) = &self.status_note {
@@ -4487,6 +4901,21 @@ impl RootView {
                                 .color(Color::Muted),
                         )
                     })
+                    .when(!self.unsent.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id("unsent-status")
+                                .cursor_pointer()
+                                .child(
+                                    Label::new(locale::status_unsent(language, self.unsent.len()))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Warning),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_unsent_panel(cx);
+                                })),
+                        )
+                    })
                     .when_some(self.sync_status_text(language), |this, text| {
                         this.child(Label::new(text).size(LabelSize::XSmall).color(Color::Muted))
                     })
@@ -4702,6 +5131,9 @@ impl Render for RootView {
             })
             .when(self.attachment_menu.is_some(), |el| {
                 el.child(self.render_attachment_menu(cx))
+            })
+            .when(self.unsent_panel_open, |el| {
+                el.child(self.render_unsent_panel(cx))
             })
             .when(
                 self.command_palette
@@ -5303,5 +5735,107 @@ mod tests {
         view.clear_message_selection();
         assert!(view.attachments.is_empty());
         assert!(view.attachment_menu.is_none());
+    }
+
+    fn outgoing_row(raw: Vec<u8>, recipients: &[&str], state: OutgoingState) -> OutgoingRow {
+        OutgoingRow {
+            id: 42,
+            account_id: 7,
+            sender: "me@example.com".into(),
+            recipients: recipients.iter().map(|r| r.to_string()).collect(),
+            raw,
+            message_id_hdr: None,
+            attempts: 3,
+            last_error: Some("  550 mailbox unavailable ".into()),
+            created_at: 0,
+            state,
+            next_attempt_at: 0,
+            deferrals: 0,
+        }
+    }
+
+    #[test]
+    fn unsent_item_summarizes_the_row() {
+        let row = outgoing_row(
+            Vec::new(),
+            &["a@x.com", "b@y.com"],
+            OutgoingState::MaybeSent,
+        );
+        let item = unsent_item(&row, "Hello".into());
+        assert_eq!(
+            item,
+            UnsentItem {
+                id: 42,
+                account_id: 7,
+                subject: "Hello".into(),
+                recipients: "a@x.com, b@y.com".into(),
+                error: Some("550 mailbox unavailable".into()),
+                maybe_sent: true,
+            }
+        );
+        let mut row = outgoing_row(Vec::new(), &[], OutgoingState::Failed);
+        row.last_error = Some("   ".into());
+        let item = unsent_item(&row, String::new());
+        assert_eq!(item.error, None);
+        assert!(!item.maybe_sent);
+    }
+
+    #[test]
+    fn compose_init_from_outgoing_restores_the_draft() {
+        let draft = Draft {
+            from: Address::new(Some("Me"), "me@example.com"),
+            to: vec![Address::new(Some("Ana"), "ana@x.com")],
+            cc: vec![Address::new(None::<String>, "bob@y.com")],
+            bcc: vec![Address::new(None::<String>, "hidden@z.com")],
+            subject: "Report".into(),
+            text: "See attached.".into(),
+            in_reply_to: Some("orig@x.com".into()),
+            references: vec!["orig@x.com".into()],
+            attachments: vec![mail_core::OutgoingAttachment {
+                filename: "a.txt".into(),
+                mime_type: "text/plain".into(),
+                data: b"hello".to_vec(),
+            }],
+            ..Draft::default()
+        };
+        let raw = mail_core::build_message(&draft, "id@example.com", 0);
+        let recipients = mail_core::envelope_recipients(&draft);
+        let recipients: Vec<&str> = recipients.iter().map(String::as_str).collect();
+        let row = outgoing_row(raw, &recipients, OutgoingState::Failed);
+        let parsed = mail_core::parse_message(&row.raw).unwrap();
+        let init = compose_init_from_outgoing(&row, &parsed);
+        assert_eq!(init.account_id, Some(7));
+        assert_eq!(init.replaces_outgoing, Some(42));
+        let emails = |list: &[Address]| -> Vec<String> {
+            list.iter().map(|address| address.email.clone()).collect()
+        };
+        assert_eq!(emails(&init.draft.to), ["ana@x.com"]);
+        assert_eq!(emails(&init.draft.cc), ["bob@y.com"]);
+        assert_eq!(emails(&init.draft.bcc), ["hidden@z.com"]);
+        assert_eq!(init.draft.from.email, "me@example.com");
+        assert_eq!(init.draft.subject, "Report");
+        assert_eq!(init.draft.text.trim(), "See attached.");
+        assert_eq!(init.draft.in_reply_to.as_deref(), Some("orig@x.com"));
+        assert_eq!(init.draft.attachments.len(), 1);
+        assert_eq!(init.draft.attachments[0].filename, "a.txt");
+        assert_eq!(init.draft.attachments[0].data, b"hello");
+    }
+
+    #[test]
+    fn removing_an_account_hides_it_until_reload_clears_it() {
+        let (_dir, mut view) = test_view();
+        let account_id = view.accounts[0].id;
+        let before = view.accounts.len();
+        view.removing_accounts.insert(account_id);
+        view.reload_from_database();
+        assert_eq!(view.accounts.len(), before - 1);
+        assert!(!view.folders_by_account.contains_key(&account_id));
+        assert!(view
+            .list_messages
+            .iter()
+            .all(|message| message.account_id != account_id));
+        view.removing_accounts.remove(&account_id);
+        view.reload_from_database();
+        assert_eq!(view.accounts.len(), before);
     }
 }

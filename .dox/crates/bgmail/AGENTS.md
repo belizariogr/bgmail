@@ -8,7 +8,8 @@ wiring to `storage`.
 
 ## Ownership
 
-- Owns: `main`, `RootView`, compose/settings windows, toolbar/sidebar/list/
+- Owns: `main`, `build.rs` (Windows icon), packaging config
+  (`[package.metadata.packager]`, `packaging/`), `RootView`, compose/settings windows, toolbar/sidebar/list/
   reader chrome, locale catalog, persisted `config.json`, mail HTML
   sanitization/theming (`mail_html`), command palette, menus/shortcuts, window drag/CSD helpers, DB seed
   bridge.
@@ -19,6 +20,33 @@ wiring to `storage`.
 
 - Binary name is `BGMail` (menu title on unbundled macOS). Package crate name
   is `bgmail`.
+- **Packaging** (cargo-packager, decided with two opposing reviews) is
+  configured once in `[package.metadata.packager]` of `Cargo.toml` (paths
+  relative to this crate): product `BGMail`, identifier
+  `io.github.belizariogr.bgmail`, icons from `assets/appIcon/`, per-OS default
+  formats (macOS app+dmg, Linux deb+AppImage+pacman, Windows NSIS; CI adds
+  WiX). Run `cargo packager --release` (its before-packaging hook builds the
+  release binary); outputs land in `target/[<triple>/]release/`.
+  - Linux: `packaging/linux/BGMail.desktop` is the Handlebars desktop template
+    for deb/AppImage/pacman (`Categories=Network;Email;`, mailto handler,
+    `StartupWMClass=BGMail`). Every window (main, compose, settings) sets
+    GPUI `app_id` to `root::WINDOW_APP_ID` = `"BGMail"` (desktop file
+    basename = binary name) so docks group them. Deb `Depends` lists the
+    linked/dlopen'ed libs (xcb, xkbcommon, wayland, Vulkan + ICD, fontconfig);
+    secrets go over D-Bus Secret Service (pure Rust), so a keyring daemon
+    (gnome-keyring, KeePassXC…) is needed at runtime but not a package dep.
+  - macOS: `minimum-system-version` 10.15.7 (Zed's floor); signing identity
+    is injected by CI only (never committed).
+  - Windows: `build.rs` embeds `assets/appIcon/BGMail.ico` in the exe
+    (`main` calls `embed_windows_icon` only on a Windows host building for
+    Windows: writes `OUT_DIR/bgmail-icon.rc` with the absolute icon path and
+    compiles it with `embed-resource`; no-op elsewhere). NSIS shortcuts
+    carry AppUserModelID = `identifier`; `notifications` passes the same id
+    to `notify-rust` (`app_id`) when an installer Start Menu shortcut
+    (`BGMail.lnk` or `BGMail\BGMail.lnk` under `%APPDATA%`/`%PROGRAMDATA%`)
+    exists; unpackaged runs keep notify-rust's PowerShell id (Windows drops
+    toasts from an unregistered id). WiX shortcuts are assumed to carry the
+    same id.
 - The reader shows bodies with `html_view::HtmlView` (sanitized + themed by
   `mail_html`). Remote images are blocked unless the user loads them:
   clicking the privacy shield next to the subject loads them for that
@@ -99,7 +127,22 @@ wiring to `storage`.
   Message actions call `mail_sync::actions` (local change + queued server
   op) and then `Command::ProcessQueue`; opening a message marks it read and
   fetches a missing body (`Command::FetchBody`). Sending enqueues the built
-  message in the outbox (`RootView::send_draft`).
+  message in the outbox (`RootView::send_draft`). A failed action shows a
+  localized status note (`StatusActionFailed: {error}`), never only a log.
+- Unsent mail is never silently stuck: outbox rows that stopped retrying
+  (`storage::Database::failed_outgoing`: `failed` / `maybe_sent`) show as
+  "N unsent" (`Color::Warning`) in the status bar, refreshed on reload and on
+  `Sent`/`SendFailed`. Clicking it opens a panel listing subject (parsed from
+  the raw), recipients, last error and, for `maybe_sent`, "May already have
+  been sent", with Retry (`retry_outgoing` + `process_queue`), Edit (compose
+  prefilled from the raw with `ComposeInit::replaces_outgoing`; the row is
+  deleted only once the edited copy is queued) and Discard (confirmed with
+  `window.prompt`, `delete_outgoing`).
+- Account removal and secret updates never block the UI thread:
+  `MailService` start/stop return `BlockingJob`s (last request per account
+  wins, run one at a time) executed on `cx.background_spawn`; removal hides
+  the account at once (`removing_accounts`), deletes its mail on its own
+  `storage::Database` connection, then reloads (errors → status note).
 - Windows that read `RootView` while rendering (settings) are opened with
   `cx.defer`, outside `RootView`'s update (GPUI renders new windows
   synchronously; re-entering the entity panics).
@@ -155,6 +198,9 @@ wiring to `storage`.
 
 - `cargo test -p bgmail` (sanitize, config, locale, layout helpers, …).
 - `cargo run -p bgmail`.
+- Packaging: `cargo packager --release` (on Linux add `NO_STRIP=1` when the
+  host libs use `.relr.dyn`, which linuxdeploy's bundled `strip` rejects);
+  inspect the deb/AppImage `.desktop` and icons.
 - Workspace `fmt` / `clippy -D warnings` / `test --workspace`.
 
 ## Child DOX Index

@@ -254,6 +254,15 @@ pub fn plan_folder(
 
 /// A server-side action queued by the UI (`storage::PendingOp` payload).
 /// Folder names are server (remote) names.
+///
+/// Every variant records where the message was when the op was queued:
+/// `uid` plus the folder's `uid_validity` at that time, and the message's
+/// `Message-ID` header (`message_id_hdr`, no angle brackets). Before running
+/// an op the worker SELECTs the folder; when the UIDVALIDITY differs (or was
+/// never recorded — payloads written before these fields existed decode
+/// with `None`) the UID is re-resolved by Message-ID instead of trusted.
+/// `uid == 0` means "unresolved": the message is in `folder` but its UID is
+/// unknown (a move without COPYUID); it is found by Message-ID too.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PendingAction {
@@ -262,16 +271,28 @@ pub enum PendingAction {
         uid: u32,
         add: MessageFlags,
         remove: MessageFlags,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uid_validity: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id_hdr: Option<String>,
     },
     Move {
         from: String,
         uid: u32,
         to: String,
         to_folder_id: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uid_validity: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id_hdr: Option<String>,
     },
     Delete {
         folder: String,
         uid: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uid_validity: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id_hdr: Option<String>,
     },
 }
 
@@ -295,37 +316,86 @@ impl PendingAction {
         serde_json::from_str(payload).ok()
     }
 
-    /// The `(folder, uid)` the action operates on.
+    /// The `(folder, uid)` the action operates on (`uid` 0 = unresolved).
     pub fn source(&self) -> (&str, u32) {
         match self {
-            Self::Flags { folder, uid, .. } | Self::Delete { folder, uid } => (folder, *uid),
+            Self::Flags { folder, uid, .. } | Self::Delete { folder, uid, .. } => (folder, *uid),
             Self::Move { from, uid, .. } => (from, *uid),
         }
     }
 
-    /// Points the action at a new location (the message was moved first).
-    pub fn retarget(&mut self, folder: &str, new_uid: u32) {
+    /// UIDVALIDITY of the source folder when `uid` was recorded.
+    pub fn uid_validity(&self) -> Option<u32> {
         match self {
-            Self::Flags { folder: f, uid, .. } | Self::Delete { folder: f, uid } => {
+            Self::Flags { uid_validity, .. }
+            | Self::Move { uid_validity, .. }
+            | Self::Delete { uid_validity, .. } => *uid_validity,
+        }
+    }
+
+    /// The message's `Message-ID` header, when known.
+    pub fn message_id_hdr(&self) -> Option<&str> {
+        match self {
+            Self::Flags { message_id_hdr, .. }
+            | Self::Move { message_id_hdr, .. }
+            | Self::Delete { message_id_hdr, .. } => message_id_hdr.as_deref(),
+        }
+    }
+
+    /// Points the action at a new location (the message was moved first).
+    /// `new_uid` 0 / `uid_validity` `None` leave it unresolved.
+    pub fn retarget(&mut self, folder: &str, new_uid: u32, new_validity: Option<u32>) {
+        match self {
+            Self::Flags {
+                folder: f,
+                uid,
+                uid_validity,
+                ..
+            }
+            | Self::Delete {
+                folder: f,
+                uid,
+                uid_validity,
+                ..
+            }
+            | Self::Move {
+                from: f,
+                uid,
+                uid_validity,
+                ..
+            } => {
                 *f = folder.to_string();
                 *uid = new_uid;
-            }
-            Self::Move { from, uid, .. } => {
-                *from = folder.to_string();
-                *uid = new_uid;
+                *uid_validity = new_validity;
             }
         }
     }
 }
 
-/// UIDs of `folder_remote_name` that queued ops still act on.
+/// UIDs of `folder_remote_name` that queued ops still act on (unresolved
+/// `uid == 0` entries excluded).
 pub fn in_flight_uids(ops: &[PendingOp], folder_remote_name: &str) -> HashSet<u32> {
     ops.iter()
         .filter_map(|op| PendingAction::decode(&op.payload))
         .filter_map(|action| {
             let (folder, uid) = action.source();
-            (folder == folder_remote_name).then_some(uid)
+            (folder == folder_remote_name && uid != 0).then_some(uid)
         })
+        .collect()
+}
+
+/// Storage ids of messages with a queued flag edit: a sync must not
+/// overwrite their local flags with the server's (not yet updated) ones,
+/// wherever the op currently points (it may await a Message-ID lookup).
+pub fn messages_with_pending_flags(ops: &[PendingOp]) -> HashSet<i64> {
+    ops.iter()
+        .filter(|op| {
+            matches!(
+                PendingAction::decode(&op.payload),
+                Some(PendingAction::Flags { .. })
+            )
+        })
+        .filter_map(|op| op.message_id)
         .collect()
 }
 
@@ -745,30 +815,43 @@ mod tests {
         }
     }
 
+    fn flags(folder: &str, uid: u32) -> PendingAction {
+        PendingAction::Flags {
+            folder: folder.into(),
+            uid,
+            add: MessageFlags {
+                seen: true,
+                ..Default::default()
+            },
+            remove: MessageFlags::default(),
+            uid_validity: Some(3),
+            message_id_hdr: Some("a@x".into()),
+        }
+    }
+
+    fn mv(from: &str, uid: u32, to: &str) -> PendingAction {
+        PendingAction::Move {
+            from: from.into(),
+            uid,
+            to: to.into(),
+            to_folder_id: 9,
+            uid_validity: Some(3),
+            message_id_hdr: None,
+        }
+    }
+
+    fn del(folder: &str, uid: u32) -> PendingAction {
+        PendingAction::Delete {
+            folder: folder.into(),
+            uid,
+            uid_validity: None,
+            message_id_hdr: Some("b@x".into()),
+        }
+    }
+
     #[test]
     fn pending_action_round_trips_and_retargets() {
-        let seen = MessageFlags {
-            seen: true,
-            ..Default::default()
-        };
-        let mut actions = vec![
-            PendingAction::Flags {
-                folder: "INBOX".into(),
-                uid: 4,
-                add: seen,
-                remove: MessageFlags::default(),
-            },
-            PendingAction::Move {
-                from: "INBOX".into(),
-                uid: 5,
-                to: "Trash".into(),
-                to_folder_id: 9,
-            },
-            PendingAction::Delete {
-                folder: "Trash".into(),
-                uid: 6,
-            },
-        ];
+        let mut actions = vec![flags("INBOX", 4), mv("INBOX", 5, "Trash"), del("Trash", 6)];
         let kinds: Vec<_> = actions.iter().map(PendingAction::kind).collect();
         assert_eq!(kinds, vec!["flags", "move", "delete"]);
         for action in &actions {
@@ -778,50 +861,77 @@ mod tests {
             );
         }
         assert!(actions[1].encode().contains(r#""type":"move""#));
+        assert!(
+            !actions[1].encode().contains("message_id_hdr"),
+            "absent fields are not written"
+        );
         assert_eq!(PendingAction::decode("{}"), None);
         assert_eq!(PendingAction::decode("garbage"), None);
         let sources: Vec<_> = actions.iter().map(|a| a.source()).collect();
         assert_eq!(sources, vec![("INBOX", 4), ("INBOX", 5), ("Trash", 6)]);
+        let validities: Vec<_> = actions.iter().map(|a| a.uid_validity()).collect();
+        assert_eq!(validities, vec![Some(3), Some(3), None]);
+        let ids: Vec<_> = actions.iter().map(|a| a.message_id_hdr()).collect();
+        assert_eq!(ids, vec![Some("a@x"), None, Some("b@x")]);
         for action in &mut actions {
-            action.retarget("Archive", 77);
+            action.retarget("Archive", 77, Some(8));
             assert_eq!(action.source(), ("Archive", 77));
+            assert_eq!(action.uid_validity(), Some(8));
         }
+        actions[0].retarget("Archive", 0, None);
+        assert_eq!(actions[0].source(), ("Archive", 0));
+        assert_eq!(actions[0].uid_validity(), None);
+        assert_eq!(actions[0].message_id_hdr(), Some("a@x"), "kept");
         assert!(matches!(&actions[1], PendingAction::Move { to, .. } if to == "Trash"));
+    }
+
+    #[test]
+    fn payloads_without_validity_or_message_id_still_decode() {
+        let old = r#"{"type":"move","from":"INBOX","uid":5,"to":"Trash","to_folder_id":2}"#;
+        let action = PendingAction::decode(old).unwrap();
+        assert_eq!(action.source(), ("INBOX", 5));
+        assert_eq!(action.uid_validity(), None);
+        assert_eq!(action.message_id_hdr(), None);
+        let old = r#"{"type":"flags","folder":"INBOX","uid":4,
+            "add":{"seen":true,"answered":false,"flagged":false,"deleted":false,"draft":false},
+            "remove":{"seen":false,"answered":false,"flagged":false,"deleted":false,"draft":false}}"#;
+        assert!(PendingAction::decode(old).is_some());
+        let old = r#"{"type":"delete","folder":"Trash","uid":6}"#;
+        assert_eq!(PendingAction::decode(old).unwrap().source(), ("Trash", 6));
     }
 
     #[test]
     fn in_flight_uids_filters_by_source_folder() {
         let ops = vec![
-            op(
-                1,
-                &PendingAction::Move {
-                    from: "INBOX".into(),
-                    uid: 5,
-                    to: "Trash".into(),
-                    to_folder_id: 2,
-                },
-            ),
-            op(
-                2,
-                &PendingAction::Delete {
-                    folder: "Trash".into(),
-                    uid: 6,
-                },
-            ),
+            op(1, &mv("INBOX", 5, "Trash")),
+            op(2, &del("Trash", 6)),
             PendingOp {
                 payload: "not json".into(),
-                ..op(
-                    3,
-                    &PendingAction::Delete {
-                        folder: "INBOX".into(),
-                        uid: 1,
-                    },
-                )
+                ..op(3, &del("INBOX", 1))
             },
+            op(4, &flags("INBOX", 0)),
         ];
         assert_eq!(in_flight_uids(&ops, "INBOX"), [5].into());
         assert_eq!(in_flight_uids(&ops, "Trash"), [6].into());
         assert!(in_flight_uids(&ops, "Other").is_empty());
+    }
+
+    #[test]
+    fn messages_with_pending_flags_ignores_moves_and_garbage() {
+        let mut moved = op(2, &mv("INBOX", 5, "Trash"));
+        moved.message_id = Some(20);
+        let mut unknown = op(3, &flags("INBOX", 1));
+        unknown.message_id = None;
+        let ops = vec![
+            op(1, &flags("INBOX", 0)),
+            moved,
+            unknown,
+            PendingOp {
+                payload: "not json".into(),
+                ..op(4, &flags("INBOX", 1))
+            },
+        ];
+        assert_eq!(messages_with_pending_flags(&ops), [1].into());
     }
 
     #[test]

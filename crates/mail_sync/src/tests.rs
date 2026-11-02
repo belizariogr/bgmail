@@ -50,6 +50,7 @@ fn test_options() -> EngineOptions {
         body_prefetch: 0,
         retry_base: Duration::from_millis(10),
         retry_max: Duration::from_millis(40),
+        send_retry_delays: vec![Duration::ZERO],
         ..EngineOptions::default()
     }
 }
@@ -751,7 +752,15 @@ fn send_failures_retry_then_become_permanent() {
     // No more automatic attempts; the row stays for the UI.
     h.sync();
     assert!(sender.sent().is_empty());
-    assert_eq!(h.db.outbox_count().unwrap(), 1);
+    assert_eq!(h.db.outbox_count().unwrap(), 0);
+    let failed = h.db.failed_outgoing().unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].state, storage::OutgoingState::Failed);
+    // The user retries: sent on the next cycle.
+    h.db.retry_outgoing(outbox_id).unwrap();
+    h.run(Command::ProcessQueue);
+    assert_eq!(sender.sent().len(), 1);
+    assert!(h.db.failed_outgoing().unwrap().is_empty());
 }
 
 #[test]
@@ -995,4 +1004,586 @@ fn shutdown_command_and_unopenable_database() {
             status: AccountStatus::Error { .. }
         }
     ));
+}
+
+// --- Review findings: stale UIDs, races, outbox state machine ---
+
+/// The engine's database file, for a second ("UI") connection opened from a
+/// hook running on the worker thread.
+fn db_path(h: &Harness) -> std::path::PathBuf {
+    h._file.path().to_path_buf()
+}
+
+#[test]
+fn queued_ops_follow_the_message_across_a_uid_validity_change() {
+    let h = Harness::imap();
+    h.server.deliver("INBOX", &mail("a", 1), unread());
+    h.server.deliver("INBOX", &mail("b", 2), unread());
+    let h = h.started();
+    let b = h.id_of("b");
+    // Queued against b = UID 2 under the old UIDVALIDITY…
+    actions::set_starred(&h.db, b, true).unwrap();
+    actions::archive(&h.db, b).unwrap();
+    // …then the server renumbers: b is UID 1 and a new message takes UID 2.
+    h.server.expunge("INBOX", 1);
+    h.server.reset_uid_validity("INBOX");
+    h.server.deliver("INBOX", &mail("c", 3), unread());
+    h.run(Command::ProcessQueue);
+    assert_eq!(h.server_subjects("Archive"), strings(&["b"]));
+    assert_eq!(h.server_subjects("INBOX"), strings(&["c"]), "c untouched");
+    assert!(h.server.messages("Archive")[0].flags.flagged);
+    assert!(!h.server.messages("INBOX")[0].flags.flagged);
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+    h.sync();
+    assert_eq!(h.subjects(system::ARCHIVE), strings(&["b"]));
+    assert_eq!(h.subjects(system::INBOX), strings(&["c"]));
+}
+
+#[test]
+fn legacy_payloads_without_validity_are_rechecked() {
+    let h = Harness::imap();
+    h.server.deliver("INBOX", &mail("a", 1), unread());
+    h.server.deliver("INBOX", &mail("b", 2), unread());
+    let h = h.started();
+    let (a, b) = (h.id_of("a"), h.id_of("b"));
+    let legacy_flag = |uid: u32| {
+        format!(
+            r#"{{"type":"flags","folder":"INBOX","uid":{uid},
+            "add":{{"seen":true,"flagged":false,"answered":false,"draft":false,"deleted":false}},
+            "remove":{{"seen":false,"flagged":false,"answered":false,"draft":false,"deleted":false}}}}"#
+        )
+    };
+    // Checkpoint unchanged: the recorded UID is trusted.
+    h.db.enqueue_op(h.account, "flags", Some(a), &legacy_flag(1))
+        .unwrap();
+    h.run(Command::ProcessQueue);
+    assert!(h.server.messages("INBOX")[0].flags.seen);
+    // After a renumbering the stored message's Message-ID finds it.
+    h.server.expunge("INBOX", 1);
+    h.server.reset_uid_validity("INBOX");
+    h.server.deliver("INBOX", &mail("c", 3), unread());
+    h.db.enqueue_op(h.account, "flags", Some(b), &legacy_flag(2))
+        .unwrap();
+    h.run(Command::ProcessQueue);
+    let inbox = h.server.messages("INBOX");
+    assert!(inbox[0].flags.seen, "b (now UID 1) was marked");
+    assert!(!inbox[1].flags.seen, "c (UID 2) was not");
+}
+
+#[test]
+fn move_without_uidplus_keeps_later_flag_edits() {
+    let h = Harness::imap();
+    h.server.set_capabilities(Capabilities {
+        uidplus: false,
+        ..h.server.capabilities()
+    });
+    h.server.deliver("INBOX", &mail("m", 1), unread());
+    let h = h.started();
+    let id = h.id_of("m");
+    actions::archive(&h.db, id).unwrap();
+    actions::set_starred(&h.db, id, true).unwrap();
+    actions::set_read(&h.db, id, true).unwrap();
+    h.run(Command::ProcessQueue);
+    let archived = h.server.messages("Archive");
+    assert_eq!(archived.len(), 1);
+    assert!(archived[0].flags.flagged && archived[0].flags.seen);
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+    h.sync();
+    let detail = h.db.get_message(h.id_of("m")).unwrap().unwrap();
+    assert!(detail.starred && !detail.unread, "the UI never flips back");
+    assert_eq!(h.message_count(), 1);
+}
+
+/// A move without COPYUID, run but not yet followed by a sync: the message
+/// has no location and no queued op.
+fn moved_without_copyuid(h: &Harness, subject: &str) -> i64 {
+    let id = h.id_of(subject);
+    actions::archive(&h.db, id).unwrap();
+    h.run(Command::ProcessQueue);
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+    // The worker resyncs the target right away; the state before that sync
+    // lands is what these tests are about.
+    h.db.detach_locations(id).unwrap();
+    id
+}
+
+fn imap_without_uidplus() -> Harness {
+    let h = Harness::imap();
+    h.server.set_capabilities(Capabilities {
+        uidplus: false,
+        ..h.server.capabilities()
+    });
+    h
+}
+
+#[test]
+fn move_without_copyuid_resyncs_the_target_right_away() {
+    let h = imap_without_uidplus();
+    h.server.deliver("INBOX", &mail("m", 1), unread());
+    let h = h.started();
+    let id = h.id_of("m");
+    actions::archive(&h.db, id).unwrap();
+    h.run(Command::ProcessQueue);
+    let archive = h.folder_id(system::ARCHIVE);
+    let deadline = Instant::now() + WAIT;
+    while h.db.folder_uids(archive).unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "never re-attached");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(h.db.folder_uids(archive).unwrap()[0].1, id);
+}
+
+/// Polls `check`: the resync after a move without COPYUID may still be
+/// running when a later command's `Idle` arrives.
+fn eventually(what: &str, check: impl Fn() -> bool) {
+    let deadline = Instant::now() + WAIT;
+    while !check() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn flag_edit_after_a_move_without_copyuid_reaches_the_server() {
+    let h = imap_without_uidplus();
+    h.server.deliver("INBOX", &mail("m", 1), unread());
+    let h = h.started();
+    let id = moved_without_copyuid(&h, "m");
+    actions::set_starred(&h.db, id, true).unwrap();
+    h.run(Command::ProcessQueue);
+    eventually("the flag on the server", || {
+        h.server.messages("Archive")[0].flags.flagged
+    });
+    h.sync();
+    eventually("the local copy to settle", || {
+        h.message_count() == 1 && h.db.get_message(h.id_of("m")).unwrap().unwrap().starred
+    });
+}
+
+#[test]
+fn flag_edit_during_a_header_fetch_is_not_overwritten() {
+    let h = imap_without_uidplus();
+    h.server.deliver("INBOX", &mail("m", 1), unread());
+    let h = h.started();
+    let id = h.id_of("m");
+    let path = db_path(&h);
+    h.server.on_next_call("fetch_headers Archive", move || {
+        let ui = Database::open(&path).unwrap();
+        actions::set_starred(&ui, id, true).unwrap();
+    });
+    actions::archive(&h.db, id).unwrap();
+    h.run(Command::ProcessQueue);
+    eventually("the merged header", || {
+        !h.db
+            .folder_uids(h.folder_id(system::ARCHIVE))
+            .unwrap()
+            .is_empty()
+    });
+    assert!(
+        h.db.get_message(id).unwrap().unwrap().starred,
+        "the header fetched before the edit must not undo it"
+    );
+    h.run(Command::ProcessQueue);
+    eventually("the flag on the server", || {
+        h.server.messages("Archive")[0].flags.flagged
+    });
+}
+
+#[test]
+fn move_after_a_move_without_copyuid_reaches_the_server() {
+    let h = imap_without_uidplus();
+    h.server.deliver("INBOX", &mail("m", 1), unread());
+    let h = h.started();
+    let id = moved_without_copyuid(&h, "m");
+    actions::trash(&h.db, id).unwrap();
+    h.run(Command::ProcessQueue);
+    eventually("the move on the server", || {
+        h.server.messages("Archive").is_empty() && h.server.messages("Trash").len() == 1
+    });
+    h.sync();
+    eventually("the local copy to settle", || {
+        h.message_count() == 1 && h.db.pending_ops(h.account).unwrap().is_empty()
+    });
+}
+
+#[test]
+fn delete_after_a_move_without_copyuid_reaches_the_server() {
+    let h = imap_without_uidplus();
+    h.server.deliver("INBOX", &mail("m", 1), unread());
+    let h = h.started();
+    let id = moved_without_copyuid(&h, "m");
+    actions::delete_permanently(&h.db, id).unwrap();
+    h.run(Command::ProcessQueue);
+    eventually("the delete on the server", || {
+        h.server.messages("Archive").is_empty()
+    });
+    h.sync();
+    eventually("the row to stay gone", || {
+        h.db.pending_ops(h.account).unwrap().is_empty() && h.message_count() == 0
+    });
+}
+
+#[test]
+fn failed_message_id_search_is_not_a_missing_message() {
+    let h = Harness::imap();
+    h.server.deliver("INBOX", &mail("m", 1), unread());
+    let h = h.started();
+    let id = h.id_of("m");
+    actions::archive(&h.db, id).unwrap();
+    h.server.reset_uid_validity("INBOX");
+    h.server.on_next_call("find_uid", {
+        let server = h.server.clone();
+        move || server.fail_next(RemoteErrorKind::Protocol)
+    });
+    h.run(Command::ProcessQueue);
+    let ops = h.db.pending_ops(h.account).unwrap();
+    assert_eq!(ops.len(), 1, "kept for another attempt");
+    assert_eq!(ops[0].attempts, 1);
+    assert!(h.server.messages("Archive").is_empty());
+    h.run(Command::ProcessQueue);
+    assert_eq!(h.server.messages("Archive").len(), 1);
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+}
+
+#[test]
+fn expired_send_lease_tells_the_ui() {
+    let h = Harness::imap().started();
+    let id =
+        h.db.enqueue_outgoing(
+            h.account,
+            "me@example.com",
+            &strings(&["b@x.com"]),
+            &mail("outgoing", 9),
+            None,
+        )
+        .unwrap();
+    h.db.claim_outgoing(id, 0).unwrap();
+    let events = h.run(Command::SyncNow);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SyncEvent::SendFailed { outbox_id, permanent: true, .. } if *outbox_id == id
+    )));
+    assert_eq!(
+        h.db.outgoing(id).unwrap().unwrap().state,
+        storage::OutgoingState::MaybeSent
+    );
+    assert!(h.connector.sender().sent().is_empty(), "never resent");
+}
+
+#[test]
+fn giving_up_on_the_sent_copy_tells_the_ui() {
+    let h = Harness::imap().started();
+    h.db.enqueue_outgoing(
+        h.account,
+        "me@example.com",
+        &strings(&["b@x.com"]),
+        &mail("outgoing", 9),
+        None,
+    )
+    .unwrap();
+    let mut events = Vec::new();
+    for _ in 0..crate::worker::MAX_APPEND_DEFERRALS {
+        h.server.on_next_call("append Sent", {
+            let server = h.server.clone();
+            move || server.fail_next(RemoteErrorKind::Protocol)
+        });
+        for row in h.db.outbox(h.account).unwrap() {
+            h.db.conn()
+                .execute(
+                    "UPDATE outbox SET next_attempt_at = 0 WHERE id = ?1",
+                    [row.id],
+                )
+                .unwrap();
+        }
+        events = h.run(Command::ProcessQueue);
+    }
+    assert!(h.db.outbox(h.account).unwrap().is_empty());
+    assert_eq!(h.connector.sender().sent().len(), 1, "sent once");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SyncEvent::SentCopyFailed { .. })));
+}
+
+#[test]
+fn sync_keeps_local_flags_while_a_flag_op_is_pending() {
+    let h = Harness::imap();
+    let uid = h.server.deliver("INBOX", &mail("m", 1), unread());
+    let h = h.started();
+    let id = h.id_of("m");
+    // The server refuses the STORE once; meanwhile another client changes
+    // an unrelated flag so a flag check runs.
+    actions::set_starred(&h.db, id, true).unwrap();
+    h.server.on_next_call("store_flags", {
+        let server = h.server.clone();
+        move || {
+            server.fail_next(RemoteErrorKind::Protocol);
+        }
+    });
+    h.server.set_flags(
+        "INBOX",
+        uid,
+        MessageFlags {
+            answered: true,
+            ..Default::default()
+        },
+    );
+    h.run(Command::SyncFolder(h.folder_id(system::INBOX)));
+    assert_eq!(h.db.pending_ops(h.account).unwrap().len(), 1);
+    assert!(h.db.get_message(id).unwrap().unwrap().starred, "kept");
+    h.run(Command::ProcessQueue);
+    assert!(h.server.messages("INBOX")[0].flags.flagged);
+}
+
+#[test]
+fn trash_then_restore_while_the_move_runs_converges_to_inbox() {
+    let h = Harness::imap();
+    h.server.deliver("INBOX", &mail("m", 1), unread());
+    let h = h.started();
+    let id = h.id_of("m");
+    actions::trash(&h.db, id).unwrap();
+    let path = db_path(&h);
+    h.server.on_next_call("move_messages INBOX", move || {
+        let ui = Database::open(&path).unwrap();
+        actions::restore_from_trash(&ui, id).unwrap();
+    });
+    h.run(Command::ProcessQueue);
+    // The compensating move runs right after.
+    let deadline = Instant::now() + WAIT;
+    while !h.db.pending_ops(h.account).unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "compensating move never ran");
+        h.run(Command::ProcessQueue);
+    }
+    assert_eq!(h.server_subjects("INBOX"), strings(&["m"]));
+    assert!(h.server.messages("Trash").is_empty());
+    assert_eq!(h.subjects(system::INBOX), strings(&["m"]));
+    h.sync();
+    assert_eq!(h.subjects(system::INBOX), strings(&["m"]));
+    assert!(h.subjects(system::TRASH).is_empty());
+    assert_eq!(h.message_count(), 1);
+}
+
+#[test]
+fn retargeting_a_move_while_it_runs_converges_to_the_new_target() {
+    let h = Harness::imap();
+    h.server.deliver("INBOX", &mail("m", 1), unread());
+    let h = h.started();
+    let id = h.id_of("m");
+    actions::trash(&h.db, id).unwrap();
+    let path = db_path(&h);
+    h.server.on_next_call("move_messages INBOX", move || {
+        let ui = Database::open(&path).unwrap();
+        actions::archive(&ui, id).unwrap();
+    });
+    h.run(Command::ProcessQueue);
+    assert_eq!(
+        h.subjects(system::ARCHIVE),
+        strings(&["m"]),
+        "UI intent kept"
+    );
+    let deadline = Instant::now() + WAIT;
+    while !h.db.pending_ops(h.account).unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "retargeted move never ran");
+        h.run(Command::ProcessQueue);
+    }
+    assert_eq!(h.server_subjects("Archive"), strings(&["m"]));
+    assert!(h.server.messages("Trash").is_empty());
+    h.sync();
+    assert_eq!(h.subjects(system::ARCHIVE), strings(&["m"]));
+    assert_eq!(h.message_count(), 1);
+}
+
+#[test]
+fn dropped_ops_outside_the_window_restore_the_local_copy() {
+    let config = AccountConfig {
+        email: "me@example.com".into(),
+        username: "me@example.com".into(),
+        sync_window: 1,
+        ..Default::default()
+    };
+    let h = Harness::new(PROVIDER_IMAP, &config.to_json(), test_options());
+    h.server.deliver("INBOX", &mail("old", 1), unread());
+    let h = h.started();
+    // "old" falls out of the 1-message window.
+    h.server.deliver("INBOX", &mail("new", 2), unread());
+    h.server.deliver("INBOX", &mail("doomed", 3), unread());
+    h.sync();
+    let old = h.id_of("old");
+    actions::archive(&h.db, old).unwrap();
+    for _ in 0..crate::worker::MAX_OP_ATTEMPTS {
+        h.server.on_next_call("move_messages", {
+            let server = h.server.clone();
+            move || server.fail_next(RemoteErrorKind::Protocol)
+        });
+        h.run(Command::ProcessQueue);
+    }
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty(), "dropped");
+    h.sync(); // full cycle: purge_orphans runs
+    assert_eq!(h.id_of("old"), old, "local copy kept");
+    assert!(h.subjects(system::INBOX).contains(&"old".to_string()));
+    assert!(h.subjects(system::ARCHIVE).is_empty());
+
+    // A refused permanent delete: the row is gone locally, so the header
+    // is fetched again regardless of the window.
+    let doomed = h.id_of("doomed");
+    actions::delete_permanently(&h.db, doomed).unwrap();
+    assert!(h.db.get_message(doomed).unwrap().is_none());
+    for _ in 0..crate::worker::MAX_OP_ATTEMPTS {
+        h.server.on_next_call("delete_messages", {
+            let server = h.server.clone();
+            move || server.fail_next(RemoteErrorKind::Protocol)
+        });
+        h.run(Command::ProcessQueue);
+    }
+    h.sync();
+    assert!(h.subjects(system::INBOX).contains(&"doomed".to_string()));
+}
+
+#[test]
+fn transient_send_failures_back_off_without_using_attempts() {
+    let options = EngineOptions {
+        send_retry_delays: vec![Duration::from_secs(60)],
+        ..test_options()
+    };
+    let h = Harness::new(PROVIDER_IMAP, "{}", options).started();
+    let id =
+        h.db.enqueue_outgoing(
+            h.account,
+            "me@example.com",
+            &strings(&["b@x.com"]),
+            b"raw",
+            None,
+        )
+        .unwrap();
+    let sender = h.connector.sender();
+    for _ in 0..5 {
+        sender.fail_next_with(mail_core::SendError::transient(
+            mail_core::RemoteError::new(RemoteErrorKind::Protocol, "451 try later"),
+        ));
+    }
+    let events = h.run(Command::ProcessQueue);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        SyncEvent::SendFailed { permanent: false, outbox_id, .. } if *outbox_id == id
+    )));
+    let row = &h.db.outbox(h.account).unwrap()[0];
+    assert_eq!((row.attempts, row.deferrals), (0, 1));
+    assert_eq!(row.state, storage::OutgoingState::Queued);
+    assert!(row.next_attempt_at >= crate::worker::unix_now() + 50);
+    // Not due yet: further cycles do not retry.
+    h.sync();
+    h.sync();
+    assert_eq!(sender.sends(), 1);
+    assert_eq!(h.db.outbox(h.account).unwrap()[0].deferrals, 1);
+}
+
+#[test]
+fn uncertain_sends_are_never_resent_automatically() {
+    let h = Harness::imap().started();
+    let id =
+        h.db.enqueue_outgoing(
+            h.account,
+            "me@example.com",
+            &strings(&["b@x.com"]),
+            b"raw",
+            None,
+        )
+        .unwrap();
+    let sender = h.connector.sender();
+    sender.deliver_then_fail_next();
+    let events = h.run(Command::ProcessQueue);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        SyncEvent::SendFailed { permanent: true, outbox_id, .. } if *outbox_id == id
+    )));
+    h.sync();
+    h.sync();
+    assert_eq!(sender.sent().len(), 1, "delivered once, never resent");
+    let stuck = h.db.failed_outgoing().unwrap();
+    assert_eq!(stuck.len(), 1);
+    assert_eq!(stuck[0].state, storage::OutgoingState::MaybeSent);
+    // The user discards it.
+    h.db.delete_outgoing(id).unwrap();
+    assert!(h.db.failed_outgoing().unwrap().is_empty());
+}
+
+#[test]
+fn a_previous_worker_holding_the_account_lock_blocks_sending() {
+    let h = Harness::imap().started();
+    let lock = h.engine.account_lock(h.account);
+    let guard = lock.lock().unwrap();
+    h.db.enqueue_outgoing(
+        h.account,
+        "me@example.com",
+        &strings(&["b@x.com"]),
+        b"raw",
+        None,
+    )
+    .unwrap();
+    h.run(Command::ProcessQueue);
+    assert!(h.connector.sender().sent().is_empty(), "old worker owns it");
+    drop(guard);
+    // The new worker retries on its own shortly after.
+    h.wait_for("Sent", |e| matches!(e, SyncEvent::Sent { .. }));
+    assert_eq!(h.connector.sender().sent().len(), 1);
+}
+
+#[test]
+fn rows_claimed_by_a_dead_worker_become_maybe_sent() {
+    let h = Harness::imap().started();
+    let fresh =
+        h.db.enqueue_outgoing(
+            h.account,
+            "me@example.com",
+            &strings(&["b@x.com"]),
+            b"1",
+            None,
+        )
+        .unwrap();
+    let stale =
+        h.db.enqueue_outgoing(
+            h.account,
+            "me@example.com",
+            &strings(&["c@x.com"]),
+            b"2",
+            None,
+        )
+        .unwrap();
+    let now = crate::worker::unix_now();
+    // Another (live) worker is sending `fresh`; `stale` was claimed by one
+    // that died long ago.
+    assert!(h.db.claim_outgoing(fresh, now).unwrap());
+    assert!(h.db.claim_outgoing(stale, now - 3600).unwrap());
+    h.sync();
+    assert!(h.connector.sender().sent().is_empty());
+    let rows = h.db.outbox(h.account).unwrap();
+    assert_eq!(rows[0].state, storage::OutgoingState::Sending);
+    assert_eq!(rows[1].state, storage::OutgoingState::MaybeSent);
+}
+
+#[test]
+fn failed_sent_copy_is_retried_without_resending() {
+    let h = Harness::imap().started();
+    let raw = mail("outgoing", 9);
+    h.db.enqueue_outgoing(
+        h.account,
+        "me@example.com",
+        &strings(&["b@x.com"]),
+        &raw,
+        None,
+    )
+    .unwrap();
+    h.server.on_next_call("append Sent", {
+        let server = h.server.clone();
+        move || server.fail_next(RemoteErrorKind::Protocol)
+    });
+    h.run(Command::ProcessQueue);
+    assert_eq!(h.connector.sender().sent().len(), 1);
+    assert!(h.server.messages("Sent").is_empty());
+    let row = &h.db.outbox(h.account).unwrap()[0];
+    assert_eq!(row.state, storage::OutgoingState::AppendPending);
+    assert_eq!(h.db.outbox_count().unwrap(), 0, "already sent");
+    h.run(Command::ProcessQueue);
+    assert_eq!(h.server.messages("Sent").len(), 1);
+    assert_eq!(h.connector.sender().sent().len(), 1, "not sent twice");
+    assert!(h.db.outbox(h.account).unwrap().is_empty());
 }

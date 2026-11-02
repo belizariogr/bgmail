@@ -504,3 +504,54 @@ fn dovecot_starttls_condstore_and_move() {
     assert_eq!(tls.uids("Archive").unwrap().len(), 2);
     tls.logout();
 }
+
+/// UID re-resolution by Message-ID (used after a UIDVALIDITY change or a
+/// move without COPYUID) against a real server's `UID SEARCH HEADER`.
+#[test]
+#[ignore]
+fn find_uid_by_message_id_against_greenmail() {
+    let _serial = gate!();
+    let tag = format!("find-{}", nonce());
+    send(&tag);
+    let mut remote = imap();
+    let uid = wait_for(&mut remote, &tag);
+    let id = format!("{tag}@localhost");
+    assert_eq!(
+        remote.find_uid_by_message_id("INBOX", &id).unwrap(),
+        Some(uid)
+    );
+    assert_eq!(
+        remote
+            .find_uid_by_message_id("INBOX", &format!("<{id}>"))
+            .unwrap(),
+        Some(uid)
+    );
+    assert_eq!(
+        remote
+            .find_uid_by_message_id("INBOX", &format!("missing-{id}"))
+            .unwrap(),
+        None
+    );
+    remote.delete_messages("INBOX", &[uid]).unwrap();
+    assert_eq!(remote.find_uid_by_message_id("INBOX", &id).unwrap(), None);
+    remote.logout();
+}
+
+/// SMTP failures are classified by phase against a real server: a rejected
+/// recipient (before DATA) is never "maybe sent".
+#[test]
+#[ignore]
+fn smtp_rejections_before_data_are_not_uncertain() {
+    let _serial = gate!();
+    let mut sender = SmtpSender::new(
+        &server(3025, Security::None),
+        ALICE,
+        &Secret::Password(PASSWORD.into()),
+        ConnectOptions::default(),
+    )
+    .unwrap();
+    let err = sender
+        .send("bob@localhost", &["not an address".to_string()], b"x\r\n")
+        .unwrap_err();
+    assert_eq!(err.failure, mail_core::SendFailure::Permanent);
+}

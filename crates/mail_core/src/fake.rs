@@ -16,7 +16,7 @@ use crate::folder::RemoteFolder;
 use crate::parse::{has_attachments, parse_message};
 use crate::remote::{
     Capabilities, FolderStatus, IdleOutcome, MailConnector, MailRemote, MailSender, RemoteError,
-    RemoteErrorKind, RemoteFlags, RemoteHeader, RemoteResult,
+    RemoteErrorKind, RemoteFlags, RemoteHeader, RemoteResult, SendError,
 };
 
 /// Hierarchy delimiter the fake server reports for every folder.
@@ -117,12 +117,25 @@ fn uid_list(uids: &[u32]) -> String {
         .join(",")
 }
 
+/// A callback run when a matching call reaches the fake server.
+type CallHook = Box<dyn FnOnce() + Send>;
+
 /// Shared in-memory mail server implementing [`MailRemote`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FakeRemote {
     state: Arc<Mutex<ServerState>>,
     /// Signalled after every mutation (and on cancellation) to wake `idle`.
     changed: Arc<Condvar>,
+    /// `(call prefix, hook)` pairs, see [`FakeRemote::on_next_call`].
+    hooks: Arc<Mutex<Vec<(String, CallHook)>>>,
+}
+
+impl std::fmt::Debug for FakeRemote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeRemote")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for FakeRemote {
@@ -154,7 +167,29 @@ impl FakeRemote {
                 logged_out: false,
             })),
             changed: Arc::new(Condvar::new()),
+            hooks: Arc::default(),
         }
+    }
+
+    /// Runs `hook` once, the next time a call whose log line (see
+    /// [`Self::calls`]) starts with `prefix` arrives — before the call takes
+    /// effect and without holding the server lock. Lets tests act as
+    /// another party (the UI, another client) while the engine is "on the
+    /// network".
+    pub fn on_next_call(&self, prefix: &str, hook: impl FnOnce() + Send + 'static) {
+        self.hooks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((prefix.to_string(), Box::new(hook)));
+    }
+
+    /// Takes the first hook registered for `call`, if any.
+    fn take_hook(&self, call: &str) -> Option<CallHook> {
+        let mut hooks = self.hooks.lock().unwrap_or_else(|e| e.into_inner());
+        let index = hooks
+            .iter()
+            .position(|(prefix, _)| call.starts_with(prefix.as_str()))?;
+        Some(hooks.remove(index).1)
     }
 
     /// Wakes `idle` waiters; called after every mutation.
@@ -167,8 +202,12 @@ impl FakeRemote {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Records the call, then fails with the next queued error if any.
+    /// Runs a matching hook, records the call, then fails with the next
+    /// queued error if any.
     fn enter(&self, call: String) -> RemoteResult<MutexGuard<'_, ServerState>> {
+        if let Some(hook) = self.take_hook(&call) {
+            hook();
+        }
         let mut state = self.lock();
         state.calls.push(call);
         match state.failures.pop_front() {
@@ -421,6 +460,35 @@ impl MailRemote for FakeRemote {
             .collect())
     }
 
+    /// Matches the parsed `Message-ID` of every message (brackets ignored).
+    fn find_uid_by_message_id(
+        &mut self,
+        folder: &str,
+        message_id: &str,
+    ) -> RemoteResult<Option<u32>> {
+        let mut state = self.enter(format!("find_uid {folder} {message_id}"))?;
+        let wanted = message_id
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>');
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let found = state
+            .folder(folder)?
+            .messages
+            .values()
+            .filter(|m| {
+                parse_message(&header_block(&m.raw))
+                    .and_then(|p| p.message_id)
+                    .is_some_and(|id| id.trim_start_matches('<').trim_end_matches('>') == wanted)
+            })
+            .map(|m| m.uid)
+            .max();
+        state.selected = Some(folder.to_string());
+        Ok(found)
+    }
+
     fn fetch_body(&mut self, folder: &str, uid: u32) -> RemoteResult<Vec<u8>> {
         let state = self.enter(format!("fetch_body {folder} {uid}"))?;
         state
@@ -584,10 +652,19 @@ pub struct SentMail {
     pub raw: Vec<u8>,
 }
 
+/// A queued `FakeSender` failure; `delivered` records the mail first (the
+/// server accepted it before the connection broke).
+#[derive(Debug)]
+struct SendFault {
+    error: SendError,
+    delivered: bool,
+}
+
 #[derive(Debug, Default)]
 struct SenderState {
     sent: Vec<SentMail>,
-    failures: VecDeque<RemoteErrorKind>,
+    failures: VecDeque<SendFault>,
+    sends: usize,
 }
 
 /// Records submissions instead of sending them; clones share the log.
@@ -610,24 +687,56 @@ impl FakeSender {
         self.lock().sent.clone()
     }
 
-    /// Makes the next `send` fail with `kind` (queued like `FakeRemote`).
+    /// Makes the next `send` fail with `kind`, classified like an error
+    /// raised before the message data (`SendError::from`). Queued like
+    /// `FakeRemote`.
     pub fn fail_next(&self, kind: RemoteErrorKind) {
-        self.lock().failures.push_back(kind);
+        self.fail_next_with(SendError::from(RemoteError::new(kind, "injected failure")));
+    }
+
+    /// Makes the next `send` fail with exactly `error` (nothing recorded).
+    pub fn fail_next_with(&self, error: SendError) {
+        self.lock().failures.push_back(SendFault {
+            error,
+            delivered: false,
+        });
+    }
+
+    /// The next `send` is accepted (recorded in `sent`) but reports an
+    /// [`crate::remote::SendFailure::Uncertain`] network error, like a
+    /// connection that broke while waiting for the final reply.
+    pub fn deliver_then_fail_next(&self) {
+        self.lock().failures.push_back(SendFault {
+            error: SendError::uncertain(RemoteError::new(
+                RemoteErrorKind::Network,
+                "connection reset after DATA",
+            )),
+            delivered: true,
+        });
+    }
+
+    /// `send` calls so far (successful or not).
+    pub fn sends(&self) -> usize {
+        self.lock().sends
     }
 }
 
 impl MailSender for FakeSender {
-    fn send(&mut self, from: &str, recipients: &[String], raw: &[u8]) -> RemoteResult<()> {
+    fn send(&mut self, from: &str, recipients: &[String], raw: &[u8]) -> Result<(), SendError> {
         let mut state = self.lock();
-        if let Some(kind) = state.failures.pop_front() {
-            return Err(RemoteError::new(kind, "injected failure"));
+        state.sends += 1;
+        let fault = state.failures.pop_front();
+        if fault.as_ref().is_none_or(|fault| fault.delivered) {
+            state.sent.push(SentMail {
+                from: from.to_string(),
+                recipients: recipients.to_vec(),
+                raw: raw.to_vec(),
+            });
         }
-        state.sent.push(SentMail {
-            from: from.to_string(),
-            recipients: recipients.to_vec(),
-            raw: raw.to_vec(),
-        });
-        Ok(())
+        match fault {
+            Some(fault) => Err(fault.error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1084,18 +1193,75 @@ mod tests {
         let mut conn: Box<dyn MailSender> = Box::new(sender.clone());
         sender.fail_next(RemoteErrorKind::Auth);
         let to = vec!["b@x".to_string()];
-        assert_eq!(
-            conn.send("a@x", &to, MAIL).unwrap_err().kind,
-            RemoteErrorKind::Auth
-        );
+        let err = conn.send("a@x", &to, MAIL).unwrap_err();
+        assert_eq!(err.error.kind, RemoteErrorKind::Auth);
+        assert_eq!(err.failure, crate::remote::SendFailure::Transient);
         conn.send("a@x", &to, MAIL).unwrap();
         assert_eq!(
             sender.sent(),
             vec![SentMail {
                 from: "a@x".into(),
-                recipients: to,
+                recipients: to.clone(),
                 raw: MAIL.to_vec(),
             }]
         );
+
+        sender.fail_next_with(SendError::permanent(RemoteError::new(
+            RemoteErrorKind::Protocol,
+            "550",
+        )));
+        let err = conn.send("a@x", &to, MAIL).unwrap_err();
+        assert_eq!(err.failure, crate::remote::SendFailure::Permanent);
+        assert_eq!(sender.sent().len(), 1, "rejected mail is not recorded");
+
+        sender.deliver_then_fail_next();
+        let err = conn.send("a@x", &to, MAIL).unwrap_err();
+        assert_eq!(err.failure, crate::remote::SendFailure::Uncertain);
+        assert_eq!(sender.sent().len(), 2, "accepted before the failure");
+        assert_eq!(sender.sends(), 4);
+    }
+
+    #[test]
+    fn hooks_run_once_before_matching_calls() {
+        let server = server();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let log = hits.clone();
+        let handle = server.clone();
+        server.on_next_call("uids INBOX", move || {
+            // The server lock is free: the hook may act as another client.
+            handle.deliver("INBOX", MAIL, MessageFlags::default());
+            log.lock().unwrap().push("hook");
+        });
+        let mut remote: Box<dyn MailRemote> = Box::new(server.clone());
+        remote.select("INBOX").unwrap();
+        assert!(hits.lock().unwrap().is_empty(), "prefix did not match");
+        let uids = remote.uids("INBOX").unwrap();
+        assert_eq!(uids.len(), 1, "hook ran before the call took effect");
+        remote.uids("INBOX").unwrap();
+        assert_eq!(*hits.lock().unwrap(), vec!["hook"]);
+        assert!(format!("{server:?}").contains("FakeRemote"));
+    }
+
+    #[test]
+    fn find_uid_by_message_id_matches_parsed_header() {
+        let server = FakeRemote::new();
+        server.add_folder("INBOX", &[]);
+        let raw = |id: &str| format!("Message-ID: <{id}>\r\nSubject: s\r\n\r\nb\r\n").into_bytes();
+        server.deliver("INBOX", &raw("a@x"), MessageFlags::default());
+        server.deliver("INBOX", &raw("b@x"), MessageFlags::default());
+        let second_a = server.deliver("INBOX", &raw("a@x"), MessageFlags::default());
+        let mut remote: Box<dyn MailRemote> = Box::new(server.clone());
+        assert_eq!(
+            remote.find_uid_by_message_id("INBOX", "a@x").unwrap(),
+            Some(second_a)
+        );
+        assert_eq!(
+            remote.find_uid_by_message_id("INBOX", "<b@x>").unwrap(),
+            Some(2)
+        );
+        assert_eq!(remote.find_uid_by_message_id("INBOX", "c@x").unwrap(), None);
+        assert_eq!(remote.find_uid_by_message_id("INBOX", " ").unwrap(), None);
+        assert!(remote.find_uid_by_message_id("Nope", "a@x").is_err());
+        assert!(server.calls().contains(&"find_uid INBOX a@x".to_string()));
     }
 }

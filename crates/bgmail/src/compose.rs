@@ -102,6 +102,9 @@ pub struct ComposeInit {
     /// Account to send from (the one the original message belongs to).
     pub account_id: Option<i64>,
     pub draft: mail_core::Draft,
+    /// Outbox row this message re-creates (editing an unsent message);
+    /// deleted once the edited copy is queued.
+    pub replaces_outgoing: Option<i64>,
 }
 
 /// The recipient fields that are validated as address lists.
@@ -204,6 +207,8 @@ pub struct ComposeView {
     /// Background reads still running (Send is disabled meanwhile).
     pending_attachment_loads: usize,
     reply: ReplyHeaders,
+    /// See [`ComposeInit::replaces_outgoing`].
+    replaces_outgoing: Option<i64>,
     /// Inline address errors + banner message from the last send attempt.
     errors: ComposeErrors,
     /// A send is being handed to the main view (blocks double sends).
@@ -285,6 +290,7 @@ impl ComposeView {
             attachments: Vec::new(),
             pending_attachment_loads: 0,
             reply: ReplyHeaders::default(),
+            replaces_outgoing: None,
             errors: ComposeErrors::default(),
             sending: false,
             edited: false,
@@ -312,6 +318,7 @@ impl ComposeView {
         let init = init.unwrap_or_default();
         let draft = init.draft;
         self.from_account = account_index(&self.accounts, init.account_id);
+        self.replaces_outgoing = init.replaces_outgoing;
         set_input(&self.to, &mail_core::format_address_list(&draft.to), cx);
         set_input(&self.cc, &mail_core::format_address_list(&draft.cc), cx);
         set_input(&self.bcc, &mail_core::format_address_list(&draft.bcc), cx);
@@ -435,9 +442,12 @@ impl ComposeView {
         cx.notify();
         let root = self.root.clone();
         let window_handle = self.window_handle;
+        let replaces = self.replaces_outgoing;
         cx.spawn(async move |this, cx| {
             let result = root
-                .update(cx, |root, cx| root.send_draft(account_id, draft, cx))
+                .update(cx, |root, cx| {
+                    root.send_draft(account_id, draft, replaces, cx)
+                })
                 .unwrap_or_else(|error| Err(error.to_string()));
             let sent = this
                 .update(cx, |this, cx| this.finish_send(result, cx))

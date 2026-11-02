@@ -127,6 +127,7 @@ pub(crate) mod test_server {
 
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -139,11 +140,26 @@ pub(crate) mod test_server {
     }
 
     /// Starts the server; returns its base URL and the log of requests.
+    ///
+    /// The base URL carries a path prefix unique to this server; requests
+    /// without it get a 404 and are neither logged nor handled. Tests run
+    /// in parallel (and other test processes) can make stray connections
+    /// to a port this server re-used; the prefix keeps them out of the log.
+    /// Handlers see `target` with the prefix stripped.
     pub fn serve(
         handler: impl Fn(&Request) -> (u16, String) + Send + 'static,
     ) -> (String, Arc<Mutex<Vec<Request>>>) {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let prefix = format!(
+            "/srv{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let base = format!(
+            "http://127.0.0.1:{}{prefix}",
+            listener.local_addr().unwrap().port()
+        );
         let log = Arc::new(Mutex::new(Vec::new()));
         let seen = log.clone();
         thread::spawn(move || {
@@ -170,6 +186,14 @@ pub(crate) mod test_server {
                 }
                 let mut body = vec![0u8; length];
                 let _ = reader.read_exact(&mut body);
+                let mut stream = stream;
+                let Some(target) = target.strip_prefix(&prefix).map(str::to_string) else {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 404 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    continue;
+                };
                 let request = Request {
                     method,
                     target,
@@ -177,7 +201,6 @@ pub(crate) mod test_server {
                 };
                 let (status, text) = handler(&request);
                 seen.lock().unwrap().push(request);
-                let mut stream = stream;
                 let _ = write!(
                     stream,
                     "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
@@ -236,9 +259,7 @@ mod tests {
 
     #[test]
     fn transport_errors_are_mapped() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let port = crate::tls::test_support::REFUSED_PORT;
         let err = get(&format!("http://127.0.0.1:{port}/"), Duration::from_secs(2)).unwrap_err();
         assert_eq!(err.kind, RemoteErrorKind::Network, "{err}");
         let err = get("not a url", Duration::from_secs(2)).unwrap_err();

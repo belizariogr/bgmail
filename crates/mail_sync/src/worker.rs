@@ -2,26 +2,29 @@
 //! connected `MailRemote`, executes commands and sync cycles, and keeps an
 //! IDLE thread watching the Inbox.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mail_core::{
-    parse_message, AccountConfig, CancelToken, IdleOutcome, MailConnector, MailRemote,
-    MessageFlags, RemoteError, RemoteErrorKind, DEFAULT_SYNC_WINDOW,
+    parse_message, AccountConfig, CancelToken, IdleOutcome, MailConnector, MailRemote, MailSender,
+    MessageFlags, RemoteError, RemoteErrorKind, SendError, SendFailure, DEFAULT_SYNC_WINDOW,
 };
-use storage::{system, Database, Folder, FolderSyncState, BODY_STATE_FULL, PROVIDER_LOCAL};
+use storage::{
+    system, Database, Folder, FolderSyncState, OutgoingRow, OutgoingState, PendingOp,
+    BODY_STATE_FULL, PROVIDER_LOCAL,
+};
 
 use crate::body::body_content;
 use crate::engine::EngineOptions;
 use crate::events::{AccountStatus, Command, SyncEvent};
 use crate::plan::{
-    in_flight_uids, new_remote_message, notice_for_new, plan_folder, plan_folders, should_announce,
-    sync_order, LocalFolderState, PendingAction,
+    in_flight_uids, messages_with_pending_flags, new_remote_message, notice_for_new, plan_folder,
+    plan_folders, should_announce, sync_order, LocalFolderState, PendingAction,
 };
 
 /// Headers fetched per round trip (progress + list refresh after each).
@@ -30,8 +33,18 @@ pub(crate) const HEADER_BATCH: usize = 100;
 pub(crate) const FLAG_BATCH: usize = 500;
 /// Failed attempts after which a queued op is dropped (and its folder resynced).
 pub(crate) const MAX_OP_ATTEMPTS: u32 = 3;
-/// Failed attempts after which an outgoing message is no longer retried.
+/// Permanent (5xx) rejections after which an outgoing message becomes
+/// `failed` (transient failures never use this budget up).
 pub(crate) const MAX_SEND_ATTEMPTS: u32 = 3;
+/// Failed Sent-copy APPENDs after which the copy is given up.
+pub(crate) const MAX_APPEND_DEFERRALS: u32 = 5;
+/// A `sending` row older than this belonged to a worker that died mid-send
+/// (longer than any SMTP transaction can take with its I/O timeouts).
+pub(crate) const SEND_LEASE: Duration = Duration::from_secs(10 * 60);
+/// Retry delay while a previous worker of the account still holds its lock.
+const HANDOVER_RETRY: Duration = Duration::from_secs(2);
+/// Compare-and-swap rounds when re-pointing later ops races the UI.
+const RETARGET_ROUNDS: usize = 4;
 /// Longest single wait of the command loop (keeps it responsive to bugs).
 const MAX_WAIT: Duration = Duration::from_secs(3600);
 /// Granularity of cancellable sleeps in the IDLE thread.
@@ -169,6 +182,10 @@ pub(crate) struct WorkerSetup {
     pub commands: Receiver<Command>,
     /// Clone of the command sender, handed to the IDLE thread.
     pub poke: Sender<Command>,
+    /// Shared by every worker this engine starts for the account: held
+    /// while replaying ops / sending, so a replaced worker that is still
+    /// winding down never runs them concurrently with its successor.
+    pub account_lock: Arc<Mutex<()>>,
 }
 
 /// Thread entry point.
@@ -211,6 +228,9 @@ struct Worker {
     idle: Option<JoinHandle<()>>,
     idle_unsupported: Arc<AtomicBool>,
     shutdown: bool,
+    account_lock: Arc<Mutex<()>>,
+    /// When the earliest backed-off outbox row is due (`ProcessQueue`).
+    outbox_wake: Option<Instant>,
 }
 
 impl Worker {
@@ -235,6 +255,8 @@ impl Worker {
             idle: None,
             idle_unsupported: Arc::new(AtomicBool::new(false)),
             shutdown: false,
+            account_lock: setup.account_lock,
+            outbox_wake: None,
         }
     }
 
@@ -315,6 +337,10 @@ impl Worker {
             (None, true) => now + MAX_WAIT,
             (None, false) => self.next_poll,
         };
+        let deadline = match self.outbox_wake {
+            Some(wake) if !self.auth_failed => deadline.min(wake),
+            _ => deadline,
+        };
         match self
             .commands
             .recv_timeout(deadline.saturating_duration_since(now).min(MAX_WAIT))
@@ -330,6 +356,10 @@ impl Worker {
                 if self.retry_at.is_some_and(|retry| retry <= now) {
                     self.retry_at = None;
                     return Some(Command::SyncNow);
+                }
+                if self.outbox_wake.is_some_and(|wake| wake <= now) {
+                    self.outbox_wake = None;
+                    return Some(Command::ProcessQueue);
                 }
                 (self.retry_at.is_none() && !self.auth_failed && now >= self.next_poll)
                     .then_some(Command::SyncNow)
@@ -543,11 +573,10 @@ impl Worker {
     /// Queue + outbox.
     fn queue_cycle(&mut self) -> Result<(), Abort> {
         let has_work = !self.db.pending_ops(self.account_id)?.is_empty()
-            || self
+            || !self
                 .db
-                .outbox(self.account_id)?
-                .iter()
-                .any(|row| row.attempts < MAX_SEND_ATTEMPTS);
+                .due_outgoing(self.account_id, unix_now())?
+                .is_empty();
         if !has_work {
             return Ok(());
         }
@@ -560,89 +589,437 @@ impl Worker {
         Ok(())
     }
 
+    /// Takes the per-account lock shared with any previous worker of this
+    /// account that may still be finishing (see `Engine::start_account`).
+    /// `None` while that worker holds it: the caller skips its queue/outbox
+    /// work and a retry is scheduled.
+    fn try_account_lock(lock: &Mutex<()>) -> Option<MutexGuard<'_, ()>> {
+        match lock.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// Another worker of the account still holds the lock: try again soon.
+    fn retry_after_handover(&mut self) {
+        let at = Instant::now() + HANDOVER_RETRY;
+        self.retry_at = Some(self.retry_at.map_or(at, |retry| retry.min(at)));
+    }
+
     /// Replays queued ops oldest first. Returns whether any completed.
+    ///
+    /// Each op is checked before it runs: the source folder is SELECTed
+    /// (once per pass) and its UIDVALIDITY compared with the one recorded in
+    /// the op; stale or unresolved UIDs are re-found (see `resolve_uid`).
+    /// Completion is a compare-and-swap on the op row, so a UI rewrite or
+    /// cancel that raced with the server call is reconciled instead of lost.
     fn process_queue(&mut self) -> Result<bool, Abort> {
+        let lock = self.account_lock.clone();
+        let Some(_guard) = Self::try_account_lock(&lock) else {
+            self.retry_after_handover();
+            return Ok(false);
+        };
         let mut changed = false;
-        for op in self.db.pending_ops(self.account_id)? {
+        let mut validities: HashMap<String, u32> = HashMap::new();
+        let ids: Vec<i64> = self
+            .db
+            .pending_ops(self.account_id)?
+            .iter()
+            .map(|op| op.id)
+            .collect();
+        for id in ids {
             self.check_interrupts()?;
+            // Re-read: an earlier op of this pass (or the UI) may have
+            // re-pointed or removed it.
+            let Some(op) = self.db.pending_op(id)? else {
+                continue;
+            };
             let Some(action) = PendingAction::decode(&op.payload) else {
                 self.db.complete_op(op.id)?;
                 continue;
             };
+            let resolved = match self.resolve_uid(&mut validities, &op, &action) {
+                Ok(resolved) => resolved,
+                Err(Abort::Remote(error)) if !is_connection_error(error.kind) => {
+                    changed |= self.op_failed(&op, &action, None, &error.to_string())?;
+                    continue;
+                }
+                Err(other) => return Err(other),
+            };
+            let Some(uid) = resolved else {
+                changed |= self.op_target_missing(&op, &action)?;
+                continue;
+            };
+            let folder = action.source().0.to_string();
             let remote = self.rm()?;
             let result = match &action {
-                PendingAction::Flags {
-                    folder,
-                    uid,
-                    add,
-                    remove,
-                } => remote
-                    .store_flags(folder, &[*uid], *add, *remove)
+                PendingAction::Flags { add, remove, .. } => remote
+                    .store_flags(&folder, &[uid], *add, *remove)
                     .map(|()| None),
-                PendingAction::Move { from, uid, to, .. } => {
-                    remote.move_messages(from, &[*uid], to)
-                }
-                PendingAction::Delete { folder, uid } => {
-                    remote.delete_messages(folder, &[*uid]).map(|()| None)
+                PendingAction::Move { to, .. } => remote.move_messages(&folder, &[uid], to),
+                PendingAction::Delete { .. } => {
+                    remote.delete_messages(&folder, &[uid]).map(|()| None)
                 }
             };
             match result {
                 Ok(new_uids) => {
-                    self.db.complete_op(op.id)?;
                     changed = true;
-                    if let (
-                        PendingAction::Move {
-                            from,
-                            uid,
-                            to,
-                            to_folder_id,
-                        },
-                        Some(new_uid),
-                        Some(message_id),
-                    ) = (
-                        &action,
-                        new_uids.and_then(|uids| uids.first().copied()),
-                        op.message_id,
-                    ) {
-                        self.db
-                            .attach_location(message_id, *to_folder_id, new_uid)?;
-                        self.retarget_later_ops(op.id, message_id, (from, *uid), to, new_uid)?;
-                    }
+                    let new_uid = new_uids.and_then(|uids| uids.first().copied());
+                    self.op_done(&op, &action, new_uid)?;
                 }
                 Err(error) if is_connection_error(error.kind) => return Err(error.into()),
                 Err(error) => {
-                    self.db.fail_op(op.id, &error.to_string())?;
-                    if op.attempts + 1 >= MAX_OP_ATTEMPTS {
-                        self.db.complete_op(op.id)?;
-                        self.mark_for_resync(action.source().0)?;
-                        changed = true;
-                    }
+                    changed |= self.op_failed(&op, &action, Some(uid), &error.to_string())?;
                 }
             }
         }
         Ok(changed)
     }
 
-    /// After a move reported the new UID, ops queued later for the same
-    /// message at its old location now act on the new one.
+    /// The UID the op must act on now, or `None` when the message is not in
+    /// the op's folder any more. In order:
+    /// 1. the recorded UID, when the recorded UIDVALIDITY equals the
+    ///    server's (selected once per pass);
+    /// 2. a stored location of the message in that folder whose checkpoint
+    ///    matches the server (a sync re-attached it);
+    /// 3. `UID SEARCH HEADER Message-ID` (the op's header, else the stored
+    ///    message's);
+    /// 4. payloads written before UIDVALIDITY was recorded: the recorded UID
+    ///    while the folder's stored checkpoint still matches the server.
+    ///
+    /// A failed search that nothing else resolved is an error, not `None`.
+    fn resolve_uid(
+        &mut self,
+        validities: &mut HashMap<String, u32>,
+        op: &PendingOp,
+        action: &PendingAction,
+    ) -> Result<Option<u32>, Abort> {
+        let (folder, uid) = action.source();
+        let current = match validities.get(folder) {
+            Some(validity) => *validity,
+            None => {
+                let validity = self.rm()?.select(folder)?.uid_validity;
+                validities.insert(folder.to_string(), validity);
+                validity
+            }
+        };
+        if uid != 0 && action.uid_validity() == Some(current) {
+            return Ok(Some(uid));
+        }
+        let mut search_failed = None;
+        let mut header = action.message_id_hdr().map(str::to_string);
+        if let Some(message_id) = op.message_id {
+            for location in self.db.message_locations(message_id)? {
+                if location.remote_name.as_deref() == Some(folder)
+                    && self.db.folder_sync_state(location.folder_id)?.uid_validity == Some(current)
+                {
+                    return Ok(Some(location.uid));
+                }
+            }
+            if header.is_none() {
+                header = self
+                    .db
+                    .get_message(message_id)?
+                    .and_then(|message| message.message_id_hdr);
+            }
+        }
+        if let Some(header) = header {
+            match self.rm()?.find_uid_by_message_id(folder, &header) {
+                Ok(Some(found)) => return Ok(Some(found)),
+                Ok(None) => {}
+                Err(error) if is_connection_error(error.kind) => return Err(error.into()),
+                // A server that cannot search falls through to the checkpoint.
+                Err(error) => search_failed = Some(error),
+            }
+        }
+        if uid != 0 && action.uid_validity().is_none() {
+            if let Some(local) = self.db.folder_by_remote_name(self.account_id, folder)? {
+                if self.db.folder_sync_state(local.id)?.uid_validity == Some(current) {
+                    return Ok(Some(uid));
+                }
+            }
+        }
+        // Unknown is not "gone": a failed search counts as a failed attempt,
+        // so the op isn't dropped as if another client had acted on it.
+        match search_failed {
+            Some(error) => Err(error.into()),
+            None => Ok(None),
+        }
+    }
+
+    /// The op's message is not in its folder (any more). Flag ops wait for
+    /// a sync to re-attach it (counted as a failed attempt); a Move/Delete
+    /// has nothing left to act on (another client moved/deleted it): it is
+    /// dropped and both folders resynced so the server's truth wins.
+    fn op_target_missing(&mut self, op: &PendingOp, action: &PendingAction) -> Result<bool, Abort> {
+        let folder = action.source().0.to_string();
+        if let PendingAction::Flags { .. } = action {
+            let error = format!("message not found in {folder}");
+            return self.op_failed(op, action, None, &error);
+        }
+        if self
+            .db
+            .complete_op_if_unchanged(op.id, &op.kind, &op.payload)?
+        {
+            self.mark_for_resync(&folder)?;
+            if let PendingAction::Move { to, .. } = action {
+                self.mark_for_resync(to)?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Records a failed attempt; after [`MAX_OP_ATTEMPTS`] the op is dropped,
+    /// the source location of a Move/Delete restored (see
+    /// `restore_source`) and the folder resynced. Returns whether local
+    /// state changed.
+    fn op_failed(
+        &mut self,
+        op: &PendingOp,
+        action: &PendingAction,
+        resolved_uid: Option<u32>,
+        error: &str,
+    ) -> Result<bool, Abort> {
+        self.db.fail_op(op.id, error)?;
+        if op.attempts + 1 < MAX_OP_ATTEMPTS {
+            return Ok(false);
+        }
+        // `fail_op` leaves kind/payload alone, so the CAS only fails when
+        // the UI rewrote the op meanwhile: then the new intent gets its turn.
+        if !self
+            .db
+            .complete_op_if_unchanged(op.id, &op.kind, &op.payload)?
+        {
+            return Ok(false);
+        }
+        if matches!(
+            action,
+            PendingAction::Move { .. } | PendingAction::Delete { .. }
+        ) {
+            self.restore_source(op, action, resolved_uid)?;
+        }
+        self.mark_for_resync(action.source().0)?;
+        Ok(true)
+    }
+
+    /// A Move/Delete the server kept refusing was dropped: the message is
+    /// still at its source, but the UI detached (move) or deleted (delete)
+    /// it locally. Re-attach the source location, or — when the row is gone
+    /// — fetch its header again regardless of the sync window, so
+    /// `purge_orphans` cannot delete the only local copy of mail that still
+    /// exists on the server.
+    fn restore_source(
+        &mut self,
+        op: &PendingOp,
+        action: &PendingAction,
+        resolved_uid: Option<u32>,
+    ) -> Result<(), Abort> {
+        let (folder, recorded) = action.source();
+        let Some(uid) = resolved_uid.or((recorded != 0).then_some(recorded)) else {
+            return Ok(());
+        };
+        let Some(local) = self.db.folder_by_remote_name(self.account_id, folder)? else {
+            return Ok(());
+        };
+        if let Some(message_id) = op.message_id {
+            if self.db.get_message(message_id)?.is_some() {
+                self.db.attach_location(message_id, local.id, uid)?;
+                return Ok(());
+            }
+        }
+        let folder = folder.to_string();
+        match self.rm()?.fetch_headers(&folder, &[uid]) {
+            Ok(headers) => {
+                for header in headers {
+                    let parsed = parse_message(&header.header).unwrap_or_default();
+                    let message = new_remote_message(&header, &parsed);
+                    self.db.record_remote_message(
+                        self.account_id,
+                        local.id,
+                        header.uid,
+                        &message,
+                    )?;
+                }
+                Ok(())
+            }
+            Err(error) if is_connection_error(error.kind) => Err(error.into()),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// The server applied `action`. Completes the op with a compare-and-swap;
+    /// for a Move also records the new location (when the server reported
+    /// COPYUID) and re-points later ops of the message there — unresolved
+    /// (`uid` 0, found by Message-ID later) without COPYUID, so flag edits
+    /// made while the move was queued are not lost. If the UI rewrote or
+    /// cancelled the op meanwhile, see `reconcile_move`.
+    fn op_done(
+        &mut self,
+        op: &PendingOp,
+        action: &PendingAction,
+        new_uid: Option<u32>,
+    ) -> Result<(), Abort> {
+        let PendingAction::Move {
+            from,
+            to,
+            to_folder_id,
+            ..
+        } = action
+        else {
+            self.db
+                .complete_op_if_unchanged(op.id, &op.kind, &op.payload)?;
+            return Ok(());
+        };
+        let Some(message_id) = op.message_id else {
+            self.db
+                .complete_op_if_unchanged(op.id, &op.kind, &op.payload)?;
+            return Ok(());
+        };
+        let validity = match new_uid {
+            Some(_) => self.db.folder_sync_state(*to_folder_id)?.uid_validity,
+            None => None,
+        };
+        let landed = (to.as_str(), new_uid.unwrap_or(0), validity);
+        // Location first: a UI round that reads after our CAS must already
+        // see where the message is.
+        if let Some(uid) = new_uid {
+            self.db.attach_location(message_id, *to_folder_id, uid)?;
+        }
+        if self
+            .db
+            .complete_op_if_unchanged(op.id, &op.kind, &op.payload)?
+        {
+            self.retarget_later_ops(op.id, message_id, from, landed)?;
+            if new_uid.is_none() {
+                // No location until a sync of the target re-finds it: do that
+                // now rather than at the next poll.
+                self.mark_for_resync(to)?;
+            }
+        } else {
+            self.reconcile_move(op, message_id, from, *to_folder_id, landed)?;
+        }
+        Ok(())
+    }
+
+    /// The server moved the message `from` → `landed`, but the UI changed
+    /// the op while it ran. Converge on the UI's latest intent:
+    /// - rewritten Move to the folder it landed in: done, keep the location;
+    /// - rewritten otherwise (another target, or a delete): the op (and
+    ///   later ones) now start from `landed`; the `landed` location attached
+    ///   by `op_done` is detached again and the list shows the rewrite's
+    ///   target, as the UI left it;
+    /// - cancelled (moved back to `from`): later ops are re-pointed to
+    ///   `landed` and a compensating Move `landed` → `from` is queued after
+    ///   them; the stale `from` location the UI re-attached is detached (the
+    ///   server expunged that UID), so the message stays listed in `from`
+    ///   while in flight.
+    fn reconcile_move(
+        &mut self,
+        op: &PendingOp,
+        message_id: i64,
+        from: &str,
+        to_folder_id: i64,
+        landed: (&str, u32, Option<u32>),
+    ) -> Result<(), Abort> {
+        let (to, new_uid, validity) = landed;
+        let current = self
+            .db
+            .pending_ops(self.account_id)?
+            .into_iter()
+            .find(|row| row.id == op.id);
+        if let Some(current) = current {
+            let rewritten = PendingAction::decode(&current.payload);
+            if let Some(PendingAction::Move {
+                to: wanted,
+                to_folder_id: wanted_id,
+                ..
+            }) = &rewritten
+            {
+                if wanted == to {
+                    self.db.complete_op_if_unchanged(
+                        current.id,
+                        &current.kind,
+                        &current.payload,
+                    )?;
+                    self.retarget_later_ops(op.id, message_id, from, landed)?;
+                    return Ok(());
+                }
+                self.db.detach_location(message_id, to_folder_id)?;
+                if self.db.message_locations(message_id)?.is_empty() {
+                    if let Some(target) = self.db.folder_by_id(*wanted_id)? {
+                        self.db.move_message_to_folder(message_id, &target.path)?;
+                    }
+                }
+            } else {
+                self.db.detach_location(message_id, to_folder_id)?;
+            }
+            // Includes the rewritten op itself (id > op.id - 1).
+            self.retarget_later_ops(op.id - 1, message_id, from, landed)?;
+            return Ok(());
+        }
+        // Cancelled: the UI expects the message back in `from`.
+        self.retarget_later_ops(op.id, message_id, from, landed)?;
+        let (Some(source), Some(message)) = (
+            self.db.folder_by_remote_name(self.account_id, from)?,
+            self.db.get_message(message_id)?,
+        ) else {
+            return Ok(());
+        };
+        self.db.detach_location(message_id, to_folder_id)?;
+        self.db.detach_location(message_id, source.id)?;
+        let back = PendingAction::Move {
+            from: to.to_string(),
+            uid: new_uid,
+            to: from.to_string(),
+            to_folder_id: source.id,
+            uid_validity: validity,
+            message_id_hdr: message.message_id_hdr,
+        };
+        self.db.enqueue_op(
+            self.account_id,
+            back.kind(),
+            Some(message_id),
+            &back.encode(),
+        )?;
+        enqueue_command(&mut self.queue, Command::ProcessQueue);
+        Ok(())
+    }
+
+    /// Ops queued after `after_op` for the same message that still act on
+    /// its old folder `from` now act on `landed` (`uid` 0 = unresolved).
+    /// Compare-and-swap per row, re-read when the UI changed it meanwhile.
     fn retarget_later_ops(
         &mut self,
         after_op: i64,
         message_id: i64,
-        old: (&str, u32),
-        folder: &str,
-        new_uid: u32,
+        from: &str,
+        landed: (&str, u32, Option<u32>),
     ) -> Result<(), Abort> {
-        for op in self.db.pending_ops(self.account_id)? {
-            if op.id <= after_op || op.message_id != Some(message_id) {
-                continue;
+        let (folder, new_uid, validity) = landed;
+        for _ in 0..RETARGET_ROUNDS {
+            let mut lost_race = false;
+            for op in self.db.pending_ops(self.account_id)? {
+                if op.id <= after_op || op.message_id != Some(message_id) {
+                    continue;
+                }
+                let Some(mut action) = PendingAction::decode(&op.payload) else {
+                    continue;
+                };
+                if action.source().0 != from {
+                    continue;
+                }
+                action.retarget(folder, new_uid, validity);
+                lost_race |= !self.db.update_op_if_unchanged(
+                    op.id,
+                    &op.kind,
+                    &op.payload,
+                    action.kind(),
+                    &action.encode(),
+                )?;
             }
-            let Some(mut action) = PendingAction::decode(&op.payload) else {
-                continue;
-            };
-            if action.source() == old {
-                action.retarget(folder, new_uid);
-                self.db.update_op(op.id, action.kind(), &action.encode())?;
+            if !lost_race {
+                break;
             }
         }
         Ok(())
@@ -663,65 +1040,172 @@ impl Worker {
         Ok(())
     }
 
-    /// Sends queued mail; files a copy in Sent unless the server does.
+    /// Delay before retry number `n` (0-based) of an outgoing row.
+    fn send_retry_delay(&self, n: u32) -> i64 {
+        let delays = &self.options.send_retry_delays;
+        delays
+            .get(n as usize)
+            .or(delays.last())
+            .map_or(0, |delay| delay.as_secs() as i64)
+    }
+
+    /// Sends due outbox rows and retries pending Sent copies.
+    ///
+    /// State machine (`storage::OutgoingState`): a `queued` row is claimed
+    /// (`sending` + lease) so no other worker sends it too, then
+    /// - accepted → `append_pending` (raw kept) until the Sent copy is
+    ///   filed (or right away deleted when the server files it itself);
+    /// - transient failure (4xx, connection/auth before the data) →
+    ///   `queued` again with back-off; attempts are not used up;
+    /// - permanent rejection (5xx) → `queued` with back-off, `failed` after
+    ///   [`MAX_SEND_ATTEMPTS`];
+    /// - uncertain (connection lost after the data) → `maybe_sent`, never
+    ///   resent automatically.
+    ///
+    /// Runs under the per-account lock; `sending` rows whose lease is older
+    /// than [`SEND_LEASE`] belonged to a worker that died mid-send and
+    /// become `maybe_sent`.
     fn process_outbox(&mut self) -> Result<(), Abort> {
-        let rows: Vec<_> = self
-            .db
-            .outbox(self.account_id)?
-            .into_iter()
-            .filter(|row| row.attempts < MAX_SEND_ATTEMPTS)
-            .collect();
-        if rows.is_empty() {
+        let lock = self.account_lock.clone();
+        let Some(_guard) = Self::try_account_lock(&lock) else {
+            self.retry_after_handover();
             return Ok(());
+        };
+        let now = unix_now();
+        for id in self
+            .db
+            .expire_outgoing_leases(self.account_id, now - SEND_LEASE.as_secs() as i64)?
+        {
+            self.emit(SyncEvent::SendFailed {
+                account_id: self.account_id,
+                outbox_id: id,
+                error: "the app was interrupted while sending; it may have been sent".into(),
+                permanent: true,
+            });
         }
-        let mut sender = None;
+        let rows = self.db.due_outgoing(self.account_id, now)?;
+        let mut sender: Option<Box<dyn MailSender>> = None;
+        let mut result = Ok(());
         for row in rows {
-            self.check_interrupts()?;
+            if let Err(abort) = self.check_interrupts() {
+                result = Err(abort);
+                break;
+            }
+            if row.state == OutgoingState::AppendPending {
+                if let Err(abort) = self.retry_sent_copy(&row) {
+                    result = Err(abort);
+                    break;
+                }
+                continue;
+            }
+            if row.attempts >= MAX_SEND_ATTEMPTS {
+                // Rows from before the state machine that already used up
+                // their attempts.
+                let error = row.last_error.clone().unwrap_or_default();
+                self.db
+                    .fail_outgoing(row.id, &error, 0, MAX_SEND_ATTEMPTS)?;
+                self.emit(SyncEvent::SendFailed {
+                    account_id: self.account_id,
+                    outbox_id: row.id,
+                    error,
+                    permanent: true,
+                });
+                continue;
+            }
+            if !self.db.claim_outgoing(row.id, now)? {
+                continue;
+            }
             let attempt = match &mut sender {
                 Some(sender) => Ok(sender),
                 None => self
                     .connector
                     .connect_sender(&self.cancel)
-                    .map(|connected| sender.insert(connected)),
+                    .map(|connected| sender.insert(connected))
+                    .map_err(SendError::from),
             };
-            let result =
-                attempt.and_then(|sender| sender.send(&row.sender, &row.recipients, &row.raw));
-            match result {
-                Ok(()) => {
-                    // Completed before the APPEND: a failure there must never
-                    // send the message twice.
-                    self.db.complete_outgoing(row.id)?;
-                    self.emit(SyncEvent::Sent {
-                        account_id: self.account_id,
-                        outbox_id: row.id,
-                    });
-                    self.save_sent_copy(&row.raw)?;
-                }
-                Err(error) if self.cancel.is_cancelled() => {
-                    let _ = error;
-                    return Err(Abort::Shutdown);
-                }
-                Err(error) if is_connection_error(error.kind) => {
-                    self.emit(SyncEvent::SendFailed {
-                        account_id: self.account_id,
-                        outbox_id: row.id,
-                        error: error.to_string(),
-                        permanent: false,
-                    });
-                    // Same server, same problem: retry the rest next cycle.
-                    break;
-                }
+            match attempt.and_then(|sender| sender.send(&row.sender, &row.recipients, &row.raw)) {
+                Ok(()) => self.sent(&row)?,
                 Err(error) => {
-                    self.db.fail_outgoing(row.id, &error.to_string())?;
-                    self.emit(SyncEvent::SendFailed {
-                        account_id: self.account_id,
-                        outbox_id: row.id,
-                        error: error.to_string(),
-                        permanent: row.attempts + 1 >= MAX_SEND_ATTEMPTS,
-                    });
+                    let stop = self.send_failed(&row, error, now)?;
+                    if self.cancel.is_cancelled() {
+                        result = Err(Abort::Shutdown);
+                        break;
+                    }
+                    if stop {
+                        // Same server, same problem: the rest waits.
+                        break;
+                    }
+                    sender = None;
                 }
             }
         }
+        self.schedule_outbox_wake()?;
+        result
+    }
+
+    /// The server accepted `row`: keep its raw for the Sent copy (unless the
+    /// server files it), announce it, then try the copy.
+    fn sent(&mut self, row: &OutgoingRow) -> Result<(), Abort> {
+        let files_copy = !self.connector.saves_sent_copy();
+        if files_copy {
+            self.db.mark_outgoing_append_pending(row.id)?;
+        } else {
+            self.db.complete_outgoing(row.id)?;
+        }
+        self.emit(SyncEvent::Sent {
+            account_id: self.account_id,
+            outbox_id: row.id,
+        });
+        if files_copy {
+            self.retry_sent_copy(row)?;
+        }
+        Ok(())
+    }
+
+    /// Records a failed send by its classification; releases the claim in
+    /// every case. Returns whether the remaining rows should wait (the
+    /// failure is about the connection, not this message).
+    fn send_failed(
+        &mut self,
+        row: &OutgoingRow,
+        error: SendError,
+        now: i64,
+    ) -> Result<bool, Abort> {
+        let message = error.to_string();
+        let (permanent, stop) = match error.failure {
+            SendFailure::Transient => {
+                let next = now + self.send_retry_delay(row.deferrals);
+                self.db.defer_outgoing(row.id, &message, next)?;
+                (false, is_connection_error(error.error.kind))
+            }
+            SendFailure::Permanent => {
+                let next = now + self.send_retry_delay(row.attempts);
+                let state = self
+                    .db
+                    .fail_outgoing(row.id, &message, next, MAX_SEND_ATTEMPTS)?;
+                (state == OutgoingState::Failed, false)
+            }
+            SendFailure::Uncertain => {
+                self.db.mark_outgoing_maybe_sent(row.id, &message)?;
+                (true, true)
+            }
+        };
+        self.emit(SyncEvent::SendFailed {
+            account_id: self.account_id,
+            outbox_id: row.id,
+            error: message,
+            permanent,
+        });
+        Ok(stop)
+    }
+
+    /// Wakes the command loop when the earliest backed-off outbox row is due.
+    fn schedule_outbox_wake(&mut self) -> Result<(), Abort> {
+        let now = unix_now();
+        self.outbox_wake = self
+            .db
+            .next_outgoing_due(self.account_id, now)?
+            .map(|at| Instant::now() + Duration::from_secs((at - now).max(0) as u64));
         Ok(())
     }
 
@@ -734,27 +1218,52 @@ impl Worker {
             .and_then(|f| f.remote_name))
     }
 
-    fn save_sent_copy(&mut self, raw: &[u8]) -> Result<(), Abort> {
-        if self.connector.saves_sent_copy() {
-            return Ok(());
-        }
+    /// Files the copy of an accepted message in Sent (IMAP APPEND), then
+    /// deletes the row. A failure keeps the row `append_pending` with
+    /// back-off; after [`MAX_APPEND_DEFERRALS`] the copy is given up (the
+    /// message itself was sent; it must never be resent for this).
+    fn retry_sent_copy(&mut self, row: &OutgoingRow) -> Result<(), Abort> {
         let mut sent = self.sent_folder()?;
         if sent.is_none() {
             // First cycle of a new account: folders are not listed yet.
+            self.ensure_connected()?;
             self.sync_folder_list()?;
             sent = self.sent_folder()?;
         }
         let Some(sent) = sent else {
+            self.db.complete_outgoing(row.id)?;
             return Ok(());
         };
         let seen = MessageFlags {
             seen: true,
             ..Default::default()
         };
-        match self.rm()?.append(&sent, seen, raw) {
-            Ok(()) => Ok(()),
-            Err(error) if is_connection_error(error.kind) => Err(error.into()),
+        self.ensure_connected()?;
+        match self.rm()?.append(&sent, seen, &row.raw) {
+            Ok(()) => {
+                self.db.complete_outgoing(row.id)?;
+                Ok(())
+            }
             Err(error) => {
+                let deferrals = if row.state == OutgoingState::AppendPending {
+                    row.deferrals
+                } else {
+                    0
+                };
+                if deferrals + 1 >= MAX_APPEND_DEFERRALS {
+                    self.db.complete_outgoing(row.id)?;
+                    self.emit(SyncEvent::SentCopyFailed {
+                        account_id: self.account_id,
+                        outbox_id: row.id,
+                        error: error.to_string(),
+                    });
+                } else {
+                    let next = unix_now() + self.send_retry_delay(deferrals);
+                    self.db.defer_outgoing(row.id, &error.to_string(), next)?;
+                }
+                if is_connection_error(error.kind) {
+                    return Err(error.into());
+                }
                 self.status(AccountStatus::Error {
                     error: error.to_string(),
                 });
@@ -827,7 +1336,8 @@ impl Worker {
                 .map(|(uid, _)| uid)
                 .collect(),
         };
-        let in_flight = in_flight_uids(&self.db.pending_ops(self.account_id)?, &name);
+        let ops = self.db.pending_ops(self.account_id)?;
+        let in_flight = in_flight_uids(&ops, &name);
         let plan = plan_folder(&local, &status, &remote_uids, self.window, &in_flight);
 
         if plan.reset {
@@ -846,7 +1356,11 @@ impl Worker {
         let mut notices = Vec::new();
         for batch in plan.to_fetch.chunks(HEADER_BATCH) {
             self.check_interrupts()?;
-            for header in self.rm()?.fetch_headers(&name, batch)? {
+            let headers = self.rm()?.fetch_headers(&name, batch)?;
+            // Read after the fetch: the UI may have queued an edit meanwhile,
+            // and these flags predate it.
+            let flags_pending = messages_with_pending_flags(&self.db.pending_ops(self.account_id)?);
+            for header in headers {
                 let parsed = parse_message(&header.header).unwrap_or_default();
                 let message = new_remote_message(&header, &parsed);
                 let insert = self.db.record_remote_message(
@@ -855,9 +1369,10 @@ impl Worker {
                     header.uid,
                     &message,
                 )?;
-                if !insert.created {
+                if !insert.created && !flags_pending.contains(&insert.message_id) {
                     // Merged into a known message (other label, moved mail):
-                    // the server's flags for this copy are current.
+                    // the server's flags for this copy are current — unless
+                    // a queued flag edit has not reached the server yet.
                     self.db.apply_remote_flags(
                         folder.id,
                         header.uid,
@@ -885,9 +1400,15 @@ impl Worker {
                 .rm()?
                 .fetch_flags(&name, chunk, plan.flags_changed_since)?;
             // Re-read: the UI may have queued an edit while we fetched.
-            let in_flight = in_flight_uids(&self.db.pending_ops(self.account_id)?, &name);
+            let ops = self.db.pending_ops(self.account_id)?;
+            let in_flight = in_flight_uids(&ops, &name);
+            let flags_pending = messages_with_pending_flags(&ops);
+            let owners: HashMap<u32, i64> = self.db.folder_uids(folder.id)?.into_iter().collect();
             for remote in flags {
-                if in_flight.contains(&remote.uid) {
+                let pending = owners
+                    .get(&remote.uid)
+                    .is_some_and(|message_id| flags_pending.contains(message_id));
+                if in_flight.contains(&remote.uid) || pending {
                     continue;
                 }
                 flags_changed |= self.db.apply_remote_flags(

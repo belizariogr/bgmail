@@ -319,8 +319,10 @@ fn email_from_id_token(id_token: &str) -> Option<String> {
     claims.get("email")?.as_str().map(str::to_string)
 }
 
-/// Accepts loopback requests until one carries the redirect (`code` or
-/// `error`); other paths (e.g. `/favicon.ico`) get a 404 and are ignored.
+/// Accepts loopback requests until one carries our redirect (`code` or
+/// `error` with the expected `state`); other paths (e.g. `/favicon.ico`)
+/// get a 404 and redirects with a foreign/missing `state` a 400, and both
+/// are ignored.
 fn wait_for_code(
     listener: &TcpListener,
     state: &str,
@@ -358,7 +360,21 @@ fn wait_for_code(
     }
 }
 
-/// Reads one HTTP request; `None` when it isn't the redirect.
+/// What one loopback request means for the sign-in.
+#[derive(Debug, PartialEq, Eq)]
+enum Redirect {
+    /// Not the redirect at all (`/favicon.ico`, no `code`/`error`): 404.
+    Unrelated,
+    /// A redirect whose `state` is missing or not ours — a stale tab, an
+    /// earlier attempt, or a forged request. Answered with 400 and ignored
+    /// (the real redirect may still come), even when it carries `error=`.
+    ForeignState,
+    /// Our redirect: the authorization code, or the provider's error (only
+    /// this one may abort the sign-in).
+    Ours(RemoteResult<String>),
+}
+
+/// Reads one HTTP request; `None` when the flow must keep waiting.
 fn handle_redirect(stream: TcpStream, state: &str) -> Option<RemoteResult<String>> {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -375,30 +391,32 @@ fn handle_redirect(stream: TcpStream, state: &str) -> Option<RemoteResult<String
         }
     }
     let target = request_line.split_whitespace().nth(1).unwrap_or("");
-    let outcome = parse_redirect(target, state);
+    let redirect = parse_redirect(target, state);
     let mut stream = stream;
-    match &outcome {
-        None => {
-            let _ = stream.write_all(
-                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
-        }
-        Some(result) => {
-            let page = page(result.is_ok());
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
-                page.len()
-            );
-        }
-    }
+    let (status, page) = match &redirect {
+        Redirect::Unrelated => ("404 Not Found", String::new()),
+        Redirect::ForeignState => ("400 Bad Request", page(false)),
+        Redirect::Ours(result) => ("200 OK", page(result.is_ok())),
+    };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+        page.len()
+    );
     let _ = stream.flush();
-    outcome
+    match redirect {
+        Redirect::Ours(result) => Some(result),
+        Redirect::Unrelated | Redirect::ForeignState => None,
+    }
 }
 
-/// Interprets the redirect target (`/?code=…&state=…` or `/?error=…`).
-fn parse_redirect(target: &str, state: &str) -> Option<RemoteResult<String>> {
-    let (_, query) = target.split_once('?')?;
+/// Interprets a loopback request target (`/?code=…&state=…` or
+/// `/?error=…&state=…`). `state` must match before anything — including an
+/// error — is trusted.
+fn parse_redirect(target: &str, state: &str) -> Redirect {
+    let Some((_, query)) = target.split_once('?') else {
+        return Redirect::Unrelated;
+    };
     let params = http::parse_query(query);
     let get = |key: &str| {
         params
@@ -406,21 +424,21 @@ fn parse_redirect(target: &str, state: &str) -> Option<RemoteResult<String>> {
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     };
-    if let Some(error) = get("error") {
+    let (error, code) = (get("error"), get("code"));
+    if error.is_none() && code.is_none() {
+        return Redirect::Unrelated;
+    }
+    if get("state") != Some(state) {
+        return Redirect::ForeignState;
+    }
+    if let Some(error) = error {
         let message = match error {
             "access_denied" => "access denied by the user".to_string(),
             other => format!("authorization failed: {other}"),
         };
-        return Some(Err(RemoteError::new(RemoteErrorKind::Auth, message)));
+        return Redirect::Ours(Err(RemoteError::new(RemoteErrorKind::Auth, message)));
     }
-    let code = get("code")?;
-    if get("state") != Some(state) {
-        return Some(Err(RemoteError::new(
-            RemoteErrorKind::Auth,
-            "state mismatch in OAuth redirect",
-        )));
-    }
-    Some(Ok(code.to_string()))
+    Redirect::Ours(Ok(code.unwrap_or_default().to_string()))
 }
 
 /// The page shown in the browser after the redirect: plain HTML, no external
@@ -447,7 +465,7 @@ fn page(success: bool) -> String {
 mod tests {
     use super::*;
     use crate::http::test_server;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{mpsc, Arc, Mutex};
 
     fn provider(base: &str) -> OAuthProvider {
         OAuthProvider {
@@ -466,27 +484,47 @@ mod tests {
         format!("e30.{payload}.sig")
     }
 
-    /// Acts as the browser: follows the redirect with `query_for(state)`.
-    fn browser(
+    /// Acts as the browser: first requests stray targets (`/favicon.ico`,
+    /// then each of `noise(state)`), which must not end the flow, then
+    /// follows the redirect with `query_for(state)`. The page it got (or the
+    /// request error) arrives on the returned channel.
+    fn browser_with_noise(
+        noise: impl Fn(&str) -> Vec<String> + Send + Sync + 'static,
         query_for: impl Fn(&str) -> String + Send + Sync + 'static,
-    ) -> (impl Fn(&str), Arc<Mutex<Option<String>>>) {
-        let page = Arc::new(Mutex::new(None));
-        let seen = page.clone();
-        let query_for = Arc::new(query_for);
+    ) -> (impl Fn(&str), mpsc::Receiver<Result<String, String>>) {
+        let (tx, pages) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        let (noise, query_for) = (Arc::new(noise), Arc::new(query_for));
         let open = move |url: &str| {
             let params = http::parse_query(url.split_once('?').unwrap().1);
             let get = |k: &str| params.iter().find(|(key, _)| key == k).unwrap().1.clone();
             let redirect = get("redirect_uri");
-            let target = format!("{redirect}/?{}", query_for(&get("state")));
-            let seen = seen.clone();
+            let state = get("state");
+            let mut stray = vec![format!("{redirect}/favicon.ico")];
+            stray.extend(
+                noise(&state)
+                    .into_iter()
+                    .map(|q| format!("{redirect}/?{q}")),
+            );
+            let target = format!("{redirect}/?{}", query_for(&state));
+            let tx = tx.lock().unwrap().clone();
             thread::spawn(move || {
-                // A stray favicon request first must not end the flow.
-                let _ = http::get(&format!("{redirect}/favicon.ico"), Duration::from_secs(5));
-                let response = http::get(&target, Duration::from_secs(5)).unwrap();
-                *seen.lock().unwrap() = Some(response.body);
+                for url in stray {
+                    let _ = http::get(&url, Duration::from_secs(30));
+                }
+                let page = http::get(&target, Duration::from_secs(30))
+                    .map(|response| response.body)
+                    .map_err(|err| err.to_string());
+                let _ = tx.send(page);
             });
         };
-        (open, page)
+        (open, pages)
+    }
+
+    fn browser(
+        query_for: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> (impl Fn(&str), mpsc::Receiver<Result<String, String>>) {
+        browser_with_noise(|_| Vec::new(), query_for)
     }
 
     #[test]
@@ -527,25 +565,17 @@ mod tests {
         assert!(field("redirect_uri")
             .unwrap()
             .starts_with("http://127.0.0.1:"));
-        // Give the browser thread a moment to record the page.
-        for _ in 0..50 {
-            if page.lock().unwrap().is_some() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        assert!(page
-            .lock()
-            .unwrap()
-            .as_deref()
-            .unwrap()
-            .contains("close this window"));
+        let page = page
+            .recv_timeout(Duration::from_secs(30))
+            .expect("browser finished")
+            .unwrap();
+        assert!(page.contains("close this window"));
     }
 
     #[test]
-    fn authorize_reports_denied_consent_and_bad_state() {
+    fn authorize_reports_denied_consent_with_our_state() {
         let (base, _) = test_server::serve(|_| (500, String::new()));
-        let (open, _) = browser(|_| "error=access_denied".into());
+        let (open, page) = browser(|state| format!("error=access_denied&state={state}"));
         let err = authorize(
             &provider(&base),
             &open,
@@ -555,17 +585,55 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind, RemoteErrorKind::Auth);
         assert!(err.message.contains("denied"));
+        let page = page.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+        assert!(page.contains("try again"));
+    }
 
+    #[test]
+    fn authorize_ignores_redirects_with_foreign_or_missing_state() {
+        let (base, _) = test_server::serve(|_| {
+            (
+                200,
+                "{\"access_token\":\"at\",\"refresh_token\":\"rt\"}".into(),
+            )
+        });
+        // A forged code, a stale tab's error, an error without state: all
+        // ignored; the genuine redirect that follows still signs in.
+        let (open, page) = browser_with_noise(
+            |_| {
+                vec![
+                    "code=x&state=forged".into(),
+                    "error=access_denied&state=old".into(),
+                    "error=access_denied".into(),
+                    "code=y".into(),
+                ]
+            },
+            |state| format!("code=real&state={state}"),
+        );
+        let tokens = authorize(
+            &provider(&base),
+            &open,
+            &CancelToken::new(),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert_eq!(tokens.refresh_token, "rt");
+        assert!(page
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap()
+            .unwrap()
+            .contains("close this window"));
+
+        // Only foreign redirects: the flow waits until its timeout.
         let (open, _) = browser(|_| "code=x&state=forged".into());
         let err = authorize(
             &provider(&base),
             &open,
             &CancelToken::new(),
-            Duration::from_secs(10),
+            Duration::from_millis(500),
         )
         .unwrap_err();
-        assert_eq!(err.kind, RemoteErrorKind::Auth);
-        assert!(err.message.contains("state"));
+        assert_eq!(err.kind, RemoteErrorKind::Cancelled);
     }
 
     #[test]
@@ -746,19 +814,27 @@ mod tests {
 
     #[test]
     fn redirect_parsing() {
-        assert!(parse_redirect("/favicon.ico", "s").is_none());
-        assert!(parse_redirect("/?foo=bar", "s").is_none());
+        assert_eq!(parse_redirect("/favicon.ico", "s"), Redirect::Unrelated);
+        assert_eq!(parse_redirect("/?foo=bar", "s"), Redirect::Unrelated);
         assert_eq!(
             parse_redirect("/?code=a%2Fb&state=s", "s"),
-            Some(Ok("a/b".into()))
+            Redirect::Ours(Ok("a/b".into()))
         );
         assert_eq!(
-            parse_redirect("/?error=server_error", "s")
-                .unwrap()
-                .unwrap_err()
-                .kind,
-            RemoteErrorKind::Auth
+            parse_redirect("/?code=a&state=t", "s"),
+            Redirect::ForeignState
         );
+        assert_eq!(parse_redirect("/?code=a", "s"), Redirect::ForeignState);
+        assert_eq!(
+            parse_redirect("/?error=server_error", "s"),
+            Redirect::ForeignState,
+            "an error without our state must not abort the sign-in"
+        );
+        let Redirect::Ours(Err(err)) = parse_redirect("/?error=server_error&state=s", "s") else {
+            panic!("our error aborts");
+        };
+        assert_eq!(err.kind, RemoteErrorKind::Auth);
+        assert!(err.message.contains("server_error"));
         assert!(page(true).contains("close this window"));
         assert!(page(false).contains("try again"));
         assert!(!page(true).contains("http"));

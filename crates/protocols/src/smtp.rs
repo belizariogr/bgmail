@@ -1,22 +1,45 @@
-//! SMTP submission via lettre, used purely as a transport: the message bytes
-//! come from `mail_core::build_message` and go out with `send_raw`.
+//! SMTP submission over lettre's low-level [`SmtpConnection`]: the message
+//! bytes come from `mail_core::build_message` and are submitted command by
+//! command (MAIL / RCPT / DATA / message) so a failure can be classified by
+//! the phase it happened in — a broken connection *before* the message data
+//! is safe to retry, one *after* it may have delivered the message
+//! ([`SendFailure::Uncertain`]).
 //!
 //! lettre owns its sockets, so a [`CancelToken`](mail_core::CancelToken) can
 //! only stop a send before it starts; the 60 s I/O timeout bounds the rest.
 
 use lettre::address::{Address, Envelope};
+use lettre::transport::smtp as smtp_transport;
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
-use lettre::transport::smtp::client::{Tls, TlsParameters};
-use lettre::transport::smtp::{self as smtp_transport, SmtpTransport};
-use lettre::Transport;
-use mail_core::{MailSender, RemoteError, RemoteErrorKind, RemoteResult, Security, ServerConfig};
+use lettre::transport::smtp::client::{SmtpConnection, TlsParameters};
+use lettre::transport::smtp::commands::{Data, Mail, Noop, Rcpt};
+use lettre::transport::smtp::extension::{ClientId, Extension, MailBodyParameter, MailParameter};
+use lettre::transport::smtp::response::Response;
+use mail_core::{
+    MailSender, RemoteError, RemoteErrorKind, RemoteResult, Security, SendError, ServerConfig,
+};
 
 use crate::connector::Secret;
 use crate::tls::{ConnectOptions, IO_TIMEOUT};
 
-/// An SMTP submission client for one account.
+/// How the session is encrypted.
+#[derive(Clone)]
+enum SmtpTls {
+    /// Implicit TLS from the first byte (port 465).
+    Wrapper(TlsParameters),
+    /// Mandatory STARTTLS upgrade after EHLO.
+    StartTls(TlsParameters),
+    None,
+}
+
+/// An SMTP submission client for one account (one connection per send).
 pub struct SmtpSender {
-    transport: SmtpTransport,
+    host: String,
+    port: u16,
+    tls: SmtpTls,
+    hello: ClientId,
+    credentials: Credentials,
+    mechanisms: Vec<Mechanism>,
 }
 
 impl std::fmt::Debug for SmtpSender {
@@ -25,8 +48,19 @@ impl std::fmt::Debug for SmtpSender {
     }
 }
 
+/// Where a submission failed (see [`classify`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendPhase {
+    /// Connect, TLS, EHLO, AUTH: nothing about the message was sent.
+    Connect,
+    /// MAIL / RCPT / DATA commands: the server has not got the message.
+    Envelope,
+    /// Message bytes + terminator + final reply: may have been accepted.
+    Message,
+}
+
 impl SmtpSender {
-    /// Builds the transport (no network yet): implicit TLS for
+    /// Prepares the client (no network yet): implicit TLS for
     /// [`Security::Tls`], mandatory STARTTLS for [`Security::StartTls`],
     /// cleartext for [`Security::None`]. Passwords authenticate with
     /// PLAIN/LOGIN, access tokens with XOAUTH2.
@@ -36,7 +70,7 @@ impl SmtpSender {
         secret: &Secret,
         options: ConnectOptions,
     ) -> RemoteResult<Self> {
-        let tls = || {
+        let params = || {
             TlsParameters::builder(server.host.clone())
                 .dangerous_accept_invalid_certs(options.accept_invalid_certs)
                 .dangerous_accept_invalid_hostnames(options.accept_invalid_certs)
@@ -44,9 +78,9 @@ impl SmtpSender {
                 .map_err(map_error)
         };
         let tls = match server.security {
-            Security::Tls => Tls::Wrapper(tls()?),
-            Security::StartTls => Tls::Required(tls()?),
-            Security::None => Tls::None,
+            Security::Tls => SmtpTls::Wrapper(params()?),
+            Security::StartTls => SmtpTls::StartTls(params()?),
+            Security::None => SmtpTls::None,
         };
         let (password, mechanisms) = match secret {
             Secret::Password(password) => {
@@ -54,37 +88,135 @@ impl SmtpSender {
             }
             Secret::AccessToken(token) => (token.clone(), vec![Mechanism::Xoauth2]),
         };
-        let transport = SmtpTransport::builder_dangerous(server.host.clone())
-            .port(server.port)
-            .tls(tls)
-            .timeout(Some(IO_TIMEOUT))
-            .credentials(Credentials::new(username.to_string(), password))
-            .authentication(mechanisms)
-            .build();
-        Ok(Self { transport })
+        Ok(Self {
+            host: server.host.clone(),
+            port: server.port,
+            tls,
+            hello: ClientId::default(),
+            credentials: Credentials::new(username.to_string(), password),
+            mechanisms,
+        })
+    }
+
+    /// Opens an authenticated session (connect, TLS, EHLO, AUTH).
+    fn connect(&self) -> Result<SmtpConnection, smtp_transport::Error> {
+        let wrapper = match &self.tls {
+            SmtpTls::Wrapper(params) => Some(params),
+            _ => None,
+        };
+        let mut conn = SmtpConnection::connect(
+            (self.host.as_str(), self.port),
+            Some(IO_TIMEOUT),
+            &self.hello,
+            wrapper,
+            None,
+        )?;
+        let authenticated = (|| {
+            if let SmtpTls::StartTls(params) = &self.tls {
+                conn.starttls(params, &self.hello)?;
+            }
+            conn.auth(&self.mechanisms, &self.credentials)
+        })();
+        match authenticated {
+            Ok(_) => Ok(conn),
+            Err(err) => {
+                conn.abort();
+                Err(err)
+            }
+        }
     }
 
     /// Connects, negotiates TLS and authenticates, then quits. Used by the
     /// "Add account" dialog to validate settings before saving.
     pub fn verify(&self) -> RemoteResult<()> {
-        match self.transport.test_connection() {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(RemoteError::new(
+        let mut conn = self.connect().map_err(map_error)?;
+        let alive = conn.command(Noop).is_ok();
+        let _ = conn.quit();
+        if alive {
+            Ok(())
+        } else {
+            Err(RemoteError::new(
                 RemoteErrorKind::Network,
                 "SMTP server closed the connection",
-            )),
-            Err(err) => Err(map_error(err)),
+            ))
         }
     }
 }
 
 impl MailSender for SmtpSender {
-    fn send(&mut self, from: &str, recipients: &[String], raw: &[u8]) -> RemoteResult<()> {
-        let envelope = envelope(from, recipients)?;
-        self.transport
-            .send_raw(&envelope, raw)
-            .map(|_| ())
-            .map_err(map_error)
+    fn send(&mut self, from: &str, recipients: &[String], raw: &[u8]) -> Result<(), SendError> {
+        let envelope = envelope(from, recipients).map_err(SendError::permanent)?;
+        let mut conn = self
+            .connect()
+            .map_err(|err| classify(err, SendPhase::Connect))?;
+        match transaction(&mut conn, &envelope, raw) {
+            Ok(()) => {
+                let _ = conn.quit();
+                Ok(())
+            }
+            Err((err, phase)) => {
+                conn.abort();
+                Err(classify(err, phase))
+            }
+        }
+    }
+}
+
+/// MAIL FROM (+ SMTPUTF8 / 8BITMIME when needed), RCPT TO each, DATA, then
+/// the message; on failure also reports the phase it failed in.
+fn transaction(
+    conn: &mut SmtpConnection,
+    envelope: &Envelope,
+    raw: &[u8],
+) -> Result<(), (smtp_transport::Error, SendPhase)> {
+    let envelope_step = |result: Result<Response, smtp_transport::Error>| {
+        result.map(|_| ()).map_err(|err| (err, SendPhase::Envelope))
+    };
+    let mut options = Vec::new();
+    let non_ascii_address = envelope
+        .from()
+        .into_iter()
+        .chain(envelope.to())
+        .any(|address| !AsRef::<str>::as_ref(address).is_ascii());
+    if non_ascii_address && conn.server_info().supports_feature(Extension::SmtpUtfEight) {
+        options.push(MailParameter::SmtpUtfEight);
+    }
+    if !raw.is_ascii() && conn.server_info().supports_feature(Extension::EightBitMime) {
+        options.push(MailParameter::Body(MailBodyParameter::EightBitMime));
+    }
+    envelope_step(conn.command(Mail::new(envelope.from().cloned(), options)))?;
+    for to in envelope.to() {
+        envelope_step(conn.command(Rcpt::new(to.clone(), Vec::new())))?;
+    }
+    envelope_step(conn.command(Data))?;
+    conn.message(raw)
+        .map(|_| ())
+        .map_err(|err| (err, SendPhase::Message))
+}
+
+/// Classifies a submission failure:
+/// - `Connect`: always transient (nothing about the message was sent; auth
+///   or server trouble is the account's problem, not the message's).
+/// - `Envelope` / `Message` with a reply code: `4xx` transient, `5xx`
+///   permanent (auth codes stay transient).
+/// - `Envelope` without a code (connection lost, timeout): transient — the
+///   server never received the end of the data.
+/// - `Message` without a code: **uncertain** — the terminator may have
+///   reached the server, which may have queued the message.
+/// - Local client errors (e.g. 8-bit data the server cannot take):
+///   permanent.
+pub fn classify(err: smtp_transport::Error, phase: SendPhase) -> SendError {
+    let code = err.status();
+    let local = err.is_client() && code.is_none();
+    let error = map_error(err);
+    match (phase, code) {
+        (SendPhase::Connect, _) => SendError::transient(error),
+        _ if error.kind == RemoteErrorKind::Auth => SendError::transient(error),
+        (_, Some(code)) if code.to_string().starts_with('4') => SendError::transient(error),
+        (_, Some(_)) => SendError::permanent(error),
+        _ if local => SendError::permanent(error),
+        (SendPhase::Envelope, None) => SendError::transient(error),
+        (SendPhase::Message, None) => SendError::uncertain(error),
     }
 }
 
@@ -108,8 +240,9 @@ pub fn envelope(from: &str, recipients: &[String]) -> RemoteResult<Envelope> {
 }
 
 /// lettre errors → kinds: 530/534/535 (authentication) → Auth, other server
-/// replies → Protocol (permanent 5xx or transient 4xx alike), TLS → Tls,
-/// connection/timeouts → Network.
+/// replies → Protocol, TLS → Tls, connection/timeouts → Network. The kind is
+/// descriptive only; whether a send may be retried is decided by
+/// [`classify`].
 pub fn map_error(err: smtp_transport::Error) -> RemoteError {
     let message = err.to_string();
     let kind = if let Some(code) = err.status() {
@@ -241,11 +374,16 @@ pub(crate) mod test_server {
                 }
             } else if upper.starts_with("MAIL FROM:") {
                 current.from = line[10..].trim().to_string();
+                if current.from.contains("hangup") {
+                    return Ok(()); // connection lost before the data
+                }
                 writer.write_all(b"250 ok\r\n")?;
             } else if upper.starts_with("RCPT TO:") {
                 let to = line[8..].trim().to_string();
                 if to.contains("reject") {
                     writer.write_all(b"550 5.1.1 no such user\r\n")?;
+                } else if to.contains("tempfail") {
+                    writer.write_all(b"451 4.3.0 try again later\r\n")?;
                 } else {
                     current.to.push(to);
                     writer.write_all(b"250 ok\r\n")?;
@@ -260,13 +398,24 @@ pub(crate) mod test_server {
                     }
                     current.data.push_str(&data);
                 }
+                let data = current.data.clone();
                 log.lock().unwrap().push(std::mem::take(&mut current));
-                writer.write_all(b"250 queued\r\n")?;
+                if data.contains("X-Test: hangup") {
+                    return Ok(()); // accepted, but the final reply is lost
+                } else if data.contains("X-Test: defer") {
+                    writer.write_all(b"452 4.3.1 queue full\r\n")?;
+                } else if data.contains("X-Test: refuse") {
+                    writer.write_all(b"554 5.7.1 looks like spam\r\n")?;
+                } else {
+                    writer.write_all(b"250 queued\r\n")?;
+                }
             } else if upper == "QUIT" {
-                writer.write_all(b"221 bye\r\n")?;
+                // Logged before replying so a client that saw `221` can
+                // assert on the log without racing this thread.
                 if !current.auth.is_empty() {
                     log.lock().unwrap().push(current);
                 }
+                writer.write_all(b"221 bye\r\n")?;
                 return Ok(());
             } else {
                 writer.write_all(b"250 ok\r\n")?;
@@ -278,6 +427,7 @@ pub(crate) mod test_server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mail_core::SendFailure;
 
     fn server(port: u16) -> ServerConfig {
         ServerConfig {
@@ -355,16 +505,93 @@ mod tests {
         let err = sender
             .send("me@example.com", &["reject@example.com".into()], b"x\r\n")
             .unwrap_err();
-        assert_eq!(err.kind, RemoteErrorKind::Protocol, "{err}");
+        assert_eq!(err.error.kind, RemoteErrorKind::Protocol, "{err}");
+        assert_eq!(err.failure, SendFailure::Permanent);
+    }
+
+    #[test]
+    fn send_failures_are_classified_by_phase() {
+        let (port, log) = test_server::start("secret");
+        let mut sender = SmtpSender::new(
+            &server(port),
+            "me",
+            &Secret::Password("secret".into()),
+            ConnectOptions::default(),
+        )
+        .unwrap();
+        let to = |r: &str| vec![r.to_string()];
+        let mut send = |from: &str, rcpt: &str, raw: &[u8]| {
+            sender.send(from, &to(rcpt), raw).map_err(|e| e.failure)
+        };
+        // 4xx on RCPT: transient.
+        assert_eq!(
+            send("me@example.com", "tempfail@example.com", b"x\r\n"),
+            Err(SendFailure::Transient)
+        );
+        // Connection lost before DATA: transient (nothing delivered).
+        assert_eq!(
+            send("hangup@example.com", "a@example.com", b"x\r\n"),
+            Err(SendFailure::Transient)
+        );
+        // 4xx / 5xx after the data: not accepted.
+        assert_eq!(
+            send(
+                "me@example.com",
+                "a@example.com",
+                b"X-Test: defer\r\n\r\nx\r\n"
+            ),
+            Err(SendFailure::Transient)
+        );
+        assert_eq!(
+            send(
+                "me@example.com",
+                "a@example.com",
+                b"X-Test: refuse\r\n\r\nx\r\n"
+            ),
+            Err(SendFailure::Permanent)
+        );
+        // Connection lost after the terminator: maybe delivered.
+        assert_eq!(
+            send(
+                "me@example.com",
+                "a@example.com",
+                b"X-Test: hangup\r\n\r\nx\r\n"
+            ),
+            Err(SendFailure::Uncertain)
+        );
+        assert!(log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.data.contains("X-Test: hangup")));
+        // A bad address never reaches the network.
+        assert_eq!(
+            send("not an address", "a@example.com", b"x\r\n"),
+            Err(SendFailure::Permanent)
+        );
+    }
+
+    #[test]
+    fn connect_phase_failures_are_transient() {
+        let (port, _log) = test_server::start("secret");
+        let mut sender = SmtpSender::new(
+            &server(port),
+            "me",
+            &Secret::Password("wrong".into()),
+            ConnectOptions::default(),
+        )
+        .unwrap();
+        let err = sender
+            .send("me@example.com", &["a@example.com".into()], b"x\r\n")
+            .unwrap_err();
+        assert_eq!(err.error.kind, RemoteErrorKind::Auth);
+        assert_eq!(err.failure, SendFailure::Transient);
     }
 
     #[test]
     fn unreachable_server_is_network_error() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
         let sender = SmtpSender::new(
-            &server(port),
+            &server(crate::tls::test_support::REFUSED_PORT),
             "me",
             &Secret::Password("x".into()),
             ConnectOptions::default(),

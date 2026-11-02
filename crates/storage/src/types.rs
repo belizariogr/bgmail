@@ -196,6 +196,52 @@ pub struct PendingOp {
     pub created_at: i64,
 }
 
+/// Delivery state of an outbox row (`outbox.state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OutgoingState {
+    /// Waiting to be sent once `next_attempt_at` is due.
+    Queued,
+    /// Claimed by a worker (`lease_at` set) while the SMTP transaction runs.
+    Sending,
+    /// The connection broke after the transaction started: the server may
+    /// have accepted it. Never retried automatically — the user decides.
+    MaybeSent,
+    /// Permanently rejected too many times; never retried automatically.
+    Failed,
+    /// Sent; only the copy into the Sent folder (IMAP APPEND) is still due.
+    AppendPending,
+}
+
+impl OutgoingState {
+    /// Value stored in `outbox.state`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Sending => "sending",
+            Self::MaybeSent => "maybe_sent",
+            Self::Failed => "failed",
+            Self::AppendPending => "append_pending",
+        }
+    }
+
+    /// Parses `outbox.state`; unknown values read as `Queued` (fail open: a
+    /// row is never silently stuck).
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "sending" => Self::Sending,
+            "maybe_sent" => Self::MaybeSent,
+            "failed" => Self::Failed,
+            "append_pending" => Self::AppendPending,
+            _ => Self::Queued,
+        }
+    }
+
+    /// No automatic retry is coming: the row waits for a user decision.
+    pub fn is_stopped(self) -> bool {
+        matches!(self, Self::MaybeSent | Self::Failed)
+    }
+}
+
 /// A message waiting to be sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutgoingRow {
@@ -206,8 +252,15 @@ pub struct OutgoingRow {
     /// Raw RFC 822 bytes.
     pub raw: Vec<u8>,
     pub message_id_hdr: Option<String>,
+    /// Permanent (5xx) rejections; transient failures only count in
+    /// `deferrals`.
     pub attempts: u32,
     pub last_error: Option<String>,
     /// Unix seconds.
     pub created_at: i64,
+    pub state: OutgoingState,
+    /// Unix seconds before which the row is not retried (0 = due now).
+    pub next_attempt_at: i64,
+    /// Transient failures in a row (drives the backoff schedule).
+    pub deferrals: u32,
 }

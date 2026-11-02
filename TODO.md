@@ -400,6 +400,18 @@
       real IMAP/SMTP + SQLite) and the running app against GreenMail (add
       account in the UI, read, reply, trash, IDLE notification, attachment,
       search, remove account)
+- ✅ Unsent mail panel in the status bar (Retry / Edit / Discard): outbox
+      state machine `queued → sending → append_pending` with `failed` /
+      `maybe_sent` waiting for the user; an edit replaces its original
+      atomically, so both never go out
+- ✅ Two independent reviews of the engine, UI and packaging, all confirmed
+      findings fixed (stale UIDs after UIDVALIDITY, EXPUNGE sparing other
+      clients' `\Deleted`, 4xx back-off, duplicate sends, op/UI races, lost
+      flags after moves without COPYUID, Sent copy retries, autoconfig
+      preferring plaintext, OAuth redirects with a foreign state)
+- ⬜ Known limitation: on servers without MOVE, if COPY works and the expunge
+      fails, each replay leaves another copy in the target. Accepted: skipping
+      the copy could lose mail another client flagged `\Deleted`
 - ⬜ Threads/conversations view (thread ids are stored; list is flat)
 
 ## Stage 5 — Polish
@@ -408,7 +420,10 @@
 - 🔄 Keyboard shortcuts (command palette + Cmd+Q; per-action bindings still TODO)
 - ⬜ Accessibility
 - ✅ Native notifications (`notify-rust`, bursts summarized, Settings switch)
-- ⬜ Packaging (macOS `.app`, Linux, Windows)
+- 🔄 Packaging: `cargo-packager` metadata, icons, desktop entry, CI + release
+      workflows (GitHub Actions matrix). deb/AppImage/pacman built locally;
+      **macOS and Windows jobs never ran yet** (check the first CI run);
+      signing/notarization secrets are optional and unset
 
 ## Notes / open decisions
 - ✅ **Mail stack decided** (two opposing reviews, 2026-10-31):
