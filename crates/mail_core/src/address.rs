@@ -101,7 +101,7 @@ pub fn same_email(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 
-fn split_tokens(input: &str) -> Vec<&str> {
+pub fn split_tokens(input: &str) -> Vec<&str> {
     let mut tokens = Vec::new();
     let mut in_quotes = false;
     let mut in_angle = false;

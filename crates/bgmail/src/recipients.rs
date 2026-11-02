@@ -7,7 +7,7 @@ use gpui::{
     deferred, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, KeyDownEvent, MouseButton, Render, SharedString, Stateful, Subscription, Window,
 };
-use mail_core::{format_address_list, parse_address_list, same_email, Address};
+use mail_core::{format_address_list, parse_address_list, same_email, split_tokens, Address};
 use storage::{fold_for_search, Contact};
 use theme::ActiveTheme;
 use ui::prelude::*;
@@ -38,10 +38,15 @@ fn matching_contacts(contacts: &[Contact], added: &[Address], query: &str) -> Ve
     let rank = |contact: &Contact| {
         let name = fold_for_search(&contact.name);
         let email = fold_for_search(&contact.email);
-        if email.starts_with(&query) || name.split_whitespace().any(|w| w.starts_with(&query)) {
+        if email == query {
+            // What was typed, before anything that merely starts with it.
             Some(0)
-        } else if email.contains(&query) || name.contains(&query) {
+        } else if email.starts_with(&query)
+            || name.split_whitespace().any(|w| w.starts_with(&query))
+        {
             Some(1)
+        } else if email.contains(&query) || name.contains(&query) {
+            Some(2)
         } else {
             None
         }
@@ -76,7 +81,7 @@ fn with_known_name(address: Address, contacts: &[Contact]) -> Address {
 fn split_typed(text: &str) -> (Vec<Address>, String) {
     let mut valid = Vec::new();
     let mut rest = Vec::new();
-    for token in text.split([',', ';']) {
+    for token in split_tokens(text) {
         let token = token.trim();
         if token.is_empty() {
             continue;
@@ -481,6 +486,26 @@ mod tests {
         );
         assert!(matching_contacts(&contacts, &[], "  ").is_empty());
         assert!(matching_contacts(&contacts, &[], "zzz").is_empty());
+    }
+
+    #[test]
+    fn the_exact_address_comes_first() {
+        let contacts = [
+            contact("João", "joao@empresa.com.br"),
+            contact("", "joao@empresa.com"),
+        ];
+        assert_eq!(
+            emails(&matching_contacts(&contacts, &[], "joao@empresa.com"))[0],
+            "joao@empresa.com"
+        );
+    }
+
+    #[test]
+    fn a_quoted_name_with_a_comma_stays_one_address() {
+        let (valid, rest) = split_typed("\"Doe, John\" <j@x.test>; ann@y.test, nope");
+        assert_eq!(valid.len(), 2);
+        assert_eq!(valid[0].email, "j@x.test");
+        assert_eq!(rest, "nope");
     }
 
     #[test]

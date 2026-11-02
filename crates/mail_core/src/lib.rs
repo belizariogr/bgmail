@@ -21,7 +21,9 @@ pub mod reply;
 pub mod thread;
 
 pub use account::{AccountConfig, AuthKind, Security, ServerConfig, DEFAULT_SYNC_WINDOW};
-pub use address::{format_address_list, parse_address_list, same_email, valid_addresses, Address};
+pub use address::{
+    format_address_list, parse_address_list, same_email, split_tokens, valid_addresses, Address,
+};
 pub use cancel::{CancelGuard, CancelToken};
 pub use compose::{
     build_message, envelope_recipients, guess_mime_type, new_message_id, Draft, OutgoingAttachment,
