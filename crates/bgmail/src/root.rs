@@ -4,7 +4,9 @@
 //! and a status bar), using the components from the `ui` crate. All interaction
 //! here is "mock" — only item selection, theme toggling and language switching.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::Duration;
 
 use std::f32::consts::FRAC_PI_2;
@@ -319,6 +321,79 @@ fn unique_recipients<'a>(list: impl Iterator<Item = &'a Address>) -> Vec<&'a Add
         }
     }
     seen
+}
+
+/// How far a message must be dragged before it counts, in pixels.
+const MESSAGE_DRAG_THRESHOLD: f32 = 100.0;
+/// Opacity of the row following the pointer while dragged.
+const MESSAGE_DRAG_OPACITY: f32 = 0.6;
+
+/// Whether a drag from `origin` has gone far enough to count.
+fn drag_counts(origin: Point<Pixels>, position: Point<Pixels>) -> bool {
+    let dx = f32::from(position.x - origin.x);
+    let dy = f32::from(position.y - origin.y);
+    dx * dx + dy * dy > MESSAGE_DRAG_THRESHOLD * MESSAGE_DRAG_THRESHOLD
+}
+
+/// The messages being dragged from the list. GPUI starts a drag after a couple of
+/// pixels, so where it started is kept to tell when it counts.
+#[derive(Clone)]
+struct DraggedMessages {
+    ids: Vec<i64>,
+    /// The account they belong to: `None` for a selection across accounts, which
+    /// has no folder in common.
+    account_id: Option<i64>,
+    origin: Rc<Cell<Option<Point<Pixels>>>>,
+}
+
+impl DraggedMessages {
+    /// Whether they can be dropped on `folder_path` of `account_id` right now.
+    fn can_drop_on(&self, account_id: i64, folder_path: &str, position: Point<Pixels>) -> bool {
+        self.account_id == Some(account_id)
+            && !storage::is_manual_move_destination_forbidden(folder_path)
+            && self
+                .origin
+                .get()
+                .is_some_and(|origin| drag_counts(origin, position))
+    }
+}
+
+/// The row that follows the pointer: nothing until the drag counts.
+struct DragPreview {
+    origin: Point<Pixels>,
+    width: Pixels,
+    title: SharedString,
+    subtitle: SharedString,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !drag_counts(self.origin, window.mouse_position()) {
+            return div().into_any_element();
+        }
+        let colors = cx.theme().colors();
+        v_flex()
+            .w(self.width)
+            .px_3()
+            .py_2()
+            .gap_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.elevated_surface_background)
+            .opacity(MESSAGE_DRAG_OPACITY)
+            .child(
+                Label::new(self.title.clone())
+                    .weight(FontWeight::SEMIBOLD)
+                    .single_line(),
+            )
+            .child(
+                Label::new(self.subtitle.clone())
+                    .size(LabelSize::Small)
+                    .single_line(),
+            )
+            .into_any_element()
+    }
 }
 
 /// Whether a folder's row counts unread mail: what is in the Trash is done with.
@@ -1583,6 +1658,41 @@ impl RootView {
             }
         }
         result
+    }
+
+    /// Moves messages dragged onto a folder of their account.
+    fn move_messages_to_folder(&mut self, ids: &[i64], folder_path: &str, cx: &mut Context<Self>) {
+        let target = folder_path.to_string();
+        let action =
+            move |db: &storage::Database, id: i64| mail_actions::move_to_folder(db, id, &target);
+        match ids {
+            [id] => self.run_action_on_message(*id, cx, action),
+            _ => {
+                self.multi_selection = ids.to_vec();
+                self.run_message_action(cx, action);
+            }
+        }
+    }
+
+    /// What dragging row `id` takes along: the whole selection when the row is
+    /// part of it.
+    fn dragged_messages(&self, id: i64) -> DraggedMessages {
+        let ids = if self.multi_selection.contains(&id) {
+            self.multi_selection.clone()
+        } else {
+            vec![id]
+        };
+        let mut accounts = self
+            .list_messages
+            .iter()
+            .filter(|message| ids.contains(&message.id))
+            .map(|message| message.account_id);
+        let first = accounts.next();
+        DraggedMessages {
+            account_id: first.filter(|first| accounts.all(|other| other == *first)),
+            ids,
+            origin: Rc::default(),
+        }
     }
 
     /// Toggles read/unread of the selected message (it stays selected).
@@ -4622,11 +4732,25 @@ impl RootView {
             // below can compute the list's total height exactly. The whole row
             // (highlight included) is indented so it reads as nested under its
             // account header.
+            let drop_highlight = cx.theme().colors().element_selected;
+            let drop_path = folder.path.clone();
+            let target_path = folder.path.clone();
             list = list.child(
                 div()
                     .h(px(SIDEBAR_ROW_HEIGHT))
                     .flex_shrink_0()
                     .pl(px(ITEM_INDENT))
+                    .can_drop(move |dragged, window, _| {
+                        dragged
+                            .downcast_ref::<DraggedMessages>()
+                            .is_some_and(|dragged| {
+                                dragged.can_drop_on(account_id, &drop_path, window.mouse_position())
+                            })
+                    })
+                    .drag_over::<DraggedMessages>(move |style, _, _, _| style.bg(drop_highlight))
+                    .on_drop(cx.listener(move |this, dragged: &DraggedMessages, _, cx| {
+                        this.move_messages_to_folder(&dragged.ids, &target_path, cx);
+                    }))
                     .child(item),
             );
         }
@@ -4933,6 +5057,30 @@ impl RootView {
             .when(!selected, |el| el.hover(move |el| el.bg(hover)))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_drag(self.dragged_messages(message_id), {
+                let width = self.list_width;
+                let title: SharedString = message.sender.clone().into();
+                let subject: SharedString = message.subject.clone().into();
+                let language = cx.language();
+                move |dragged: &DraggedMessages, _, window, cx| {
+                    let origin = window.mouse_position();
+                    dragged.origin.set(Some(origin));
+                    let (title, subtitle) = if dragged.ids.len() > 1 {
+                        (
+                            locale::messages_selected(language, dragged.ids.len()).into(),
+                            SharedString::default(),
+                        )
+                    } else {
+                        (title.clone(), subject.clone())
+                    };
+                    cx.new(|_| DragPreview {
+                        origin,
+                        width,
+                        title,
+                        subtitle,
+                    })
+                }
+            })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 let row = hovered.then_some(message_id);
                 if *hovered || this.hovered_row == Some(message_id) {
@@ -6963,6 +7111,54 @@ mod tests {
         let everyone = unique_recipients(to.iter().chain(&cc));
         assert_eq!(everyone.len(), 2);
         assert_eq!(everyone[0].name.as_deref(), Some("Ann"));
+    }
+
+    #[test]
+    fn a_drag_counts_only_past_the_threshold() {
+        let origin = point(px(100.0), px(100.0));
+        assert!(!drag_counts(origin, point(px(100.0), px(100.0))));
+        assert!(!drag_counts(origin, point(px(200.0), px(100.0))));
+        assert!(!drag_counts(origin, point(px(160.0), px(160.0))));
+        assert!(drag_counts(origin, point(px(201.0), px(100.0))));
+        assert!(drag_counts(origin, point(px(100.0), px(-1.0))));
+    }
+
+    #[test]
+    fn dropping_needs_the_distance_a_folder_of_the_account_and_a_valid_target() {
+        let origin = point(px(0.0), px(0.0));
+        let far = point(px(300.0), px(0.0));
+        let dragged = DraggedMessages {
+            ids: vec![1],
+            account_id: Some(7),
+            origin: Rc::new(Cell::new(Some(origin))),
+        };
+        let folder = storage::system::ARCHIVE;
+        assert!(dragged.can_drop_on(7, folder, far));
+        assert!(!dragged.can_drop_on(7, folder, point(px(50.0), px(0.0))));
+        assert!(!dragged.can_drop_on(8, folder, far));
+        assert!(!dragged.can_drop_on(7, storage::system::SENT, far));
+        assert!(!dragged.can_drop_on(7, storage::system::DRAFTS, far));
+
+        let not_started = DraggedMessages {
+            origin: Rc::default(),
+            ..dragged.clone()
+        };
+        assert!(!not_started.can_drop_on(7, folder, far));
+        let across_accounts = DraggedMessages {
+            account_id: None,
+            ..dragged
+        };
+        assert!(!across_accounts.can_drop_on(7, folder, far));
+    }
+
+    #[test]
+    fn dragging_a_selected_row_takes_the_selection_along() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.apply_selection(ids[..2].to_vec());
+        assert_eq!(view.dragged_messages(ids[0]).ids, ids[..2]);
+        assert_eq!(view.dragged_messages(ids[2]).ids, [ids[2]]);
+        assert!(view.dragged_messages(ids[2]).account_id.is_some());
     }
 
     #[test]
