@@ -252,6 +252,113 @@ pub fn write_unique(dir: &Path, filename: &str, data: &[u8], private: bool) -> i
     ))
 }
 
+/// Whether a file of this name runs code rather than being read, on some system.
+/// "Open" refuses these: anyone can send them, and the name is all the system goes
+/// by. Saving stays possible for who really means to run one. Judged on the name the
+/// file would get, whose last extension is what counts (`fatura.pdf.exe`).
+pub fn runs_code(filename: &str) -> bool {
+    const EXTENSIONS: &[&str] = &[
+        // Windows
+        "application",
+        "appref-ms",
+        "appx",
+        "appxbundle",
+        "bat",
+        "cab",
+        "chm",
+        "cmd",
+        "com",
+        "cpl",
+        "dll",
+        "exe",
+        "gadget",
+        "hlp",
+        "hta",
+        "inf",
+        "ins",
+        "isp",
+        "iso",
+        "img",
+        "jar",
+        "jnlp",
+        "js",
+        "jse",
+        "lnk",
+        "msc",
+        "msi",
+        "msix",
+        "msixbundle",
+        "msp",
+        "mst",
+        "ocx",
+        "pif",
+        "ps1",
+        "ps1xml",
+        "ps2",
+        "psc1",
+        "psd1",
+        "psm1",
+        "reg",
+        "scf",
+        "scr",
+        "sct",
+        "settingcontent-ms",
+        "shb",
+        "shs",
+        "url",
+        "vb",
+        "vbe",
+        "vbs",
+        "vhd",
+        "vhdx",
+        "ws",
+        "wsc",
+        "wsf",
+        "wsh",
+        "xbap",
+        // macOS
+        "action",
+        "app",
+        "command",
+        "dmg",
+        "osax",
+        "pkg",
+        "scpt",
+        "scptd",
+        "terminal",
+        "tool",
+        "workflow",
+        // Linux and scripts anywhere
+        "appimage",
+        "bash",
+        "bin",
+        "csh",
+        "deb",
+        "desktop",
+        "fish",
+        "ksh",
+        "pl",
+        "py",
+        "pyw",
+        "rb",
+        "rpm",
+        "run",
+        "sh",
+        "zsh",
+    ];
+    let name = sanitize_filename(filename);
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    // Invisible characters don't change how a system reads the extension.
+    let extension: String = extension
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-')
+        .flat_map(char::to_lowercase)
+        .collect();
+    EXTENSIONS.contains(&extension.as_str())
+}
+
 /// Writes an attachment the user is opening into the private [`open_dir`]
 /// (after removing stale ones); returns the file to hand to the system.
 pub fn write_for_open(filename: &str, data: &[u8]) -> io::Result<PathBuf> {
@@ -448,6 +555,27 @@ JVBERi0xLjQ=\r\n\
             .starts_with("report"));
         assert_eq!(std::fs::read(&path).unwrap(), b"hi");
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn files_that_run_code_are_told_apart_by_their_last_extension() {
+        for name in [
+            "fatura.pdf.exe",
+            "SETUP.EXE",
+            "run.bat. ",
+            "a.hta",
+            "b.js",
+            "c.lnk",
+            "d.command",
+            "e.desktop",
+            "f.sh",
+            "g.ex\u{200b}e",
+        ] {
+            assert!(runs_code(name), "{name}");
+        }
+        for name in ["fatura.pdf", "exe", "photo.exe.png", "notes", "report.docx"] {
+            assert!(!runs_code(name), "{name}");
+        }
     }
 
     #[test]

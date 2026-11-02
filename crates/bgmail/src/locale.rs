@@ -308,6 +308,7 @@ pub enum Key {
     StatusAttachmentSaved,
     StatusAttachmentFailed,
     StatusAttachmentOpenFailed,
+    StatusAttachmentRunsCode,
     StatusActionFailed,
     StatusRemoveAccountFailed,
     UnsentTitle,
@@ -831,6 +832,12 @@ impl Key {
             (StatusAttachmentFailed, P) => "Não foi possível salvar o anexo",
             (StatusAttachmentOpenFailed, E) => "Could not open the attachment",
             (StatusAttachmentOpenFailed, P) => "Não foi possível abrir o anexo",
+            (StatusAttachmentRunsCode, E) => {
+                "This type of file can run programs, so it won't open from here. Save it if you trust it."
+            }
+            (StatusAttachmentRunsCode, P) => {
+                "Este tipo de arquivo pode executar programas, então não abre por aqui. Salve-o se confiar nele."
+            }
             (StatusActionFailed, E) => "Could not complete the action",
             (StatusActionFailed, P) => "Não foi possível concluir a ação",
             (StatusRemoveAccountFailed, E) => "Could not remove the account",
@@ -1019,7 +1026,7 @@ mod tests {
         assert_eq!(Language::from_code(""), Language::default());
     }
 
-    const ALL_KEYS: [Key; 244] = [
+    const ALL_KEYS: [Key; 245] = [
         Key::ViewZoomIn,
         Key::ViewZoomOut,
         Key::ViewZoomReset,
@@ -1255,6 +1262,7 @@ mod tests {
         Key::StatusAttachmentSaved,
         Key::StatusAttachmentFailed,
         Key::StatusAttachmentOpenFailed,
+        Key::StatusAttachmentRunsCode,
         Key::StatusActionFailed,
         Key::StatusRemoveAccountFailed,
         Key::UnsentTitle,

@@ -57,6 +57,10 @@ wiring to `storage`.
 - The UI language persists as `Config::language` (`Language::code`, a string so an
   unknown value loses only the language). Change it through `RootView::set_language`,
   from Settings or the first-run welcome step (`settings::language_picker`).
+- One process per profile (user decision): a later launch activates the running window
+  and exits; a build from another worktree needs its own `HOME` to run alongside one.
+- "Open" on an attachment refuses types that can run code (`attachments::runs_code`,
+  user decision); Save still works.
 - A message being written is never lost silently: Close (shortcut, X, menu), quitting
   and closing the main window ask through `ComposeView::discard_draft`, and a reply,
   forward or `mailto:` doesn't replace it (`Key::StatusComposeBusy`). Drafts stay a
@@ -166,7 +170,8 @@ wiring to `storage`.
     stays to be fixed.
   - `default_mail_app` — status and registration as the system's mail app, with
     OS-specific code behind one API (`unsafe` only for LaunchServices on macOS).
-  - `instance` — hand-off of `mailto:` links between launches.
+  - `instance` — one process per profile: lock file, and hand-off of links or
+    "show the window" from later launches.
   - `dates` — local-time list/reader dates (chrono `clock`).
   - `notifications` — desktop notifications (`notify-rust`) on a short-lived
     thread; bursts summarized.
@@ -210,9 +215,9 @@ wiring to `storage`.
 - `mailto:` links arrive as a process argument (Linux, Windows) or through
   `on_open_urls` (macOS bundle) and become a prefilled compose window
   (`RootView::open_mailto`); they never send and never replace a message with
-  edits. A launch with a link hands it to the running instance and exits
-  (`instance`: loopback TCP, private `~/.config/BGMail/instance` file with port
-  and random token). Plain launches are unchanged.
+  edits. Any later launch hands its link, or a request to show the window, to the
+  running instance and exits (`instance`: `instance.lock` file lock, loopback TCP,
+  private `~/.config/BGMail/instance` file with port and random token).
 - Message list: virtualized with GPUI `uniform_list` (uniform row height;
   only visible rows are built) and the `ui::Scrollbar` on the list handle's
   `base_handle`. It owns a focus handle with key context `MessageList`

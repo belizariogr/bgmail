@@ -390,6 +390,9 @@
       guarded compose (replace, close, quit), chosen column widths kept across
       zoom, escaped notification bodies on markup servers, live placeholders and
       settings title, handoff files out of Linux's shared temp directory.
+- ✅ One BGMail per profile: a later launch activates the running window and exits
+      (`instance::lock_profile`), since two processes undid each other's Moves.
+- ✅ "Open" refuses attachments that can run code; Save still works.
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
 - ✅ Read / mark read-unread (opening marks read on the server; toggle via

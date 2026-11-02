@@ -480,7 +480,7 @@ window.
 - **struct `QuotedOriginal`** / **`reply_html`** / **`reply_text`** / **`toggle_quote`** / **`build_quote_view`** / **`render_quote`** (private, `compose`): what a reply quotes, the HTML and plain-text versions sent, and the quote below the editor.
 - **struct `QuoteToggleColors`** / **`quote_toggle_colors`** (private, `compose`): colors of the `⋯` button, from the light theme over a white page.
 - **`default_mail_app`**: `status()` / `set_default()` (pub, per OS), enums `Status`, `Outcome`, `Error`; on Linux `status_with` / `set_default_with` / `status_from_query` / `application_dirs`.
-- **`instance`**: `mailto_argument` / `forward` / `listen` (pub); `forward_through`, `serve`, `read_message`, `new_token`, `write_private`, `instance_file` (private): hand-off of links to the running process.
+- **`instance`**: `mailto_argument` / `lock_profile` / `hand_over` / `listen`, `ProfileLock`, `ACTIVATE` (pub); `lock_at` (file lock at `instance.lock`; I/O failure = `Unavailable`, which starts anyway), `hand_over_through` (retries while the running process starts), `forward_through`, `serve`, `read_message`, `new_token`, `write_private`, `instance_file` (private): one process per profile; a later launch hands over its `mailto:` link, or `ACTIVATE` to show the window, and exits.
 - **`refresh_default_app`** / **`make_default_app`** / **`render_default_mail_app`** / **`default_app_message`** (private, `settings`): the Settings row.
 - **`render_format_bar`** / **`render_style_button`** / **`render_menu_button`** / **`format_dropdown`** / **`format_menu_of`** / **`render_font_picker`** / **`render_size_picker`** / **`render_align_picker`** / **`render_color_picker`** / **`format_body`** / **`toggle_format_menu`** / enum **`FormatMenu`** / **`family_label`** / **`message_html`** / **`body_selection_color`** / **`body_scrollbar_colors`** (private, `compose`): the formatting bar, and what is sent.
 - **`has_edits`** (`pub(crate)`, `compose`): whether replacing the content would lose typed text.
@@ -737,6 +737,7 @@ overwrite (a ` (n)` suffix is added while a name is taken).
 - **`numbered_name(name, n)`** (private): `name` for 0, else `stem (n).ext`.
 - **`extract(raw, part_index)`** (pub): decoded bytes via `mail_core::attachment_content`; `NotFound` error when the part is missing.
 - **`open_dir()`** (pub): `print::handoff_dir("attachments")`.
+- **`runs_code(filename)`** (pub): whether the sanitized name's last extension is in the list of types that execute on some OS; `RootView::open_attachment` refuses those with `Key::StatusAttachmentRunsCode` (user decision), Save stays.
 - **`downloads_dir()`** (pub) / **`downloads_dir_in(home)`** (private): `~/Downloads` when it exists, else home (`HOME`/`USERPROFILE`), else the temp dir.
 - **`write_unique(dir, filename, data, private)`** (pub): creates `dir` (private → 0700 via `print::create_private_dir`), then create-new files `sanitize_filename(filename)`, `… (1)`, … until one is free (private → 0600); writes `data`, returns the path. Races are safe (create-new, `AlreadyExists` → next name).
 - **`write_for_open(filename, data)`** (pub): creates the private `open_dir()` (failing if it isn't ours), removes stale files in it, then private `write_unique` there.

@@ -2716,6 +2716,10 @@ impl RootView {
     /// the private temp directory and opens it with the system's default app.
     pub(crate) fn open_attachment(&mut self, attachment: AttachmentRow, cx: &mut Context<Self>) {
         self.attachment_menu = None;
+        if attachments::runs_code(&attachment.filename) {
+            self.set_status_note(Key::StatusAttachmentRunsCode.tr(cx.language()), cx);
+            return;
+        }
         let Some(raw) = self.attachment_raw(&attachment, Key::StatusAttachmentOpenFailed, cx)
         else {
             return;
@@ -8348,6 +8352,36 @@ mod tests {
         let saved = config::load_from(file);
         assert!(saved.light_theme);
         assert_eq!(saved.language(), Language::Portuguese);
+    }
+
+    #[gpui::test]
+    fn an_attachment_that_runs_code_is_not_opened(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            view.open_attachment(
+                AttachmentRow {
+                    id: 1,
+                    message_id: 1,
+                    filename: "invoice.pdf.exe".into(),
+                    mime_type: "application/octet-stream".into(),
+                    size: 1,
+                    part_index: 0,
+                    content_id: None,
+                    inline: false,
+                },
+                cx,
+            );
+            assert_eq!(
+                view.status_note_for_tests().map(|note| note.as_ref()),
+                Some(Key::StatusAttachmentRunsCode.tr(Language::default()))
+            );
+        });
     }
 
     #[gpui::test]
