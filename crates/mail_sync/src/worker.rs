@@ -1282,7 +1282,8 @@ impl Worker {
             ..Default::default()
         };
         self.ensure_connected()?;
-        match self.rm()?.append(&sent, seen, &row.raw) {
+        let copy = mail_core::sent_copy(&row.raw, &row.recipients);
+        match self.rm()?.append(&sent, seen, &copy) {
             Ok(()) => {
                 self.db.complete_outgoing(row.id)?;
                 self.sent_is_stale = true;

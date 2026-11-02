@@ -26,7 +26,8 @@ pub use address::{
 };
 pub use cancel::{CancelGuard, CancelToken};
 pub use compose::{
-    build_message, envelope_recipients, guess_mime_type, new_message_id, Draft, OutgoingAttachment,
+    build_message, envelope_recipients, guess_mime_type, new_message_id, sent_copy, Draft,
+    OutgoingAttachment,
 };
 pub use flags::MessageFlags;
 pub use folder::{

@@ -18,6 +18,30 @@ pub struct OutgoingAttachment {
     pub data: Vec<u8>,
 }
 
+/// The copy of `raw` kept in the sender's Sent folder: with a `Bcc:` header for the
+/// envelope recipients missing from To and Cc. Only there: the SMTP server gets `raw`,
+/// or the other recipients could read it.
+pub fn sent_copy(raw: &[u8], envelope: &[String]) -> Vec<u8> {
+    let Some(parsed) = crate::parse_message(raw) else {
+        return raw.to_vec();
+    };
+    let visible = || parsed.to.iter().chain(&parsed.cc);
+    let hidden: Vec<&str> = envelope
+        .iter()
+        .filter(|recipient| {
+            !visible().any(|address| crate::same_email(&address.email, recipient))
+                && !recipient.chars().any(char::is_control)
+        })
+        .map(String::as_str)
+        .collect();
+    if hidden.is_empty() {
+        return raw.to_vec();
+    }
+    let mut copy = format!("Bcc: {}\r\n", hidden.join(",\r\n ")).into_bytes();
+    copy.extend_from_slice(raw);
+    copy
+}
+
 /// Everything needed to produce (and later re-open) an outgoing message.
 /// Serializable so a queued/outbox draft can be persisted as JSON.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +229,24 @@ fn to_builder_list(addresses: &[Address]) -> BuilderAddress<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sent_copy_records_who_was_hidden() {
+        let raw = b"From: a@x.test\r\nTo: B <b@x.test>\r\nCc: c@x.test\r\nSubject: s\r\n\r\nbody";
+        let envelope = |list: &[&str]| list.iter().map(|r| r.to_string()).collect::<Vec<_>>();
+        assert_eq!(sent_copy(raw, &envelope(&["b@x.test", "C@x.test"])), raw);
+
+        let copy = sent_copy(raw, &envelope(&["b@x.test", "d@x.test", "e@x.test"]));
+        let parsed = crate::parse_message(&copy).unwrap();
+        let hidden: Vec<_> = parsed.bcc.iter().map(|a| a.email.as_str()).collect();
+        assert_eq!(hidden, ["d@x.test", "e@x.test"]);
+        assert_eq!(parsed.subject, "s");
+        assert_eq!(parsed.to[0].email, "b@x.test");
+
+        // A value that could add headers isn't written.
+        let copy = sent_copy(raw, &envelope(&["x@x.test\r\nSubject: y"]));
+        assert_eq!(copy, raw);
+    }
     use crate::parse::{attachment_content, parse_message};
 
     fn draft() -> Draft {

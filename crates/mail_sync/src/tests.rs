@@ -1528,6 +1528,25 @@ fn a_message_three_days_old_is_not_sent_any_more() {
 }
 
 #[test]
+fn only_the_sent_copy_records_the_bcc() {
+    let h = Harness::imap().started();
+    let raw = mail("outgoing", 9);
+    h.db.enqueue_outgoing(
+        h.account,
+        "me@example.com",
+        &strings(&["hidden@x.com"]),
+        &raw,
+        None,
+    )
+    .unwrap();
+    h.run(Command::ProcessQueue);
+    assert_eq!(h.connector.sender().sent()[0].raw, raw);
+    let copy = &h.server.messages("Sent")[0];
+    let parsed = mail_core::parse_message(&copy.raw).unwrap();
+    assert_eq!(parsed.bcc[0].email, "hidden@x.com");
+}
+
+#[test]
 fn a_sent_message_is_listed_in_sent_right_away() {
     let h = Harness::imap().started();
     h.db.enqueue_outgoing(
