@@ -1383,28 +1383,38 @@ impl RootView {
                     || multi.contains(&message.id)
             });
         }
-        self.prune_multi_selection();
+        let collapsed = self.prune_multi_selection();
         if let Some(selected) = self.selected_message_id {
             if self.list_messages.iter().any(|m| m.id == selected) {
                 self.reload_selected_detail();
+                if collapsed {
+                    // Now it's an open message, and it may have only its headers.
+                    self.request_selected_body();
+                }
             } else {
                 self.clear_message_selection();
             }
         }
     }
 
-    /// Drops selected rows that left the list; one survivor is a plain
-    /// selection again.
-    fn prune_multi_selection(&mut self) {
+    /// Drops selected rows that left the list; one survivor is a plain selection
+    /// again (`true`), and with none left the reader doesn't keep showing a message
+    /// that isn't listed.
+    fn prune_multi_selection(&mut self) -> bool {
         let listed: HashSet<i64> = self.list_messages.iter().map(|m| m.id).collect();
         self.multi_selection.retain(|id| listed.contains(id));
         if let [only] = self.multi_selection[..] {
             self.selected_message_id = Some(only);
             self.multi_selection.clear();
             self.multi_preview = None;
-        } else if !self.multi_selection.is_empty() {
-            self.reload_multi_preview();
+            return true;
         }
+        if !self.multi_selection.is_empty() {
+            self.reload_multi_preview();
+        } else if self.multi_preview.is_some() {
+            self.clear_message_selection();
+        }
+        false
     }
 
     /// Re-reads the message shown for a multiple selection and its chips.
