@@ -7,6 +7,17 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Packaging changes are proven before a tag needs them. Publishing stays
+  # tag-only (see the `release` job).
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - assets/appIcon/**
+      - crates/bgmail/Cargo.toml
+      - crates/bgmail/build.rs
+      - crates/bgmail/packaging/**
+      - rust-toolchain.toml
+      - script/bundle-linux
   workflow_dispatch:
 
 permissions:
