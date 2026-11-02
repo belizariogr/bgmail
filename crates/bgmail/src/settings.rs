@@ -28,6 +28,7 @@ use crate::account_setup::{
 };
 use crate::actions::ComposeClose;
 use crate::data;
+use crate::default_mail_app;
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::root::RootView;
 
@@ -243,6 +244,11 @@ struct OAuthFlow {
 /// reflected in the main window immediately.
 pub(crate) struct SettingsView {
     pub(crate) section: SettingsSection,
+    /// Whether BGMail is the default mail app, once the system answered.
+    default_app: Option<default_mail_app::Status>,
+    default_app_checked: bool,
+    /// What happened the last time the user asked to make it the default.
+    default_app_message: Option<SharedString>,
     /// Back-reference to the main view, which owns accounts and preferences.
     /// Weak so the settings window never keeps it alive.
     root: WeakEntity<RootView>,
@@ -266,6 +272,9 @@ impl SettingsView {
     /// `root` on every render instead.
     pub(crate) fn new(_accounts: Vec<data::Account>, root: WeakEntity<RootView>) -> Self {
         Self {
+            default_app: None,
+            default_app_checked: false,
+            default_app_message: None,
             section: SettingsSection::General,
             root,
             root_observation: None,
@@ -774,6 +783,82 @@ impl SettingsView {
 
     // ----- Rendering ----------------------------------------------------------
 
+    /// Asks the system off the UI thread: it means running a command.
+    fn refresh_default_app(&mut self, cx: &mut Context<Self>) {
+        self.default_app_checked = true;
+        let status = cx.background_spawn(async { default_mail_app::status() });
+        cx.spawn(async move |this, cx| {
+            let status = status.await;
+            this.update(cx, |this, cx| {
+                this.default_app = Some(status);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn make_default_app(&mut self, cx: &mut Context<Self>) {
+        self.default_app_message = None;
+        let outcome = cx.background_spawn(async { default_mail_app::set_default() });
+        cx.spawn(async move |this, cx| {
+            let outcome = outcome.await;
+            this.update(cx, |this, cx| {
+                this.default_app_message = default_app_message(&outcome, cx.language());
+                this.refresh_default_app(cx);
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_default_mail_app(
+        &mut self,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        if !self.default_app_checked {
+            self.refresh_default_app(cx);
+        }
+        let status = self.default_app;
+        v_flex()
+            .gap_1()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .gap_4()
+                    .py_1()
+                    .child(Label::new(Key::DefaultAppLabel.tr(language)).color(Color::Muted))
+                    .child(match status {
+                        Some(default_mail_app::Status::IsDefault) => {
+                            Label::new(Key::DefaultAppIsDefault.tr(language)).into_any_element()
+                        }
+                        Some(status) => h_flex()
+                            .gap_3()
+                            .when(status == default_mail_app::Status::NotDefault, |el| {
+                                el.child(
+                                    Label::new(Key::DefaultAppNotDefault.tr(language))
+                                        .color(Color::Muted),
+                                )
+                            })
+                            .child(
+                                Button::new("make-default-app", Key::DefaultAppSet.tr(language))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.make_default_app(cx);
+                                    })),
+                            )
+                            .into_any_element(),
+                        None => div().into_any_element(),
+                    }),
+            )
+            .children(self.default_app_message.clone().map(|message| {
+                Label::new(message)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+            }))
+    }
+
     fn render_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let language = cx.language();
@@ -839,6 +924,7 @@ impl SettingsView {
                         .child(Label::new(Key::LanguageLabel.tr(language)).color(Color::Muted))
                         .child(self.render_language_picker(language, cx)),
                 )
+                .child(self.render_default_mail_app(language, cx))
                 .into_any_element(),
             SettingsSection::Accounts => self.render_accounts(window, cx).into_any_element(),
             SettingsSection::Appearance => {
@@ -1519,6 +1605,25 @@ fn settings_row(
         .child(Label::new(value.into()))
 }
 
+/// What to tell the user after asking to become the default mail app.
+fn default_app_message(
+    outcome: &Result<default_mail_app::Outcome, default_mail_app::Error>,
+    language: Language,
+) -> Option<SharedString> {
+    match outcome {
+        Ok(default_mail_app::Outcome::Done) => None,
+        Ok(default_mail_app::Outcome::FinishInSystemSettings) => {
+            Some(Key::DefaultAppFinishInSettings.tr(language).into())
+        }
+        Err(default_mail_app::Error::NotInstalled) => {
+            Some(Key::DefaultAppNotInstalled.tr(language).into())
+        }
+        Err(default_mail_app::Error::Failed(detail)) => {
+            Some(format!("{}: {detail}", Key::DefaultAppFailed.tr(language)).into())
+        }
+    }
+}
+
 /// Bordered box around a text field; the border follows focus.
 fn input_box(input: &Entity<TextInput>, window: &Window, cx: &App) -> impl IntoElement {
     let colors = cx.theme().colors();
@@ -1627,4 +1732,26 @@ fn message_element(message: &FailureMessage, language: Language) -> impl IntoEle
                     .color(Color::Muted),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_app_outcomes_tell_the_user_what_to_do() {
+        use default_mail_app::{Error, Outcome};
+        let language = Language::Portuguese;
+        assert_eq!(default_app_message(&Ok(Outcome::Done), language), None);
+        assert_eq!(
+            default_app_message(&Ok(Outcome::FinishInSystemSettings), language),
+            Some(Key::DefaultAppFinishInSettings.tr(language).into())
+        );
+        assert_eq!(
+            default_app_message(&Err(Error::NotInstalled), language),
+            Some(Key::DefaultAppNotInstalled.tr(language).into())
+        );
+        let failed = default_app_message(&Err(Error::Failed("boom".into())), language).unwrap();
+        assert!(failed.ends_with(": boom"));
+    }
 }

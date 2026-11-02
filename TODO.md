@@ -394,6 +394,9 @@
       (messages no longer turn italic).
 - ✅ Bulk star, read/unread and move; bulk restore and confirmed permanent
       deletion in the Trash
+- ✅ Default mail app: Settings ▸ General (status + "Make default"), `mailto:` links
+      open a prefilled compose window, later launches hand links to the running one
+- ⬜ Confirm the default mail app on macOS and Windows (only Linux was exercised)
 - ⬜ Selection on a dark page is still translucent, so a translucent window
       shows the desktop through it
 - ✅ Replies quote the original's formatted HTML (images embedded with `cid:` are

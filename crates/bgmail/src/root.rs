@@ -3461,6 +3461,29 @@ impl RootView {
 
     /// Opens the compose window (optionally prefilled), or focuses it if it
     /// is already open.
+    /// Starts a message from a `mailto:` link, from the first account that can
+    /// send. A message being written is never replaced by one from outside.
+    pub(crate) fn open_mailto(&mut self, uri: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft) = mail_core::draft_from_mailto(uri) else {
+            return;
+        };
+        let busy = self
+            .with_compose_window(cx, |view, window, _| {
+                window.activate_window();
+                view.has_edits()
+            })
+            .unwrap_or(false);
+        if busy {
+            self.set_status_note(Key::StatusComposeBusy.tr(cx.language()), cx);
+            return;
+        }
+        let init = ComposeInit {
+            draft,
+            ..Default::default()
+        };
+        self.open_compose_with(Some(init), window, cx);
+    }
+
     pub(crate) fn open_compose_with(
         &mut self,
         init: Option<ComposeInit>,

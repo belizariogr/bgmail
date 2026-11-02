@@ -251,6 +251,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`readable_text`** (pub) — `pub fn readable_text(text: Option<&str>, html: Option<&str>) -> String`: the text part, or the converted HTML when that part is missing, blank or HTML itself.
 - **`looks_like_html`** (private) — text starting with `<!doctype`, `<html`, `<head` or `<body`.
 - **`reply_html`** (pub) — `pub fn reply_html(text: &str) -> String`: HTML alternative of a reply with Gmail's markup (`div.gmail_quote`, `div.gmail_attr`, nested `blockquote.gmail_quote`); text below a quote stays outside it.
+- **`draft_from_mailto`** (pub, `mailto`) — `pub fn draft_from_mailto(uri: &str) -> Option<Draft>`: RFC 6068 link to a draft; only to/cc/bcc/subject/body are honored, invalid addresses dropped, line breaks removed from the subject. Helpers `addresses`, `single_line`, `percent_decode`.
 - **`reply_html_with_original`** (pub) — `pub fn reply_html_with_original(reply: &str, attribution: &str, original_html: &str) -> String`: `reply_html` of what was written, followed by a Gmail quote of `original_html`.
 - **`quote_depth`** (private) — quote depth of a line and its text without the `>` markers.
 - **`tidy_lines`** (private) — trims lines, collapses blank runs, drops leading/trailing blanks.

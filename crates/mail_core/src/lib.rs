@@ -14,6 +14,7 @@ pub mod compose;
 pub mod fake;
 pub mod flags;
 pub mod folder;
+pub mod mailto;
 pub mod parse;
 pub mod remote;
 pub mod reply;
@@ -30,6 +31,7 @@ pub use folder::{
     decode_imap_utf7, encode_imap_utf7, role_from_name, role_from_special_use, FolderRole,
     RemoteFolder,
 };
+pub use mailto::draft_from_mailto;
 pub use parse::{
     attachment_content, has_attachments, inline_images, parse_message, AttachmentInfo,
     ParsedMessage,

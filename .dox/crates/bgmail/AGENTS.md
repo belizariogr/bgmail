@@ -124,6 +124,9 @@ wiring to `storage`.
     awaits engine events in a GPUI task; secrets are read with
     `cx.read_credentials` asynchronously (GPUI keychain: Keychain /
     Credential Manager / Secret Service), never on the startup path.
+  - `default_mail_app` — status and registration as the system's mail app, with
+    OS-specific code behind one API (`unsafe` only for LaunchServices on macOS).
+  - `instance` — hand-off of `mailto:` links between launches.
   - `dates` — local-time list/reader dates (chrono `clock`).
   - `notifications` — desktop notifications (`notify-rust`) on a short-lived
     thread; bursts summarized.
@@ -151,6 +154,18 @@ wiring to `storage`.
 - Windows that read `RootView` while rendering (settings) are opened with
   `cx.defer`, outside `RootView`'s update (GPUI renders new windows
   synchronously; re-entering the entity panics).
+- Default mail app: Settings ▸ General shows whether BGMail handles `mailto:`
+  and offers "Make default" (`default_mail_app`, one API per OS, run off the UI
+  thread and only on that click): Linux `xdg-mime` (refused when no installed
+  desktop entry exists), macOS LaunchServices (needs the bundle, which declares
+  the scheme through the packager's `deep-link-protocols`), Windows registers the
+  app under HKCU and opens the system settings, where only the user can choose.
+- `mailto:` links arrive as a process argument (Linux, Windows) or through
+  `on_open_urls` (macOS bundle) and become a prefilled compose window
+  (`RootView::open_mailto`); they never send and never replace a message with
+  edits. A launch with a link hands it to the running instance and exits
+  (`instance`: loopback TCP, private `~/.config/BGMail/instance` file with port
+  and random token). Plain launches are unchanged.
 - Message list: virtualized with GPUI `uniform_list` (uniform row height;
   only visible rows are built) and the `ui::Scrollbar` on the list handle's
   `base_handle`. It owns a focus handle with key context `MessageList`

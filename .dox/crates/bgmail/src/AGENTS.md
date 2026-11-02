@@ -479,6 +479,10 @@ window.
 
 - **struct `QuotedOriginal`** / **`reply_html`** / **`reply_text`** / **`toggle_quote`** / **`build_quote_view`** / **`render_quote`** (private, `compose`): what a reply quotes, the HTML and plain-text versions sent, and the quote below the editor.
 - **struct `QuoteToggleColors`** / **`quote_toggle_colors`** (private, `compose`): colors of the `⋯` button, from the light theme over a white page.
+- **`default_mail_app`**: `status()` / `set_default()` (pub, per OS), enums `Status`, `Outcome`, `Error`; on Linux `status_with` / `set_default_with` / `status_from_query` / `application_dirs`.
+- **`instance`**: `mailto_argument` / `forward` / `listen` (pub); `forward_through`, `serve`, `read_message`, `new_token`, `write_private`, `instance_file` (private): hand-off of links to the running process.
+- **`refresh_default_app`** / **`make_default_app`** / **`render_default_mail_app`** / **`default_app_message`** (private, `settings`): the Settings row.
+- **`has_edits`** (`pub(crate)`, `compose`): whether replacing the content would lose typed text.
 - **`quotable_text`** (pub, `mail_html`): a plain-text original for a reply's quote.
 - **`quotable_html`** (pub, `mail_html`): the original's sanitized body for a reply's quote, without `cid:` images.
 - **struct `BulkSelection`** (`commands`) and **`bulk_move_targets`** (private): what commands know about a multiple selection; folders all its accounts share.
@@ -1919,6 +1923,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_selection_stack`** / **`reader_detail`** / **`reload_multi_preview`** / **`fetch_multi_preview_body`** / **`sheet_corners`** (private): reader for a multiple selection: the previewed message (never marked read) on a sheet, tilted sheets behind it, floating actions.
 - **`bulk_selection`** / **`apply_action_keeping_selection`** / **`finish_bulk_toggle`** / **`confirm_delete_selection`** (private): summary of a multiple selection for the commands, bulk star/read keeping the selection, and the confirmed permanent deletion.
 - **`ReaderJob`** (`runs_in_background`, `build`) / **`BuiltReader`** / **`install_reader`** (private): a reader document's inputs, buildable on any thread, its result, and handing it to the view.
+- **`open_mailto`** (`pub(crate)`): prefilled compose from a `mailto:` link; refuses to replace a message with edits.
 - **`render_dropdown`** / **`render_filter_menu`** / **`render_move_menu`** (private): reader card stack for a multiple selection and the toolbar dropdowns.
 - **`select_message_row`** (private)
   - Signature: `fn select_message_row(&mut self, id: i64, window, cx)`

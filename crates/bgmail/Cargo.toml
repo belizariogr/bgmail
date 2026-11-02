@@ -49,6 +49,8 @@ lol_html = "3.0.0"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
 raw-window-handle = "0.6"
+# LaunchServices strings: querying and setting the default mail app.
+core-foundation = "0.10"
 
 # Windows-only: maximize-on-open can drop `WM_SIZE` during the busy open sequence;
 # we re-post it from the native handle. Kept isolated in `window_drag.rs`.
@@ -106,6 +108,12 @@ icons = [
     "../../assets/appIcon/BGMail.ico",
 ]
 
+# macOS only offers a bundle as mail app if it declares the scheme; on Linux the
+# desktop template declares it (see below).
+[[package.metadata.packager.deep-link-protocols]]
+schemes = ["mailto"]
+name = "E-mail"
+
 [package.metadata.packager.macos]
 # Same floor as Zed's bundle (GPUI's Metal renderer).
 minimum-system-version = "10.15.7"
@@ -128,6 +136,8 @@ depends = [
     "libvulkan1",
     "mesa-vulkan-drivers | vulkan-icd",
     "libfontconfig1",
+    # `xdg-mime`: querying and setting the default mail app.
+    "xdg-utils",
 ]
 
 [package.metadata.packager.pacman]
@@ -139,6 +149,7 @@ depends = [
     "wayland",
     "vulkan-icd-loader",
     "fontconfig",
+    "xdg-utils",
 ]
 
 [package.metadata.packager.nsis]

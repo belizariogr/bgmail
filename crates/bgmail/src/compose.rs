@@ -445,6 +445,11 @@ impl ComposeView {
         }));
     }
 
+    /// Whether the user typed something that replacing the content would lose.
+    pub(crate) fn has_edits(&self) -> bool {
+        self.edited
+    }
+
     fn mark_edited(&mut self, cx: &mut Context<Self>) {
         self.edited = true;
         cx.notify();
