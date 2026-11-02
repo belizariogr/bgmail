@@ -15,10 +15,11 @@ fn main() {
     for key in KEYS {
         println!("cargo:rerun-if-env-changed={key}");
     }
-    // Watched only when present: a missing watched file makes cargo rebuild
-    // this crate on every build. A first .env needs `touch crates/protocols/build.rs`.
+    // Created when missing because cargo can only watch a file that exists: an
+    // absent one rebuilds this crate on every build, and not watching it would
+    // leave the first real .env unnoticed behind a fresh build.
     let path = Path::new("../../.env");
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(text) = dotenv::read_or_create(path) else {
         return;
     };
     println!("cargo:rerun-if-changed={}", path.display());

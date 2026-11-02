@@ -109,9 +109,9 @@ sudo apt install pkg-config clang libxkbcommon-dev libxkbcommon-x11-dev \
 ### Google sign-in in local builds
 
 Copy `.env.example` to `.env` and fill in your OAuth client (desktop app type).
-`cargo build` embeds it; `.env` is gitignored. After creating the file for the
-first time, run `touch crates/protocols/build.rs`. Without it, Gmail is still
-offered but sign-in explains that the client isn't configured.
+`cargo build` and `script/install-linux*` embed it; `.env` is gitignored and an
+empty one is created by the first build. Without a client, Gmail is still offered
+but sign-in explains that the client isn't configured.
 
 ## Structure
 

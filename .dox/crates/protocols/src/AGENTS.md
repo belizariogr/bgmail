@@ -126,10 +126,11 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ### `build.rs` + `src/dotenv.rs`
 
-- **`main`** (`build.rs`): for each Google key without a real environment variable, emits `cargo:rustc-env` from `../../.env`; watches the file only when present.
+- **`main`** (`build.rs`): for each Google key without a real environment variable, emits `cargo:rustc-env` from `../../.env`, which it creates empty when missing so cargo can always watch it; an uncreatable file (read-only checkout) skips both the values and the watch.
+- **`read_or_create`** (`dotenv.rs`) — `pub fn read_or_create(path: &Path) -> io::Result<String>`: contents of `path`, creating an empty file if missing; an existing file keeps its contents and mtime.
 - **`lookup`** (`dotenv.rs`, shared via `#[path]`, a test-only module in the lib) — `pub fn lookup(text: &str, key: &str) -> Option<String>`: `KEY=value`, `export`, quotes; comments and blanks skipped; last assignment wins.
 - **`unquote`** (private) — strips one pair of matching `"` or `'`.
-- Tests: `lookup_reads_plain_exported_and_quoted_values`, `lookup_skips_missing_and_blank_values`.
+- Tests: `read_or_create_creates_missing_and_keeps_existing`, `lookup_reads_plain_exported_and_quoted_values`, `lookup_skips_missing_and_blank_values`.
 
 ### `src/imap_remote.rs`
 
