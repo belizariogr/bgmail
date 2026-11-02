@@ -276,6 +276,23 @@ fn row_actions_room(hovered: bool, in_trash: bool) -> Pixels {
     px(buttons * (ROW_ACTION_WIDTH + ROW_ACTION_GAP))
 }
 
+/// Star button of the toolbar: filled and in the list's star color when set.
+fn star_icon(starred: bool) -> IconName {
+    if starred {
+        IconName::StarFilled
+    } else {
+        IconName::Star
+    }
+}
+
+fn star_color(starred: bool) -> Color {
+    if starred {
+        Color::Warning
+    } else {
+        Color::Default
+    }
+}
+
 /// Whether a folder's row counts unread mail: what is in the Trash is done with.
 fn folder_shows_unread(path: &str) -> bool {
     path != storage::system::TRASH
@@ -3883,12 +3900,9 @@ impl RootView {
                                                 )),
                                                 IconButton::new(
                                                     "flag",
-                                                    if ctx.message_starred() {
-                                                        IconName::StarFilled
-                                                    } else {
-                                                        IconName::Star
-                                                    },
+                                                    star_icon(ctx.message_starred()),
                                                 )
+                                                .color(star_color(ctx.message_starred()))
                                                 .disabled(!enabled(CommandId::MessageToggleFlag))
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.toggle_message_flag(cx);
@@ -6374,6 +6388,14 @@ mod tests {
         assert_eq!(row_actions_room(false, false), px(0.0));
         assert_eq!(row_actions_room(true, false), px(40.0));
         assert_eq!(row_actions_room(true, true), px(20.0));
+    }
+
+    #[test]
+    fn toolbar_star_matches_the_list_when_set() {
+        assert_eq!(star_icon(true), IconName::StarFilled);
+        assert_eq!(star_color(true), Color::Warning);
+        assert_eq!(star_icon(false), IconName::Star);
+        assert_eq!(star_color(false), Color::Default);
     }
 
     #[test]

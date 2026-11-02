@@ -167,6 +167,7 @@ wiring to `storage`.
   Attachments; session state, the open message stays listed even if it stops
   matching) and more. Toolbar: compose on the left; reply / reply all /
   forward, trash / archive / junk, flag / mark read|unread / move centered;
+  the star button is filled and yellow on a starred message;
   message buttons are disabled when their command isn't available. Move opens
   a dropdown of `CommandContext::move_targets`.
 - Message rows: Ctrl/Cmd+click toggles, Shift+click and Shift+arrows take a

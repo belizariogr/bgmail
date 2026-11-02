@@ -1329,6 +1329,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **enum `ListFilter`** (`matches`, `label`, `OPTIONS`): rows shown by the filter button.
 - **`clicked_selection`** / **`selection_range`** (private): rows selected after a click (Shift range from the anchor, Ctrl/Cmd toggle, plain single) and the inclusive range between two rows, in list order.
 - **`row_actions_room`** (private): width the subject of a hovered row gives up for its action buttons.
+- **`star_icon`** / **`star_color`** (private): toolbar star look: filled and `Color::Warning` (as in the list) when the message is starred.
 - **`folder_shows_unread`** (private): whether a folder's row counts unread (not the Trash).
 - **struct `RootView`**: Main application view state (layout, selection, reader `HtmlView`, search, palette, auxiliary windows, persistence). List state: `list_scroll: UniformListScrollHandle`, `list_focus`, `attachments` (chips of the selected message), `attachment_menu`.
 
