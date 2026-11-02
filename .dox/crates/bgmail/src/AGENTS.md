@@ -1922,6 +1922,8 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`ReaderJob`** (`runs_in_background`, `build`) / **`BuiltReader`** / **`install_reader`** (private): a reader document's inputs, buildable on any thread, its result, and handing it to the view.
 - **`open_mailto`** (`pub(crate)`): prefilled compose from a `mailto:` link; refuses to replace a message with edits.
 - **`request_delete`** (`pub(crate)`) / **`confirm_delete_forever`** / **`delete_row_message`** (private): Delete from anywhere: to the Trash, or for good, confirmed, for what is already there.
+- **`rename_account`** (`pub(crate)`) / **`begin_rename`** / **`save_rename`** (`settings`, private): renaming an account.
+- **`recipients`**: `RecipientInput` (`new`, `set_contacts`, `set_addresses`, `content`), event `RecipientsChanged`; private `matching_contacts`, `with_known_name`, `split_typed`, `add_unique`, `card_label`, `on_typed`, `commit_typed`, `accept`, `remove`, `on_key_down`, `render_card`, `render_suggestions`.
 - **`render_dropdown`** / **`render_filter_menu`** / **`render_move_menu`** (private): reader card stack for a multiple selection and the toolbar dropdowns.
 - **`select_message_row`** (private)
   - Signature: `fn select_message_row(&mut self, id: i64, window, cx)`

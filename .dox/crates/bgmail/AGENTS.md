@@ -126,6 +126,9 @@ wiring to `storage`.
     awaits engine events in a GPUI task; secrets are read with
     `cx.read_credentials` asynchronously (GPUI keychain: Keychain /
     Credential Manager / Secret Service), never on the startup path.
+  - `recipients` — To/Cc/Bcc field: addresses as cards (name, with the full
+    address on hover), contact suggestions while typing, text that isn't an address
+    stays to be fixed.
   - `default_mail_app` — status and registration as the system's mail app, with
     OS-specific code behind one API (`unsafe` only for LaunchServices on macOS).
   - `instance` — hand-off of `mailto:` links between launches.
@@ -156,6 +159,12 @@ wiring to `storage`.
 - Windows that read `RootView` while rendering (settings) are opened with
   `cx.defer`, outside `RootView`'s update (GPUI renders new windows
   synchronously; re-entering the entity panics).
+- Contacts: `storage` catalog filled by itself, with no screen to manage it:
+  senders with their name and recipients without one, by `mail_sync` for synced
+  mail (Junk excluded, backfilled once per account) and `send_draft` for what is
+  sent. A known name is never overwritten; a blank one is filled by later mail.
+- Accounts can be renamed (Settings ▸ Accounts): the sidebar and the name mail is
+  sent with.
 - Default mail app: Settings ▸ General shows whether BGMail handles `mailto:`
   and offers "Make default" (`default_mail_app`, one API per OS, run off the UI
   thread and only on that click): Linux `xdg-mime` (refused when no installed

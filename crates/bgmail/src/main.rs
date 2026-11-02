@@ -25,6 +25,7 @@ mod mail_html;
 mod mail_service;
 mod notifications;
 mod print;
+mod recipients;
 mod root;
 mod settings;
 mod shortcuts;

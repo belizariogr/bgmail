@@ -397,6 +397,8 @@
 - ✅ Default mail app: Settings ▸ General (status + "Make default"), `mailto:` links
       open a prefilled compose window, later launches hand links to the running one
 - ⬜ Confirm the default mail app on macOS and Windows (only Linux was exercised)
+- ✅ Renaming accounts; contact catalog filled from mail; recipient fields with
+      cards and suggestions
 - ⬜ Selection on a dark page is still translucent, so a translucent window
       shows the desktop through it
 - ✅ Replies quote the original's formatted HTML (images embedded with `cid:` are

@@ -1,6 +1,7 @@
 //! Local SQLite persistence for accounts, folders and messages.
 
 mod accounts;
+mod contacts;
 mod database;
 mod folder;
 mod membership;
@@ -15,6 +16,7 @@ mod sync;
 mod test_support;
 mod types;
 
+pub use contacts::Contact;
 pub use database::{database_path, global_folder_path, Database};
 pub use folder::{
     folders_csv, is_manual_move_destination_forbidden, is_system_path, system, user_folder_path,

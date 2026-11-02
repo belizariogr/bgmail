@@ -8,6 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
+use std::rc::Rc;
+
 use gpui::{
     anchored, black, deferred, size, white, AnyElement, AnyWindowHandle, App, Bounds, ClickEvent,
     Context, Corner, Entity, ExternalPaths, Focusable, FontWeight, Global, Hsla, KeyBinding,
@@ -19,10 +21,12 @@ use html_view::{
     Resources,
 };
 use mail_core::{Address, Draft, OutgoingAttachment};
+use storage::Contact;
 use theme::{ActiveTheme, Theme, ThemeColors, MAIL_TEXT_COLORS};
 
 use crate::data::MessageBody;
 use crate::mail_html::{email_document, DocumentColors};
+use crate::recipients::{RecipientInput, RecipientsChanged};
 use ui::prelude::*;
 use ui::{
     font_for_family, Align, Button, ButtonStyle, Color, ContextMenu, FontFamily, Icon, IconButton,
@@ -250,9 +254,9 @@ pub struct ComposeView {
     from_menu_open: bool,
     /// Whether Cc and Bcc rows are visible.
     show_cc_bcc: bool,
-    to: Entity<TextInput>,
-    cc: Entity<TextInput>,
-    bcc: Entity<TextInput>,
+    to: Entity<RecipientInput>,
+    cc: Entity<RecipientInput>,
+    bcc: Entity<RecipientInput>,
     subject: Entity<TextInput>,
     body: Entity<TextArea>,
     /// Scroll container of the body; the text area keeps its caret visible in it.
@@ -299,6 +303,7 @@ impl ComposeView {
     /// send) and, with `init`, everything prefilled from its draft.
     pub fn new(
         accounts: Vec<ComposeAccount>,
+        contacts: Vec<Contact>,
         root: WeakEntity<RootView>,
         white_background: bool,
         init: Option<ComposeInit>,
@@ -307,9 +312,17 @@ impl ComposeView {
     ) -> Self {
         ensure_key_bindings(cx);
         let language = cx.language();
-        let to = cx.new(|cx| TextInput::new(Key::ComposeFieldPlaceholder.tr(language), cx));
-        let cc = cx.new(|cx| TextInput::new("", cx));
-        let bcc = cx.new(|cx| TextInput::new("", cx));
+        let contacts: Rc<[Contact]> = contacts.into();
+        let to = cx.new(|cx| {
+            RecipientInput::new(
+                Key::ComposeFieldPlaceholder.tr(language),
+                contacts.clone(),
+                window,
+                cx,
+            )
+        });
+        let cc = cx.new(|cx| RecipientInput::new("", contacts.clone(), window, cx));
+        let bcc = cx.new(|cx| RecipientInput::new("", contacts.clone(), window, cx));
         let subject = cx.new(|cx| TextInput::new("", cx));
         let body_scroll = ScrollHandle::new();
         let body = cx.new(|cx| {
@@ -326,9 +339,11 @@ impl ComposeView {
             (&cc, AddressField::Cc),
             (&bcc, AddressField::Bcc),
         ] {
-            subscriptions.push(cx.subscribe(input, move |this, _, _: &TextInputEvent, cx| {
-                this.on_address_changed(field, cx);
-            }));
+            subscriptions.push(
+                cx.subscribe(input, move |this, _, _: &RecipientsChanged, cx| {
+                    this.on_address_changed(field, cx);
+                }),
+            );
         }
         subscriptions.push(cx.subscribe(&subject, |this, _, _: &TextInputEvent, cx| {
             this.mark_edited(cx);
@@ -385,9 +400,12 @@ impl ComposeView {
         let draft = init.draft;
         self.from_account = account_index(&self.accounts, init.account_id);
         self.replaces_outgoing = init.replaces_outgoing;
-        set_input(&self.to, &mail_core::format_address_list(&draft.to), cx);
-        set_input(&self.cc, &mail_core::format_address_list(&draft.cc), cx);
-        set_input(&self.bcc, &mail_core::format_address_list(&draft.bcc), cx);
+        self.to
+            .update(cx, |field, cx| field.set_addresses(&draft.to, cx));
+        self.cc
+            .update(cx, |field, cx| field.set_addresses(&draft.cc, cx));
+        self.bcc
+            .update(cx, |field, cx| field.set_addresses(&draft.bcc, cx));
         set_input(&self.subject, &draft.subject, cx);
         // `set_content` leaves the caret at the start: above a quoted reply.
         self.body
@@ -483,6 +501,14 @@ impl ComposeView {
         }));
     }
 
+    /// Replaces the catalog offered in the recipient fields.
+    pub(crate) fn set_contacts(&mut self, contacts: Vec<Contact>, cx: &mut Context<Self>) {
+        let contacts: Rc<[Contact]> = contacts.into();
+        for field in [&self.to, &self.cc, &self.bcc] {
+            field.update(cx, |field, _| field.set_contacts(contacts.clone()));
+        }
+    }
+
     /// Whether the user typed something that replacing the content would lose.
     pub(crate) fn has_edits(&self) -> bool {
         self.edited
@@ -531,9 +557,9 @@ impl ComposeView {
 
     fn fields(&self, cx: &App) -> ComposeFields {
         ComposeFields {
-            to: self.to.read(cx).content().to_string(),
-            cc: self.cc.read(cx).content().to_string(),
-            bcc: self.bcc.read(cx).content().to_string(),
+            to: self.to.read(cx).content(cx),
+            cc: self.cc.read(cx).content(cx),
+            bcc: self.bcc.read(cx).content(cx),
             subject: self.subject.read(cx).content().to_string(),
             body: self.body.read(cx).plain_export(),
             body_html: self.body.read(cx).formatted_html(),

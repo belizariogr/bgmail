@@ -221,6 +221,9 @@ pub enum Key {
     AccountCancel,
     AccountSave,
     AccountUpdatePassword,
+    AccountRename,
+    AccountNewName,
+    ComposeRemoveRecipient,
     AccountNewPassword,
     AccountSignInAgain,
     AccountRemove,
@@ -639,6 +642,12 @@ impl Key {
             (AccountCancel, P) => "Cancelar",
             (AccountSave, E) => "Save",
             (AccountSave, P) => "Salvar",
+            (AccountRename, E) => "Rename",
+            (AccountRename, P) => "Renomear",
+            (AccountNewName, E) => "Account name",
+            (AccountNewName, P) => "Nome da conta",
+            (ComposeRemoveRecipient, E) => "Remove",
+            (ComposeRemoveRecipient, P) => "Remover",
             (AccountUpdatePassword, E) => "Update password",
             (AccountUpdatePassword, P) => "Atualizar senha",
             (AccountNewPassword, E) => "New password",
@@ -890,7 +899,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 211] = [
+    const ALL_KEYS: [Key; 214] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -1056,6 +1065,9 @@ mod tests {
         Key::AccountCancel,
         Key::AccountSave,
         Key::AccountUpdatePassword,
+        Key::AccountRename,
+        Key::AccountNewName,
+        Key::ComposeRemoveRecipient,
         Key::AccountNewPassword,
         Key::AccountSignInAgain,
         Key::AccountRemove,

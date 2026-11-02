@@ -1866,6 +1866,29 @@ impl RootView {
 
     /// Replaces an account's secret (e.g. after a password change) and
     /// reconnects it. The worker restart runs off the UI thread.
+    /// Renames an account: what the sidebar shows, and the name its mail is sent
+    /// with. Blank names are ignored.
+    pub(crate) fn rename_account(&mut self, account_id: i64, name: &str, cx: &mut Context<Self>) {
+        let name = name.trim();
+        let Some(account) = self.accounts.iter().find(|a| a.id == account_id).cloned() else {
+            return;
+        };
+        if name.is_empty() || name == account.name {
+            return;
+        }
+        match self
+            .db
+            .update_account(account_id, name, &account.config_json)
+        {
+            Ok(()) => self.reload_from_database(),
+            Err(error) => self.set_status_note(
+                format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
     pub(crate) fn update_account_secret(
         &mut self,
         account_id: i64,
@@ -3435,6 +3458,15 @@ impl RootView {
         if recipients.is_empty() {
             return Err(Key::ComposeNoRecipients.tr(language).to_string());
         }
+        // Whoever mail goes to joins the catalog, by address: their name comes when
+        // they write back.
+        let contacts: Vec<_> = recipients
+            .iter()
+            .map(|email| (email.clone(), None))
+            .collect();
+        if let Err(error) = self.db.record_contacts(&contacts) {
+            eprintln!("BGMail: could not record contacts: {error}");
+        }
         let message_id = mail_core::new_message_id(&draft.from.email, unique_token());
         let raw = mail_core::build_message(&draft, &message_id, dates::now_unix());
         match replaces_outgoing {
@@ -3506,10 +3538,13 @@ impl RootView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let contacts = self.db.list_contacts().unwrap_or_default();
         if let Some(handle) = self.compose_window {
             let init_for_open = init.clone();
+            let contacts_for_open = contacts.clone();
             if handle
                 .update(cx, |view, window, cx| {
+                    view.set_contacts(contacts_for_open, cx);
                     if init_for_open.is_some() {
                         view.apply_init(init_for_open, window, cx);
                     }
@@ -3544,8 +3579,9 @@ impl RootView {
 
         if let Ok(handle) = cx.open_window(options, |window, cx| {
             let root_for_close = root.clone();
-            let view =
-                cx.new(|cx| ComposeView::new(accounts, root, compose_white, init, window, cx));
+            let view = cx.new(|cx| {
+                ComposeView::new(accounts, contacts, root, compose_white, init, window, cx)
+            });
             window.on_window_should_close(cx, move |_, cx| {
                 if let Some(root) = root_for_close.upgrade() {
                     root.update(cx, |root, cx| {
