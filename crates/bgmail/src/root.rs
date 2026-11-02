@@ -1584,10 +1584,17 @@ impl RootView {
             .selected_message_id
             .or(self.selection_focus)
             .and_then(|id| self.list_messages.iter().position(|m| m.id == id));
-        let Some(target) = adjacent_index(current, self.list_messages.len(), step) else {
+        // With nothing open, the row the keys are on is the next one to open.
+        let nothing_selected =
+            self.selected_message_id.is_none() && self.multi_selection.is_empty();
+        let target = match current {
+            Some(row) if nothing_selected => Some(row),
+            _ => adjacent_index(current, self.list_messages.len(), step),
+        };
+        let Some(target) = target else {
             return false;
         };
-        if Some(target) == current {
+        if !nothing_selected && Some(target) == current {
             return false;
         }
         let id = self.list_messages[target].id;
@@ -1653,8 +1660,8 @@ impl RootView {
     }
 
     /// Runs a message action on the selected message through `mail_sync`
-    /// (local change now, server op queued), then keeps a sensible
-    /// selection: the message that took its place in the list.
+    /// (local change now, server op queued); see [`Self::apply_message_action`]
+    /// for what stays selected.
     fn run_message_action(
         &mut self,
         cx: &mut Context<Self>,
@@ -1768,29 +1775,25 @@ impl RootView {
         cx.notify();
     }
 
-    /// Runs `action` on message `id` and refreshes the list. The selection
-    /// only moves when the selected message itself left the list; then the
-    /// message that took its place is selected.
+    /// Runs `action` on message `id` and refreshes the list. As in Gmail, a selected
+    /// message that left the list leaves nothing open, rather than opening the next one
+    /// and marking it read; the arrow keys carry on from the row that took its place.
     fn apply_message_action(
         &mut self,
         id: i64,
         action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
     ) -> rusqlite::Result<()> {
         let position = self.list_messages.iter().position(|m| m.id == id);
+        let was_selected = self.selected_message_id == Some(id);
         let result = self.act_on_message(id, action);
         self.reload_message_list();
-        if self.selected_message_id.is_none() {
-            if let Some(next) = position.and_then(|ix| {
+        if was_selected && self.selected_message_id.is_none() {
+            self.selection_focus = position.and_then(|ix| {
                 self.list_messages
                     .get(ix)
                     .or_else(|| self.list_messages.last())
                     .map(|m| m.id)
-            }) {
-                self.selected_message_id = Some(next);
-                self.reload_selected_detail();
-                self.open_selected_message();
-                self.reveal_selected_message();
-            }
+            });
         }
         result
     }
@@ -7874,7 +7877,7 @@ mod tests {
     }
 
     #[test]
-    fn row_action_on_the_selected_message_selects_its_neighbor() {
+    fn removing_the_selected_message_leaves_nothing_open() {
         let (_dir, mut view) = test_view();
         let selected = view.selected_message_id.expect("seed selects a message");
         let position = view
@@ -7882,13 +7885,71 @@ mod tests {
             .iter()
             .position(|m| m.id == selected)
             .unwrap();
-        let neighbor = view.list_messages.get(position + 1).map(|m| m.id);
+        let neighbor = view.list_messages[position + 1].id;
+        view.db.set_message_unread(neighbor, true).unwrap();
+        view.reload_message_list();
+
         view.apply_message_action(selected, mail_actions::trash)
             .unwrap();
-        assert_ne!(view.selected_message_id, Some(selected));
-        if neighbor.is_some() {
-            assert_eq!(view.selected_message_id, neighbor);
+
+        assert_eq!(view.selected_message_id, None);
+        assert!(view.selected_detail.is_none());
+        assert!(view.db.get_message(neighbor).unwrap().unwrap().unread);
+    }
+
+    #[test]
+    fn the_arrow_keys_carry_on_from_the_row_that_took_the_place() {
+        for step in [1, -1] {
+            let (_dir, mut view) = test_view();
+            let selected = view.selected_message_id.expect("seed selects a message");
+            let position = view
+                .list_messages
+                .iter()
+                .position(|m| m.id == selected)
+                .unwrap();
+            let neighbor = view.list_messages[position + 1].id;
+            view.apply_message_action(selected, mail_actions::trash)
+                .unwrap();
+            assert!(view.select_adjacent_message(step));
+            assert_eq!(view.selected_message_id, Some(neighbor));
         }
+    }
+
+    #[test]
+    fn removing_the_last_row_leaves_the_keys_on_the_new_last_one() {
+        let (_dir, mut view) = test_view();
+        let last = view.list_messages.last().unwrap().id;
+        view.selected_message_id = Some(last);
+        view.reload_selected_detail();
+        view.apply_message_action(last, mail_actions::trash)
+            .unwrap();
+        assert_eq!(view.selected_message_id, None);
+        assert_eq!(
+            view.selection_focus,
+            view.list_messages.last().map(|m| m.id)
+        );
+    }
+
+    #[test]
+    fn a_row_action_with_nothing_selected_selects_nothing() {
+        let (_dir, mut view) = test_view();
+        let other = view.list_messages[0].id;
+        view.clear_message_selection();
+        view.apply_message_action(other, mail_actions::trash)
+            .unwrap();
+        assert_eq!(view.selected_message_id, None);
+        assert!(view.selected_detail.is_none());
+    }
+
+    #[test]
+    fn a_row_action_leaves_a_multiple_selection_alone() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.apply_selection(ids[1..3].to_vec());
+        view.apply_message_action(ids[0], mail_actions::trash)
+            .unwrap();
+        assert_eq!(view.selected_message_id, None);
+        assert_eq!(view.multi_selection, ids[1..3]);
     }
 
     #[test]

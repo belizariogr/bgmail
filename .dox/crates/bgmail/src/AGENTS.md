@@ -1949,7 +1949,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Purpose: Runs a message action on any message; failures become a localized status note. `run_message_action` delegates here with the selected id.
 - **`apply_message_action`** (private)
   - Signature: `fn apply_message_action(&mut self, id: i64, action) -> rusqlite::Result<()>`
-  - Behavior: Runs the action, wakes the account's queue when needed, reloads the list; the selection moves to the neighbor only when the selected message left the list.
+  - Behavior: Runs the action, wakes the account's queue when needed, reloads the list. A selected message that left the list leaves nothing open and marks nothing read (as in Gmail); `selection_focus` goes to the row that took its place, where the arrow keys carry on.
 - **`palette_traps_tab`** (private)
   - Signature: `fn palette_traps_tab(&self) -> bool`
   - Purpose: While the palette is open, root's `capture_action` stops `ui::FocusNext`/`FocusPrevious` so Tab can't reach the fields behind it.
@@ -2221,7 +2221,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_unsent_panel(cx)`** (private): full-window occluder (mouse-down outside closes) with a scrollable elevated panel above the status bar's right edge: title, then per row the subject (or "(no subject)"), "To: recipients", `last_error` (`Color::Error`), the "May already have been sent" hint (`Color::Warning`) for `maybe_sent`, and Retry / Edit / Discard buttons.
 - **`open_selected_message()`** (private): marks the opened message read (`mail_sync::actions::set_read` + queue) and asks for its body (`Command::FetchBody`) when only headers are stored.
 - **`after_action(account_id, outcome)`** (private): wakes the account's worker when an action queued server work.
-- **`run_message_action(cx, action)`** (private): runs a `mail_sync::actions` function on the selected message (an error, e.g. "database is locked", becomes a `StatusActionFailed: {error}` status note), reloads the list and selects the message that took its place (opening it).
+- **`run_message_action(cx, action)`** (private): runs a `mail_sync::actions` function on the selected message (an error, e.g. "database is locked", becomes a `StatusActionFailed: {error}` status note), reloads the list; see `apply_message_action` for the selection.
 - **`toggle_message_read(cx)`** (pub(crate)): read ↔ unread for the selected message (stays selected).
 - Message actions `delete_message_to_trash`, `restore_message`, `archive_message`, `mark_message_junk`, `toggle_message_flag`, `move_message_to_folder`, `delete_message_permanently` (only in Trash) all go through `run_message_action` (local change now, server op queued).
 - **`compose_accounts()`** (pub(crate)): `ComposeAccount`s (sending accounts first; local ones `can_send = false`).

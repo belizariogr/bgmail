@@ -382,6 +382,7 @@
 - ✅ Zoom of the whole app with Ctrl/Cmd `+`/`-`/`0` in every window, persisted
       (`app_zoom`, content scale patched into `vendor/gpui`).
 - ✅ Each mailbox remembers its selected messages for the session.
+- ✅ Removing the open message leaves nothing open, as in Gmail.
 - ⬜ Persist the UI language (`locale` always starts in English, so the setup does
       too); consider a language picker on the welcome step.
 
