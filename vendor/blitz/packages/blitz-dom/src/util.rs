@@ -158,6 +158,13 @@ pub fn walk_tree(indent: usize, node: &Node) {
 pub(crate) fn parse_svg_image(source: &[u8]) -> Result<crate::node::SvgImageData, usvg::Error> {
     let options = usvg::Options {
         fontdb: Arc::clone(&*FONT_DB),
+        // BGMail: an SVG in a message mustn't read local files. A device like
+        // `/dev/ptmx` would block forever; UNC paths would reach the network. Only
+        // `data:` images remain.
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_string: Box::new(|_, _| None),
+            ..Default::default()
+        },
         ..Default::default()
     };
     crate::node::SvgImageData::from_data(source, &options)
@@ -180,6 +187,31 @@ impl ToColorColor for AbsoluteColor {
 #[cfg(all(test, feature = "svg"))]
 mod svg_tests {
     use super::parse_svg_image;
+
+    /// A 1x1 PNG.
+    const PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0,
+        0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0d, 0x49, 0x44,
+        0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0, 5, 0, 1, 0xff, 0x89, 0x99,
+        0x3d, 0x1d, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn an_svg_cannot_read_local_files() {
+        let path = std::env::temp_dir().join(format!("bgmail-svg-{}.png", std::process::id()));
+        std::fs::write(&path, PNG).unwrap();
+        let svg = format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='9' height='9'>\
+             <image width='9' height='9' href='{}'/></svg>",
+            path.display()
+        );
+        let parsed = parse_svg_image(svg.as_bytes());
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            parsed.unwrap().tree.root().children().is_empty(),
+            "the file was read"
+        );
+    }
 
     #[test]
     fn svg_without_xmlns_parses() {
