@@ -35,13 +35,39 @@ an e-mail client, without Zed-scale bloat.
   emit a `Changed` event (`TextInputEvent` / `TextAreaEvent`) on user edits
   only; programmatic `set_content` / `clear` stay silent. Both own IME via
   `EntityInputHandler` and call `set_native_text_focus` on click.
-- `TextArea` (compose body): plain text with `\n` line endings only (`\r\n`
+- Only the focused text field paints its selection. `TextArea::set_selection_color` overrides the highlight for text on a page of another color.
+- `prompt::init` (once at startup): confirmation dialogs in the theme where the
+  platform has no native ones (Linux; GPUI's fallback is always white). Enter
+  answers with the first non-cancel action, Escape with the cancel one or the last.
+- Selection drags are followed from a window-level listener, so they continue
+  outside the field. `TextArea::press_outside` lets a host place the caret from
+  clicks around the text.
+- Repeated clicks: double click selects the word (a masked `TextInput` selects
+  everything), triple click the field (`TextInput`) or line (`TextArea`).
+- `IconButton::hover_color`: hover feedback through the icon color and no
+  background, for buttons over surfaces of varying color.
+- `ContextMenu` entries fill the menu's width (minus its padding) wherever the
+  host places it, including content-sized anchored boxes.
+- `IconButton::compact`: the button is exactly its icon's size.
+- `Scrollbar::always_visible` / `thumb_colors`: for content that doesn't follow
+  the theme (the reader's page).
+- `TextArea` (compose body): text with `\n` line endings only (`\r\n`
   normalized on load/paste/input), soft-wraps to its width and grows to its
   content height (`min_lines` floor) — the caller provides the scroll
   container and may pass its `ScrollHandle` via `track_scroll` for caret
-  autoscroll. Tab is not consumed (parent focus navigation). Its actions are
+  autoscroll. Tab and Shift+Tab move focus to the next/previous field. Its actions are
   namespaced under `ui::text_area::*`; only `TextArea` / `TextAreaEvent` are
   re-exported at the crate root.
+- `TextArea` formatting (`text_area/rich.rs`, GPUI-free): character styles (bold,
+  italic, underline, family, color) and paragraph styles (align, list, indent,
+  size) over the buffer's text, followed by diffing each edit; undo keeps a
+  `RichText` per buffer step. Size is per paragraph because GPUI shapes a line at
+  one font size, so lines are shaped one by one, each with its own height and left
+  edge. The default family needs a bold that is a different face, the others not to
+  be GPUI's fallback, which has no weights, even for families it lists as
+  installed. `FontFamily` is Gmail's set; the editor shows the closest installed
+  font and the sent mail names the font itself with a CSS fallback. Export:
+  `formatted_html` (`None` when plain) and `plain_export`.
 - `TextArea` keeps GPUI-free editing logic (text/selection/undo in
   `text_area/buffer.rs`, soft-wrap row math in `text_area/rows.rs`) separate
   from the element so it is unit-tested without a window; reshaping happens
@@ -59,8 +85,9 @@ an e-mail client, without Zed-scale bloat.
 ## Verification
 
 - Component/unit tests in each module where logic exists (e.g. scrollbar
-  geometry, `text_area` buffer/rows core). GPUI `test-support` is not enabled
-  for this crate, so element/entity code is covered through its pure helpers.
+  geometry, `text_area` buffer/rows core). Focus navigation runs on
+  GPUI's `test-support` (dev-dependency); other element code is covered through
+  its pure helpers.
 - `cargo test -p ui`
 - Workspace clippy/fmt as in parent.
 

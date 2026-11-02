@@ -1,7 +1,7 @@
 //! Downloaded raw message → what `storage::Database::store_body` keeps.
 
-use mail_core::{html_to_text, inline_images, parse_message};
-use storage::NewAttachment;
+use mail_core::{inline_images, parse_message, readable_text};
+use storage::{Database, NewAttachment};
 
 /// Upper bound of image bytes inlined as `data:` URIs into one stored HTML
 /// body; images beyond it keep their `cid:` reference.
@@ -37,7 +37,7 @@ pub fn body_content(raw: &[u8]) -> BodyContent {
             } else {
                 html.clone()
             };
-            let plain = text.clone().unwrap_or_else(|| html_to_text(html));
+            let plain = readable_text(text.as_deref(), Some(html));
             (content, "html", plain)
         }
         (None, Some(text)) => (text.replace("\r\n", "\n"), "text", text.clone()),
@@ -62,6 +62,20 @@ pub fn body_content(raw: &[u8]) -> BodyContent {
         format,
         plain_text,
     }
+}
+
+/// Re-derives the plain text and preview of stored bodies written before
+/// HTML in text parts and named entities were handled, so their list rows
+/// stop showing markup. Failures only leave a row as it was.
+pub fn repair_stale_previews(db: &Database, account_id: i64) -> rusqlite::Result<()> {
+    for id in db.messages_with_markup_preview(account_id)? {
+        let Some(raw) = db.message_raw(id)? else {
+            continue;
+        };
+        let body = body_content(&raw);
+        db.update_body_text(id, &body.plain_text, &body.preview)?;
+    }
+    Ok(())
 }
 
 /// Whitespace collapsed to single spaces, cut at `max_chars` characters.
@@ -269,6 +283,19 @@ JVBERi0xLjQgZmFrZQ==\r\n\
         let headers_only = body_content(b"Subject: x\r\n\r\n");
         assert_eq!(headers_only.format, "text");
         assert!(headers_only.content.is_empty());
+    }
+
+    #[test]
+    fn html_in_the_text_part_gives_a_readable_preview() {
+        let raw = b"From: a@b\r\nSubject: s\r\nMIME-Version: 1.0\r\n\
+            Content-Type: multipart/alternative; boundary=x\r\n\r\n\
+            --x\r\nContent-Type: text/plain\r\n\r\n\
+            <!DOCTYPE html><html><head><style>p{}</style></head><body>Sua fatura</body></html>\r\n\
+            --x\r\nContent-Type: text/html\r\n\r\n\
+            <html><body><p>Sua fatura&zwnj; chegou</p></body></html>\r\n--x--\r\n";
+        let body = body_content(raw);
+        assert_eq!(body.format, "html");
+        assert_eq!(body.preview, "Sua fatura chegou");
     }
 
     #[test]

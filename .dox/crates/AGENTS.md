@@ -30,8 +30,9 @@ isolated tests, and shorter incremental compiles.
   (ring) shared by `imap`, `lettre` and `ureq`.
 - No `accounts` crate (decided): config in `storage`, secrets via GPUI's
   credential API in `bgmail`, OAuth/presets in `protocols`.
-- Prefer published `gpui` from crates.io (`0.2.2` workspace pin). Local Zed
-  (`~/dev/zed`) is read-only reference only.
+- `gpui` is `0.2.2` from crates.io, replaced by a patched copy in `vendor/gpui`
+  (see `.dox/vendor/AGENTS.md`). Local Zed (`~/dev/zed`) is read-only reference
+  only.
 - Empty / unused directories under `crates/` are not workspace members and must
   not receive DOX until they become real crates.
 - **Source API catalogs** live at `.dox/crates/<crate>/src/AGENTS.md` and must

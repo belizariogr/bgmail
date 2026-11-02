@@ -29,9 +29,10 @@ wiring to `storage`.
   release binary); outputs land in `target/[<triple>/]release/`.
   - Linux: `packaging/linux/BGMail.desktop` is the Handlebars desktop template
     for deb/AppImage/pacman (`Categories=Network;Email;`, mailto handler,
-    `StartupWMClass=BGMail`). Every window (main, compose, settings) sets
-    GPUI `app_id` to `root::WINDOW_APP_ID` = `"BGMail"` (desktop file
-    basename = binary name) so docks group them. Deb `Depends` lists the
+    `StartupWMClass=com.bgmail.main`). Each window has its own GPUI `app_id`
+    (user decision): main `com.bgmail.main`, settings `com.bgmail.settings`,
+    compose `com.bgmail.newmail` (`root::*_WINDOW_APP_ID`); only the main one
+    matches the desktop entry. Deb `Depends` lists the
     linked/dlopen'ed libs (xcb, xkbcommon, wayland, Vulkan + ICD, fontconfig);
     secrets go over D-Bus Secret Service (pure Rust), so a keyring daemon
     (gnome-keyring, KeePassXC…) is needed at runtime but not a package dep.
@@ -47,6 +48,34 @@ wiring to `storage`.
     exists; unpackaged runs keep notify-rust's PowerShell id (Windows drops
     toasts from an unregistered id). WiX shortcuts are assumed to carry the
     same id.
+- After removing the open message (delete, archive, junk, move), nothing is open and
+  the next message isn't marked read, as in Gmail without auto-advance (user
+  decision). The arrow keys open the row that took its place.
+- Each mailbox remembers its selection for the session (`remembered_selections`,
+  user decision): switching away and back selects the same rows again if still
+  listed, without marking them read. Not persisted; searches don't record one.
+- Zoom of the whole app (user decision): Ctrl/Cmd `+`/`-`/`0` (global actions
+  `AppZoomIn`/`AppZoomOut`/`AppZoomReset`, also in the View menu) step
+  `app_zoom`'s levels (75%–200%) through `RootView::zoom_app`, applied to every open
+  window with `Window::set_content_scale` (`vendor/gpui`) and on opening a new one,
+  persisted as `Config::ui_scale`. Coordinates from `window_bounds()` aren't scaled;
+  compare them with `window_frame::logical_window_size`. The page zoom of the reader
+  remains on Ctrl/Cmd + wheel only.
+- Sent mail can only be deleted (user decision): Archive, Junk, Move and dragging
+  are unavailable while the list shows Sent, and everywhere for a message that is
+  in Sent but not in the Inbox (`commands::message_only_in_sent`; Gmail's All Mail
+  copy doesn't change this, mail sent to oneself stays movable from the Inbox). One
+  such row blocks them for a whole multiple selection.
+- First-run setup (`onboarding::OnboardingView`, rendered by `RootView` instead
+  of the toolbar and columns, under a title bar with the window controls): welcome
+  → theme → account → conclusion. Shown only while `needs_onboarding` holds (setup
+  never finished and no account), so existing profiles skip it; finishing or
+  skipping persists `onboarding_completed`. The account step embeds
+  `SettingsView::form_only` (one form implementation). The default-mail-app switch
+  is opt-in (user decision: a switch on the last step), applied on finish, asked
+  once; a system message keeps the screen open until the next click.
+- The theme choice persists as `Config::light_theme`; change it through
+  `RootView::set_appearance`, never `theme::set_theme` directly from a view.
 - The reader shows bodies with `html_view::HtmlView` (sanitized + themed by
   `mail_html`). Remote images are blocked unless the user loads them:
   clicking the privacy shield next to the subject loads them for that
@@ -57,7 +86,7 @@ wiring to `storage`.
   `mail_html::is_openable_link` (http/https/mailto), secondary clicks open a
   `ui::ContextMenu` (open/copy link, copy, select all), and Cmd/Ctrl+F
   (`FindInMessage`, also a global action) opens the find bar. The reader
-  zoom (Ctrl/Cmd `+`/`-`/`0`, Ctrl/Cmd + wheel; `HtmlView`) shows in the
+  zoom (Ctrl/Cmd + wheel; `HtmlView`) shows in the
   status bar when not 100%.
   `html_view::init` is called at startup.
 - Printing (`MessagePrint`, Cmd/Ctrl+P) goes through the system browser
@@ -65,9 +94,13 @@ wiring to `storage`.
   writes `mail_html::print_document` (light page, header, CSP allowing only
   `data:` images and its own nonce'd `print()` script) to a private temp
   file and `open_with_system` opens it.
-- Reader robustness: HTML over 1 MB is shown as plain text (with "Show
-  formatted"), bodies `html_view` refuses (too deep) as plain text, and a
-  message whose formatted rendering was interrupted by a crash (the
+- Reader robustness: HTML is always shown formatted, whatever its size (user
+  decision). Bodies from 256 KB on are sanitized, parsed and laid out on a
+  background thread with a placeholder meanwhile (`ReaderJob`; newest selection
+  wins); smaller ones build in place, so no placeholder flashes. No parsed
+  document cache: measured, the largest real message builds in about 180 ms, so a
+  cache would only save that on reopening at a memory cost. Bodies
+  `html_view` refuses (too deep) show as plain text, and a message whose formatted rendering was interrupted by a crash (the
   `crash_guard` marker survived) as plain text, each with a notice. The
   release profile keeps `panic = "abort"` (decided with two opposing
   reviews): unwinding through Blitz/GPUI state isn't safe and stack overflow
@@ -75,13 +108,15 @@ wiring to `storage`.
 - Compose (`compose::ComposeView`, one window at a time): real editors
   (`ui::TextInput` To/Cc/Bcc/Subject, `ui::TextArea` body), From picker
   (`ui::ContextMenu`; local accounts listed but can't send), attachments via
-  picker / drag-and-drop read off the UI thread (25 MB total cap), plain-text
-  send only. Send (button, `ComposeSend`, Cmd/Ctrl+Enter) validates with
+  picker / drag-and-drop read off the UI thread (25 MB total cap). Formatting tools on
+  the send button's row, as in Gmail (undo, font, size, B/I/U, color, align, lists, indent) drives
+  `ui::TextArea`; formatted text is sent as HTML with a plain-text version, and
+  unformatted new mail stays plain text. Send (button, `ComposeSend`, Cmd/Ctrl+Enter) validates with
   `mail_core::parse_address_list` (inline per-field errors) and hands the
   `Draft` to `RootView::send_draft` in a task (never while root is leased);
   success closes the window, errors show in a banner. Replies prefill from
   `ComposeInit` (`RootView::open_compose_with`; an open window is refilled)
-  and focus the body above the quote; forwards focus To. Discard asks for
+  and focus the body; forwards focus To. Discard asks for
   confirmation only after edits; closing the window does not prompt.
 - **Modules (flat under `src/`):**
   - `root` — main three-column UI + selection/layout state.
@@ -119,6 +154,12 @@ wiring to `storage`.
     awaits engine events in a GPUI task; secrets are read with
     `cx.read_credentials` asynchronously (GPUI keychain: Keychain /
     Credential Manager / Secret Service), never on the startup path.
+  - `recipients` — To/Cc/Bcc field: addresses as cards (name, with the full
+    address on hover), contact suggestions while typing, text that isn't an address
+    stays to be fixed.
+  - `default_mail_app` — status and registration as the system's mail app, with
+    OS-specific code behind one API (`unsafe` only for LaunchServices on macOS).
+  - `instance` — hand-off of `mailto:` links between launches.
   - `dates` — local-time list/reader dates (chrono `clock`).
   - `notifications` — desktop notifications (`notify-rust`) on a short-lived
     thread; bursts summarized.
@@ -146,6 +187,25 @@ wiring to `storage`.
 - Windows that read `RootView` while rendering (settings) are opened with
   `cx.defer`, outside `RootView`'s update (GPUI renders new windows
   synchronously; re-entering the entity panics).
+- Contacts: `storage` catalog filled by itself, with no screen to manage it:
+  senders with their name and recipients without one, by `mail_sync` for synced
+  mail (Junk excluded, backfilled once per account) and `send_draft` for what is
+  sent. A known name is never overwritten; a blank one is filled by later mail.
+- Accounts have two editable names (Settings ▸ Accounts, also when adding one):
+  the account name, listed in the sidebar, and the sender name, in the "From" of
+  their mail. A blank sender name uses the account name.
+- Default mail app: Settings ▸ General shows whether BGMail handles `mailto:`
+  and offers "Make default" (`default_mail_app`, one API per OS, run off the UI
+  thread and only on that click): Linux `xdg-mime` (refused when no installed
+  desktop entry exists), macOS LaunchServices (needs the bundle, which declares
+  the scheme through the packager's `deep-link-protocols`), Windows registers the
+  app under HKCU and opens the system settings, where only the user can choose.
+- `mailto:` links arrive as a process argument (Linux, Windows) or through
+  `on_open_urls` (macOS bundle) and become a prefilled compose window
+  (`RootView::open_mailto`); they never send and never replace a message with
+  edits. A launch with a link hands it to the running instance and exits
+  (`instance`: loopback TCP, private `~/.config/BGMail/instance` file with port
+  and random token). Plain launches are unchanged.
 - Message list: virtualized with GPUI `uniform_list` (uniform row height;
   only visible rows are built) and the `ui::Scrollbar` on the list handle's
   `base_handle`. It owns a focus handle with key context `MessageList`
@@ -162,10 +222,40 @@ wiring to `storage`.
   with `mail_core::attachment_content`, written to a private temp copy,
   `open_with_system`), Save As… (`prompt_for_new_path` starting in
   Downloads), Save to Downloads. Results/errors go to the status bar.
-- Toolbar: compose + Get mail (sync now) on the left; reply / reply all /
+- List header: Get mail (sync now), filter (All / Unread / Starred /
+  Attachments; session state, the open message stays listed even if it stops
+  matching) and more. Toolbar: compose on the left; reply / reply all /
   forward, trash / archive / junk, flag / mark read|unread / move centered;
-  message buttons are disabled when their command isn't available.
-- Mail shortcuts (mac / other): Reply `cmd-r`/`ctrl-r`, Reply All
+  the star button is filled and yellow on a starred message;
+  message buttons are disabled when their command isn't available. Move opens
+  a dropdown of `CommandContext::move_targets`.
+- Reader recipients, as in Gmail: "to" and first names on one line ("me" for the
+  account's address), the whole address on hover, To and Cc in full behind a chevron.
+- Dragging a list row (its whole selection when it is part of one) onto a folder of
+  the same account moves it. It counts once past 100 px, for good: until then nothing
+  follows the pointer and folders refuse the drop. While it counts the cursor is the closed hand; Windows has none, so
+  the system's is hidden and one painted in its place. A selection across accounts can't be dropped,
+  nor can Sent, Drafts or Starred take mail.
+- Message rows: Ctrl/Cmd+click toggles, Shift+click and Shift+arrows take a
+  range, Ctrl/Cmd+A selects all (list focus only). Two or more selected rows
+  (`multi_selection`, with `selected_message_id` = `None`) show, as in macOS
+  Mail, the row picked last (`multi_preview`, not marked read) on a sheet 10%
+  smaller, its page scaled to match, with tilted, shadowed sheets behind it and a floating bar: Delete, Archive, Junk, star,
+  read/unread and Move, or Restore and Delete forever (confirmed) in the Trash.
+  In the Trash, the toolbar's delete button, a row's Delete button and the Delete
+  key delete for good, after a confirmation. Bulk star and read keep the selection and follow the whole selection (any
+  unread: mark all read; not all starred: star all). Any other bulk action never deletes for
+  good and leaves nothing selected. On hover Reply / Delete appear centered at
+  the right, icon-sized and with no background (their icons brighten on hover);
+  only the subject shrinks for them, so the date and star stay in place. Trash shows no unread badge.
+- Replies follow Gmail: the editor holds only what the user writes, and below
+  it a `⋯` button reveals the attribution line and the original, rendered behind
+  a side bar (read-only, parsed off the UI thread when first shown). The sent
+  message has `In-Reply-To`/`References`, a `Re:` subject, Gmail's attribution
+  line, `gmail_quote` markup around the original's sanitized HTML
+  (`mail_html::quotable_html`, without `cid:` images) and a `> ` plain-text
+  version. Forwards and edited unsent messages keep their text in the editor.
+- Command palette: `cmd-k` / `ctrl-k`. Mail shortcuts (mac / other): Reply `cmd-r`/`ctrl-r`, Reply All
   `cmd-shift-r`/`ctrl-shift-r`, Forward `cmd-shift-f`/`ctrl-shift-f`, Mark
   read/unread `cmd-shift-u`/`ctrl-shift-m` (Ctrl+Shift+U is the Linux IME
   Unicode key), Get New Mail `cmd-shift-n`/`ctrl-shift-n`; also in the
@@ -196,7 +286,8 @@ wiring to `storage`.
 
 ## Verification
 
-- `cargo test -p bgmail` (sanitize, config, locale, layout helpers, …).
+- `cargo test -p bgmail` (sanitize, config, locale, layout helpers, …; drags run in
+  simulated windows through GPUI's `test-support`).
 - `cargo run -p bgmail`.
 - Packaging: `cargo packager --release` (on Linux add `NO_STRIP=1` when the
   host libs use `.relr.dyn`, which linuxdeploy's bundled `strip` rejects);

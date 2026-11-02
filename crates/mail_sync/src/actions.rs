@@ -1014,6 +1014,7 @@ mod tests {
             email: String::new(),
             provider: PROVIDER_LOCAL.into(),
             config_json: String::new(),
+            sender_name: String::new(),
         }));
     }
 }

@@ -28,6 +28,7 @@ use crate::account_setup::{
 };
 use crate::actions::ComposeClose;
 use crate::data;
+use crate::default_mail_app;
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::root::RootView;
 
@@ -83,6 +84,7 @@ impl SettingsSection {
 /// rest is the state of the background lookups.
 struct AccountForm {
     name: Entity<TextInput>,
+    sender_name: Entity<TextInput>,
     email: Entity<TextInput>,
     password: Entity<TextInput>,
     imap_host: Entity<TextInput>,
@@ -117,6 +119,7 @@ impl AccountForm {
             cx.new(|cx| TextInput::new(placeholder, cx))
         };
         let name = input(Key::AccountNamePlaceholder.tr(language));
+        let sender_name = input(Key::AccountSenderPlaceholder.tr(language));
         let email = input(Key::AccountEmailPlaceholder.tr(language));
         let password = input("");
         let imap_host = input("imap.example.com");
@@ -156,6 +159,7 @@ impl AccountForm {
 
         Self {
             name,
+            sender_name,
             email,
             password,
             imap_host,
@@ -243,6 +247,11 @@ struct OAuthFlow {
 /// reflected in the main window immediately.
 pub(crate) struct SettingsView {
     pub(crate) section: SettingsSection,
+    /// Whether BGMail is the default mail app, once the system answered.
+    default_app: Option<default_mail_app::Status>,
+    default_app_checked: bool,
+    /// What happened the last time the user asked to make it the default.
+    default_app_message: Option<SharedString>,
     /// Back-reference to the main view, which owns accounts and preferences.
     /// Weak so the settings window never keeps it alive.
     root: WeakEntity<RootView>,
@@ -256,9 +265,14 @@ pub(crate) struct SettingsView {
     form_open: bool,
     /// Account whose password is being replaced inline.
     password_edit: Option<(i64, Entity<TextInput>)>,
+    /// Account whose names are being edited, with the fields holding them: what
+    /// it is listed under and what its mail goes out with.
+    names_edit: Option<(i64, Entity<TextInput>, Entity<TextInput>)>,
     oauth: Option<OAuthFlow>,
     /// Last failure of a per-account action (re-sign-in), shown under its row.
     account_messages: HashMap<i64, FailureMessage>,
+    /// Shows only the "Add account" form, embedded in the first-run setup.
+    form_only: bool,
 }
 
 impl SettingsView {
@@ -266,15 +280,27 @@ impl SettingsView {
     /// `root` on every render instead.
     pub(crate) fn new(_accounts: Vec<data::Account>, root: WeakEntity<RootView>) -> Self {
         Self {
+            default_app: None,
+            default_app_checked: false,
+            default_app_message: None,
             section: SettingsSection::General,
             root,
             root_observation: None,
             form: None,
             form_open: false,
             password_edit: None,
+            names_edit: None,
             oauth: None,
             account_messages: HashMap::new(),
+            form_only: false,
         }
+    }
+
+    /// The "Add account" form alone, for the first-run setup to embed.
+    pub(crate) fn form_only(root: WeakEntity<RootView>) -> Self {
+        let mut view = Self::new(Vec::new(), root);
+        view.form_only = true;
+        view
     }
 
     /// Switches to `section` (e.g. "Add account" from the welcome screen,
@@ -518,8 +544,13 @@ impl SettingsView {
         secret: String,
         cx: &mut Context<Self>,
     ) {
+        let sender_name = self
+            .form
+            .as_ref()
+            .map(|form| AccountForm::text(&form.sender_name, cx))
+            .unwrap_or_default();
         let added = self.root.update(cx, |root, cx| {
-            root.add_remote_account(&name, config, secret, cx)
+            root.add_remote_account(&name, &sender_name, config, secret, cx)
         });
         match added {
             Ok(Ok(_)) => {
@@ -718,6 +749,46 @@ impl SettingsView {
         cx.notify();
     }
 
+    fn begin_names_edit(
+        &mut self,
+        account: &storage::Account,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let language = cx.language();
+        let name = cx.new(|cx| {
+            let mut input = TextInput::new(Key::AccountNamePlaceholder.tr(language), cx);
+            input.set_content(&account.name, cx);
+            input
+        });
+        let sender = cx.new(|cx| {
+            let mut input = TextInput::new(Key::AccountSenderPlaceholder.tr(language), cx);
+            input.set_content(account.from_name(), cx);
+            input
+        });
+        name.read(cx).focus_handle(cx).focus(window);
+        self.names_edit = Some((account.id, name, sender));
+        cx.notify();
+    }
+
+    fn save_names(&mut self, cx: &mut Context<Self>) {
+        let Some((account_id, name_input, sender_input)) = self.names_edit.take() else {
+            return;
+        };
+        let name = AccountForm::text(&name_input, cx);
+        if name.trim().is_empty() {
+            self.names_edit = Some((account_id, name_input, sender_input));
+            return;
+        }
+        let sender = AccountForm::text(&sender_input, cx);
+        self.root
+            .update(cx, |root, cx| {
+                root.set_account_names(account_id, &name, &sender, cx)
+            })
+            .ok();
+        cx.notify();
+    }
+
     fn save_password(&mut self, cx: &mut Context<Self>) {
         let Some((account_id, input)) = self.password_edit.take() else {
             return;
@@ -773,6 +844,82 @@ impl SettingsView {
     }
 
     // ----- Rendering ----------------------------------------------------------
+
+    /// Asks the system off the UI thread: it means running a command.
+    fn refresh_default_app(&mut self, cx: &mut Context<Self>) {
+        self.default_app_checked = true;
+        let status = cx.background_spawn(async { default_mail_app::status() });
+        cx.spawn(async move |this, cx| {
+            let status = status.await;
+            this.update(cx, |this, cx| {
+                this.default_app = Some(status);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn make_default_app(&mut self, cx: &mut Context<Self>) {
+        self.default_app_message = None;
+        let outcome = cx.background_spawn(async { default_mail_app::set_default() });
+        cx.spawn(async move |this, cx| {
+            let outcome = outcome.await;
+            this.update(cx, |this, cx| {
+                this.default_app_message = default_app_message(&outcome, cx.language());
+                this.refresh_default_app(cx);
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_default_mail_app(
+        &mut self,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        if !self.default_app_checked {
+            self.refresh_default_app(cx);
+        }
+        let status = self.default_app;
+        v_flex()
+            .gap_1()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .gap_4()
+                    .py_1()
+                    .child(Label::new(Key::DefaultAppLabel.tr(language)).color(Color::Muted))
+                    .child(match status {
+                        Some(default_mail_app::Status::IsDefault) => {
+                            Label::new(Key::DefaultAppIsDefault.tr(language)).into_any_element()
+                        }
+                        Some(status) => h_flex()
+                            .gap_3()
+                            .when(status == default_mail_app::Status::NotDefault, |el| {
+                                el.child(
+                                    Label::new(Key::DefaultAppNotDefault.tr(language))
+                                        .color(Color::Muted),
+                                )
+                            })
+                            .child(
+                                Button::new("make-default-app", Key::DefaultAppSet.tr(language))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.make_default_app(cx);
+                                    })),
+                            )
+                            .into_any_element(),
+                        None => div().into_any_element(),
+                    }),
+            )
+            .children(self.default_app_message.clone().map(|message| {
+                Label::new(message)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+            }))
+    }
 
     fn render_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
@@ -839,6 +986,7 @@ impl SettingsView {
                         .child(Label::new(Key::LanguageLabel.tr(language)).color(Color::Muted))
                         .child(self.render_language_picker(language, cx)),
                 )
+                .child(self.render_default_mail_app(language, cx))
                 .into_any_element(),
             SettingsSection::Accounts => self.render_accounts(window, cx).into_any_element(),
             SettingsSection::Appearance => {
@@ -865,8 +1013,10 @@ impl SettingsView {
                                     } else {
                                         ButtonStyle::Subtle
                                     })
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        theme::set_theme(theme::Theme::light(), cx);
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let _ = this.root.update(cx, |root, cx| {
+                                            root.set_appearance(Appearance::Light, cx);
+                                        });
                                         cx.notify();
                                     })),
                             )
@@ -877,8 +1027,10 @@ impl SettingsView {
                                     } else {
                                         ButtonStyle::Subtle
                                     })
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        theme::set_theme(theme::Theme::dark(), cx);
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let _ = this.root.update(cx, |root, cx| {
+                                            root.set_appearance(Appearance::Dark, cx);
+                                        });
                                         cx.notify();
                                     })),
                             ),
@@ -1051,6 +1203,17 @@ impl SettingsView {
             .is_some_and(|flow| flow.target == OAuthTarget::Account(id));
 
         let mut actions = h_flex().gap_1().flex_shrink_0();
+        let editing = account.clone();
+        actions = actions.child(
+            Button::new(
+                ("account-rename", id as usize),
+                Key::AccountEditNames.tr(language),
+            )
+            .style(ButtonStyle::Subtle)
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.begin_names_edit(&editing, window, cx)),
+            ),
+        );
         if signing_in {
             actions = actions.child(
                 Button::new(
@@ -1121,7 +1284,7 @@ impl SettingsView {
                                     .child(badge_element(badge, cx)),
                             )
                             .child(
-                                Label::new(account.email.clone())
+                                Label::new(format!("{} <{}>", account.from_name(), account.email))
                                     .size(LabelSize::Small)
                                     .color(Color::Muted)
                                     .single_line(),
@@ -1135,6 +1298,46 @@ impl SettingsView {
                     .child(actions),
             );
 
+        if let Some((_, name, sender)) = self.names_edit.as_ref().filter(|(edit, _, _)| *edit == id)
+        {
+            row = row
+                .child(labeled_field(
+                    Key::AccountFieldName.tr(language),
+                    name,
+                    window,
+                    cx,
+                ))
+                .child(labeled_field(
+                    Key::AccountFieldSender.tr(language),
+                    sender,
+                    window,
+                    cx,
+                ))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new(
+                                ("account-names-save", id as usize),
+                                Key::AccountSave.tr(language),
+                            )
+                            .style(ButtonStyle::Filled)
+                            .on_click(cx.listener(|this, _, _, cx| this.save_names(cx))),
+                        )
+                        .child(
+                            Button::new(
+                                ("account-names-cancel", id as usize),
+                                Key::AccountCancel.tr(language),
+                            )
+                            .style(ButtonStyle::Subtle)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.names_edit = None;
+                                cx.notify();
+                            })),
+                        ),
+                );
+        }
         if let Some((_, input)) = self.password_edit.as_ref().filter(|(edit, _)| *edit == id) {
             row = row.child(
                 h_flex()
@@ -1195,10 +1398,20 @@ impl SettingsView {
             .border_1()
             .border_color(colors.border)
             .bg(colors.surface_background)
-            .child(Label::new(Key::AccountAddTitle.tr(language)).weight(FontWeight::SEMIBOLD))
+            .when(!self.form_only, |card| {
+                card.child(
+                    Label::new(Key::AccountAddTitle.tr(language)).weight(FontWeight::SEMIBOLD),
+                )
+            })
             .child(labeled_field(
                 Key::AccountFieldName.tr(language),
                 &form.name,
+                window,
+                cx,
+            ))
+            .child(labeled_field(
+                Key::AccountFieldSender.tr(language),
+                &form.sender_name,
                 window,
                 cx,
             ))
@@ -1484,6 +1697,12 @@ impl Render for SettingsView {
                 self.root_observation = Some(cx.observe(&root, |_, _, cx| cx.notify()));
             }
         }
+        if self.form_only {
+            if self.form.is_none() {
+                self.form = Some(AccountForm::new(cx.language(), cx));
+            }
+            return self.render_form(false, window, cx).into_any_element();
+        }
         let colors = cx.theme().colors();
 
         h_flex()
@@ -1503,6 +1722,7 @@ impl Render for SettingsView {
                     .overflow_y_scroll()
                     .child(self.render_content(window, cx)),
             )
+            .into_any_element()
     }
 }
 
@@ -1517,6 +1737,25 @@ fn settings_row(
         .py_1()
         .child(Label::new(label.into()).color(Color::Muted))
         .child(Label::new(value.into()))
+}
+
+/// What to tell the user after asking to become the default mail app.
+pub(crate) fn default_app_message(
+    outcome: &Result<default_mail_app::Outcome, default_mail_app::Error>,
+    language: Language,
+) -> Option<SharedString> {
+    match outcome {
+        Ok(default_mail_app::Outcome::Done) => None,
+        Ok(default_mail_app::Outcome::FinishInSystemSettings) => {
+            Some(Key::DefaultAppFinishInSettings.tr(language).into())
+        }
+        Err(default_mail_app::Error::NotInstalled) => {
+            Some(Key::DefaultAppNotInstalled.tr(language).into())
+        }
+        Err(default_mail_app::Error::Failed(detail)) => {
+            Some(format!("{}: {detail}", Key::DefaultAppFailed.tr(language)).into())
+        }
+    }
 }
 
 /// Bordered box around a text field; the border follows focus.
@@ -1627,4 +1866,26 @@ fn message_element(message: &FailureMessage, language: Language) -> impl IntoEle
                     .color(Color::Muted),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_app_outcomes_tell_the_user_what_to_do() {
+        use default_mail_app::{Error, Outcome};
+        let language = Language::Portuguese;
+        assert_eq!(default_app_message(&Ok(Outcome::Done), language), None);
+        assert_eq!(
+            default_app_message(&Ok(Outcome::FinishInSystemSettings), language),
+            Some(Key::DefaultAppFinishInSettings.tr(language).into())
+        );
+        assert_eq!(
+            default_app_message(&Err(Error::NotInstalled), language),
+            Some(Key::DefaultAppNotInstalled.tr(language).into())
+        );
+        let failed = default_app_message(&Err(Error::Failed("boom".into())), language).unwrap();
+        assert!(failed.ends_with(": boom"));
+    }
 }

@@ -8,6 +8,7 @@
 
 pub mod actions;
 pub mod body;
+mod contacts;
 mod engine;
 mod events;
 pub mod plan;

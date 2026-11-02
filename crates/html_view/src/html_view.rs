@@ -6,6 +6,7 @@
 
 #[allow(dead_code, clippy::all, unused_imports)]
 mod blitz_paint;
+pub mod contrast;
 pub mod display_list;
 pub mod document;
 pub mod element;
@@ -17,10 +18,11 @@ pub mod remote;
 pub mod resources;
 pub mod text;
 
+pub use contrast::DarkPage;
 pub use display_list::DisplayList;
 pub use document::{
-    Appearance, DocumentMode, DocumentOptions, HtmlDocument, RenderError, DEFAULT_SELECTION_COLOR,
-    MAX_NESTING_DEPTH,
+    Appearance, DetachedDocument, DocumentMode, DocumentOptions, HtmlDocument, RenderError,
+    DEFAULT_SELECTION_COLOR, MAX_NESTING_DEPTH,
 };
 pub use element::{init, HtmlElement, HtmlView, HtmlViewEvent};
 pub use interaction::{HitInfo, PointerButton, PointerInput, PointerModifiers, PointerPhase};

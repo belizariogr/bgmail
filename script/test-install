@@ -40,7 +40,7 @@ grep -qx "Name=BGMail" "$desktop" || fail "Name not rendered"
 grep -qx "Exec=$home/.local/bgmail.app/bin/bgmail %u" "$desktop" || fail "Exec not absolute"
 grep -qx "Icon=$home/.local/bgmail.app/share/icons/hicolor/512x512/apps/bgmail.png" "$desktop" \
     || fail "Icon not absolute"
-grep -qx "StartupWMClass=BGMail" "$desktop" || fail "StartupWMClass lost"
+grep -qx "StartupWMClass=com.bgmail.main" "$desktop" || fail "StartupWMClass lost"
 grep -q "^Comment=." "$desktop" || fail "Comment not rendered"
 if grep -q "{{" "$desktop"; then fail "unrendered template: $(grep "{{" "$desktop")"; fi
 

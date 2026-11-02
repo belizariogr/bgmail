@@ -6,7 +6,7 @@ use crate::membership::{message_ids_in_folder, settle_after_location_loss};
 use crate::types::{Account, Folder, FolderSyncState};
 use crate::Database;
 
-const ACCOUNT_COLUMNS: &str = "id, name, email, provider, config_json";
+const ACCOUNT_COLUMNS: &str = "id, name, email, provider, config_json, sender_name";
 const FOLDER_COLUMNS: &str = "id, account_id, path, display_name, remote_name, role";
 
 fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
@@ -16,6 +16,7 @@ fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
         email: row.get(2)?,
         provider: row.get(3)?,
         config_json: row.get(4)?,
+        sender_name: row.get(5)?,
     })
 }
 
@@ -71,6 +72,21 @@ impl Database {
         self.conn().execute(
             "UPDATE accounts SET name = ?1, config_json = ?2 WHERE id = ?3",
             params![name, config_json, id],
+        )?;
+        Ok(())
+    }
+
+    /// Sets the names of an account: what it is listed under and what its mail goes
+    /// out with.
+    pub fn set_account_names(
+        &self,
+        id: i64,
+        name: &str,
+        sender_name: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE accounts SET name = ?1, sender_name = ?2 WHERE id = ?3",
+            params![name, sender_name, id],
         )?;
         Ok(())
     }
@@ -309,6 +325,23 @@ mod tests {
             )
             .unwrap();
         assert!(db.get_account(fx.local_account).unwrap().is_some());
+    }
+
+    #[test]
+    fn mail_goes_out_with_the_account_name_until_a_sender_name_is_set() {
+        let (_file, db, fx) = remote_db();
+        let account = db.get_account(fx.account).unwrap().unwrap();
+        assert_eq!(account.sender_name, "");
+        assert_eq!(account.from_name(), account.name);
+
+        db.set_account_names(fx.account, "Work", "Ann Lee").unwrap();
+        let account = db.get_account(fx.account).unwrap().unwrap();
+        assert_eq!(account.name, "Work");
+        assert_eq!(account.from_name(), "Ann Lee");
+
+        db.set_account_names(fx.account, "Work", "  ").unwrap();
+        let account = db.get_account(fx.account).unwrap().unwrap();
+        assert_eq!(account.from_name(), "Work");
     }
 
     #[test]

@@ -372,6 +372,19 @@
 - ⬜ POP3 (postponed, see decision)
 - ⬜ Microsoft OAuth (Outlook.com requires it; presets flag it)
 - ⬜ Persist rotated OAuth refresh tokens (kept in memory today)
+- ✅ First-run setup in the main window (`onboarding`): welcome, theme cards with
+      a mini preview, account (the Settings form embedded), conclusion with an
+      opt-in "default mail app" switch. Shown only to a profile with no account
+      that never finished it. The theme choice is now persisted
+      (`Config::light_theme`, also from Settings).
+- ✅ Sent mail can only be deleted: Archive, Junk, Move and dragging are blocked
+      for it (`commands::message_only_in_sent`, `selection_movable`).
+- ✅ Zoom of the whole app with Ctrl/Cmd `+`/`-`/`0` in every window, persisted
+      (`app_zoom`, content scale patched into `vendor/gpui`).
+- ✅ Each mailbox remembers its selected messages for the session.
+- ✅ Removing the open message leaves nothing open, as in Gmail.
+- ⬜ Persist the UI language (`locale` always starts in English, so the setup does
+      too); consider a language picker on the welcome step.
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
 - ✅ Read / mark read-unread (opening marks read on the server; toggle via
@@ -380,7 +393,43 @@
       `ui::TextArea` body, quoting, forwarded attachments, address validation)
 - ✅ Send (SMTP + Gmail XOAUTH2) through the outbox; copy APPENDed to Sent
       unless the server files it (Gmail)
-- ⬜ Drafts (save/resume) and HTML composing (plain text only today)
+- ✅ Mail list and reader round (user list, 2026-11-02): Ctrl/Cmd+K palette;
+      `com.bgmail.main|settings|newmail` window classes; word/field selection on
+      repeated clicks in `TextInput`; multiple selection (Ctrl/Cmd/Shift, Shift+
+      arrows, Ctrl/Cmd+A) with the message on a stack of sheets, as in macOS Mail, and bulk Delete/Archive/Junk; row
+      actions centered at the right, icon-sized, only the subject giving way;
+      working Archive on Gmail, Move menu and list filter; Get mail moved above
+      the list; star icon and "Starred"/"Com estrela"; no badge on Trash; always
+      formatted; always-visible reader scrollbars; `[Gmail]/Rascunhos` as Drafts;
+      replies with Gmail's markup; readable previews and quotes (HTML in the
+      text part, all named entities; stored previews repaired on worker start);
+      opaque selection over white pages; web fonts registered per file
+      (messages no longer turn italic).
+- ✅ Bulk star, read/unread and move; bulk restore and confirmed permanent
+      deletion in the Trash
+- ✅ Default mail app: Settings ▸ General (status + "Make default"), `mailto:` links
+      open a prefilled compose window, later launches hand links to the running one
+- ⬜ Confirm the default mail app on macOS and Windows (only Linux was exercised)
+- ✅ Account name and sender name, both editable; contact catalog filled from mail; recipient fields with
+      cards and suggestions
+- ✅ Drag messages from the list onto a folder, past 100 px
+- ✅ Text fixed for a white page stays readable on a dark page
+- ⬜ Selection on a dark page is still translucent, so a translucent window
+      shows the desktop through it
+- ✅ Replies quote the original's formatted HTML (images embedded with `cid:` are
+      left out)
+- ⬜ Editing or removing the quote in the reply composer (read-only today)
+- ⬜ Confirm on a real account: Archive, Move, Drafts folder, a sent reply
+- ✅ Large HTML bodies (from 256 KB) build on a background thread; texture upload
+      of their images on first paint still happens on the UI thread
+- ✅ Reply composer as in Gmail: quote out of the editor, behind a `⋯` button,
+      rendered with its formatting
+- ✅ HTML composing: formatting bar in the compose window (font, size, B/I/U, color,
+      alignment, lists, indent, undo/redo)
+- ⬜ Text size within a line (per paragraph today: GPUI shapes a line at one size);
+      links and images in the editor; pasting with formatting; editing an unsent
+      message loses its formatting
+- ⬜ Drafts (save/resume)
 - ⬜ Set `\\Answered` on the original after a reply is sent
 - ✅ Move / delete / archive / junk, reflected on the server (optimistic
       local change + queued op, MOVE or COPY/EXPUNGE)
@@ -420,6 +469,19 @@
       to close or for the read timeout, since `shutdown` doesn't wake it. Stopping
       an account still returns at once and detaches the worker
 - ⬜ Threads/conversations view (thread ids are stored; list is flat)
+
+- ✅ Tab / Shift+Tab move between text fields (`ui::FocusNext`/`FocusPrevious`;
+      `TextInput`/`TextArea` are tab stops; the command palette traps Tab)
+- ✅ Message list rows show Reply and Delete on hover (right edge); Delete keeps
+      the selection and is omitted in Trash
+- ✅ New-mail notifications carry the app icon on Linux (bundle icon or theme
+      name + `desktop-entry` hint)
+- ✅ Gmail: new mail met in All Mail before the Inbox is still announced
+      (`plan::is_new_arrival`)
+- 🔄 Confirm why a Gmail message arrived with no notification on 2026-11-02:
+      delivery works and config is on, but the cause wasn't reproduced. Errors go
+      only to stderr (`/dev/null` when launched from the desktop); log them if it
+      happens again
 
 ## Stage 5 — Polish
 - ✅ Rename product to **BGMail** (binary, window/menu titles, themes, docs;

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     point, px, quad, relative, size, App, Axis, BorderStyle, Bounds, Corners, CursorStyle,
     DispatchPhase, Edges, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, Position, ScrollHandle, Style, Window,
 };
 use theme::ActiveTheme;
@@ -66,6 +66,8 @@ pub struct Scrollbar {
     state: Entity<ScrollbarState>,
     handle: ScrollHandle,
     axis: Axis,
+    always_visible: bool,
+    thumb_colors: Option<(Hsla, Hsla)>,
 }
 
 impl Scrollbar {
@@ -75,6 +77,8 @@ impl Scrollbar {
             state,
             handle,
             axis: Axis::Vertical,
+            always_visible: false,
+            thumb_colors: None,
         }
     }
 
@@ -84,7 +88,23 @@ impl Scrollbar {
             state,
             handle,
             axis: Axis::Horizontal,
+            always_visible: false,
+            thumb_colors: None,
         }
+    }
+
+    /// Keeps the thumb on screen whenever the content overflows, instead of
+    /// revealing it on hover or scroll.
+    pub fn always_visible(mut self) -> Self {
+        self.always_visible = true;
+        self
+    }
+
+    /// Thumb colors (resting, dragged) for content that doesn't follow the
+    /// theme, e.g. a white message page in the dark theme.
+    pub fn thumb_colors(mut self, resting: Hsla, dragged: Hsla) -> Self {
+        self.thumb_colors = Some((resting, dragged));
+        self
     }
 }
 
@@ -312,13 +332,12 @@ impl Element for Scrollbar {
         // progress, or briefly after scrolling (even via the mouse wheel). The
         // hovered flag is updated from the mouse-move handler so visibility is
         // never stale (a plain hover move otherwise wouldn't repaint the view).
-        if hovered || dragging || recently_scrolled {
+        if self.always_visible || hovered || dragging || recently_scrolled {
             let colors = cx.theme().colors();
-            let thumb_color = if dragging {
-                colors.scrollbar_thumb_hover
-            } else {
-                colors.scrollbar_thumb
-            };
+            let (resting, dragged) = self
+                .thumb_colors
+                .unwrap_or((colors.scrollbar_thumb, colors.scrollbar_thumb_hover));
+            let thumb_color = if dragging { dragged } else { resting };
 
             window.paint_quad(quad(
                 layout.thumb,

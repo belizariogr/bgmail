@@ -16,6 +16,9 @@ repository instead of living in someone's checkout.
   - `vendor/taffy/` (DioxusLabs/taffy rev `c256056`, MIT), wired by
     `[patch."https://github.com/DioxusLabs/taffy"]` in the root `Cargo.toml`
     and in `vendor/blitz/Cargo.toml`.
+  - `vendor/gpui/` (gpui 0.2.2 from crates.io, Apache-2.0, without `examples/`,
+    `tests/` and their manifest targets), wired by `[patch.crates-io]` in the root
+    `Cargo.toml`; its own workspace, listed in `[workspace] exclude`.
 - Does not own: code vendored inside a crate (e.g.
   `crates/html_view/src/blitz_paint/`, documented there).
 
@@ -27,6 +30,16 @@ repository instead of living in someone's checkout.
 - `serde_fmt`: upstream `impl From<serde_fmt::Error> for core::fmt::Error`
   removed. GPUI 0.2.2 enables `log/kv_unstable_serde`, which pulls
   `serde_fmt`; that foreign impl makes `?` ambiguous in Stylo's `ToCss` derive.
+- `gpui`: per-window content scale, for the zoom of the whole app (no public API
+  can scale a window's rendering and input together). `Window::set_content_scale`
+  multiplies the scale factor and divides the viewport and event positions
+  (`scale_event_positions`); what goes back to the platform (IME position, window
+  menu position, client inset) is multiplied again. `Window::content_scale`,
+  `Window::platform_viewport_size` expose it. `window_bounds`/`bounds` stay in
+  platform coordinates.
+  `platform/test/window.rs`: `TestWindow`'s window handle is an error instead of a
+  panic, which took down any test reaching native code on Windows
+  (`set_native_text_focus`).
 - `blitz` (HTML e-mail fidelity, measured in `spikes/html_render`):
   - `layout/table.rs`: non-cell children of a row become anonymous cells
     (`<td style="display:block">`); browser automatic table layout
@@ -38,6 +51,9 @@ repository instead of living in someone's checkout.
     legacy attributes as CSS (`legacy_presentational_css`): `cellspacing`,
     `cellpadding`, table/cell `border` (incl. `border="0"`), `<font
     color/size/face>`, `<body text>`, named/bare-hex `bgcolor`.
+  - `html.rs` + `font_metrics.rs`: `HtmlParserProvider: Send + Sync` and a
+    compile-time assertion that `BlitzFontMetricsProvider` is `Send`, so documents
+    can be built off the UI thread (`html_view::DetachedDocument`).
   - `assets/default.css`: `td, th { padding: 1px }`, cell min/max-height
     neutralised (`!important`).
   - `stylo_to_parley.rs`: `-apple-system`/`BlinkMacSystemFont` map to

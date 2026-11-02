@@ -10,6 +10,9 @@ actions!(
         ComposeNew,
         OpenSettings,
         ToggleSidebar,
+        AppZoomIn,
+        AppZoomOut,
+        AppZoomReset,
         MessageDelete,
         MessageDeletePermanent,
         MessageRestore,
@@ -28,6 +31,9 @@ actions!(
         MessageToggleRead,
         GetNewMail,
         SelectNextMessage,
+        ExtendSelectionDown,
+        ExtendSelectionUp,
+        SelectAllMessages,
         SelectPreviousMessage,
     ]
 );

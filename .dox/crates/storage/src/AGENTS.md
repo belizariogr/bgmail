@@ -51,7 +51,7 @@ Signatures are authoritative; `Lnn` anchors (where present) are approximate.
 - **const `PROVIDER_LOCAL` / `PROVIDER_IMAP` / `PROVIDER_GMAIL`**: `"local"`, `"imap"`, `"gmail"` — values of `accounts.provider`.
 - **struct `Account`**: `id`, `name`, `email`, `provider`, `config_json` (opaque caller JSON, `{}` default).
 - **struct `Folder`**: `id`, `account_id`, storage `path`, `display_name` (empty for system folders), `remote_name: Option<String>` (server mailbox; `None` = local folder), `role: Option<String>` (special-use role or `None`).
-- **struct `MessageListItem`**: list row without body — ids, sender, subject, `preview`, `received_at` display string, `date_ts` (unix seconds, 0 for mock), `thread_id`, `unread`/`starred`/`has_attachment`.
+- **struct `MessageListItem`**: list row without body — ids, sender, subject, `preview`, `received_at` display string, `date_ts` (unix seconds, 0 for mock), `thread_id`, `unread`/`starred`/`has_attachment`, `folders_csv`.
 - **struct `MessageDetail`**: reader row — list fields plus `plain_text`, `raw_content`, `raw_format` (`html`/`text`), `to_addrs`/`cc_addrs`/`reply_to` (opaque display lists), `message_id_hdr`, `in_reply_to`, `references_hdr` (space-separated), `thread_id`, `body_state` (0 headers only, 1 body present), `answered`, live `folders_csv`.
 - **enum `MailListQuery`**: `GlobalSystemFolder(path)` (all accounts), `AccountFolder { account_id, folder_path }`, `Search(text)`.
 - **struct `FolderSyncState`** (`Default`, `Copy`): `uid_validity: Option<u32>`, `uid_next: Option<u32>`, `highest_modseq: Option<u64>`, `synced_at: Option<i64>`.
@@ -180,6 +180,11 @@ _(No functions.)_
 - **`Database::clear_folder_locations`** (pub) — `pub fn clear_folder_locations(&self, folder_id: i64) -> rusqlite::Result<()>`: same orphan rules as above for every location of the folder (UIDVALIDITY reset), committed every `LOCATION_BATCH` messages (loop: write tx, next batch of ids, delete their locations in the folder, settle, commit) so the UI connection never waits on one huge transaction.
 - **`Database::apply_remote_flags`** (pub) — `pub fn apply_remote_flags(&self, folder_id: i64, uid: u32, unread: bool, starred: bool, answered: bool) -> rusqlite::Result<bool>`: updates flags only if different, refreshes membership when changed; `false` for unknown location or no change.
 - **`Database::store_body`** (pub) — `pub fn store_body(&self, message_id: i64, raw: &[u8], content: &str, format: &str, plain_text: &str, preview: &str, attachments: &[NewAttachment]) -> rusqlite::Result<()>`: write tx; upserts `message_bodies.raw`, sets raw_content/raw_format (`html`|`text`, CHECK-enforced)/plain_text/preview/search_text (recomputed)/`has_attachment` (any non-inline)/`body_state 1`, replaces attachments. No-op for a deleted message.
+- Starred (`system::FLAGGED`) leaves out mail in the Trash, in lists and unread counts (`hidden_from_folder`); it keeps its star for when it is restored.
+- **`Account::from_name`** (pub) / **`Database::set_account_names`** (pub): the name in the "From" (`sender_name`, schema v5, or the account's name when blank), and setting both.
+- **`contacts`**: `Contact`; `Database::record_contacts`, `list_contacts`, `contact_sources`, `meta_flag`, `set_meta_flag` (pub).
+- **`Database::messages_with_markup_preview`** (pub) — downloaded messages of an account whose preview starts with `<` or holds `&…;`.
+- **`Database::update_body_text`** (pub) — replaces plain text and preview, keeping search text in step; no-op for a missing message.
 - **`Database::message_raw`** (pub) — `pub fn message_raw(&self, message_id: i64) -> rusqlite::Result<Option<Vec<u8>>>`.
 - **`Database::list_attachments`** (pub) — `pub fn list_attachments(&self, message_id: i64) -> rusqlite::Result<Vec<AttachmentRow>>`: non-inline first, then by `part_index`, id.
 - **`Database::message_locations`** (pub) — `pub fn message_locations(&self, message_id: i64) -> rusqlite::Result<Vec<MessageLocation>>`.

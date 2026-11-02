@@ -12,6 +12,9 @@ gpui.workspace = true
 theme.workspace = true
 unicode-segmentation = "1"
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"
 windows = { version = "0.61", features = [

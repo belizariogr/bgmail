@@ -442,6 +442,18 @@ _300 functions/methods documented._
   - Purpose: Inert state (as Zed's `Disableable`), e.g. message actions with no selection.
   - Behavior: Render uses `Color::Disabled`, no hover/selected background, drops the click handler, but still swallows left mouse-down (no title-bar drag).
 
+- **`prompt`**: `init` (pub); `themed_prompt`, `action_for_key`, `is_cancel`, `ThemedPrompt` (private).
+- **`TextArea::press_outside`** (pub): a press on the page around the text, as one on it.
+- **`font_for_family`** (pub, `text_area`) / **`ContextMenu::in_font`** (pub) / **`FontFamily::ALL`**: previewing the fonts in a menu.
+- **`text_area::rich`** (GPUI-free): `RichText` (`new`, `matches`, `is_plain`, `apply_edit`, `style_at`, `para`, `runs_in`, `all_chars`, `update_chars`, `update_paras`, `list_number`, `list_marker`, `to_plain`, `to_html`), `CharStyle`, `ParaStyle`, `Format`, `FontFamily`, `TextSize` (`scale`), `Align`, `ListKind`, `MAX_INDENT`.
+- **`TextArea` formatting** (pub): `format`, `formatted_html`, `plain_export`, `can_undo`, `can_redo`, `toggle_bold`, `toggle_italic`, `toggle_underline`, `set_font_family`, `set_text_color`, `set_text_size`, `set_align`, `toggle_list`, `indent`, `undo_step`, `redo_step`, `set_selection_color`. Actions `ToggleBold`, `ToggleItalic`, `ToggleUnderline` (Cmd/Ctrl+B, I, U).
+- **`Families`** / **`styled_run`** / **`line_runs`** / **`line_left`** / **`LineGeometry`** (private, `text_area`): fonts with real bold faces, runs of a line, and where each line goes.
+- **`TextBuffer::undo_steps`** / **`can_undo`** / **`can_redo`** / **`add_undo_step`** (pub(crate)): history counters and an undo step without a text change.
+- **`IconButton::hover_color`** (pub): brightens the icon on hover instead of showing a background.
+- **`IconButton::compact`** (pub) / **`side`** (private): makes the button its icon's size / side of the button's square.
+- **`Icon::group_hover_color`** (pub): icon color while the named group is hovered.
+- **`click_selection`** (private, `text_input`): range selected by a repeated click (word, or the whole field when masked or on a triple click).
+- **`Scrollbar::always_visible`** / **`Scrollbar::thumb_colors`** (pub): keep the thumb on screen whenever content overflows / override its theme colors.
 - **`effective_color`** (private)
   - Signature: `fn effective_color(&self) -> Color`
   - Purpose: Icon color after states.
@@ -786,6 +798,12 @@ _300 functions/methods documented._
 
 #### Types / constants
 
+- **actions `ui`**: `FocusNext`, `FocusPrevious` — Tab navigation between text
+  fields. `TextInput` and `TextArea` focus handles are tab stops; order follows
+  paint order and wraps. Handled by `focus_next_field` / `focus_previous_field`
+  (pub(crate)), which also call `set_native_text_focus`. A view can veto them with
+  `capture_action` (the command palette does). Tests: `focus_tests` (walk + wrap,
+  Tab leaves the text untouched).
 - **actions `text_input`**: GPUI actions — `Backspace`, `Delete`, `Left`, `Right`,
   `WordLeft`, `WordRight`, `SelectLeft`, `SelectRight`, `SelectWordLeft`,
   `SelectWordRight`, `SelectAll`, `Home`, `End`, `SelectHome`, `SelectEnd`,
@@ -852,7 +870,7 @@ _300 functions/methods documented._
 - **`bind_keys`** (pub, L120)
   - Signature: `pub fn bind_keys(cx: &mut App)`
   - Purpose: Registers all keyboard shortcuts for `TextInput` focus context.
-  - Behavior: Binds editing/navigation keys under context `"TextInput"`. Includes
+  - Behavior: Binds Tab/Shift+Tab (`FocusNext`/`FocusPrevious`) and editing/navigation keys under context `"TextInput"`. Includes
     platform-specific word and document navigation — Ctrl on Windows/Linux,
     Option/Command variants on macOS. Call once at app startup before views use
     `TextInput`.
@@ -1229,7 +1247,7 @@ core lives in `text_area/buffer.rs` and `text_area/rows.rs` (below).
 - **`bind_keys`** (pub, L94)
   - Signature: `pub fn bind_keys(cx: &mut App)`
   - Purpose: Registers `TextArea` bindings under context `"TextArea"`.
-  - Behavior: Common: backspace/shift-backspace, delete, arrows (+shift),
+  - Behavior: Common: tab/shift-tab → `FocusNext`/`FocusPrevious` (never inserts a tab), backspace/shift-backspace, delete, arrows (+shift),
     home/end (+shift, visual row), enter/shift-enter → `Newline`, cmd-a, cmd/ctrl
     c/x/v, cmd-z / cmd-shift-z. Non-macOS: ctrl-a, ctrl-z, ctrl-y /
     ctrl-shift-z (redo), ctrl-left/right (+shift) words, ctrl-home/end (+shift)

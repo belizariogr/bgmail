@@ -6,17 +6,17 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, fill, point, px, relative, App, Bounds, ClipboardItem, Context, CursorStyle, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, Window,
+    actions, fill, point, px, relative, App, Bounds, ClipboardItem, Context, CursorStyle,
+    DispatchPhase, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine, SharedString,
+    Style, TextRun, UTF16Selection, Window,
 };
 use theme::ActiveTheme;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::prelude::*;
-use crate::text_area::marked_text_runs;
+use crate::text_area::{marked_text_runs, word_range_at};
 
 #[cfg(target_os = "windows")]
 pub fn set_native_text_focus(window: &Window) {
@@ -95,6 +95,28 @@ pub(crate) fn previous_word_start(content: &str, offset: usize) -> usize {
     }
 }
 
+gpui::actions!(
+    ui,
+    [
+        /// Moves focus to the next text field of the window (Tab).
+        FocusNext,
+        /// Moves focus to the previous text field of the window (Shift+Tab).
+        FocusPrevious,
+    ]
+);
+
+/// Tab handler shared by the text components.
+pub(crate) fn focus_next_field(_: &FocusNext, window: &mut Window, _: &mut App) {
+    window.focus_next();
+    set_native_text_focus(window);
+}
+
+/// Shift+Tab handler shared by the text components.
+pub(crate) fn focus_previous_field(_: &FocusPrevious, window: &mut Window, _: &mut App) {
+    window.focus_prev();
+    set_native_text_focus(window);
+}
+
 /// Byte offset of the next word start (Windows-style Ctrl+Right).
 pub(crate) fn next_word_start(content: &str, offset: usize) -> usize {
     let len = content.len();
@@ -119,6 +141,22 @@ pub(crate) fn next_word_start(content: &str, offset: usize) -> usize {
 /// Folds `\r\n` / `\r` / `\n` into single spaces for a one-line field.
 pub(crate) fn single_line(text: &str) -> String {
     text.replace("\r\n", " ").replace(['\r', '\n'], " ")
+}
+
+/// Selection made by a repeated click at `offset`: a double click takes the
+/// word and a triple click the whole field. A masked field selects everything
+/// on a double click too, so its word boundaries stay hidden.
+fn click_selection(
+    content: &str,
+    offset: usize,
+    click_count: usize,
+    masked: bool,
+) -> Option<Range<usize>> {
+    match click_count {
+        0 | 1 => None,
+        2 if !masked => Some(word_range_at(content, offset)),
+        _ => Some(0..content.len()),
+    }
 }
 
 /// Glyph drawn for every character of a masked (password) field.
@@ -148,6 +186,8 @@ pub fn bind_keys(cx: &mut App) {
     const CONTEXT: Option<&str> = Some("TextInput");
 
     cx.bind_keys([
+        KeyBinding::new("tab", FocusNext, CONTEXT),
+        KeyBinding::new("shift-tab", FocusPrevious, CONTEXT),
         KeyBinding::new("backspace", Backspace, CONTEXT),
         KeyBinding::new("delete", Delete, CONTEXT),
         KeyBinding::new("left", Left, CONTEXT),
@@ -235,7 +275,7 @@ impl TextInput {
     /// Creates an empty field with the given placeholder.
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: SharedString::default(),
             placeholder: placeholder.into(),
             selected_range: 0..0,
@@ -406,10 +446,16 @@ impl TextInput {
         window.focus(&self.focus_handle);
         cx.stop_propagation();
         self.is_selecting = true;
-        if event.modifiers.shift {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
+        let offset = self.index_for_mouse_position(event.position);
+        if let Some(range) = click_selection(&self.content, offset, event.click_count, self.masked)
+        {
+            self.selected_range = range;
+            self.selection_reversed = false;
+            cx.notify();
+        } else if event.modifiers.shift {
+            self.select_to(offset, cx);
         } else {
-            self.move_to(self.index_for_mouse_position(event.position), cx);
+            self.move_to(offset, cx);
         }
     }
 
@@ -817,8 +863,18 @@ impl Element for TextInputElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
+        // Anywhere in the window: a selection drag may leave the field.
+        let dragged = self.input.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble {
+                dragged.update(cx, |input, cx| input.on_mouse_move(event, window, cx));
+            }
+        });
+        // Only the focused field shows its selection, as there is one at a time.
+        if focus_handle.is_focused(window) {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection);
+            }
         }
         let line = prepaint.line.take().unwrap();
         line.paint(bounds.origin, window.line_height(), window, cx)
@@ -846,6 +902,8 @@ impl Render for TextInput {
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
+            .on_action(focus_next_field)
+            .on_action(focus_previous_field)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
@@ -867,7 +925,6 @@ impl Render for TextInput {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(TextInputElement { input: cx.entity() })
     }
 }
@@ -879,10 +936,83 @@ impl Focusable for TextInput {
 }
 
 #[cfg(test)]
+mod focus_tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::text_area::TextArea;
+
+    struct Form {
+        first: Entity<TextInput>,
+        second: Entity<TextInput>,
+        body: Entity<TextArea>,
+    }
+
+    impl Render for Form {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .child(self.first.clone())
+                .child(self.second.clone())
+                .child(self.body.clone())
+        }
+    }
+
+    fn form(cx: &mut TestAppContext) -> (Entity<Form>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            crate::bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|_, cx| Form {
+            first: cx.new(|cx| TextInput::new("", cx)),
+            second: cx.new(|cx| TextInput::new("", cx)),
+            body: cx.new(|cx| TextArea::new("", cx)),
+        });
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    #[gpui::test]
+    fn tab_walks_the_text_fields_and_wraps(cx: &mut TestAppContext) {
+        let (view, cx) = form(cx);
+        let (first, second, body) = view.read_with(cx, |form, cx| {
+            (
+                form.first.focus_handle(cx),
+                form.second.focus_handle(cx),
+                form.body.focus_handle(cx),
+            )
+        });
+        cx.update(|window, _| window.focus(&first));
+        cx.run_until_parked();
+
+        for expected in [&second, &body, &first] {
+            cx.simulate_keystrokes("tab");
+            cx.update(|window, _| assert!(expected.is_focused(window)));
+        }
+        for expected in [&body, &second, &first] {
+            cx.simulate_keystrokes("shift-tab");
+            cx.update(|window, _| assert!(expected.is_focused(window)));
+        }
+    }
+
+    #[gpui::test]
+    fn tab_does_not_change_the_text(cx: &mut TestAppContext) {
+        let (view, cx) = form(cx);
+        let body = view.read_with(cx, |form, cx| form.body.focus_handle(cx));
+        cx.update(|window, _| window.focus(&body));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("tab");
+        view.read_with(cx, |form, cx| {
+            assert_eq!(form.body.read(cx).content(), "");
+            assert_eq!(form.first.read(cx).content(), "");
+        });
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
-        masked_offset, masked_text, next_word_start, previous_word_start, single_line,
-        unmasked_offset,
+        click_selection, masked_offset, masked_text, next_word_start, previous_word_start,
+        single_line, unmasked_offset,
     };
 
     #[test]
@@ -906,6 +1036,20 @@ mod tests {
     fn single_line_folds_line_breaks_into_spaces() {
         assert_eq!(single_line("a\r\nb\nc\rd"), "a b c d");
         assert_eq!(single_line("plain"), "plain");
+    }
+
+    #[test]
+    fn repeated_clicks_select_the_word_then_the_field() {
+        let text = "Re: hello world";
+        assert_eq!(click_selection(text, 6, 1, false), None);
+        assert_eq!(click_selection(text, 6, 2, false), Some(4..9));
+        assert_eq!(click_selection(text, 6, 3, false), Some(0..text.len()));
+        assert_eq!(click_selection(text, 6, 4, false), Some(0..text.len()));
+    }
+
+    #[test]
+    fn double_click_on_a_masked_field_selects_everything() {
+        assert_eq!(click_selection("my secret", 1, 2, true), Some(0..9));
     }
 
     #[test]

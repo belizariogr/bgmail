@@ -42,6 +42,28 @@ pub fn format_full_date(time: NaiveDateTime, language: Language) -> String {
     }
 }
 
+/// "Mon, Nov 2, 2026 at 9:05 AM" / "seg., 2 de nov. de 2026 às 09:05".
+pub fn format_quote_date(time: NaiveDateTime, language: Language) -> String {
+    match language {
+        Language::English => time.format("%a, %b %-d, %Y at %-I:%M %p").to_string(),
+        Language::Portuguese => {
+            const DAYS: [&str; 7] = ["seg.", "ter.", "qua.", "qui.", "sex.", "sáb.", "dom."];
+            const MONTHS: [&str; 12] = [
+                "jan.", "fev.", "mar.", "abr.", "mai.", "jun.", "jul.", "ago.", "set.", "out.",
+                "nov.", "dez.",
+            ];
+            format!(
+                "{}, {} de {} de {} às {}",
+                DAYS[time.weekday().num_days_from_monday() as usize],
+                time.day(),
+                MONTHS[time.month0() as usize],
+                time.year(),
+                time.format("%H:%M"),
+            )
+        }
+    }
+}
+
 fn short_date(time: NaiveDateTime, now: NaiveDateTime, language: Language) -> String {
     let same_year = time.year() == now.year();
     match (language, same_year) {
@@ -85,6 +107,15 @@ pub fn list_date(unix: i64, fallback: &str, language: Language) -> String {
 pub fn full_date(unix: i64, fallback: &str, language: Language) -> String {
     match local(unix) {
         Some(time) => format_full_date(time, language),
+        None => fallback.to_string(),
+    }
+}
+
+/// Date of a reply's attribution line, as Gmail writes it (`fallback` for
+/// unknown times).
+pub fn quote_date(unix: i64, fallback: &str, language: Language) -> String {
+    match local(unix) {
+        Some(time) => format_quote_date(time, language),
         None => fallback.to_string(),
     }
 }
@@ -178,6 +209,19 @@ mod tests {
         assert_eq!(
             format_full_date(time, Language::Portuguese),
             "31/10/2026 14:07"
+        );
+    }
+
+    #[test]
+    fn quote_date_follows_gmail_per_language() {
+        let time = at(2026, 11, 2, 9, 5);
+        assert_eq!(
+            format_quote_date(time, Language::English),
+            "Mon, Nov 2, 2026 at 9:05 AM"
+        );
+        assert_eq!(
+            format_quote_date(time, Language::Portuguese),
+            "seg., 2 de nov. de 2026 às 09:05"
         );
     }
 

@@ -277,6 +277,17 @@ fn linux_layout_for_window(window: &Window) -> CaptionLayout {
 
 /// Wraps the main UI in Zed-style client-side decoration chrome when the
 /// compositor is using CSD. No-op (returns `content` unchanged) for SSD.
+/// The window's size in the coordinates of elements and events, which the app's zoom
+/// divides but the platform's window bounds don't know about.
+fn logical_window_size(window: &Window) -> Size<Pixels> {
+    let scale = window.content_scale();
+    window
+        .window_bounds()
+        .get_bounds()
+        .size
+        .map(|length| length / scale)
+}
+
 pub fn wrap_client_decorations(
     content: AnyElement,
     window: &mut Window,
@@ -300,16 +311,13 @@ pub fn wrap_client_decorations(
             canvas(
                 |_bounds, window, _cx| {
                     window.insert_hitbox(
-                        Bounds::new(
-                            point(px(0.0), px(0.0)),
-                            window.window_bounds().get_bounds().size,
-                        ),
+                        Bounds::new(point(px(0.0), px(0.0)), logical_window_size(window)),
                         HitboxBehavior::Normal,
                     )
                 },
                 move |_bounds, hitbox, window, _cx| {
                     let mouse = window.mouse_position();
-                    let size = window.window_bounds().get_bounds().size;
+                    let size = logical_window_size(window);
                     let Some(edge) = resize_edge(mouse, shadow_size, size) else {
                         return;
                     };
@@ -335,7 +343,7 @@ pub fn wrap_client_decorations(
         .when(!tiling.right, |div| div.pr(shadow_size))
         .on_mouse_move(|_, window, _| window.refresh())
         .on_mouse_down(MouseButton::Left, move |e, window, _| {
-            let size = window.window_bounds().get_bounds().size;
+            let size = logical_window_size(window);
             if let Some(edge) = resize_edge(e.position, shadow_size, size) {
                 window.start_window_resize(edge);
             }

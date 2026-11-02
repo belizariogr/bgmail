@@ -18,6 +18,7 @@ mod context_menu;
 mod icon;
 mod label;
 mod list_item;
+pub mod prompt;
 mod scrollbar;
 mod switch;
 pub mod text_area;
@@ -34,7 +35,10 @@ pub use label::*;
 pub use list_item::*;
 pub use scrollbar::*;
 pub use switch::*;
-pub use text_area::{TextArea, TextAreaEvent};
+pub use text_area::rich::{
+    Align, CharStyle, FontFamily, Format, ListKind, ParaStyle, TextSize, MAX_INDENT,
+};
+pub use text_area::{font_for_family, TextArea, TextAreaEvent};
 pub use text_input::*;
 pub use text_size::*;
 pub use tooltip::*;

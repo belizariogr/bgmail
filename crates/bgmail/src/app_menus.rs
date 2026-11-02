@@ -13,11 +13,11 @@
 use gpui::{App, Global, Menu, MenuItem, SystemMenuType};
 
 use crate::actions::{
-    ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, GetNewMail,
-    MessageArchive, MessageDelete, MessageDeletePermanent, MessageForward, MessageMarkJunk,
-    MessagePrint, MessageReply, MessageReplyAll, MessageRestore, MessageToggleFlag,
-    MessageToggleRead, MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette,
-    ToggleSidebar,
+    AppZoomIn, AppZoomOut, AppZoomReset, ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew,
+    ComposeSend, GetNewMail, MessageArchive, MessageDelete, MessageDeletePermanent, MessageForward,
+    MessageMarkJunk, MessagePrint, MessageReply, MessageReplyAll, MessageRestore,
+    MessageToggleFlag, MessageToggleRead, MoveMessageToFolder, OpenSettings, Quit,
+    ToggleCommandPalette, ToggleSidebar,
 };
 use crate::commands::{self, CommandContext, CommandId};
 use crate::locale::{Key, Language};
@@ -66,7 +66,7 @@ fn edit_menu() -> Menu {
 /// Builds the menu tree for the main mail window.
 pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
     let move_items: Vec<MenuItem> = ctx
-        .move_targets()
+        .move_targets(language)
         .into_iter()
         .filter(|(_, path)| commands::command_enabled(&CommandId::MoveToFolder(path.clone()), ctx))
         .map(|(label, path)| MenuItem::action(label, MoveMessageToFolder { path }))
@@ -190,6 +190,10 @@ pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
                 MenuItem::action(Key::ToolbarToggleSidebar.tr(language), ToggleSidebar),
                 MenuItem::separator(),
                 MenuItem::action(Key::CommandPalette.tr(language), ToggleCommandPalette),
+                MenuItem::separator(),
+                MenuItem::action(Key::ViewZoomIn.tr(language), AppZoomIn),
+                MenuItem::action(Key::ViewZoomOut.tr(language), AppZoomOut),
+                MenuItem::action(Key::ViewZoomReset.tr(language), AppZoomReset),
             ],
         },
         Menu {
@@ -318,6 +322,7 @@ mod tests {
                     role: None,
                 }],
             )]),
+            ..Default::default()
         }
     }
 

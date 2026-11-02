@@ -98,6 +98,8 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
   callers (`bgmail` seed adapters), not hardcoded UI strings here.
 - Dependency rule: no `gpui`, `ui`, or `theme`.
 
+- `contacts` (schema v4): one row per address (case-insensitive) with an optional name; `record_contacts` fills blank names and never overwrites one.
+
 ## Work Guidance
 
 - Prefer extending `Database` methods over ad-hoc SQL in `bgmail`.

@@ -7,8 +7,8 @@
 use std::collections::HashSet;
 
 use mail_core::{
-    decode_imap_utf7, format_address_list, thread_key, FolderRole, FolderStatus, MessageFlags,
-    ParsedMessage, RemoteFolder, RemoteHeader,
+    decode_imap_utf7, format_address_list, role_from_special_use, thread_key, FolderRole,
+    FolderStatus, MessageFlags, ParsedMessage, RemoteFolder, RemoteHeader,
 };
 use serde::{Deserialize, Serialize};
 use storage::{system, user_folder_path, Folder, FolderSyncState, NewRemoteMessage, PendingOp};
@@ -94,9 +94,16 @@ impl FolderPlan {
 /// Diffs the server folder list against the local one. Local-only folders
 /// (`remote_name == None`) are never touched.
 pub fn plan_folders(remote: &[RemoteFolder], local: &[Folder]) -> FolderPlan {
-    // Archive-role folders must claim the archive path before All Mail does.
+    // Archive-role folders must claim the archive path before All Mail does,
+    // and a folder the server declares (SPECIAL-USE) before one that only has
+    // a matching name: Gmail's `[Gmail]/Rascunhos` over a label `Rascunhos`.
     let mut ordered: Vec<&RemoteFolder> = remote.iter().collect();
-    ordered.sort_by_key(|folder| folder.role == Some(FolderRole::All));
+    ordered.sort_by_key(|folder| {
+        (
+            folder.role == Some(FolderRole::All),
+            role_from_special_use(&folder.attributes).is_none(),
+        )
+    });
 
     let mut used_system = HashSet::new();
     let mut planned_paths = HashSet::new();
@@ -406,15 +413,29 @@ pub fn should_announce(folder_path: &str, before: &FolderSyncState, reset: bool)
     folder_path == system::INBOX && before.synced_at.is_some() && !reset
 }
 
-/// Notification for a stored header: only for newly created, unread rows
-/// when the folder sync announces (see [`should_announce`]).
+/// Whether a header stored by a folder sync is a new arrival in that folder.
+/// Gmail shows one message under many labels: a sync pass may meet new mail
+/// in All Mail just before the Inbox, so a merged row still counts when its
+/// UID is above the folder's previous UIDNEXT. Plain IMAP only merges mail
+/// moved by the UI, which never is an arrival.
+pub fn is_new_arrival(
+    created: bool,
+    gm_msgid: Option<u64>,
+    uid: u32,
+    uid_next_before: Option<u32>,
+) -> bool {
+    created || (gm_msgid.is_some() && uid_next_before.is_some_and(|next| uid >= next))
+}
+
+/// Notification for a stored header: only for unread new arrivals (see
+/// [`is_new_arrival`]) when the folder sync announces (see [`should_announce`]).
 pub fn notice_for_new(
     message_id: i64,
     message: &NewRemoteMessage,
-    created: bool,
+    arrived: bool,
     announce: bool,
 ) -> Option<NewMailNotice> {
-    (created && announce && message.unread).then(|| NewMailNotice {
+    (arrived && announce && message.unread).then(|| NewMailNotice {
         message_id,
         sender: message.sender.clone(),
         subject: message.subject.clone(),
@@ -627,6 +648,30 @@ mod tests {
         let plan = plan_folders(&server, &[]);
         assert_eq!(plan.upserts.len(), 1);
         assert_eq!(plan.upserts[0].remote_name, "Archive");
+    }
+
+    #[test]
+    fn plan_folders_gives_the_system_path_to_the_declared_folder() {
+        let server = vec![
+            remote("Rascunhos", &[]),
+            remote("[Gmail]/Rascunhos", &["\\Drafts"]),
+        ];
+        let local = vec![
+            local(1, system::DRAFTS, Some("Rascunhos"), Some("drafts")),
+            local(
+                2,
+                "user:[Gmail]/Rascunhos",
+                Some("[Gmail]/Rascunhos"),
+                Some("drafts"),
+            ),
+        ];
+        let plan = plan_folders(&server, &local);
+        let drafts = &plan.upserts[0];
+        assert_eq!(drafts.path, system::DRAFTS);
+        assert_eq!(drafts.remote_name, "[Gmail]/Rascunhos");
+        assert!(drafts.reset);
+        assert_eq!(plan.upserts[1].path, "user:Rascunhos");
+        assert_eq!(plan.deletes, vec![2]);
     }
 
     #[test]
@@ -932,6 +977,21 @@ mod tests {
             },
         ];
         assert_eq!(messages_with_pending_flags(&ops), [1].into());
+    }
+
+    #[test]
+    fn new_arrivals_include_gmail_merges_above_the_old_uidnext() {
+        assert!(is_new_arrival(true, None, 1, Some(100)), "new row");
+        assert!(
+            is_new_arrival(false, Some(9), 100, Some(100)),
+            "other label first"
+        );
+        assert!(!is_new_arrival(false, Some(9), 99, Some(100)), "older mail");
+        assert!(!is_new_arrival(false, Some(9), 100, None), "no checkpoint");
+        assert!(
+            !is_new_arrival(false, None, 100, Some(100)),
+            "plain IMAP move"
+        );
     }
 
     #[test]

@@ -15,16 +15,18 @@ use mail_core::{
     MessageFlags, RemoteError, RemoteErrorKind, SendError, SendFailure, DEFAULT_SYNC_WINDOW,
 };
 use storage::{
-    system, Database, Folder, FolderSyncState, OutgoingRow, OutgoingState, PendingOp,
-    BODY_STATE_FULL, PROVIDER_LOCAL,
+    system, Database, Folder, FolderSyncState, NewRemoteMessage, OutgoingRow, OutgoingState,
+    PendingOp, BODY_STATE_FULL, PROVIDER_LOCAL,
 };
 
-use crate::body::body_content;
+use crate::body::{body_content, repair_stale_previews};
+use crate::contacts;
 use crate::engine::EngineOptions;
 use crate::events::{AccountStatus, Command, SyncEvent};
 use crate::plan::{
-    in_flight_uids, messages_with_pending_flags, new_remote_message, notice_for_new, plan_folder,
-    plan_folders, should_announce, sync_order, LocalFolderState, PendingAction,
+    in_flight_uids, is_new_arrival, messages_with_pending_flags, new_remote_message,
+    notice_for_new, plan_folder, plan_folders, should_announce, sync_order, LocalFolderState,
+    PendingAction,
 };
 
 /// Headers fetched per round trip (progress + list refresh after each).
@@ -205,6 +207,12 @@ pub(crate) fn run_worker(setup: WorkerSetup) {
             return;
         }
     };
+    if let Err(error) = repair_stale_previews(&db, setup.account_id) {
+        eprintln!("BGMail: could not repair message previews: {error}");
+    }
+    if let Err(error) = contacts::backfill(&db, setup.account_id) {
+        eprintln!("BGMail: could not fill the contacts: {error}");
+    }
     Worker::new(setup, db).run();
 }
 
@@ -834,12 +842,15 @@ impl Worker {
                 for header in headers {
                     let parsed = parse_message(&header.header).unwrap_or_default();
                     let message = new_remote_message(&header, &parsed);
-                    self.db.record_remote_message(
+                    let insert = self.db.record_remote_message(
                         self.account_id,
                         local.id,
                         header.uid,
                         &message,
                     )?;
+                    if insert.created {
+                        self.record_contacts(&local.path, &message)?;
+                    }
                 }
                 Ok(())
             }
@@ -1272,6 +1283,14 @@ impl Worker {
         }
     }
 
+    /// Updates the contact catalog from a message that just arrived.
+    fn record_contacts(&self, folder_path: &str, message: &NewRemoteMessage) -> Result<(), Abort> {
+        if let Some(account) = self.db.get_account(self.account_id)? {
+            contacts::record_message(&self.db, &account.email, folder_path, message)?;
+        }
+        Ok(())
+    }
+
     /// Applies the server folder list; emits `FoldersChanged` on changes.
     fn sync_folder_list(&mut self) -> Result<(), Abort> {
         let remote = self.rm()?.list_folders()?;
@@ -1327,6 +1346,7 @@ impl Worker {
         let status = self.rm()?.select(&name)?;
         let remote_uids = self.rm()?.uids(&name)?;
         let before = self.db.folder_sync_state(folder.id)?;
+        let uid_next_before = before.uid_next;
         let local = LocalFolderState {
             sync: before,
             uids: self
@@ -1369,6 +1389,9 @@ impl Worker {
                     header.uid,
                     &message,
                 )?;
+                if insert.created {
+                    self.record_contacts(&folder.path, &message)?;
+                }
                 if !insert.created && !flags_pending.contains(&insert.message_id) {
                     // Merged into a known message (other label, moved mail):
                     // the server's flags for this copy are current — unless
@@ -1384,7 +1407,12 @@ impl Worker {
                 notices.extend(notice_for_new(
                     insert.message_id,
                     &message,
-                    insert.created,
+                    is_new_arrival(
+                        insert.created,
+                        message.gm_msgid,
+                        header.uid,
+                        uid_next_before,
+                    ),
                     announce,
                 ));
             }

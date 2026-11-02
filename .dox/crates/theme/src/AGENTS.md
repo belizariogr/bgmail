@@ -36,6 +36,8 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ## API Catalog
 
+- **const `MAIL_TEXT_COLORS`** (pub): colors offered for text in a message, as `0xRRGGBB`; they travel with the mail, so they don't follow the theme.
+
 _19 functions/methods documented._
 
 ### `src/theme.rs`

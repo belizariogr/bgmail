@@ -17,7 +17,7 @@ pub enum IconSize {
 
 impl IconSize {
     /// Square footprint of the rendered icon.
-    fn px(self) -> Pixels {
+    pub(crate) fn px(self) -> Pixels {
         match self {
             IconSize::XXSmall => px(10.0),
             IconSize::XSmall => px(12.0),
@@ -36,6 +36,16 @@ impl IconSize {
 /// call sites stay stable if an icon's artwork is swapped in the future.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IconName {
+    FormatUndo,
+    FormatRedo,
+    FormatAlignLeft,
+    FormatAlignCenter,
+    FormatAlignRight,
+    FormatListBullet,
+    FormatListNumbered,
+    FormatIndentMore,
+    FormatIndentLess,
+    DragHand,
     Inbox,
     Sent,
     Drafts,
@@ -97,6 +107,16 @@ impl IconName {
     /// Asset path of the icon's SVG, resolvable by [`crate::Assets`].
     pub fn path(self) -> &'static str {
         match self {
+            IconName::FormatUndo => crate::FORMAT_UNDO,
+            IconName::FormatRedo => crate::FORMAT_REDO,
+            IconName::FormatAlignLeft => crate::FORMAT_ALIGN_LEFT,
+            IconName::FormatAlignCenter => crate::FORMAT_ALIGN_CENTER,
+            IconName::FormatAlignRight => crate::FORMAT_ALIGN_RIGHT,
+            IconName::FormatListBullet => crate::FORMAT_LIST_BULLET,
+            IconName::FormatListNumbered => crate::FORMAT_LIST_NUMBERED,
+            IconName::FormatIndentMore => crate::FORMAT_INDENT_MORE,
+            IconName::FormatIndentLess => crate::FORMAT_INDENT_LESS,
+            IconName::DragHand => crate::DRAG_HAND,
             IconName::Inbox => crate::INBOX,
             IconName::Sent => crate::SEND,
             IconName::Drafts => crate::FILE_PEN,
@@ -149,6 +169,7 @@ pub struct Icon {
     name: IconName,
     size: IconSize,
     color: Color,
+    group_hover: Option<(SharedString, Color)>,
 }
 
 impl Icon {
@@ -158,6 +179,7 @@ impl Icon {
             name,
             size: IconSize::default(),
             color: Color::default(),
+            group_hover: None,
         }
     }
 
@@ -172,6 +194,12 @@ impl Icon {
         self.color = color;
         self
     }
+
+    /// Color of the icon while the element with group `group` is hovered.
+    pub fn group_hover_color(mut self, group: impl Into<SharedString>, color: Color) -> Self {
+        self.group_hover = Some((group.into(), color));
+        self
+    }
 }
 
 impl RenderOnce for Icon {
@@ -184,6 +212,10 @@ impl RenderOnce for Icon {
             .h(size)
             .path(self.name.path())
             .text_color(color)
+            .when_some(self.group_hover, |el, (group, color)| {
+                let color = color.hsla(cx);
+                el.group_hover(group, move |style| style.text_color(color))
+            })
     }
 }
 
@@ -194,7 +226,17 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 42] = [
+    const ALL: [IconName; 52] = [
+        IconName::DragHand,
+        IconName::FormatUndo,
+        IconName::FormatRedo,
+        IconName::FormatAlignLeft,
+        IconName::FormatAlignCenter,
+        IconName::FormatAlignRight,
+        IconName::FormatListBullet,
+        IconName::FormatListNumbered,
+        IconName::FormatIndentMore,
+        IconName::FormatIndentLess,
         IconName::Inbox,
         IconName::Sent,
         IconName::Drafts,

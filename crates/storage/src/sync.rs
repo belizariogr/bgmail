@@ -341,6 +341,59 @@ impl Database {
     }
 
     /// Raw RFC 822 bytes, when the body was downloaded.
+    /// Downloaded messages of the account whose preview still looks like
+    /// markup: raw HTML or undecoded entities.
+    pub fn messages_with_markup_preview(&self, account_id: i64) -> rusqlite::Result<Vec<i64>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM messages
+             WHERE account_id = ?1 AND body_state = ?2
+               AND (preview LIKE '<%' OR preview LIKE '%&%;%')",
+        )?;
+        let ids = stmt
+            .query_map(params![account_id, BODY_STATE_FULL as i64], |row| {
+                row.get(0)
+            })?
+            .collect();
+        ids
+    }
+
+    /// Replaces the text derived from a stored body, keeping search in step.
+    pub fn update_body_text(
+        &self,
+        message_id: i64,
+        plain_text: &str,
+        preview: &str,
+    ) -> rusqlite::Result<()> {
+        let tx = self.write_transaction()?;
+        let Some((sender, sender_email, subject)) = tx
+            .query_row(
+                "SELECT sender, sender_email, subject FROM messages WHERE id = ?1",
+                params![message_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(());
+        };
+        tx.execute(
+            "UPDATE messages SET plain_text = ?1, preview = ?2, search_text = ?3 WHERE id = ?4",
+            params![
+                plain_text,
+                preview,
+                build_search_text(&sender, &sender_email, &subject, plain_text),
+                message_id
+            ],
+        )?;
+        tx.commit()
+    }
+
     pub fn message_raw(&self, message_id: i64) -> rusqlite::Result<Option<Vec<u8>>> {
         self.conn()
             .query_row(
@@ -890,6 +943,43 @@ mod tests {
         assert_eq!(db.list_attachments(id).unwrap().len(), 1);
         assert_eq!(db.message_raw(id).unwrap().as_deref(), Some(&b"RAW2"[..]));
         assert_eq!(count(&db, "SELECT COUNT(*) FROM message_bodies"), 1);
+    }
+
+    #[test]
+    fn markup_previews_are_found_and_replaced() {
+        let (_file, db, fx) = remote_db();
+        let ids: Vec<i64> = [1, 2, 3]
+            .iter()
+            .map(|uid| {
+                db.insert_remote_message(fx.account, fx.inbox, *uid, &remote_message("x", None))
+                    .unwrap()
+            })
+            .collect();
+        db.store_body(ids[0], b"x", "h", "html", "<html>", "<html> code", &[])
+            .unwrap();
+        db.store_body(ids[1], b"x", "t", "text", "fine", "Ol&aacute; there", &[])
+            .unwrap();
+        db.store_body(ids[2], b"x", "t", "text", "fine", "A & B", &[])
+            .unwrap();
+        assert_eq!(
+            db.messages_with_markup_preview(fx.account).unwrap(),
+            ids[..2]
+        );
+
+        db.update_body_text(ids[0], "readable", "readable").unwrap();
+        db.update_body_text(404, "x", "x").unwrap();
+        assert_eq!(
+            db.messages_with_markup_preview(fx.account).unwrap(),
+            vec![ids[1]]
+        );
+        let detail = db.get_message(ids[0]).unwrap().unwrap();
+        assert_eq!(detail.plain_text, "readable");
+        assert_eq!(
+            db.list_messages(&MailListQuery::Search("readable".into()))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

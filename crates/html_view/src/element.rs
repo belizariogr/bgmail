@@ -30,12 +30,6 @@ actions!(
         PageDown,
         ScrollToTop,
         ScrollToBottom,
-        /// Zooms the page in one step.
-        ZoomIn,
-        /// Zooms the page out one step.
-        ZoomOut,
-        /// Back to 100%.
-        ResetZoom,
     ]
 );
 
@@ -85,10 +79,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-space", PageUp, context),
         KeyBinding::new("home", ScrollToTop, context),
         KeyBinding::new("end", ScrollToBottom, context),
-        KeyBinding::new("secondary-=", ZoomIn, context),
-        KeyBinding::new("secondary-+", ZoomIn, context),
-        KeyBinding::new("secondary--", ZoomOut, context),
-        KeyBinding::new("secondary-0", ResetZoom, context),
     ]);
 }
 
@@ -369,6 +359,18 @@ fn paint_input_listeners(
     });
 }
 
+/// How far the pointer is above (negative) or below the view while selecting: the
+/// view scrolls by it, to reach text beyond the visible part.
+fn drag_scroll_delta(y: f32, top: f32, bottom: f32) -> f32 {
+    if y < top {
+        y - top
+    } else if y > bottom {
+        y - bottom
+    } else {
+        0.0
+    }
+}
+
 /// A scrollable, interactive view showing one HTML document.
 pub struct HtmlView {
     document: Rc<RefCell<HtmlDocument>>,
@@ -383,6 +385,8 @@ pub struct HtmlView {
     dragging: bool,
     /// Page zoom, kept across documents like a browser tab's.
     zoom: f32,
+    /// Extra scale set by the host, apart from the user's zoom, which stays as it is.
+    display_scale: f32,
     /// Pending repaint for animated images, and when it fires.
     frame_timer: Option<(Instant, Task<()>)>,
 }
@@ -406,13 +410,19 @@ impl HtmlView {
             hovered_link: None,
             dragging: false,
             zoom: 1.0,
+            display_scale: 1.0,
             frame_timer: None,
         }
     }
 
+    /// Height of the laid out document, for hosts that show it whole.
+    pub fn content_height(&self) -> f32 {
+        self.document.borrow().content_height()
+    }
+
     /// Replaces the displayed document and scrolls back to the top.
     pub fn set_document(&mut self, mut document: HtmlDocument, cx: &mut Context<Self>) {
-        document.set_zoom(self.zoom);
+        document.set_zoom(self.zoom * self.display_scale);
         self.document = Rc::new(RefCell::new(document));
         // A new parse has new image ids: the old textures can never be hit
         // again and would otherwise accumulate for the whole session.
@@ -466,7 +476,9 @@ impl HtmlView {
         }
         let ratio = zoom / self.zoom;
         self.zoom = zoom;
-        self.document.borrow_mut().set_zoom(zoom);
+        self.document
+            .borrow_mut()
+            .set_zoom(zoom * self.display_scale);
         let offset = self.scroll.offset();
         self.scroll
             .set_offset(point(offset.x * ratio, offset.y * ratio));
@@ -477,6 +489,17 @@ impl HtmlView {
     /// Zooms `steps` levels in (> 0) or out (< 0) of [`ZOOM_LEVELS`].
     pub fn zoom_by(&mut self, steps: i32, cx: &mut Context<Self>) {
         self.set_zoom(zoom_step(self.zoom, steps), cx);
+    }
+
+    /// Scales the page on top of the user's zoom, for a host showing it smaller.
+    pub fn set_display_scale(&mut self, scale: f32, cx: &mut Context<Self>) {
+        if scale != self.display_scale {
+            self.display_scale = scale;
+            self.document
+                .borrow_mut()
+                .set_zoom(self.zoom * self.display_scale);
+            cx.notify();
+        }
     }
 
     pub fn document(&self) -> Rc<RefCell<HtmlDocument>> {
@@ -591,6 +614,17 @@ impl HtmlView {
             return;
         }
         let pressed = self.dragging && event.pressed_button == Some(MouseButton::Left);
+        if pressed {
+            let bounds = self.scroll.bounds();
+            let beyond = drag_scroll_delta(
+                f32::from(event.position.y),
+                f32::from(bounds.top()),
+                f32::from(bounds.bottom()),
+            );
+            if beyond != 0.0 {
+                self.scroll_by(beyond, cx);
+            }
+        }
         let mut document = self.document.borrow_mut();
         let mut changed = document.pointer(PointerInput {
             x,
@@ -680,9 +714,6 @@ impl Render for HtmlView {
             }))
             .on_action(cx.listener(|this, _: &ScrollToTop, _, cx| this.scroll_by(f32::MIN, cx)))
             .on_action(cx.listener(|this, _: &ScrollToBottom, _, cx| this.scroll_by(f32::MAX, cx)))
-            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(1, cx)))
-            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(-1, cx)))
-            .on_action(cx.listener(|this, _: &ResetZoom, _, cx| this.set_zoom(1.0, cx)))
             .child(
                 HtmlElement::new(self.document.clone(), self.cache.clone())
                     .interactive(cx.weak_entity()),
@@ -694,6 +725,13 @@ impl Render for HtmlView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragging_past_the_view_scrolls_by_the_distance() {
+        assert_eq!(drag_scroll_delta(50.0, 100.0, 500.0), -50.0);
+        assert_eq!(drag_scroll_delta(300.0, 100.0, 500.0), 0.0);
+        assert_eq!(drag_scroll_delta(520.0, 100.0, 500.0), 20.0);
+    }
 
     #[test]
     fn zoom_steps_follow_browser_levels() {

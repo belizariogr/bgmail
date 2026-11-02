@@ -417,6 +417,25 @@ fn incremental_sync_announces_only_new_unread_inbox_mail() {
 }
 
 #[test]
+fn gmail_mail_seen_first_in_all_mail_is_still_announced() {
+    let h = Harness::new(PROVIDER_GMAIL, "{}", test_options());
+    h.server.set_capabilities(Capabilities {
+        gmail: true,
+        ..h.server.capabilities()
+    });
+    h.server.deliver("INBOX", &mail("old", 1), unread());
+    h.server.deliver("Archive", &mail("old", 1), unread());
+    let h = h.started();
+    let raw = mail("fresh", 2);
+    // Delivered right after the Inbox step of a pass: All Mail sees it first.
+    h.server.deliver("Archive", &raw, unread());
+    assert!(new_mail(&h.sync()).is_empty(), "not in the Inbox yet");
+    h.server.deliver("INBOX", &raw, unread());
+    assert_eq!(new_mail(&h.sync()), strings(&["fresh"]));
+    assert!(new_mail(&h.sync()).is_empty(), "announced once");
+}
+
+#[test]
 fn flags_sync_in_both_directions() {
     let h = Harness::imap();
     let uid = h.server.deliver("INBOX", &mail("a", 1), unread());

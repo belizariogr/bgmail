@@ -67,6 +67,12 @@ pub struct Config {
     pub compose_width: f32,
     /// Height of the compose window.
     pub compose_height: f32,
+    /// Zoom of the whole app (1 = normal); see `app_zoom`.
+    pub ui_scale: f32,
+    /// Whether the app uses the light theme. Off by default (dark).
+    pub light_theme: bool,
+    /// Whether the first-run setup was finished, even with no account added.
+    pub onboarding_completed: bool,
 }
 
 impl Default for Config {
@@ -93,6 +99,20 @@ impl Default for Config {
             compose_y: compose::COMPOSE_POSITION_UNSET,
             compose_width: compose::COMPOSE_DEFAULT_WIDTH,
             compose_height: compose::COMPOSE_DEFAULT_HEIGHT,
+            ui_scale: 1.0,
+            light_theme: false,
+            onboarding_completed: false,
+        }
+    }
+}
+
+impl Config {
+    /// The theme appearance to start with.
+    pub fn appearance(&self) -> theme::Appearance {
+        if self.light_theme {
+            theme::Appearance::Light
+        } else {
+            theme::Appearance::Dark
         }
     }
 }
@@ -177,10 +197,30 @@ mod tests {
             compose_y: 80.0,
             compose_width: 790.0,
             compose_height: 720.0,
+            ui_scale: 1.25,
+            light_theme: true,
+            onboarding_completed: true,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn the_theme_starts_dark_and_follows_the_saved_choice() {
+        assert_eq!(Config::default().appearance(), theme::Appearance::Dark);
+        let light = Config {
+            light_theme: true,
+            ..Config::default()
+        };
+        assert_eq!(light.appearance(), theme::Appearance::Light);
+    }
+
+    #[test]
+    fn configs_from_older_versions_have_not_finished_the_setup() {
+        let config: Config = serde_json::from_str("{}").expect("parse");
+        assert!(!config.onboarding_completed);
+        assert!(!config.light_theme);
     }
 
     #[test]
@@ -270,6 +310,9 @@ mod tests {
             compose_y: 50.0,
             compose_width: 800.0,
             compose_height: 600.0,
+            ui_scale: 1.25,
+            light_theme: true,
+            onboarding_completed: true,
         };
         save_to(&path, &config).unwrap();
         assert_eq!(load_from(path.clone()), config);

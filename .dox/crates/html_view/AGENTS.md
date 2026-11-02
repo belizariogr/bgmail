@@ -128,6 +128,28 @@ positions Blitz computed.
 - **Vendored painter** (`src/blitz_paint/`, MIT/Apache-2.0, Blitz `e42ee1f`):
   keep diffs minimal and marked `BGMail`; see its child doc.
 
+- Web fonts reach GPUI under a family unique to each file
+  (`fonts::with_family_name` rewrites the `name` table): GPUI caches a family's
+  faces on first use, so later faces of the same family would never be found
+  (Google Fonts' italic-first CSS made whole messages italic).
+
+- `DetachedDocument` moves a document built on a background thread to the one
+  showing it. It holds this crate's only `unsafe` (`impl Send`): the compiler
+  refuses `HtmlDocument` only for Stylo's `Box<dyn FontMetricsProvider>`, whose one
+  implementor `vendor/blitz` asserts to be `Send`. A document is moved whole and
+  used by one thread at a time. `HtmlDocument::prepare` does the first layout and
+  recording up front.
+
+- Selection by dragging starts and follows the pointer anywhere, using the nearest
+  text when it isn't over any (`HtmlDocument::follow_selection_drag`), as in a
+  browser; Blitz only reacts over text. `HtmlView` scrolls while the pointer is
+  past its edges.
+
+- `DocumentOptions::dark_page`: on a dark page, text that can't be read on what is
+  behind it is adapted when recording the display list (`contrast`), as colors fixed
+  inline for a white page beat any stylesheet. Neutral text takes the page's text
+  color, colored text keeps its hue; text on images and gradients stays.
+
 ## Work Guidance
 
 - Prefer fixing layout/style issues upstream in Blitz; keep local changes to the

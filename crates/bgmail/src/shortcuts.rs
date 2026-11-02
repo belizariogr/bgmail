@@ -6,9 +6,10 @@
 use gpui::{App, KeyBinding, KeybindingKeystroke, Keystroke};
 
 use crate::actions::{
-    ComposeClose, ComposeNew, FindInMessage, GetNewMail, MessageArchive, MessageDelete,
-    MessageForward, MessageMarkJunk, MessagePrint, MessageReply, MessageReplyAll,
-    MessageToggleFlag, MessageToggleRead, OpenSettings, Quit, SelectNextMessage,
+    AppZoomIn, AppZoomOut, AppZoomReset, ComposeClose, ComposeNew, ExtendSelectionDown,
+    ExtendSelectionUp, FindInMessage, GetNewMail, MessageArchive, MessageDelete, MessageForward,
+    MessageMarkJunk, MessagePrint, MessageReply, MessageReplyAll, MessageToggleFlag,
+    MessageToggleRead, OpenSettings, Quit, SelectAllMessages, SelectNextMessage,
     SelectPreviousMessage, ToggleCommandPalette, ToggleSidebar,
 };
 
@@ -27,8 +28,8 @@ pub const SETTINGS_OTHER: &str = "ctrl-,";
 pub const TOGGLE_SIDEBAR_MAC: &str = "cmd-ctrl-s";
 pub const TOGGLE_SIDEBAR_OTHER: &str = "ctrl-alt-s";
 
-pub const COMMAND_PALETTE_MAC: &str = "cmd-shift-p";
-pub const COMMAND_PALETTE_OTHER: &str = "ctrl-shift-p";
+pub const COMMAND_PALETTE_MAC: &str = "cmd-k";
+pub const COMMAND_PALETTE_OTHER: &str = "ctrl-k";
 
 pub const DELETE_MESSAGE_MAC: &str = "cmd-backspace";
 pub const DELETE_MESSAGE_OTHER: &str = "ctrl-backspace";
@@ -71,6 +72,11 @@ pub const GET_MAIL_OTHER: &str = "ctrl-shift-n";
 pub const LIST_NEXT_KEYS: [&str; 2] = ["down", "j"];
 pub const LIST_PREVIOUS_KEYS: [&str; 2] = ["up", "k"];
 pub const LIST_DELETE_KEYS: [&str; 2] = ["delete", "backspace"];
+/// Message-list keys growing the selection, and selecting every row.
+pub const LIST_EXTEND_DOWN: &str = "shift-down";
+pub const LIST_EXTEND_UP: &str = "shift-up";
+pub const LIST_SELECT_ALL_MAC: &str = "cmd-a";
+pub const LIST_SELECT_ALL_OTHER: &str = "ctrl-a";
 
 /// Primary binding label for tooltips on the current platform.
 pub fn primary_binding<'a>(mac: &'a str, other: &'a str) -> &'a str {
@@ -97,6 +103,10 @@ pub fn bind_app_shortcuts(cx: &mut App) {
         KeyBinding::new(COMPOSE_OTHER, ComposeNew, None),
         KeyBinding::new(SETTINGS_MAC, OpenSettings, None),
         KeyBinding::new(SETTINGS_OTHER, OpenSettings, None),
+        KeyBinding::new("secondary-=", AppZoomIn, None),
+        KeyBinding::new("secondary-+", AppZoomIn, None),
+        KeyBinding::new("secondary--", AppZoomOut, None),
+        KeyBinding::new("secondary-0", AppZoomReset, None),
         KeyBinding::new(TOGGLE_SIDEBAR_MAC, ToggleSidebar, None),
         KeyBinding::new(TOGGLE_SIDEBAR_OTHER, ToggleSidebar, None),
         KeyBinding::new(COMMAND_PALETTE_MAC, ToggleCommandPalette, None),
@@ -146,7 +156,13 @@ pub fn bind_app_shortcuts(cx: &mut App) {
                 LIST_DELETE_KEYS
                     .into_iter()
                     .map(|key| KeyBinding::new(key, MessageDelete, list)),
-            ),
+            )
+            .chain([
+                KeyBinding::new(LIST_EXTEND_DOWN, ExtendSelectionDown, list),
+                KeyBinding::new(LIST_EXTEND_UP, ExtendSelectionUp, list),
+                KeyBinding::new(LIST_SELECT_ALL_MAC, SelectAllMessages, list),
+                KeyBinding::new(LIST_SELECT_ALL_OTHER, SelectAllMessages, list),
+            ]),
     );
 }
 
@@ -176,6 +192,29 @@ const GLOBAL_CHORDS: [(&str, &str); 17] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn plus_minus_and_zero_zoom_the_app_from_anywhere(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            bind_app_shortcuts(cx);
+            for (id, step) in [(0, 1), (1, -1), (2, 0)] {
+                let seen = seen.clone();
+                let record = move || seen.borrow_mut().push(step);
+                match id {
+                    0 => cx.on_action(move |_: &AppZoomIn, _| record()),
+                    1 => cx.on_action(move |_: &AppZoomOut, _| record()),
+                    _ => cx.on_action(move |_: &AppZoomReset, _| record()),
+                };
+            }
+        });
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        cx.simulate_keystrokes("secondary-= secondary-+ secondary-- secondary-0");
+        assert_eq!(*seen.borrow(), [1, 1, -1, 0]);
+    }
 
     #[test]
     fn format_binding_parses_compose_shortcut() {

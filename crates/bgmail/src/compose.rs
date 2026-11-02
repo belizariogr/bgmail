@@ -8,18 +8,30 @@
 
 use std::path::{Path, PathBuf};
 
+use std::rc::Rc;
+
 use gpui::{
-    anchored, black, deferred, size, white, AnyWindowHandle, App, Bounds, ClickEvent, Context,
-    Corner, Entity, ExternalPaths, FocusHandle, Focusable, Global, Hsla, KeyBinding, MouseButton,
-    PathPromptOptions, Point, PromptButton, PromptLevel, Render, ScrollHandle, Size, Subscription,
-    WeakEntity, Window, WindowBounds,
+    anchored, black, deferred, size, white, AnyElement, AnyWindowHandle, App, Bounds, ClickEvent,
+    Context, Corner, Entity, ExternalPaths, Focusable, FontWeight, Global, Hsla, KeyBinding,
+    MouseButton, PathPromptOptions, Point, PromptButton, PromptLevel, Render, ScrollHandle, Size,
+    Subscription, Task, WeakEntity, Window, WindowBounds,
+};
+use html_view::{
+    Appearance as PageAppearance, DetachedDocument, DocumentOptions, HtmlDocument, HtmlView,
+    Resources,
 };
 use mail_core::{Address, Draft, OutgoingAttachment};
-use theme::ActiveTheme;
+use storage::Contact;
+use theme::{ActiveTheme, Theme, ThemeColors, MAIL_TEXT_COLORS};
+
+use crate::data::MessageBody;
+use crate::mail_html::{email_document, DocumentColors};
+use crate::recipients::{RecipientInput, RecipientsChanged};
 use ui::prelude::*;
 use ui::{
-    Button, ButtonStyle, Color, ContextMenu, Icon, IconButton, IconName, IconSize, Label,
-    LabelSize, TextArea, TextAreaEvent, TextInput, TextInputEvent, Tooltip,
+    font_for_family, Align, Button, ButtonStyle, Color, ContextMenu, FontFamily, Icon, IconButton,
+    IconName, IconSize, Label, LabelSize, ListKind, Scrollbar, ScrollbarState, TextArea,
+    TextAreaEvent, TextInput, TextInputEvent, TextSize, Tooltip, MAX_INDENT,
 };
 
 use crate::actions::{ComposeAttach, ComposeClose, ComposeDiscard, ComposeSend};
@@ -105,6 +117,48 @@ pub struct ComposeInit {
     /// Outbox row this message re-creates (editing an unsent message);
     /// deleted once the edited copy is queued.
     pub replaces_outgoing: Option<i64>,
+    /// What a reply quotes, to send it with its formatting.
+    pub quoted_original: Option<QuotedOriginal>,
+}
+
+/// Name of a font in the menu; the fonts' own names aren't translated.
+fn family_label(family: FontFamily, language: Language) -> &'static str {
+    match family {
+        FontFamily::Sans => Key::FormatSansSerif.tr(language),
+        FontFamily::Serif => Key::FormatSerif.tr(language),
+        FontFamily::Mono => Key::FormatFixedWidth.tr(language),
+        FontFamily::Wide => Key::FormatWide.tr(language),
+        FontFamily::Narrow => Key::FormatNarrow.tr(language),
+        FontFamily::ComicSans => "Comic Sans MS",
+        FontFamily::Garamond => "Garamond",
+        FontFamily::Georgia => "Georgia",
+        FontFamily::Tahoma => "Tahoma",
+        FontFamily::Trebuchet => "Trebuchet MS",
+        FontFamily::Verdana => "Verdana",
+    }
+}
+
+/// A dropdown of the formatting toolbar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FormatMenu {
+    Font,
+    Size,
+    Color,
+    Align,
+}
+
+/// Width the quoted original is first laid out at, before the real one is known.
+const QUOTE_FIRST_LAYOUT_WIDTH: f32 = 800.0;
+
+/// The original message of a reply: its `> ` quote for the plain-text version
+/// and its HTML, ready to be sent on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuotedOriginal {
+    pub block: String,
+    pub attribution: String,
+    pub html: String,
+    /// Whether the user allows remote images for the original.
+    pub load_remote: bool,
 }
 
 /// The recipient fields that are validated as address lists.
@@ -129,7 +183,10 @@ struct ComposeFields {
     cc: String,
     bcc: String,
     subject: String,
+    /// Plain-text version of what was written.
     body: String,
+    /// HTML of what was written, when anything is formatted.
+    body_html: Option<String>,
 }
 
 /// Threading headers carried over from the message being answered.
@@ -137,6 +194,7 @@ struct ComposeFields {
 struct ReplyHeaders {
     in_reply_to: Option<String>,
     references: Vec<String>,
+    quoted: Option<QuotedOriginal>,
 }
 
 /// Why a draft could not be built: per-field address errors (shown under the
@@ -196,13 +254,14 @@ pub struct ComposeView {
     from_menu_open: bool,
     /// Whether Cc and Bcc rows are visible.
     show_cc_bcc: bool,
-    to: Entity<TextInput>,
-    cc: Entity<TextInput>,
-    bcc: Entity<TextInput>,
+    to: Entity<RecipientInput>,
+    cc: Entity<RecipientInput>,
+    bcc: Entity<RecipientInput>,
     subject: Entity<TextInput>,
     body: Entity<TextArea>,
     /// Scroll container of the body; the text area keeps its caret visible in it.
     body_scroll: ScrollHandle,
+    body_scrollbar: Entity<ScrollbarState>,
     attachments: Vec<OutgoingAttachment>,
     /// Background reads still running (Send is disabled meanwhile).
     pending_attachment_loads: usize,
@@ -229,6 +288,13 @@ pub struct ComposeView {
     /// from [`RootView`] when it changes — never read from `RootView` during
     /// render (that panics while the main view is on the stack).
     white_background: bool,
+    /// The quoted original shows, as in Gmail, only after asking for it.
+    quote_expanded: bool,
+    /// Formatting dropdown open in the toolbar.
+    format_menu: Option<FormatMenu>,
+    /// The quoted original, parsed the first time it is shown.
+    quote_view: Option<Entity<HtmlView>>,
+    _quote_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -238,6 +304,7 @@ impl ComposeView {
     /// send) and, with `init`, everything prefilled from its draft.
     pub fn new(
         accounts: Vec<ComposeAccount>,
+        contacts: Vec<Contact>,
         root: WeakEntity<RootView>,
         white_background: bool,
         init: Option<ComposeInit>,
@@ -246,15 +313,24 @@ impl ComposeView {
     ) -> Self {
         ensure_key_bindings(cx);
         let language = cx.language();
-        let to = cx.new(|cx| TextInput::new(Key::ComposeFieldPlaceholder.tr(language), cx));
-        let cc = cx.new(|cx| TextInput::new("", cx));
-        let bcc = cx.new(|cx| TextInput::new("", cx));
+        let contacts: Rc<[Contact]> = contacts.into();
+        let to = cx.new(|cx| {
+            RecipientInput::new(
+                Key::ComposeFieldPlaceholder.tr(language),
+                contacts.clone(),
+                window,
+                cx,
+            )
+        });
+        let cc = cx.new(|cx| RecipientInput::new("", contacts.clone(), window, cx));
+        let bcc = cx.new(|cx| RecipientInput::new("", contacts.clone(), window, cx));
         let subject = cx.new(|cx| TextInput::new("", cx));
         let body_scroll = ScrollHandle::new();
         let body = cx.new(|cx| {
             let mut area = TextArea::new(Key::ComposeBodyPlaceholder.tr(language), cx)
                 .min_lines(BODY_MIN_LINES);
             area.track_scroll(&body_scroll);
+            area.set_selection_color(body_selection_color(white_background, cx), cx);
             area
         });
 
@@ -264,9 +340,11 @@ impl ComposeView {
             (&cc, AddressField::Cc),
             (&bcc, AddressField::Bcc),
         ] {
-            subscriptions.push(cx.subscribe(input, move |this, _, _: &TextInputEvent, cx| {
-                this.on_address_changed(field, cx);
-            }));
+            subscriptions.push(
+                cx.subscribe(input, move |this, _, _: &RecipientsChanged, cx| {
+                    this.on_address_changed(field, cx);
+                }),
+            );
         }
         subscriptions.push(cx.subscribe(&subject, |this, _, _: &TextInputEvent, cx| {
             this.mark_edited(cx);
@@ -287,6 +365,7 @@ impl ComposeView {
             subject,
             body,
             body_scroll,
+            body_scrollbar: cx.new(|_| ScrollbarState::new()),
             attachments: Vec::new(),
             pending_attachment_loads: 0,
             reply: ReplyHeaders::default(),
@@ -299,6 +378,10 @@ impl ComposeView {
             last_reported_bounds: None,
             last_title: String::new(),
             white_background,
+            quote_expanded: false,
+            format_menu: None,
+            quote_view: None,
+            _quote_task: None,
             _subscriptions: subscriptions,
         };
         view.apply_init(init, window, cx);
@@ -319,9 +402,12 @@ impl ComposeView {
         let draft = init.draft;
         self.from_account = account_index(&self.accounts, init.account_id);
         self.replaces_outgoing = init.replaces_outgoing;
-        set_input(&self.to, &mail_core::format_address_list(&draft.to), cx);
-        set_input(&self.cc, &mail_core::format_address_list(&draft.cc), cx);
-        set_input(&self.bcc, &mail_core::format_address_list(&draft.bcc), cx);
+        self.to
+            .update(cx, |field, cx| field.set_addresses(&draft.to, cx));
+        self.cc
+            .update(cx, |field, cx| field.set_addresses(&draft.cc, cx));
+        self.bcc
+            .update(cx, |field, cx| field.set_addresses(&draft.bcc, cx));
         set_input(&self.subject, &draft.subject, cx);
         // `set_content` leaves the caret at the start: above a quoted reply.
         self.body
@@ -331,9 +417,14 @@ impl ComposeView {
         self.reply = ReplyHeaders {
             in_reply_to: draft.in_reply_to,
             references: draft.references,
+            quoted: init.quoted_original,
         };
+        self.quote_expanded = false;
+        self.quote_view = None;
+        self._quote_task = None;
         self.errors = ComposeErrors::default();
         self.from_menu_open = false;
+        self.format_menu = None;
         self.edited = false;
         let handle = match focus {
             ComposeFocus::To => self.to.focus_handle(cx),
@@ -347,8 +438,83 @@ impl ComposeView {
     pub(crate) fn set_white_background(&mut self, value: bool, cx: &mut Context<Self>) {
         if self.white_background != value {
             self.white_background = value;
+            let selection = body_selection_color(value, cx);
+            self.body
+                .update(cx, |area, cx| area.set_selection_color(selection, cx));
+            self.quote_view = None;
+            self._quote_task = None;
+            if self.quote_expanded {
+                self.build_quote_view(cx);
+            }
             cx.notify();
         }
+    }
+
+    fn toggle_quote(&mut self, cx: &mut Context<Self>) {
+        self.quote_expanded = !self.quote_expanded;
+        if self.quote_expanded && self.quote_view.is_none() {
+            self.build_quote_view(cx);
+        }
+        cx.notify();
+    }
+
+    /// Parses the quoted original off the UI thread: it can be a large message.
+    fn build_quote_view(&mut self, cx: &mut Context<Self>) {
+        let Some(quoted) = self.reply.quoted.clone() else {
+            return;
+        };
+        let theme = cx.theme().colors();
+        let colors = if self.white_background {
+            DocumentColors {
+                background: white(),
+                text: black(),
+                accent: theme.accent,
+            }
+        } else {
+            DocumentColors {
+                background: theme.background,
+                text: theme.text,
+                accent: theme.accent,
+            }
+        };
+        let build = cx.background_spawn(async move {
+            let body = MessageBody::Html(quoted.html.into());
+            let rendered = email_document(colors, &body, quoted.load_remote);
+            let options = DocumentOptions {
+                appearance: if colors.is_dark() {
+                    PageAppearance::Dark
+                } else {
+                    PageAppearance::Light
+                },
+                resources: Resources::new().allow_remote(quoted.load_remote),
+                dark_page: colors.dark_page(),
+                ..Default::default()
+            };
+            let mut document = HtmlDocument::parse(&rendered.html, options);
+            document.prepare(QUOTE_FIRST_LAYOUT_WIDTH);
+            DetachedDocument::new(document)
+        });
+        self._quote_task = Some(cx.spawn(async move |this, cx| {
+            let document = build.await;
+            this.update(cx, |this, cx| {
+                this.quote_view = Some(cx.new(|cx| HtmlView::new(document.into_inner(), cx)));
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Replaces the catalog offered in the recipient fields.
+    pub(crate) fn set_contacts(&mut self, contacts: Vec<Contact>, cx: &mut Context<Self>) {
+        let contacts: Rc<[Contact]> = contacts.into();
+        for field in [&self.to, &self.cc, &self.bcc] {
+            field.update(cx, |field, _| field.set_contacts(contacts.clone()));
+        }
+    }
+
+    /// Whether the user typed something that replacing the content would lose.
+    pub(crate) fn has_edits(&self) -> bool {
+        self.edited
     }
 
     fn mark_edited(&mut self, cx: &mut Context<Self>) {
@@ -375,6 +541,7 @@ impl ComposeView {
 
     fn close_from_menu(&mut self, cx: &mut Context<Self>) {
         self.from_menu_open = false;
+        self.format_menu = None;
         cx.notify();
     }
 
@@ -393,11 +560,12 @@ impl ComposeView {
 
     fn fields(&self, cx: &App) -> ComposeFields {
         ComposeFields {
-            to: self.to.read(cx).content().to_string(),
-            cc: self.cc.read(cx).content().to_string(),
-            bcc: self.bcc.read(cx).content().to_string(),
+            to: self.to.read(cx).content(cx),
+            cc: self.cc.read(cx).content(cx),
+            bcc: self.bcc.read(cx).content(cx),
             subject: self.subject.read(cx).content().to_string(),
-            body: self.body.read(cx).content().to_string(),
+            body: self.body.read(cx).plain_export(),
+            body_html: self.body.read(cx).formatted_html(),
         }
     }
 
@@ -593,7 +761,455 @@ impl ComposeView {
         }
     }
 
-    fn render_toolbar(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Runs `apply` on the body and keeps typing there: the toolbar's clicks must
+    /// not take the caret away.
+    fn format_body(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        apply: impl FnOnce(&mut TextArea, &mut Context<TextArea>),
+    ) {
+        self.format_menu = None;
+        self.body.update(cx, apply);
+        window.focus(&self.body.focus_handle(cx));
+        cx.notify();
+    }
+
+    fn toggle_format_menu(&mut self, menu: FormatMenu, cx: &mut Context<Self>) {
+        self.format_menu = (self.format_menu != Some(menu)).then_some(menu);
+        cx.notify();
+    }
+
+    /// The formatting tools, on the send button's row, as in Gmail.
+    fn render_format_bar(
+        &self,
+        language: Language,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let border = colors.border;
+        let area = self.body.read(cx);
+        let format = area.format();
+        let (can_undo, can_redo) = (area.can_undo(), area.can_redo());
+        let icon = |id: &'static str,
+                    label: Key,
+                    shortcut: Option<(&str, &str)>,
+                    icon: IconName,
+                    active: bool,
+                    enabled: bool,
+                    cx: &mut Context<Self>,
+                    apply: fn(&mut TextArea, &mut Context<TextArea>)| {
+            let holder = div().id(id);
+            let holder = match shortcut {
+                Some((mac, other)) => holder.tooltip(Tooltip::with_shortcut(
+                    label.tr(language),
+                    crate::shortcuts::format_binding(crate::shortcuts::primary_binding(mac, other)),
+                )),
+                None => holder.tooltip(Tooltip::text(label.tr(language))),
+            };
+            holder.child(
+                IconButton::new(id, icon)
+                    .size(IconSize::Small)
+                    .selected(active)
+                    .disabled(!enabled)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.format_body(window, cx, apply);
+                    })),
+            )
+        };
+        let separator = || div().w(px(1.0)).h(px(18.0)).mx_1().bg(border);
+        let chars = format.chars;
+        let para = format.para;
+        // Takes the room left of the send button, and wraps in a narrow window.
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .flex_wrap()
+            .child(icon(
+                "format-undo",
+                Key::FormatUndo,
+                Some(("cmd-z", "ctrl-z")),
+                IconName::FormatUndo,
+                false,
+                can_undo,
+                cx,
+                TextArea::undo_step,
+            ))
+            .child(icon(
+                "format-redo",
+                Key::FormatRedo,
+                Some(("cmd-shift-z", "ctrl-y")),
+                IconName::FormatRedo,
+                false,
+                can_redo,
+                cx,
+                TextArea::redo_step,
+            ))
+            .child(separator())
+            .child(self.render_font_picker(chars.family, language, window, cx))
+            .child(separator())
+            .child(self.render_size_picker(para.size, language, cx))
+            .child(separator())
+            .child(self.render_style_button(
+                "format-bold",
+                Key::FormatBold,
+                ("cmd-b", "ctrl-b"),
+                chars.bold,
+                language,
+                cx,
+                TextArea::toggle_bold,
+            ))
+            .child(self.render_style_button(
+                "format-italic",
+                Key::FormatItalic,
+                ("cmd-i", "ctrl-i"),
+                chars.italic,
+                language,
+                cx,
+                TextArea::toggle_italic,
+            ))
+            .child(self.render_style_button(
+                "format-underline",
+                Key::FormatUnderline,
+                ("cmd-u", "ctrl-u"),
+                chars.underline,
+                language,
+                cx,
+                TextArea::toggle_underline,
+            ))
+            .child(self.render_color_picker(chars.color, language, cx))
+            .child(separator())
+            .child(self.render_align_picker(para.align, language, cx))
+            .child(icon(
+                "format-numbered",
+                Key::FormatNumbered,
+                None,
+                IconName::FormatListNumbered,
+                para.list == Some(ListKind::Numbered),
+                true,
+                cx,
+                |area, cx| area.toggle_list(ListKind::Numbered, cx),
+            ))
+            .child(icon(
+                "format-bullets",
+                Key::FormatBullets,
+                None,
+                IconName::FormatListBullet,
+                para.list == Some(ListKind::Bullet),
+                true,
+                cx,
+                |area, cx| area.toggle_list(ListKind::Bullet, cx),
+            ))
+            .child(icon(
+                "format-indent-less",
+                Key::FormatIndentLess,
+                None,
+                IconName::FormatIndentLess,
+                false,
+                para.indent > 0,
+                cx,
+                |area, cx| area.indent(-1, cx),
+            ))
+            .child(icon(
+                "format-indent-more",
+                Key::FormatIndentMore,
+                None,
+                IconName::FormatIndentMore,
+                false,
+                para.indent < MAX_INDENT,
+                cx,
+                |area, cx| area.indent(1, cx),
+            ))
+    }
+
+    /// B, I or U: a letter showing the style it applies.
+    #[allow(clippy::too_many_arguments)]
+    fn render_style_button(
+        &self,
+        id: &'static str,
+        label: Key,
+        shortcut: (&str, &str),
+        active: bool,
+        language: Language,
+        cx: &mut Context<Self>,
+        apply: fn(&mut TextArea, &mut Context<TextArea>),
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let (hover, selected, accent, text) = (
+            colors.element_hover,
+            colors.element_active,
+            colors.text_accent,
+            colors.text,
+        );
+        let (letter, weight, italic, underline) = match id {
+            "format-bold" => ("B", FontWeight::BOLD, false, false),
+            "format-italic" => ("I", FontWeight::NORMAL, true, false),
+            _ => ("U", FontWeight::NORMAL, false, true),
+        };
+        let binding = crate::shortcuts::format_binding(crate::shortcuts::primary_binding(
+            shortcut.0, shortcut.1,
+        ));
+        h_flex()
+            .id(id)
+            .size(px(28.0))
+            .justify_center()
+            .rounded_md()
+            .cursor_pointer()
+            .when(active, |el| el.bg(selected))
+            .hover(move |el| el.bg(hover))
+            .tooltip(Tooltip::with_shortcut(label.tr(language), binding))
+            .text_color(if active { accent } else { text })
+            .font_weight(weight)
+            .when(italic, |el| el.italic())
+            .when(underline, |el| el.underline())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.format_body(window, cx, apply);
+            }))
+            .child(letter)
+    }
+
+    /// A button with text that opens one of the formatting dropdowns above it.
+    #[allow(clippy::too_many_arguments)]
+    fn render_menu_button(
+        &self,
+        id: &'static str,
+        menu: FormatMenu,
+        tooltip: Key,
+        content: impl IntoElement,
+        dropdown: Option<AnyElement>,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let hover = cx.theme().colors().element_hover;
+        h_flex()
+            .id(id)
+            .relative()
+            .h(px(28.0))
+            .px_1p5()
+            .gap_1()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |el| el.bg(hover))
+            .tooltip(Tooltip::text(tooltip.tr(language)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_format_menu(menu, cx)))
+            .child(content)
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .children(dropdown.filter(|_| self.format_menu == Some(menu)))
+    }
+
+    /// Right above its button, which is its positioning parent: the toolbar is at
+    /// the bottom of the window.
+    fn format_dropdown(content: impl IntoElement) -> AnyElement {
+        deferred(div().absolute().left_0().bottom(px(30.0)).child(content))
+            .with_priority(1)
+            .into_any_element()
+    }
+
+    /// A menu whose entries run `apply` on the body with their value, the
+    /// current one checked.
+    fn format_menu_of<T: Copy + PartialEq + 'static>(
+        &self,
+        options: &[(T, Key)],
+        current: T,
+        language: Language,
+        cx: &mut Context<Self>,
+        apply: fn(&mut TextArea, T, &mut Context<TextArea>),
+    ) -> AnyElement {
+        let view = cx.weak_entity();
+        let mut menu = ContextMenu::new();
+        for (value, key) in options.iter().copied() {
+            let view = view.clone();
+            let handler = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.format_body(window, cx, |area, cx| apply(area, value, cx));
+                });
+            };
+            menu = if value == current {
+                menu.entry_with_key_hint(key.tr(language), "✓", handler)
+            } else {
+                menu.entry(key.tr(language), handler)
+            };
+        }
+        Self::format_dropdown(menu)
+    }
+
+    fn render_font_picker(
+        &self,
+        current: FontFamily,
+        language: Language,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let dropdown = (self.format_menu == Some(FormatMenu::Font)).then(|| {
+            let inherited = window.text_style().font().family;
+            let view = cx.weak_entity();
+            let mut menu = ContextMenu::new();
+            for family in FontFamily::ALL {
+                let view = view.clone();
+                let handler = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = view.update(cx, |this, cx| {
+                        this.format_body(window, cx, |area, cx| area.set_font_family(family, cx));
+                    });
+                };
+                let label = family_label(family, language);
+                menu = if family == current {
+                    menu.entry_with_key_hint(label, "✓", handler)
+                } else {
+                    menu.entry(label, handler)
+                }
+                .in_font(font_for_family(family, &inherited, window));
+            }
+            Self::format_dropdown(menu)
+        });
+        self.render_menu_button(
+            "format-font",
+            FormatMenu::Font,
+            Key::FormatFont,
+            Label::new(family_label(current, language)).size(LabelSize::Small),
+            dropdown,
+            language,
+            cx,
+        )
+    }
+
+    fn render_size_picker(
+        &self,
+        current: TextSize,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const OPTIONS: [(TextSize, Key); 4] = [
+            (TextSize::Small, Key::FormatSmall),
+            (TextSize::Normal, Key::FormatNormal),
+            (TextSize::Large, Key::FormatLarge),
+            (TextSize::Huge, Key::FormatHuge),
+        ];
+        let dropdown =
+            self.format_menu_of(&OPTIONS, current, language, cx, TextArea::set_text_size);
+        self.render_menu_button(
+            "format-size",
+            FormatMenu::Size,
+            Key::FormatSize,
+            div().font_weight(FontWeight::BOLD).child("TT"),
+            Some(dropdown),
+            language,
+            cx,
+        )
+    }
+
+    fn render_align_picker(
+        &self,
+        current: Align,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const OPTIONS: [(Align, Key); 3] = [
+            (Align::Left, Key::FormatAlignLeft),
+            (Align::Center, Key::FormatAlignCenter),
+            (Align::Right, Key::FormatAlignRight),
+        ];
+        let dropdown = self.format_menu_of(&OPTIONS, current, language, cx, TextArea::set_align);
+        let icon = match current {
+            Align::Left => IconName::FormatAlignLeft,
+            Align::Center => IconName::FormatAlignCenter,
+            Align::Right => IconName::FormatAlignRight,
+        };
+        self.render_menu_button(
+            "format-align",
+            FormatMenu::Align,
+            Key::FormatAlign,
+            Icon::new(icon).size(IconSize::Small),
+            Some(dropdown),
+            language,
+            cx,
+        )
+    }
+
+    /// "A" underlined with the current color, and a grid of colors.
+    fn render_color_picker(
+        &self,
+        current: Option<u32>,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let (surface, border, accent, text) = (
+            colors.elevated_surface_background,
+            colors.border,
+            colors.accent,
+            colors.text,
+        );
+        let swatch = |id: usize, color: Option<u32>, cx: &mut Context<Self>| {
+            h_flex()
+                .id(("format-color", id))
+                .size(px(22.0))
+                .justify_center()
+                .rounded_sm()
+                .cursor_pointer()
+                .border_1()
+                .border_color(if color == current { accent } else { border })
+                .when_some(color, |el, rgb_value| el.bg(gpui::rgb(rgb_value)))
+                .when(color.is_none(), |el| {
+                    el.child(Icon::new(IconName::Clear).size(IconSize::XSmall))
+                })
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.format_body(window, cx, |area, cx| area.set_text_color(color, cx));
+                }))
+        };
+        let mut grid = div()
+            .occlude()
+            .w(px(166.0))
+            .p_1()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .bg(surface)
+            .border_1()
+            .border_color(border)
+            .rounded_md()
+            .shadow_lg()
+            .child(swatch(0, None, cx));
+        for (ix, color) in MAIL_TEXT_COLORS.into_iter().enumerate() {
+            grid = grid.child(swatch(ix + 1, Some(color), cx));
+        }
+        self.render_menu_button(
+            "format-color-menu",
+            FormatMenu::Color,
+            Key::FormatColor,
+            v_flex()
+                .items_center()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .line_height(px(16.0))
+                        .child("A"),
+                )
+                .child(
+                    div()
+                        .w(px(12.0))
+                        .h(px(2.0))
+                        .bg(current.map_or(text, |rgb_value| gpui::rgb(rgb_value).into())),
+                ),
+            Some(Self::format_dropdown(grid)),
+            language,
+            cx,
+        )
+    }
+
+    fn render_toolbar(
+        &self,
+        language: Language,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let can_send = self.can_send_now();
         h_flex()
             .items_center()
@@ -614,7 +1230,8 @@ impl ComposeView {
                             })),
                     ),
             )
-            .child(div().flex_1())
+            .child(div().w(px(1.0)).h(px(18.0)).bg(cx.theme().colors().border))
+            .child(self.render_format_bar(language, window, cx))
             .when(self.pending_attachment_loads > 0, |el| {
                 el.child(
                     Label::new(Key::ComposeAttachLoading.tr(language))
@@ -947,22 +1564,143 @@ impl ComposeView {
 
     fn render_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (bg, text) = compose_body_colors(self.white_background);
-        let body_focus: FocusHandle = self.body.focus_handle(cx);
+        let body = self.body.clone();
+        let (thumb, thumb_dragged) = body_scrollbar_colors(self.white_background, cx);
         div()
-            .id("compose-body")
+            .relative()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.body_scroll)
-            .p_3()
-            .cursor_text()
-            .when_some(bg, |el, bg| el.bg(bg))
-            .when_some(text, |el, text| el.text_color(text))
-            // Clicks below the text still land in the body.
-            .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                window.focus(&body_focus);
+            .child(
+                div()
+                    .id("compose-body")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.body_scroll)
+                    .p_3()
+                    .cursor_text()
+                    .when_some(bg, |el, bg| el.bg(bg))
+                    .when_some(text, |el, text| el.text_color(text))
+                    // Clicks around the text still place the caret and can start a
+                    // selection.
+                    .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                        body.update(cx, |body, cx| body.press_outside(event, window, cx));
+                    })
+                    .child(self.body.clone())
+                    .when(self.reply.quoted.is_some(), |el| {
+                        el.child(self.render_quote(cx))
+                    }),
+            )
+            .child(
+                Scrollbar::vertical(self.body_scrollbar.clone(), self.body_scroll.clone())
+                    .always_visible()
+                    .thumb_colors(thumb, thumb_dragged),
+            )
+    }
+
+    /// Below the editor, as in Gmail: a button that reveals the attribution line
+    /// and the original message, with its formatting, behind a side bar.
+    fn render_quote(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = cx.language();
+        let border = cx.theme().colors().border;
+        let toggle = quote_toggle_colors(self.white_background, cx.theme().colors());
+        let attribution = self
+            .reply
+            .quoted
+            .as_ref()
+            .map(|quoted| quoted.attribution.clone())
+            .unwrap_or_default();
+        let height = self
+            .quote_view
+            .as_ref()
+            .map_or(0.0, |view| view.read(cx).content_height());
+        v_flex()
+            .w_full()
+            .mt_4()
+            .gap_2()
+            .cursor_default()
+            // Reading the quote must not move the caret to the editor.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                h_flex().child(
+                    h_flex()
+                        .id("compose-quote-toggle")
+                        .h(px(18.0))
+                        .px_2()
+                        .justify_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .bg(toggle.background)
+                        .hover(move |el| el.bg(toggle.hover))
+                        .tooltip(Tooltip::text(Key::ComposeToggleQuote.tr(language)))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_quote(cx)))
+                        .child(
+                            Icon::new(IconName::More)
+                                .size(IconSize::Small)
+                                .color(Color::Custom(toggle.icon)),
+                        ),
+                ),
+            )
+            .when(self.quote_expanded, |el| {
+                el.child(
+                    Label::new(attribution)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .when_some(self.quote_view.clone(), |el, view| {
+                    el.child(
+                        div()
+                            .w_full()
+                            .h(px(height))
+                            .pl_3()
+                            .border_l_1()
+                            .border_color(border)
+                            .child(view),
+                    )
+                })
             })
-            .child(self.body.clone())
+    }
+}
+
+/// Selection highlight of the body on a white page: opaque (a translucent fill
+/// lets the desktop show through a translucent window) and light, to keep its
+/// dark text readable. Otherwise the theme's.
+fn body_selection_color(white_background: bool, cx: &App) -> Option<Hsla> {
+    white_background.then(|| white().blend(cx.theme().colors().accent.opacity(0.35)))
+}
+
+/// Thumb of the body's scrollbar (resting, dragged): it must show on the page's
+/// color, not the app's.
+fn body_scrollbar_colors(white_background: bool, cx: &App) -> (Hsla, Hsla) {
+    let light = Theme::light();
+    let colors = if white_background {
+        light.colors()
+    } else {
+        cx.theme().colors()
+    };
+    (colors.scrollbar_thumb, colors.scrollbar_thumb_hover)
+}
+
+/// Colors of the button that reveals the quote.
+#[derive(Clone, Copy)]
+struct QuoteToggleColors {
+    background: Hsla,
+    hover: Hsla,
+    icon: Hsla,
+}
+
+/// The button sits on the page, not on the app: over a white page it takes the
+/// light theme's colors, whatever the app's theme is.
+fn quote_toggle_colors(white_background: bool, theme: &ThemeColors) -> QuoteToggleColors {
+    let light = Theme::light();
+    let colors = if white_background {
+        light.colors()
+    } else {
+        theme
+    };
+    QuoteToggleColors {
+        background: colors.element_active,
+        hover: colors.element_hover,
+        icon: colors.text_muted,
     }
 }
 
@@ -1030,10 +1768,10 @@ impl Render for ComposeView {
             })
             .child(self.render_body(cx))
             .children(self.render_error_banner(cx))
-            .child(self.render_toolbar(language, cx))
+            .child(self.render_toolbar(language, window, cx))
             // Outside clicks close the From picker (the picker itself is
             // deferred, so it paints above this catcher).
-            .when(self.from_menu_open, |el| {
+            .when(self.from_menu_open || self.format_menu.is_some(), |el| {
                 el.child(
                     div()
                         .absolute()
@@ -1127,6 +1865,34 @@ fn parse_field(input: &str, language: Language) -> (Vec<Address>, Option<String>
 /// Validates the fields and builds the outgoing draft (plain text). Errors:
 /// invalid addresses per field, then "no recipients", then a missing or
 /// local (can't send) From account.
+/// HTML of a message: what was written, with its formatting, and the original
+/// of a reply. A plain new message has none.
+fn message_html(reply: &ReplyHeaders, fields: &ComposeFields) -> Option<String> {
+    let written = || {
+        fields
+            .body_html
+            .clone()
+            .unwrap_or_else(|| mail_core::reply_html(&fields.body))
+    };
+    match &reply.quoted {
+        Some(quoted) => Some(mail_core::reply_html_with_original(
+            &written(),
+            &quoted.attribution,
+            &quoted.html,
+        )),
+        None if reply.in_reply_to.is_some() => Some(written()),
+        None => fields.body_html.clone(),
+    }
+}
+
+/// Plain-text version of a message: what was written, and the `> ` quote.
+fn reply_text(reply: &ReplyHeaders, body: &str) -> String {
+    match &reply.quoted {
+        Some(quoted) => format!("{}\n\n{}", body.trim_end(), quoted.block),
+        None => body.to_string(),
+    }
+}
+
 fn build_draft(
     from: Option<&ComposeAccount>,
     fields: &ComposeFields,
@@ -1160,8 +1926,9 @@ fn build_draft(
         cc,
         bcc,
         subject: fields.subject.trim().to_string(),
-        text: fields.body.clone(),
-        html: None,
+        text: reply_text(reply, &fields.body),
+        // Same structure as Gmail's replies, which it collapses in conversations.
+        html: message_html(reply, fields),
         in_reply_to: reply.in_reply_to.clone(),
         references: reply.references.clone(),
         attachments: attachments.to_vec(),
@@ -1385,6 +2152,7 @@ mod tests {
         let reply = ReplyHeaders {
             in_reply_to: Some("parent@x".into()),
             references: vec!["root@x".into(), "parent@x".into()],
+            quoted: None,
         };
         let files = vec![attachment("a.pdf", 3)];
         let draft = build_draft(Some(&from), &input, &reply, &files, Language::English).unwrap();
@@ -1398,10 +2166,69 @@ mod tests {
         assert_eq!(draft.bcc[0].email, "secret@example.com");
         assert_eq!(draft.subject, "Hello");
         assert_eq!(draft.text, "Body\n> quote");
-        assert_eq!(draft.html, None);
         assert_eq!(draft.in_reply_to.as_deref(), Some("parent@x"));
+        assert_eq!(
+            draft.html.as_deref(),
+            Some(mail_core::reply_html(&draft.text).as_str())
+        );
         assert_eq!(draft.references, reply.references);
         assert_eq!(draft.attachments, files);
+    }
+
+    #[test]
+    fn a_reply_is_sent_with_the_quote_kept_out_of_the_editor() {
+        let reply = ReplyHeaders {
+            in_reply_to: Some("parent@x".into()),
+            quoted: Some(QuotedOriginal {
+                block: "Ann wrote:\n> Hello".into(),
+                attribution: "Ann wrote:".into(),
+                html: "<b>Hello</b>".into(),
+                load_remote: false,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(reply_text(&reply, "Hi\n\n"), "Hi\n\nAnn wrote:\n> Hello");
+        let mut written = ComposeFields {
+            body: "Hi".into(),
+            ..Default::default()
+        };
+        let html = message_html(&reply, &written).unwrap();
+        assert!(html.contains("<b>Hello</b>") && html.contains("Hi"));
+        written.body_html = Some("<div dir=\"ltr\"><i>Hi</i></div>".into());
+        assert!(message_html(&reply, &written)
+            .unwrap()
+            .starts_with("<div dir=\"ltr\"><i>Hi</i></div><br><div class=\"gmail_quote\">"));
+
+        let plain = ReplyHeaders::default();
+        assert_eq!(reply_text(&plain, "Hi\n"), "Hi\n");
+        assert_eq!(message_html(&plain, &ComposeFields::default()), None);
+        let formatted = ComposeFields {
+            body_html: Some("<b>x</b>".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            message_html(&plain, &formatted).as_deref(),
+            Some("<b>x</b>")
+        );
+    }
+
+    #[test]
+    fn quote_toggle_follows_the_page_not_the_app_theme() {
+        let dark = Theme::dark();
+        let on_white = quote_toggle_colors(true, dark.colors());
+        assert!(on_white.background.l > 0.7, "{:?}", on_white.background);
+        assert!(on_white.icon.l < 0.5, "{:?}", on_white.icon);
+        let on_dark = quote_toggle_colors(false, dark.colors());
+        assert_eq!(on_dark.background, dark.colors().element_active);
+    }
+
+    #[test]
+    fn every_font_has_a_distinct_label() {
+        let labels: std::collections::HashSet<_> = FontFamily::ALL
+            .into_iter()
+            .map(|family| family_label(family, Language::Portuguese))
+            .collect();
+        assert_eq!(labels.len(), FontFamily::ALL.len());
     }
 
     #[test]
