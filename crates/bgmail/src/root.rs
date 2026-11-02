@@ -91,7 +91,11 @@ const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 /// the same time as a short one.
 const FOLD_ANIM_MS: u64 = 90;
 /// Tilt of the sheets behind a multiple selection's message, in degrees.
-const SHEET_TILTS: [f32; 4] = [0.9, -0.7, 1.3, -1.1];
+const SHEET_TILTS: [f32; 4] = [3.0, -2.2, 4.4, -3.4];
+/// How much smaller a multiple selection's message shows.
+const STACK_SCALE: f32 = 0.85;
+/// Space around it on each side of the pane, as a fraction of the pane.
+const STACK_MARGIN: f32 = (1.0 - STACK_SCALE) / 2.0;
 /// Tallest a dropdown gets before it scrolls, in pixels.
 const MENU_MAX_HEIGHT: f32 = 420.0;
 /// Width of a list row's compact action button (`IconSize::Small`) and the gap
@@ -3184,6 +3188,14 @@ impl RootView {
             self.reader_build_token += 1;
             return;
         };
+        let scale = if self.multi_selection.is_empty() {
+            1.0
+        } else {
+            STACK_SCALE
+        };
+        if let Some(view) = &self.reader_view {
+            view.update(cx, |view, cx| view.set_display_scale(scale, cx));
+        }
         let colors = cx.theme().colors();
         // Force a white page (dark text) when the user keeps the reader light,
         // regardless of the app theme; otherwise follow the theme.
@@ -6095,13 +6107,19 @@ impl RootView {
         reader: impl IntoElement,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        const MARGIN: f32 = 24.0;
         const ACTIONS_OVERLAP: f32 = 15.0;
+        const SHADOW_OFFSET: f32 = 6.0;
 
         let colors = cx.theme().colors();
         let (bg, border, surface) = (colors.background, colors.border, colors.surface_background);
-        // Stand out from the pane, which is as dark as the regular surfaces.
-        let (sheet_fill, sheet_edge) = (colors.element_active, colors.text_disabled);
+        // Stand out from the pane: the page's color, or a lighter surface on a dark
+        // page.
+        let sheet_fill = if self.reader_white_background {
+            gpui::white()
+        } else {
+            colors.element_active
+        };
+        let sheet_edge = colors.text_disabled;
         let language = cx.language();
         let count = self.multi_selection.len();
         let in_trash = self.showing_trash();
@@ -6111,24 +6129,30 @@ impl RootView {
         let sheets = canvas(
             |_, _, _| {},
             move |bounds, _, window, _| {
-                let sheet = Bounds::from_corners(
-                    bounds.origin + point(px(MARGIN), px(MARGIN)),
-                    bounds.bottom_right() - point(px(MARGIN), px(MARGIN)),
+                let margin = point(
+                    bounds.size.width * STACK_MARGIN,
+                    bounds.size.height * STACK_MARGIN,
                 );
+                let sheet =
+                    Bounds::from_corners(bounds.origin + margin, bounds.bottom_right() - margin);
                 for degrees in tilts.into_iter().rev() {
                     let corners = sheet_corners(sheet, degrees);
-                    let outline = |mut builder: PathBuilder| {
-                        builder.move_to(corners[0]);
+                    let outline = |mut builder: PathBuilder, shift: f32| {
+                        let at = |corner: Point<Pixels>| corner + point(px(shift), px(shift));
+                        builder.move_to(at(corners[0]));
                         for corner in &corners[1..] {
-                            builder.line_to(*corner);
+                            builder.line_to(at(*corner));
                         }
                         builder.close();
                         builder.build()
                     };
-                    if let Ok(path) = outline(PathBuilder::fill()) {
+                    if let Ok(path) = outline(PathBuilder::fill(), SHADOW_OFFSET) {
+                        window.paint_path(path, gpui::black().opacity(0.35));
+                    }
+                    if let Ok(path) = outline(PathBuilder::fill(), 0.0) {
                         window.paint_path(path, sheet_fill);
                     }
-                    if let Ok(path) = outline(PathBuilder::stroke(px(1.0))) {
+                    if let Ok(path) = outline(PathBuilder::stroke(px(1.0)), 0.0) {
                         window.paint_path(path, sheet_edge);
                     }
                 }
@@ -6250,25 +6274,28 @@ impl RootView {
             .min_w_0()
             .h_full()
             .bg(bg)
+            // In a tall, narrow pane the tilted corners must not reach the list.
+            .overflow_hidden()
             .child(sheets)
             .child(
                 v_flex()
                     .absolute()
-                    .top(px(MARGIN))
-                    .bottom(px(MARGIN))
-                    .left(px(MARGIN))
-                    .right(px(MARGIN))
+                    .top(relative(STACK_MARGIN))
+                    .bottom(relative(STACK_MARGIN))
+                    .left(relative(STACK_MARGIN))
+                    .right(relative(STACK_MARGIN))
                     .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(border)
-                    .shadow_lg()
+                    .shadow_2xl()
                     .child(reader),
             )
             .child(
                 h_flex()
                     .absolute()
-                    .top(px(MARGIN - ACTIONS_OVERLAP))
+                    .top(relative(STACK_MARGIN))
+                    .mt(px(-ACTIONS_OVERLAP))
                     .left_0()
                     .right_0()
                     .justify_center()

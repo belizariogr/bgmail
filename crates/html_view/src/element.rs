@@ -395,6 +395,8 @@ pub struct HtmlView {
     dragging: bool,
     /// Page zoom, kept across documents like a browser tab's.
     zoom: f32,
+    /// Extra scale set by the host, apart from the user's zoom, which stays as it is.
+    display_scale: f32,
     /// Pending repaint for animated images, and when it fires.
     frame_timer: Option<(Instant, Task<()>)>,
 }
@@ -418,6 +420,7 @@ impl HtmlView {
             hovered_link: None,
             dragging: false,
             zoom: 1.0,
+            display_scale: 1.0,
             frame_timer: None,
         }
     }
@@ -429,7 +432,7 @@ impl HtmlView {
 
     /// Replaces the displayed document and scrolls back to the top.
     pub fn set_document(&mut self, mut document: HtmlDocument, cx: &mut Context<Self>) {
-        document.set_zoom(self.zoom);
+        document.set_zoom(self.zoom * self.display_scale);
         self.document = Rc::new(RefCell::new(document));
         // A new parse has new image ids: the old textures can never be hit
         // again and would otherwise accumulate for the whole session.
@@ -483,7 +486,9 @@ impl HtmlView {
         }
         let ratio = zoom / self.zoom;
         self.zoom = zoom;
-        self.document.borrow_mut().set_zoom(zoom);
+        self.document
+            .borrow_mut()
+            .set_zoom(zoom * self.display_scale);
         let offset = self.scroll.offset();
         self.scroll
             .set_offset(point(offset.x * ratio, offset.y * ratio));
@@ -494,6 +499,17 @@ impl HtmlView {
     /// Zooms `steps` levels in (> 0) or out (< 0) of [`ZOOM_LEVELS`].
     pub fn zoom_by(&mut self, steps: i32, cx: &mut Context<Self>) {
         self.set_zoom(zoom_step(self.zoom, steps), cx);
+    }
+
+    /// Scales the page on top of the user's zoom, for a host showing it smaller.
+    pub fn set_display_scale(&mut self, scale: f32, cx: &mut Context<Self>) {
+        if scale != self.display_scale {
+            self.display_scale = scale;
+            self.document
+                .borrow_mut()
+                .set_zoom(self.zoom * self.display_scale);
+            cx.notify();
+        }
     }
 
     pub fn document(&self) -> Rc<RefCell<HtmlDocument>> {
