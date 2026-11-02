@@ -45,6 +45,8 @@ pub struct AttachmentInfo {
     pub size: usize,
     /// Without angle brackets.
     pub content_id: Option<String>,
+    /// What the bytes of a text part are in, as declared.
+    pub charset: Option<String>,
     /// Embedded in the HTML body (`cid:`) rather than a user-facing attachment.
     pub inline: bool,
 }
@@ -56,7 +58,7 @@ pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
     if message.headers().is_empty() {
         return None;
     }
-    let html = own_body(message.html_part(0), true);
+    let html = html_body(&message);
     Some(ParsedMessage {
         message_id: message.message_id().map(clean_id).filter(|i| !i.is_empty()),
         in_reply_to: id_list(message.in_reply_to()).into_iter().next(),
@@ -72,10 +74,10 @@ pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
         reply_to: message.reply_to().map(addresses).unwrap_or_default(),
         date: message.date().map(|d| d.to_timestamp()),
         attachments: attachment_parts(&message)
-            .map(|(index, part)| describe(index, part, html.as_deref().unwrap_or_default()))
+            .map(|(index, part)| describe(raw, index, part, html.as_deref().unwrap_or_default()))
             .collect(),
         html,
-        text: own_body(message.text_part(0), false),
+        text: text_body(&message),
     })
 }
 
@@ -83,7 +85,7 @@ pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
 pub fn attachment_content(raw: &[u8], index: usize) -> Option<Vec<u8>> {
     let message = MessageParser::default().parse(raw)?;
     let part = message.parts.get(index)?;
-    part_bytes(part)
+    part_bytes(raw, part)
 }
 
 /// `(content_id, mime_type, bytes)` for every image with a Content-ID, i.e.
@@ -99,7 +101,7 @@ pub fn inline_images(raw: &[u8]) -> Vec<(String, String, Vec<u8>)> {
             if !mime.starts_with("image/") {
                 return None;
             }
-            Some((cid, mime, part_bytes(part)?))
+            Some((cid, mime, part_bytes(raw, part)?))
         })
         .collect()
 }
@@ -134,7 +136,7 @@ fn attachment_parts<'m>(
         })
 }
 
-fn describe(index: usize, part: &MessagePart<'_>, html: &str) -> AttachmentInfo {
+fn describe(raw: &[u8], index: usize, part: &MessagePart<'_>, html: &str) -> AttachmentInfo {
     let mime_type = mime_type(part);
     let content_id = part.content_id().map(clean_id).filter(|c| !c.is_empty());
     let is_attachment_disposition = part
@@ -158,7 +160,11 @@ fn describe(index: usize, part: &MessagePart<'_>, html: &str) -> AttachmentInfo 
     AttachmentInfo {
         index,
         filename,
-        size: part_bytes(part).map_or(0, |b| b.len()),
+        size: part_bytes(raw, part).map_or(0, |b| b.len()),
+        charset: part
+            .content_type()
+            .and_then(|ct| ct.attribute("charset"))
+            .map(str::to_string),
         inline: shown_in_body && !is_attachment_disposition,
         content_id,
         mime_type,
@@ -216,24 +222,83 @@ fn mime_type(part: &MessagePart<'_>) -> String {
     }
 }
 
-fn part_bytes(part: &MessagePart<'_>) -> Option<Vec<u8>> {
+/// The part's bytes as sent. A text part comes from the raw message rather than
+/// mail-parser's text, already decoded to UTF-8 with whatever it couldn't read lost:
+/// a Latin-1 CSV has to save and forward unchanged.
+fn part_bytes(raw: &[u8], part: &MessagePart<'_>) -> Option<Vec<u8>> {
     match &part.body {
         PartType::Binary(bytes) | PartType::InlineBinary(bytes) => Some(bytes.to_vec()),
-        PartType::Text(text) | PartType::Html(text) => Some(text.as_bytes().to_vec()),
+        PartType::Text(text) | PartType::Html(text) => {
+            original_bytes(raw, part).or_else(|| Some(text.as_bytes().to_vec()))
+        }
         PartType::Message(message) => Some(message.raw_message.to_vec()),
         PartType::Multipart(_) => None,
     }
 }
 
-/// Only accepts a body of the requested kind: mail-parser lists a text part
-/// as the HTML body of a text-only mail (and vice versa) and would convert it.
-fn own_body(part: Option<&MessagePart<'_>>, want_html: bool) -> Option<String> {
-    let text = match (&part?.body, want_html) {
-        (PartType::Html(html), true) => html,
-        (PartType::Text(text), false) => text,
-        _ => return None,
-    };
-    (!text.is_empty()).then(|| text.to_string())
+/// Reverts only the Content-Transfer-Encoding of the part's raw body.
+fn original_bytes(raw: &[u8], part: &MessagePart<'_>) -> Option<Vec<u8>> {
+    let body = raw.get(part.offset_body as usize..part.offset_end as usize)?;
+    match part.encoding {
+        mail_parser::Encoding::Base64 => mail_parser::decoders::base64::base64_decode(body),
+        mail_parser::Encoding::QuotedPrintable => {
+            mail_parser::decoders::quoted_printable::quoted_printable_decode(body)
+        }
+        mail_parser::Encoding::None => Some(body.to_vec()),
+    }
+}
+
+/// The HTML of every body part in order, with text parts between them marked up: a
+/// message can have several, as when text follows a PDF in Apple Mail. `None` without
+/// an HTML part: mail-parser also lists text parts as the HTML body of text-only mail.
+fn html_body(message: &Message<'_>) -> Option<String> {
+    let parts = body_parts(message, &message.html_body);
+    if !parts
+        .iter()
+        .any(|part| matches!(part.body, PartType::Html(_)))
+    {
+        return None;
+    }
+    let html: String = parts
+        .iter()
+        .map(|part| match &part.body {
+            PartType::Html(html) => html.to_string(),
+            PartType::Text(text) => format!(
+                "<div style=\"white-space:pre-wrap\">{}</div>",
+                html_escape::encode_text(text)
+            ),
+            _ => String::new(),
+        })
+        .collect();
+    (!html.is_empty()).then_some(html)
+}
+
+/// The text of every body part in order, [`html_body`]'s counterpart.
+fn text_body(message: &Message<'_>) -> Option<String> {
+    let parts = body_parts(message, &message.text_body);
+    if !parts
+        .iter()
+        .any(|part| matches!(part.body, PartType::Text(_)))
+    {
+        return None;
+    }
+    let text = parts
+        .iter()
+        .filter_map(|part| match &part.body {
+            PartType::Text(text) => Some(text.to_string()),
+            PartType::Html(html) => Some(crate::reply::html_to_text(html)),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn body_parts<'m>(message: &'m Message<'m>, ids: &[u32]) -> Vec<&'m MessagePart<'m>> {
+    ids.iter()
+        .filter_map(|id| message.parts.get(*id as usize))
+        .collect()
 }
 
 fn addresses(address: &mail_parser::Address<'_>) -> Vec<Address> {
@@ -261,6 +326,97 @@ fn clean_id(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn multipart(kind: &str, parts: &[&str]) -> Vec<u8> {
+        let mut raw = format!("From: a@b.c\r\nContent-Type: multipart/{kind}; boundary=X\r\n\r\n");
+        for part in parts {
+            raw.push_str(&format!("--X\r\n{part}\r\n"));
+        }
+        raw.push_str("--X--\r\n");
+        raw.into_bytes()
+    }
+
+    const TEXT: &str = "Content-Type: text/plain\r\n\r\n";
+    const HTML: &str = "Content-Type: text/html\r\n\r\n";
+
+    #[test]
+    fn every_body_part_counts() {
+        let raw = multipart(
+            "mixed",
+            &[&format!("{TEXT}INTRO"), &format!("{HTML}<p>RICH</p>")],
+        );
+        let parsed = parse_message(&raw).unwrap();
+        let html = parsed.html.unwrap();
+        assert!(
+            html.contains("INTRO") && html.contains("<p>RICH</p>"),
+            "{html}"
+        );
+        let text = parsed.text.unwrap();
+        assert!(text.contains("INTRO") && text.contains("RICH"), "{text}");
+        assert!(parsed.attachments.is_empty());
+
+        let raw = multipart(
+            "mixed",
+            &[&format!("{TEXT}FIRST"), &format!("{TEXT}SECOND")],
+        );
+        let parsed = parse_message(&raw).unwrap();
+        assert_eq!(parsed.text.as_deref(), Some("FIRST\n\nSECOND"));
+        assert_eq!(parsed.html, None);
+
+        let raw = multipart(
+            "mixed",
+            &[
+                &format!("{HTML}<p>FIRST</p>"),
+                "Content-Type: application/pdf; name=r.pdf\r\nContent-Disposition: attachment; filename=r.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\nAAAA",
+                &format!("{HTML}<p>SECOND</p>"),
+            ],
+        );
+        let parsed = parse_message(&raw).unwrap();
+        let html = parsed.html.unwrap();
+        assert!(html.contains("FIRST") && html.contains("SECOND"), "{html}");
+        assert_eq!(parsed.attachments.len(), 1);
+    }
+
+    #[test]
+    fn text_attachments_keep_their_bytes() {
+        let csv = b"S\xe3o Paulo;1\r\n";
+        for (headers, expected_charset) in [
+            ("Content-Type: text/csv; name=a.csv", None),
+            (
+                "Content-Type: text/csv; charset=iso-8859-1; name=a.csv",
+                Some("iso-8859-1"),
+            ),
+        ] {
+            let mut raw = b"From: a@b.c\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\nContent-Type: text/plain\r\n\r\nHi\r\n--X\r\n".to_vec();
+            raw.extend_from_slice(headers.as_bytes());
+            raw.extend_from_slice(b"\r\nContent-Disposition: attachment; filename=a.csv\r\nContent-Transfer-Encoding: 8bit\r\n\r\n");
+            raw.extend_from_slice(csv);
+            raw.extend_from_slice(b"\r\n--X--\r\n");
+            let parsed = parse_message(&raw).unwrap();
+            let info = &parsed.attachments[0];
+            assert_eq!(info.charset.as_deref(), expected_charset);
+            let content = attachment_content(&raw, info.index).unwrap();
+            assert_eq!(
+                content.strip_suffix(b"\r\n").unwrap_or(&content),
+                &csv[..csv.len() - 2]
+            );
+        }
+        // SP\xe3o in base64 and quoted-printable.
+        for (encoding, body) in [("base64", "U+NvDQo="), ("quoted-printable", "S=E3o")] {
+            let raw = multipart(
+                "mixed",
+                &[
+                    &format!("{TEXT}Hi"),
+                    &format!(
+                        "Content-Type: text/csv; name=a.csv\r\nContent-Disposition: attachment; filename=a.csv\r\nContent-Transfer-Encoding: {encoding}\r\n\r\n{body}"
+                    ),
+                ],
+            );
+            let parsed = parse_message(&raw).unwrap();
+            let content = attachment_content(&raw, parsed.attachments[0].index).unwrap();
+            assert!(content.starts_with(b"S\xe3o"), "{encoding}: {content:?}");
+        }
+    }
 
     fn with_part(body: &str, part_headers: &str) -> Vec<u8> {
         format!(

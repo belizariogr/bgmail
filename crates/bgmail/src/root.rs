@@ -990,6 +990,10 @@ fn forwarded_attachments(
     shown: &[AttachmentRow],
 ) -> Vec<mail_core::OutgoingAttachment> {
     // What the reader lists goes too: an image too big to embed is inline to the parser.
+    let mime_type = |info: &mail_core::AttachmentInfo| match &info.charset {
+        Some(charset) => format!("{}; charset={charset}", info.mime_type),
+        None => info.mime_type.clone(),
+    };
     let listed = |index: usize| {
         shown
             .iter()
@@ -1002,7 +1006,7 @@ fn forwarded_attachments(
         .filter_map(|info| {
             Some(mail_core::OutgoingAttachment {
                 filename: info.filename.clone(),
-                mime_type: info.mime_type.clone(),
+                mime_type: mime_type(info),
                 data: mail_core::attachment_content(raw, info.index)?,
             })
         })
@@ -8237,6 +8241,65 @@ mod tests {
             inline: false,
         };
         assert_eq!(forwarded_attachments(raw, &parsed, &[row]).len(), 1);
+    }
+
+    #[test]
+    fn a_forward_keeps_a_text_attachment_exactly_as_it_was() {
+        let mut raw = b"From: a@b.c\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\nContent-Type: text/plain\r\n\r\nHi\r\n--X\r\nContent-Type: text/csv; charset=iso-8859-1; name=a.csv\r\nContent-Disposition: attachment; filename=a.csv\r\nContent-Transfer-Encoding: 8bit\r\n\r\n".to_vec();
+        raw.extend_from_slice(b"S\xe3o\r\n--X--\r\n");
+        let parsed = mail_core::parse_message(&raw).unwrap();
+        let forwarded = forwarded_attachments(&raw, &parsed, &[]);
+        assert_eq!(forwarded[0].mime_type, "text/csv; charset=iso-8859-1");
+        assert!(forwarded[0].data.starts_with(b"S\xe3o"));
+
+        let draft = mail_core::Draft {
+            from: Address::new(None::<String>, "a@b.c"),
+            to: vec![Address::new(None::<String>, "c@d.e")],
+            attachments: forwarded,
+            ..Default::default()
+        };
+        let sent = mail_core::build_message(&draft, "id@b.c", 0);
+        let reparsed = mail_core::parse_message(&sent).unwrap();
+        let info = &reparsed.attachments[0];
+        assert_eq!(info.charset.as_deref(), Some("iso-8859-1"));
+        assert!(mail_core::attachment_content(&sent, info.index)
+            .unwrap()
+            .starts_with(b"S\xe3o"));
+    }
+
+    #[test]
+    fn removing_an_account_keeps_a_secret_another_one_logs_in_with() {
+        let (_dir, view) = test_view();
+        let config = |email: &str, username: &str| AccountConfig {
+            email: email.into(),
+            username: username.into(),
+            imap: mail_core::ServerConfig {
+                host: "imap.x.test".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let shared = config("me@x.test", "me@x.test");
+        let other = config("other@x.test", "other@x.test");
+        view.db
+            .create_account("A", "me@x.test", "imap", &shared.to_json())
+            .unwrap();
+        assert!(view.secret_is_shared(&config("alias@x.test", "me@x.test")));
+        assert!(!view.secret_is_shared(&other));
+    }
+
+    #[test]
+    fn a_search_returning_to_a_removed_account_goes_to_the_inbox() {
+        let (_dir, mut view) = test_view();
+        view.pre_search_mailbox = Some(Selection::Mailbox {
+            account_id: 42,
+            folder_path: storage::system::SENT.into(),
+        });
+        view.forget_removed_account_mailboxes(42);
+        assert!(matches!(
+            view.pre_search_mailbox,
+            Some(Selection::Global(GlobalMailbox::Inbox))
+        ));
     }
 
     #[test]
