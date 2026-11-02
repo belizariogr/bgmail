@@ -102,6 +102,8 @@ const MENU_MAX_HEIGHT: f32 = 420.0;
 /// around it, in pixels.
 const ROW_ACTION_WIDTH: f32 = 14.0;
 const ROW_ACTION_GAP: f32 = 6.0;
+/// Group of a sidebar folder's row, which takes dropped messages.
+const FOLDER_ROW_GROUP: &str = "folder-row";
 /// Fixed height of a sidebar row (account header and mailbox rows alike), in
 /// pixels. Pinning it keeps the fold (accordion) animation's height math exact,
 /// so the list never snaps at the end of the transition.
@@ -4769,25 +4771,36 @@ impl RootView {
             // (highlight included) is indented so it reads as nested under its
             // account header.
             let drop_highlight = cx.theme().colors().element_selected;
-            let drop_path = folder.path.clone();
             let target_path = folder.path.clone();
+            let drop_path = folder.path.clone();
+            let accepts = move |dragged: &dyn std::any::Any, window: &mut Window, _: &mut App| {
+                dragged
+                    .downcast_ref::<DraggedMessages>()
+                    .is_some_and(|dragged| {
+                        dragged.can_drop_on(account_id, &drop_path, window.mouse_position())
+                    })
+            };
+            // The whole row takes the drop; the highlight goes on the item itself, to
+            // look like its selected state: same corners, without the row's indent.
             list = list.child(
                 div()
+                    .group(FOLDER_ROW_GROUP)
                     .h(px(SIDEBAR_ROW_HEIGHT))
                     .flex_shrink_0()
                     .pl(px(ITEM_INDENT))
-                    .can_drop(move |dragged, window, _| {
-                        dragged
-                            .downcast_ref::<DraggedMessages>()
-                            .is_some_and(|dragged| {
-                                dragged.can_drop_on(account_id, &drop_path, window.mouse_position())
-                            })
-                    })
-                    .drag_over::<DraggedMessages>(move |style, _, _, _| style.bg(drop_highlight))
+                    .can_drop(accepts.clone())
                     .on_drop(cx.listener(move |this, dragged: &DraggedMessages, _, cx| {
                         this.move_messages_to_folder(&dragged.ids, &target_path, cx);
                     }))
-                    .child(item),
+                    .child(
+                        div()
+                            .rounded_md()
+                            .can_drop(accepts)
+                            .group_drag_over::<DraggedMessages>(FOLDER_ROW_GROUP, move |style| {
+                                style.bg(drop_highlight)
+                            })
+                            .child(item),
+                    ),
             );
         }
 
