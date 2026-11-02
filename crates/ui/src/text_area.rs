@@ -996,10 +996,19 @@ impl TextArea {
         let typed = self
             .pending_style
             .unwrap_or_else(|| self.rich.style_at(self.buffer.selected_range().start));
+        self.buffer.take_single_edit();
         f(&mut self.buffer);
         if self.buffer.revision() != revision {
-            self.rich
-                .apply_edit(&before_text, self.buffer.text(), typed);
+            match self.buffer.take_single_edit() {
+                Some((removed, len)) => {
+                    let inserted = &self.buffer.text()[removed.start..removed.start + len];
+                    self.rich
+                        .apply_edit_at(&before_text, removed, inserted, typed);
+                }
+                None => self
+                    .rich
+                    .apply_edit(&before_text, self.buffer.text(), typed),
+            }
             if self.buffer.undo_steps() != steps {
                 self.push_rich_undo(before_rich);
             }

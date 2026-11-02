@@ -204,6 +204,7 @@ pub(crate) struct TextBuffer {
     marked_range: Option<Range<usize>>,
     revision: u64,
     history: History,
+    single_edit: SingleEdit,
 }
 
 impl TextBuffer {
@@ -443,15 +444,53 @@ impl TextBuffer {
             selection_before: self.selected_range.clone(),
             reversed_before: self.selection_reversed,
         };
+        self.single_edit = match self.single_edit {
+            SingleEdit::None => SingleEdit::One(range.clone(), new_text.len()),
+            _ => SingleEdit::Several,
+        };
         self.text.replace_range(range, new_text);
         self.history.record(edit, kind);
         self.revision += 1;
     }
+
+    /// The one edit since the last call, as the range it replaced and how long the new
+    /// text is. `None` for no edit, or several: the caller has to compare the texts.
+    pub(crate) fn take_single_edit(&mut self) -> Option<(Range<usize>, usize)> {
+        match std::mem::replace(&mut self.single_edit, SingleEdit::None) {
+            SingleEdit::One(range, len) => Some((range, len)),
+            _ => None,
+        }
+    }
+}
+
+/// See [`TextBuffer::take_single_edit`].
+#[derive(Clone, Debug, Default)]
+enum SingleEdit {
+    #[default]
+    None,
+    One(Range<usize>, usize),
+    Several,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_real_range_of_one_edit_is_reported_once() {
+        let mut buffer = TextBuffer::default();
+        assert_eq!(buffer.take_single_edit(), None);
+        buffer.replace(None, "foo foo", EditKind::Other);
+        buffer.take_single_edit();
+        buffer.select_range(0, 4);
+        buffer.replace(None, "", EditKind::Other);
+        assert_eq!(buffer.take_single_edit(), Some((0..4, 0)));
+        assert_eq!(buffer.take_single_edit(), None);
+
+        buffer.replace(None, "a", EditKind::Other);
+        buffer.replace(None, "b", EditKind::Other);
+        assert_eq!(buffer.take_single_edit(), None, "two edits");
+    }
 
     #[test]
     fn an_empty_undo_step_keeps_text_and_counts_as_a_step() {
