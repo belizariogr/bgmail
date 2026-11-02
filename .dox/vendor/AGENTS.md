@@ -38,6 +38,9 @@ repository instead of living in someone's checkout.
     legacy attributes as CSS (`legacy_presentational_css`): `cellspacing`,
     `cellpadding`, table/cell `border` (incl. `border="0"`), `<font
     color/size/face>`, `<body text>`, named/bare-hex `bgcolor`.
+  - `html.rs` + `font_metrics.rs`: `HtmlParserProvider: Send + Sync` and a
+    compile-time assertion that `BlitzFontMetricsProvider` is `Send`, so documents
+    can be built off the UI thread (`html_view::DetachedDocument`).
   - `assets/default.css`: `td, th { padding: 1px }`, cell min/max-height
     neutralised (`!important`).
   - `stylo_to_parley.rs`: `-apple-system`/`BlinkMacSystemFont` map to

@@ -137,6 +137,8 @@ pub enum Key {
     StatusAuthFailed,
     StatusSyncError,
     ReaderLoadingBody,
+    ReaderPreparingBody,
+    ComposeToggleQuote,
     ReaderTo,
     ReaderCc,
     WelcomeTitle,
@@ -435,6 +437,10 @@ impl Key {
             (StatusAuthFailed, P) => "Falha ao entrar na conta",
             (StatusSyncError, E) => "Sync error",
             (StatusSyncError, P) => "Erro de sincronização",
+            (ReaderPreparingBody, E) => "Preparing message…",
+            (ReaderPreparingBody, P) => "Preparando mensagem…",
+            (ComposeToggleQuote, E) => "Show or hide the quoted message",
+            (ComposeToggleQuote, P) => "Mostrar ou ocultar a mensagem citada",
             (ReaderLoadingBody, E) => "Downloading message…",
             (ReaderLoadingBody, P) => "Baixando mensagem…",
             (ReaderTo, E) => "To",
@@ -783,7 +789,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 176] = [
+    const ALL_KEYS: [Key; 178] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -865,6 +871,8 @@ mod tests {
         Key::StatusAuthFailed,
         Key::StatusSyncError,
         Key::ReaderLoadingBody,
+        Key::ReaderPreparingBody,
+        Key::ComposeToggleQuote,
         Key::ReaderTo,
         Key::ReaderCc,
         Key::WelcomeTitle,

@@ -650,6 +650,27 @@ pub struct HtmlDocument {
     zoom: f32,
 }
 
+/// A document on its way from a background thread to the thread that shows it,
+/// so large messages don't stall the window while they are parsed.
+pub struct DetachedDocument(HtmlDocument);
+
+// SAFETY: asserting `HtmlDocument: Send` fails only on Stylo's
+// `Box<dyn FontMetricsProvider>`, a trait object without a `Send` bound. Its only
+// implementor is Blitz's `BlitzFontMetricsProvider`, which `vendor/blitz` asserts
+// to be `Send` at compile time. The document is moved whole and used by one thread
+// at a time, never shared.
+unsafe impl Send for DetachedDocument {}
+
+impl DetachedDocument {
+    pub fn new(document: HtmlDocument) -> Self {
+        Self(document)
+    }
+
+    pub fn into_inner(self) -> HtmlDocument {
+        self.0
+    }
+}
+
 impl HtmlDocument {
     /// Parses `html` as an HTML document (never as XML, whatever its doctype).
     pub fn parse(html: &str, options: DocumentOptions) -> Self {
@@ -731,6 +752,13 @@ impl HtmlDocument {
             });
         }
         Ok(document)
+    }
+
+    /// Does the costly first layout and recording for `width` CSS px up front,
+    /// so a document built on a background thread is cheap to show.
+    pub fn prepare(&mut self, width: f32) {
+        self.layout(width);
+        self.display_list();
     }
 
     /// Element nesting depth of the document.
@@ -1202,6 +1230,22 @@ pub fn force_html_parse(html: &str, mode: DocumentMode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_document_built_on_another_thread_works_here() {
+        let detached = std::thread::spawn(|| {
+            let mut document =
+                HtmlDocument::parse("<p>Hello there</p>", DocumentOptions::default());
+            document.prepare(400.0);
+            DetachedDocument::new(document)
+        })
+        .join()
+        .expect("worker");
+        let mut document = detached.into_inner();
+        assert!(document.content_height() > 0.0);
+        assert!(document.layout(200.0) > 0.0);
+        assert_eq!(document.find("hello"), 1);
+    }
     use crate::interaction::{HitInfo, PointerButton, PointerInput, PointerPhase};
 
     #[test]

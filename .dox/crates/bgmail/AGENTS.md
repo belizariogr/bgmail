@@ -66,8 +66,12 @@ wiring to `storage`.
   writes `mail_html::print_document` (light page, header, CSP allowing only
   `data:` images and its own nonce'd `print()` script) to a private temp
   file and `open_with_system` opens it.
-- Reader robustness: HTML is always shown formatted, whatever its size
-  (user decision; large bodies still parse on the UI thread). Bodies
+- Reader robustness: HTML is always shown formatted, whatever its size (user
+  decision). Bodies from 256 KB on are sanitized, parsed and laid out on a
+  background thread with a placeholder meanwhile (`ReaderJob`; newest selection
+  wins); smaller ones build in place, so no placeholder flashes. No parsed
+  document cache: measured, the largest real message builds in about 180 ms, so a
+  cache would only save that on reopening at a memory cost. Bodies
   `html_view` refuses (too deep) show as plain text, and a message whose formatted rendering was interrupted by a crash (the
   `crash_guard` marker survived) as plain text, each with a notice. The
   release profile keeps `panic = "abort"` (decided with two opposing
@@ -82,7 +86,7 @@ wiring to `storage`.
   `Draft` to `RootView::send_draft` in a task (never while root is leased);
   success closes the window, errors show in a banner. Replies prefill from
   `ComposeInit` (`RootView::open_compose_with`; an open window is refilled)
-  and focus the body above the quote; forwards focus To. Discard asks for
+  and focus the body; forwards focus To. Discard asks for
   confirmation only after edits; closing the window does not prompt.
 - **Modules (flat under `src/`):**
   - `root` — main three-column UI + selection/layout state.
@@ -181,10 +185,13 @@ wiring to `storage`.
   good and leaves nothing selected. On hover Reply / Delete appear centered at
   the right, icon-sized and with no background (their icons brighten on hover);
   only the subject shrinks for them, so the date and star stay in place. Trash shows no unread badge.
-- Replies carry Gmail's structure: `In-Reply-To`/`References`, a `Re:`
-  subject, Gmail's attribution line and an HTML alternative: the original's
-  sanitized HTML (`mail_html::quotable_html`, without `cid:` images) while the
-  prefilled quote is intact, otherwise built from the edited text.
+- Replies follow Gmail: the editor holds only what the user writes, and below
+  it a `⋯` button reveals the attribution line and the original, rendered behind
+  a side bar (read-only, parsed off the UI thread when first shown). The sent
+  message has `In-Reply-To`/`References`, a `Re:` subject, Gmail's attribution
+  line, `gmail_quote` markup around the original's sanitized HTML
+  (`mail_html::quotable_html`, without `cid:` images) and a `> ` plain-text
+  version. Forwards and edited unsent messages keep their text in the editor.
 - Command palette: `cmd-k` / `ctrl-k`. Mail shortcuts (mac / other): Reply `cmd-r`/`ctrl-r`, Reply All
   `cmd-shift-r`/`ctrl-shift-r`, Forward `cmd-shift-f`/`ctrl-shift-f`, Mark
   read/unread `cmd-shift-u`/`ctrl-shift-m` (Ctrl+Shift+U is the Linux IME

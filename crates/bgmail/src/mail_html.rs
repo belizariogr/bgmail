@@ -188,6 +188,14 @@ pub fn quotable_html(html: &str) -> String {
     rewrite_str(&sanitized, settings).unwrap_or_default()
 }
 
+/// A plain-text original as it goes inside a reply's quote.
+pub fn quotable_text(text: &str) -> String {
+    text.lines()
+        .map(escape_html)
+        .collect::<Vec<_>>()
+        .join("<br>")
+}
+
 fn leading_doctype(html: &str) -> Option<&str> {
     let mut rest = html.trim_start_matches('\u{feff}').trim_start();
     loop {
@@ -789,6 +797,11 @@ fn escape_html(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quotable_text_is_escaped_with_line_breaks() {
+        assert_eq!(quotable_text("a <b>\nc"), "a &lt;b&gt;<br>c");
+    }
 
     #[test]
     fn quotable_html_keeps_the_body_without_active_content() {

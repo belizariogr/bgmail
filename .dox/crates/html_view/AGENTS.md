@@ -133,6 +133,13 @@ positions Blitz computed.
   faces on first use, so later faces of the same family would never be found
   (Google Fonts' italic-first CSS made whole messages italic).
 
+- `DetachedDocument` moves a document built on a background thread to the one
+  showing it. It holds this crate's only `unsafe` (`impl Send`): the compiler
+  refuses `HtmlDocument` only for Stylo's `Box<dyn FontMetricsProvider>`, whose one
+  implementor `vendor/blitz` asserts to be `Send`. A document is moved whole and
+  used by one thread at a time. `HtmlDocument::prepare` does the first layout and
+  recording up front.
+
 ## Work Guidance
 
 - Prefer fixing layout/style issues upstream in Blitz; keep local changes to the

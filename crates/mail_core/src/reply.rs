@@ -229,23 +229,10 @@ pub fn reply_html(text: &str) -> String {
     out
 }
 
-/// [`reply_html`] quoting the original message's own HTML, when `quote_block`
-/// (the attribution and `> ` lines the reply was prefilled with) is still intact
-/// in `text`. `None` when it was edited: then the text is what must be sent.
-/// `original_html` must already be safe to send on.
-pub fn reply_html_with_original(
-    text: &str,
-    quote_block: &str,
-    attribution: &str,
-    original_html: &str,
-) -> Option<String> {
-    let quote_block = quote_block.trim_end();
-    if quote_block.is_empty() {
-        return None;
-    }
-    let start = text.find(quote_block)?;
-    let (before, after) = (&text[..start], &text[start + quote_block.len()..]);
-    let mut out = reply_html(before);
+/// [`reply_html`] of what the user wrote, followed by a Gmail quote of the
+/// original's HTML, which must already be safe to send on.
+pub fn reply_html_with_original(reply: &str, attribution: &str, original_html: &str) -> String {
+    let mut out = reply_html(reply);
     out.push_str("<br><div class=\"gmail_quote\"><div dir=\"ltr\" class=\"gmail_attr\">");
     out.push_str(&html_escape::encode_text(attribution));
     out.push_str("<br></div><blockquote class=\"gmail_quote\" style=\"");
@@ -253,10 +240,7 @@ pub fn reply_html_with_original(
     out.push_str("\">");
     out.push_str(original_html);
     out.push_str("</blockquote></div>");
-    if !after.trim().is_empty() {
-        out.push_str(&reply_html(after.trim_start_matches('\n')));
-    }
-    Some(out)
+    out
 }
 
 /// Quote depth of a line and its text without the `> ` markers.
@@ -442,33 +426,11 @@ mod reply_format_tests {
     }
 
     #[test]
-    fn reply_quotes_the_original_html_while_the_quote_is_intact() {
-        let block = "On Ann wrote:\n> Hello";
-        let text = format!("My answer\n\n{block}\n");
-        let html = reply_html_with_original(&text, block, "On Ann wrote:", "<b>Hello</b>").unwrap();
-        assert!(html.starts_with("<div dir=\"ltr\">My answer<br><br></div>"));
+    fn reply_quotes_the_original_html_below_what_was_written() {
+        let html = reply_html_with_original("My <answer>", "On Ann wrote:", "<b>Hello</b>");
+        assert!(html.starts_with("<div dir=\"ltr\">My &lt;answer&gt;<br></div>"));
         assert!(html.contains("class=\"gmail_attr\">On Ann wrote:<br></div>"));
-        assert!(html.contains("<b>Hello</b></blockquote></div>"));
-        assert!(!html.contains("&gt; Hello"));
-
-        let below = format!("{block}\n\nBelow");
-        let html =
-            reply_html_with_original(&below, block, "On Ann wrote:", "<b>Hello</b>").unwrap();
-        assert!(html.ends_with("<div dir=\"ltr\">Below<br></div>"));
-    }
-
-    #[test]
-    fn an_edited_quote_falls_back_to_the_text() {
-        assert_eq!(
-            reply_html_with_original(
-                "On Ann wrote:\n> Edited",
-                "On Ann wrote:\n> Hello",
-                "a",
-                "b"
-            ),
-            None
-        );
-        assert_eq!(reply_html_with_original("x", "  ", "a", "b"), None);
+        assert!(html.ends_with("<b>Hello</b></blockquote></div>"));
     }
 
     #[test]

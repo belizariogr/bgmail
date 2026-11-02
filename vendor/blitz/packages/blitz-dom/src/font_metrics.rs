@@ -39,6 +39,14 @@ pub(crate) struct BlitzFontMetricsProvider {
     pub(crate) font_ctx: Arc<Mutex<FontContext>>,
 }
 
+// BGMail: the only part of a document the compiler can't see as `Send` is this
+// provider behind Stylo's `Box<dyn FontMetricsProvider>`; `html_view`'s
+// `DetachedDocument` relies on this assertion.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<BlitzFontMetricsProvider>();
+};
+
 impl core::fmt::Debug for BlitzFontMetricsProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "BlitzFontMetricsProvider")

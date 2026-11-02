@@ -1,7 +1,8 @@
 use crate::{BaseDocument, Document, DocumentConfig, DocumentMutator, PlainDocument};
 use blitz_traits::node_id::NodeId;
 
-pub trait HtmlParserProvider {
+// BGMail: Send + Sync so a parsed document can be built off the UI thread.
+pub trait HtmlParserProvider: Send + Sync {
     fn parse_inner_html<'m, 'doc>(
         &self,
         mutr: &'m mut DocumentMutator<'doc>,

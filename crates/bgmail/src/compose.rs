@@ -12,10 +12,17 @@ use gpui::{
     anchored, black, deferred, size, white, AnyWindowHandle, App, Bounds, ClickEvent, Context,
     Corner, Entity, ExternalPaths, FocusHandle, Focusable, Global, Hsla, KeyBinding, MouseButton,
     PathPromptOptions, Point, PromptButton, PromptLevel, Render, ScrollHandle, Size, Subscription,
-    WeakEntity, Window, WindowBounds,
+    Task, WeakEntity, Window, WindowBounds,
+};
+use html_view::{
+    Appearance as PageAppearance, DetachedDocument, DocumentOptions, HtmlDocument, HtmlView,
+    Resources,
 };
 use mail_core::{Address, Draft, OutgoingAttachment};
 use theme::ActiveTheme;
+
+use crate::data::MessageBody;
+use crate::mail_html::{email_document, DocumentColors};
 use ui::prelude::*;
 use ui::{
     Button, ButtonStyle, Color, ContextMenu, Icon, IconButton, IconName, IconSize, Label,
@@ -109,13 +116,18 @@ pub struct ComposeInit {
     pub quoted_original: Option<QuotedOriginal>,
 }
 
-/// The original message of a reply: its quote as prefilled in the body and its
-/// HTML, ready to be sent on.
+/// Width the quoted original is first laid out at, before the real one is known.
+const QUOTE_FIRST_LAYOUT_WIDTH: f32 = 800.0;
+
+/// The original message of a reply: its `> ` quote for the plain-text version
+/// and its HTML, ready to be sent on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuotedOriginal {
     pub block: String,
     pub attribution: String,
     pub html: String,
+    /// Whether the user allows remote images for the original.
+    pub load_remote: bool,
 }
 
 /// The recipient fields that are validated as address lists.
@@ -241,6 +253,11 @@ pub struct ComposeView {
     /// from [`RootView`] when it changes — never read from `RootView` during
     /// render (that panics while the main view is on the stack).
     white_background: bool,
+    /// The quoted original shows, as in Gmail, only after asking for it.
+    quote_expanded: bool,
+    /// The quoted original, parsed the first time it is shown.
+    quote_view: Option<Entity<HtmlView>>,
+    _quote_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -311,6 +328,9 @@ impl ComposeView {
             last_reported_bounds: None,
             last_title: String::new(),
             white_background,
+            quote_expanded: false,
+            quote_view: None,
+            _quote_task: None,
             _subscriptions: subscriptions,
         };
         view.apply_init(init, window, cx);
@@ -345,6 +365,9 @@ impl ComposeView {
             references: draft.references,
             quoted: init.quoted_original,
         };
+        self.quote_expanded = false;
+        self.quote_view = None;
+        self._quote_task = None;
         self.errors = ComposeErrors::default();
         self.from_menu_open = false;
         self.edited = false;
@@ -360,8 +383,66 @@ impl ComposeView {
     pub(crate) fn set_white_background(&mut self, value: bool, cx: &mut Context<Self>) {
         if self.white_background != value {
             self.white_background = value;
+            self.quote_view = None;
+            self._quote_task = None;
+            if self.quote_expanded {
+                self.build_quote_view(cx);
+            }
             cx.notify();
         }
+    }
+
+    fn toggle_quote(&mut self, cx: &mut Context<Self>) {
+        self.quote_expanded = !self.quote_expanded;
+        if self.quote_expanded && self.quote_view.is_none() {
+            self.build_quote_view(cx);
+        }
+        cx.notify();
+    }
+
+    /// Parses the quoted original off the UI thread: it can be a large message.
+    fn build_quote_view(&mut self, cx: &mut Context<Self>) {
+        let Some(quoted) = self.reply.quoted.clone() else {
+            return;
+        };
+        let theme = cx.theme().colors();
+        let colors = if self.white_background {
+            DocumentColors {
+                background: white(),
+                text: black(),
+                accent: theme.accent,
+            }
+        } else {
+            DocumentColors {
+                background: theme.background,
+                text: theme.text,
+                accent: theme.accent,
+            }
+        };
+        let build = cx.background_spawn(async move {
+            let body = MessageBody::Html(quoted.html.into());
+            let rendered = email_document(colors, &body, quoted.load_remote);
+            let options = DocumentOptions {
+                appearance: if colors.is_dark() {
+                    PageAppearance::Dark
+                } else {
+                    PageAppearance::Light
+                },
+                resources: Resources::new().allow_remote(quoted.load_remote),
+                ..Default::default()
+            };
+            let mut document = HtmlDocument::parse(&rendered.html, options);
+            document.prepare(QUOTE_FIRST_LAYOUT_WIDTH);
+            DetachedDocument::new(document)
+        });
+        self._quote_task = Some(cx.spawn(async move |this, cx| {
+            let document = build.await;
+            this.update(cx, |this, cx| {
+                this.quote_view = Some(cx.new(|cx| HtmlView::new(document.into_inner(), cx)));
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn mark_edited(&mut self, cx: &mut Context<Self>) {
@@ -976,6 +1057,64 @@ impl ComposeView {
                 window.focus(&body_focus);
             })
             .child(self.body.clone())
+            .when(self.reply.quoted.is_some(), |el| {
+                el.child(self.render_quote(cx))
+            })
+    }
+
+    /// Below the editor, as in Gmail: a button that reveals the attribution line
+    /// and the original message, with its formatting, behind a side bar.
+    fn render_quote(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = cx.language();
+        let border = cx.theme().colors().border;
+        let attribution = self
+            .reply
+            .quoted
+            .as_ref()
+            .map(|quoted| quoted.attribution.clone())
+            .unwrap_or_default();
+        let height = self
+            .quote_view
+            .as_ref()
+            .map_or(0.0, |view| view.read(cx).content_height());
+        v_flex()
+            .w_full()
+            .mt_4()
+            .gap_2()
+            .cursor_default()
+            // Reading the quote must not move the caret to the editor.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                h_flex().child(
+                    div()
+                        .id("compose-quote-toggle")
+                        .tooltip(Tooltip::text(Key::ComposeToggleQuote.tr(language)))
+                        .child(
+                            IconButton::new("compose-quote-toggle-button", IconName::More)
+                                .size(IconSize::Small)
+                                .selected(self.quote_expanded)
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_quote(cx))),
+                        ),
+                ),
+            )
+            .when(self.quote_expanded, |el| {
+                el.child(
+                    Label::new(attribution)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .when_some(self.quote_view.clone(), |el, view| {
+                    el.child(
+                        div()
+                            .w_full()
+                            .h(px(height))
+                            .pl_3()
+                            .border_l_1()
+                            .border_color(border)
+                            .child(view),
+                    )
+                })
+            })
     }
 }
 
@@ -1140,21 +1279,22 @@ fn parse_field(input: &str, language: Language) -> (Vec<Address>, Option<String>
 /// Validates the fields and builds the outgoing draft (plain text). Errors:
 /// invalid addresses per field, then "no recipients", then a missing or
 /// local (can't send) From account.
-/// HTML of a reply: with the original's formatting while the user left the
-/// quote as it was, otherwise from the text alone.
+/// HTML of a reply: what was written, and the original with its formatting.
 fn reply_html(reply: &ReplyHeaders, body: &str) -> String {
-    reply
-        .quoted
-        .as_ref()
-        .and_then(|quoted| {
-            mail_core::reply_html_with_original(
-                body,
-                &quoted.block,
-                &quoted.attribution,
-                &quoted.html,
-            )
-        })
-        .unwrap_or_else(|| mail_core::reply_html(body))
+    match &reply.quoted {
+        Some(quoted) => {
+            mail_core::reply_html_with_original(body, &quoted.attribution, &quoted.html)
+        }
+        None => mail_core::reply_html(body),
+    }
+}
+
+/// Plain-text version of a message: what was written, and the `> ` quote.
+fn reply_text(reply: &ReplyHeaders, body: &str) -> String {
+    match &reply.quoted {
+        Some(quoted) => format!("{}\n\n{}", body.trim_end(), quoted.block),
+        None => body.to_string(),
+    }
 }
 
 fn build_draft(
@@ -1190,7 +1330,7 @@ fn build_draft(
         cc,
         bcc,
         subject: fields.subject.trim().to_string(),
-        text: fields.body.clone(),
+        text: reply_text(reply, &fields.body),
         // Same structure as Gmail's replies, which it collapses in conversations.
         html: reply
             .in_reply_to
@@ -1443,19 +1583,23 @@ mod tests {
     }
 
     #[test]
-    fn reply_html_uses_the_original_until_the_quote_is_edited() {
+    fn a_reply_is_sent_with_the_quote_kept_out_of_the_editor() {
         let reply = ReplyHeaders {
             in_reply_to: Some("parent@x".into()),
             quoted: Some(QuotedOriginal {
                 block: "Ann wrote:\n> Hello".into(),
                 attribution: "Ann wrote:".into(),
                 html: "<b>Hello</b>".into(),
+                load_remote: false,
             }),
             ..Default::default()
         };
-        assert!(reply_html(&reply, "Hi\n\nAnn wrote:\n> Hello").contains("<b>Hello</b>"));
-        let edited = reply_html(&reply, "Hi\n\nAnn wrote:\n> Changed");
-        assert!(!edited.contains("<b>Hello</b>") && edited.contains("Changed"));
+        assert_eq!(reply_text(&reply, "Hi\n\n"), "Hi\n\nAnn wrote:\n> Hello");
+        let html = reply_html(&reply, "Hi");
+        assert!(html.contains("<b>Hello</b>") && html.contains("Hi"));
+
+        let plain = ReplyHeaders::default();
+        assert_eq!(reply_text(&plain, "Hi\n"), "Hi\n");
     }
 
     #[test]

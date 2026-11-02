@@ -396,10 +396,14 @@
       deletion in the Trash
 - ⬜ Selection on a dark page is still translucent, so a translucent window
       shows the desktop through it
-- ✅ Replies quote the original's formatted HTML while the quote is intact
-      (images embedded with `cid:` are left out)
+- ✅ Replies quote the original's formatted HTML (images embedded with `cid:` are
+      left out)
+- ⬜ Editing or removing the quote in the reply composer (read-only today)
 - ⬜ Confirm on a real account: Archive, Move, Drafts folder, a sent reply
-- ⬜ Parse large HTML bodies off the UI thread (they are always formatted now)
+- ✅ Large HTML bodies (from 256 KB) build on a background thread; texture upload
+      of their images on first paint still happens on the UI thread
+- ✅ Reply composer as in Gmail: quote out of the editor, behind a `⋯` button,
+      rendered with its formatting
 - ⬜ Drafts (save/resume) and HTML composing (plain text only today)
 - ⬜ Set `\\Answered` on the original after a reply is sent
 - ✅ Move / delete / archive / junk, reflected on the server (optimistic

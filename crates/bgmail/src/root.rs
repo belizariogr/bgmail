@@ -42,15 +42,15 @@ use crate::dates;
 use crate::db_seed;
 use crate::locale::{self, ActiveLanguage, Key, Language};
 use crate::mail_html::{
-    email_document, is_openable_link, plain_text, print_document, quotable_html, DocumentColors,
-    PrintHeader,
+    email_document, is_openable_link, plain_text, print_document, quotable_html, quotable_text,
+    DocumentColors, PrintHeader,
 };
 use crate::mail_service::{self, MailService, OverallStatus, StartError};
 use crate::settings::SettingsView;
 use crate::shortcuts;
 use html_view::{
-    Appearance as PageAppearance, DocumentOptions, HitInfo, HtmlDocument, HtmlView, HtmlViewEvent,
-    RenderError,
+    Appearance as PageAppearance, DetachedDocument, DocumentOptions, HitInfo, HtmlDocument,
+    HtmlView, HtmlViewEvent, RenderError,
 };
 use mail_core::{AccountConfig, Address, Draft, ParsedMessage, QuoteLabels, ReplyKind};
 use mail_sync::{actions as mail_actions, ActionOutcome, Command, SyncEvent};
@@ -373,6 +373,80 @@ struct ReaderSignature {
     remote: bool,
 }
 
+/// HTML bodies from this size on are built on a background thread, showing a
+/// placeholder meanwhile. Smaller ones take a few ms: building them right away
+/// avoids flashing the placeholder at every message.
+const BACKGROUND_BUILD_BYTES: usize = 256 * 1024;
+
+/// Everything a reader document is made from, so it can be built on any thread.
+struct ReaderJob {
+    colors: DocumentColors,
+    body: MessageBody,
+    remote: bool,
+    crashed: bool,
+    selection_color: [u8; 4],
+    /// Expected layout width: the first layout at the real one is then cheap.
+    width: f32,
+}
+
+/// A reader document ready to be shown.
+struct BuiltReader {
+    document: DetachedDocument,
+    notice: Option<ReaderNotice>,
+    blocked_images: usize,
+}
+
+impl ReaderJob {
+    fn runs_in_background(&self) -> bool {
+        matches!(&self.body, MessageBody::Html(html) if html.len() >= BACKGROUND_BUILD_BYTES)
+    }
+
+    /// Sanitizes, themes, parses and lays out the body. A message that crashed
+    /// the renderer, or that it refuses (too deep), becomes plain text.
+    fn build(self) -> BuiltReader {
+        let options = || DocumentOptions {
+            appearance: if self.colors.is_dark() {
+                PageAppearance::Dark
+            } else {
+                PageAppearance::Light
+            },
+            selection_color: Some(self.selection_color),
+            resources: html_view::Resources::new().allow_remote(self.remote),
+            ..Default::default()
+        };
+        let as_plain = || match &self.body {
+            MessageBody::Html(html) => MessageBody::Text(plain_text(html).into()),
+            text => text.clone(),
+        };
+        let mut notice = (self.crashed && matches!(self.body, MessageBody::Html(_)))
+            .then_some(ReaderNotice::Crashed);
+        let shown = if notice.is_some() {
+            as_plain()
+        } else {
+            self.body.clone()
+        };
+        let rendered = email_document(self.colors, &shown, self.remote);
+        let mut document = match HtmlDocument::try_parse(&rendered.html, options()) {
+            Ok(document) => document,
+            Err(RenderError::TooDeep { .. }) => {
+                notice = Some(ReaderNotice::Unrenderable);
+                let fallback = email_document(self.colors, &as_plain(), false);
+                HtmlDocument::parse(&fallback.html, options())
+            }
+        };
+        document.prepare(self.width);
+        BuiltReader {
+            document: DetachedDocument::new(document),
+            blocked_images: if notice.is_some() {
+                0
+            } else {
+                rendered.blocked_images
+            },
+            notice,
+        }
+    }
+}
+
 /// Why the reader shows a message as plain text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReaderNotice {
@@ -598,6 +672,10 @@ pub struct RootView {
     /// colors it was themed with). Used to skip re-parsing the body on every
     /// render when nothing that affects the document has changed.
     last_reader_sig: Option<ReaderSignature>,
+    /// A large message is being built in the background.
+    reader_preparing: bool,
+    /// Identifies the newest reader build; older ones are dropped when done.
+    reader_build_token: u64,
     /// Desktop notifications for new mail (Settings ▸ Notifications).
     pub(crate) notifications_enabled: bool,
     /// Persisted "load remote content" preference. Remote content needs
@@ -1024,6 +1102,8 @@ impl RootView {
             crashed_messages: crash_guard.take_unfinished().into_iter().collect(),
             crash_guard,
             last_reader_sig: None,
+            reader_preparing: false,
+            reader_build_token: 0,
             notifications_enabled: settings.notifications_enabled,
             load_remote_images: settings.load_remote_images,
             remote_allowed: HashSet::new(),
@@ -2889,6 +2969,8 @@ impl RootView {
         let Some(detail) = self.reader_detail() else {
             self.last_reader_sig = None;
             self.reader_notice = None;
+            self.reader_preparing = false;
+            self.reader_build_token += 1;
             return;
         };
         let colors = cx.theme().colors();
@@ -2911,62 +2993,69 @@ impl RootView {
             colors: doc_colors,
             remote,
         };
-        if self.reader_view.is_some() && self.last_reader_sig == Some(signature) {
+        if (self.reader_view.is_some() || self.reader_preparing)
+            && self.last_reader_sig == Some(signature)
+        {
             return;
         }
-        let body = db_seed::message_body_from_detail(detail);
-        let mut notice = match &body {
-            MessageBody::Html(_) if self.crashed_messages.contains(&id) => {
-                Some(ReaderNotice::Crashed)
-            }
-            _ => None,
-        };
-        let options = || DocumentOptions {
-            appearance: if doc_colors.is_dark() {
-                PageAppearance::Dark
-            } else {
-                PageAppearance::Light
-            },
-            selection_color: Some(reader_selection_color(colors.accent, background)),
-            resources: html_view::Resources::new().allow_remote(remote),
-            ..Default::default()
-        };
-        let as_plain = |body: &MessageBody| match body {
-            MessageBody::Html(html) => MessageBody::Text(plain_text(html).into()),
-            text => text.clone(),
-        };
-        let shown = if notice.is_some() {
-            as_plain(&body)
-        } else {
-            body.clone()
+        let job = ReaderJob {
+            colors: doc_colors,
+            body: db_seed::message_body_from_detail(detail),
+            remote,
+            crashed: self.crashed_messages.contains(&id),
+            selection_color: reader_selection_color(colors.accent, background),
+            width: f32::from(self.reader_segment_width()),
         };
         // A crash rendering formatted HTML must not repeat on every start:
         // mark the message before parsing it (parsing can crash too) until a
         // frame showing it was drawn.
-        let guarded = notice.is_none() && matches!(body, MessageBody::Html(_));
+        let guarded = !job.crashed && matches!(job.body, MessageBody::Html(_));
         if guarded {
             self.crash_guard.begin(id);
         }
-        let rendered = email_document(doc_colors, &shown, remote);
-        let document = match HtmlDocument::try_parse(&rendered.html, options()) {
-            Ok(document) => document,
-            Err(RenderError::TooDeep { .. }) => {
-                notice = Some(ReaderNotice::Unrenderable);
-                let fallback = email_document(doc_colors, &as_plain(&body), false);
-                HtmlDocument::parse(&fallback.html, options())
-            }
-        };
-        self.content_blocked_count = if notice.is_some() {
-            0
-        } else {
-            rendered.blocked_images
-        };
-        self.reader_notice = notice;
+        self.reader_build_token += 1;
+        self.last_reader_sig = Some(signature);
+        self.reader_menu = None;
+        if !job.runs_in_background() {
+            self.reader_preparing = false;
+            self.install_reader(job.build(), guarded, window, cx);
+            return;
+        }
+        self.reader_preparing = true;
+        self.reader_notice = None;
+        self.content_blocked_count = 0;
+        let token = self.reader_build_token;
+        let built = cx.background_spawn(async move { job.build() });
+        cx.spawn_in(window, async move |this, cx| {
+            let built = built.await;
+            this.update_in(cx, |this, window, cx| {
+                // The user may have moved on while this one was being built.
+                if this.reader_build_token == token {
+                    this.reader_preparing = false;
+                    this.install_reader(built, guarded, window, cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Hands a built document to the reader view.
+    fn install_reader(
+        &mut self,
+        built: BuiltReader,
+        guarded: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.content_blocked_count = built.blocked_images;
+        self.reader_notice = built.notice;
         if guarded {
             let guard = self.crash_guard.clone();
             window.on_next_frame(move |_, _| guard.finish());
         }
-        self.reader_menu = None;
+        let document = built.document.into_inner();
         match &self.reader_view {
             Some(view) => view.update(cx, |view, cx| view.set_document(document, cx)),
             None => {
@@ -2975,7 +3064,6 @@ impl RootView {
                 self.reader_view = Some(view);
             }
         }
-        self.last_reader_sig = Some(signature);
         // Keep an open find bar's query applied to the new document.
         self.run_find(cx);
     }
@@ -3280,15 +3368,20 @@ impl RootView {
             formatted_date: date,
         };
         let mut draft = mail_core::prepare_reply(&parsed, kind, &me, &labels);
-        let quoted_original = parsed
+        // As in Gmail, the editor only holds what the user writes; the quote
+        // shows below it and is added when sending.
+        let quoted_html = parsed
             .html
             .as_deref()
-            .filter(|_| kind != ReplyKind::Forward)
-            .map(|html| QuotedOriginal {
-                block: draft.text.trim_start().to_string(),
-                attribution: labels.attribution.clone(),
-                html: quotable_html(html),
-            });
+            .map(quotable_html)
+            .or_else(|| parsed.text.as_deref().map(quotable_text))
+            .filter(|html| kind != ReplyKind::Forward && !html.trim().is_empty());
+        let quoted_original = quoted_html.map(|html| QuotedOriginal {
+            block: std::mem::take(&mut draft.text).trim_start().to_string(),
+            attribution: labels.attribution.clone(),
+            html,
+            load_remote: self.remote_allowed_for(detail.id),
+        });
         if kind == ReplyKind::Forward {
             if let Some(raw) = raw.as_deref() {
                 draft.attachments = forwarded_attachments(raw, &parsed);
@@ -5554,13 +5647,14 @@ impl RootView {
             .children(self.render_attachments(cx));
 
         let loading_body = message.body_state == storage::BODY_STATE_HEADERS;
+        let preparing = self.reader_preparing;
         let language = cx.language();
         // The body is rendered natively by `html_view` (scrolls on both axes;
         // laid out at the pane width).
         let scrollbars = self
             .reader_view
             .as_ref()
-            .filter(|_| !loading_body)
+            .filter(|_| !loading_body && !preparing)
             .map(|view| view.read(cx).scroll_handle().clone())
             .into_iter()
             .flat_map(|handle| {
@@ -5586,14 +5680,19 @@ impl RootView {
             // Match the forced-white page so no themed background shows at
             // sub-pixel edges.
             .when(self.reader_white_background, |el| el.bg(gpui::white()))
-            .when(loading_body, |el| {
+            .when(loading_body || preparing, |el| {
+                let text = if loading_body {
+                    Key::ReaderLoadingBody
+                } else {
+                    Key::ReaderPreparingBody
+                };
                 el.flex().items_center().justify_center().child(
-                    Label::new(Key::ReaderLoadingBody.tr(language))
+                    Label::new(text.tr(language))
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
             })
-            .when(!loading_body, |el| {
+            .when(!loading_body && !preparing, |el| {
                 el.when_some(self.reader_view.clone(), |el, view| el.child(view))
             })
             .children(scrollbars);
@@ -6152,6 +6251,49 @@ mod tests {
     fn sidebar_starts_visible() {
         let (_dir, view) = test_view();
         assert!(view.show_sidebar);
+    }
+
+    fn job(html: &str, crashed: bool) -> ReaderJob {
+        ReaderJob {
+            colors: DocumentColors {
+                background: gpui::white(),
+                text: gpui::black(),
+                accent: gpui::black(),
+            },
+            body: MessageBody::Html(html.to_string().into()),
+            remote: false,
+            crashed,
+            selection_color: [0, 0, 0, 255],
+            width: 500.0,
+        }
+    }
+
+    #[test]
+    fn only_large_html_is_built_in_the_background() {
+        assert!(!job("<p>small</p>", false).runs_in_background());
+        let large = "x".repeat(BACKGROUND_BUILD_BYTES);
+        assert!(job(&large, false).runs_in_background());
+        let mut text = job("", false);
+        text.body = MessageBody::Text(large.into());
+        assert!(!text.runs_in_background());
+    }
+
+    #[test]
+    fn reader_documents_build_on_another_thread() {
+        let built = std::thread::spawn(|| job("<p>Hello</p>", false).build())
+            .join()
+            .expect("worker");
+        assert_eq!(built.notice, None);
+        let mut document = built.document.into_inner();
+        assert!(document.content_height() > 0.0);
+        assert_eq!(document.find("hello"), 1);
+    }
+
+    #[test]
+    fn a_message_that_crashed_is_built_as_plain_text() {
+        let built = job("<p>Hello</p><img src=\"https://a.test/x.png\">", true).build();
+        assert_eq!(built.notice, Some(ReaderNotice::Crashed));
+        assert_eq!(built.blocked_images, 0);
     }
 
     #[test]

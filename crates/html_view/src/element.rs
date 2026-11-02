@@ -410,6 +410,11 @@ impl HtmlView {
         }
     }
 
+    /// Height of the laid out document, for hosts that show it whole.
+    pub fn content_height(&self) -> f32 {
+        self.document.borrow().content_height()
+    }
+
     /// Replaces the displayed document and scrolls back to the top.
     pub fn set_document(&mut self, mut document: HtmlDocument, cx: &mut Context<Self>) {
         document.set_zoom(self.zoom);
