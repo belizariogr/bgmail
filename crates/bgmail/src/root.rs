@@ -417,10 +417,16 @@ fn drag_cursor(draws_hand: bool) -> CursorStyle {
 /// Height of the card following the pointer, in pixels.
 const DRAG_CARD_HEIGHT: f32 = 56.0;
 
-/// Where the card goes for its center to be under the pointer, relative to where GPUI
-/// places a drag: the pointer minus where the row was grabbed.
-fn drag_card_origin(grab: Point<Pixels>, width: Pixels) -> Point<Pixels> {
-    point(grab.x - width / 2.0, grab.y - px(DRAG_CARD_HEIGHT / 2.0))
+/// How far inside the card's top left corner the pointer sits, in pixels.
+const DRAG_CARD_POINTER_INSET: f32 = 12.0;
+
+/// Where the card goes for its top left corner to be just past the pointer, relative
+/// to where GPUI places a drag: the pointer minus where the row was grabbed.
+fn drag_card_origin(grab: Point<Pixels>) -> Point<Pixels> {
+    point(
+        grab.x - px(DRAG_CARD_POINTER_INSET),
+        grab.y - px(DRAG_CARD_POINTER_INSET),
+    )
 }
 
 /// The row that follows the pointer: nothing until the drag counts.
@@ -440,7 +446,7 @@ impl Render for DragPreview {
             return div().into_any_element();
         }
         let colors = cx.theme().colors();
-        let card = drag_card_origin(self.grab, self.width);
+        let card = drag_card_origin(self.grab);
         let hand = |size: f32, color: Hsla| {
             svg()
                 .absolute()
@@ -7416,7 +7422,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dragging_past_the_threshold_sets_the_cursor_and_centers_the_card(
+    fn dragging_past_the_threshold_sets_the_cursor_and_places_the_card(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
@@ -7450,7 +7456,7 @@ mod tests {
             Some(CursorStyle::ClosedHand)
         );
         let card = cx.debug_bounds("drag-card").expect("the card shows");
-        assert_eq!(card.center(), far);
+        assert_eq!(card.origin, pointer_inset(far));
 
         let back = point(px(70.0), px(40.0));
         cx.simulate_mouse_move(back, held, Default::default());
@@ -7460,17 +7466,20 @@ mod tests {
             Some(CursorStyle::ClosedHand)
         );
         assert_eq!(
-            cx.debug_bounds("drag-card").expect("still shows").center(),
-            back
+            cx.debug_bounds("drag-card").expect("still shows").origin,
+            pointer_inset(back)
         );
     }
 
+    /// Where the card's corner belongs for a pointer at `pointer`.
+    fn pointer_inset(pointer: Point<Pixels>) -> Point<Pixels> {
+        point(pointer.x - px(12.0), pointer.y - px(12.0))
+    }
+
     #[test]
-    fn the_drag_card_is_centered_on_the_pointer() {
+    fn the_pointer_sits_12px_inside_the_top_left_corner_of_the_drag_card() {
         let grab = point(px(40.0), px(10.0));
-        let card = drag_card_origin(grab, px(200.0));
-        assert_eq!(card.x + px(100.0), grab.x);
-        assert_eq!(card.y + px(DRAG_CARD_HEIGHT / 2.0), grab.y);
+        assert_eq!(drag_card_origin(grab), pointer_inset(grab));
     }
 
     #[test]
