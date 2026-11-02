@@ -401,6 +401,12 @@
 - ✅ Archive with Gmail labels only leaves the Inbox.
 - ✅ A message still being retried shows in the unsent panel, with Edit and Discard;
       retries stop after about three days.
+- ✅ Review round 3: Archive leaves Spam on labeled accounts, compose-busy check before
+      stopping a retry, no retry of a message being edited, search no longer held to
+      its starting folder's rules, whole-token `cid:` match.
+- 🔄 Awaiting a user decision (review round 3): list and limit queued messages that were
+      never tried (account offline or failing to log in); count the give-up limit by
+      age rather than by tries; filter private addresses when fetching remote images.
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
 - ✅ Read / mark read-unread (opening marks read on the server; toggle via

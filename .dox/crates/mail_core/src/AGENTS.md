@@ -192,7 +192,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`inline_images`** (pub) — `pub fn inline_images(raw: &[u8]) -> Vec<(String, String, Vec<u8>)>` — `(cid, mime, bytes)` for listed parts with a Content-ID and an `image/*` type.
 - **`has_attachments`** (pub) — `pub fn has_attachments(message: &ParsedMessage) -> bool` — any attachment with `inline == false`.
 - **`attachment_parts`** (private) — iterator of `(part id, part)`: binary/message parts in `attachments` or carrying a Content-ID; text/html parts only when in `attachments` and not a body part; never multiparts.
-- **`describe`** (private) — builds `AttachmentInfo`: filename from disposition/`name` else `attachment.<ext>` (or `attachment`); `inline` = an `image/*` whose Content-ID the HTML body references (`html_references_cid`: any case, percent-encoded or not) and whose disposition is not `attachment`; size = decoded length.
+- **`describe`** (private) — builds `AttachmentInfo`: filename from disposition/`name` else `attachment.<ext>` (or `attachment`); `inline` = an `image/*` whose Content-ID the HTML body references (`html_references_cid`: the whole id, any case, percent-encoded or not) and whose disposition is not `attachment`; size = decoded length.
 - **`mime_type`** (private) — lowercase `type/subtype` from Content-Type, else by body kind.
 - **`part_bytes`** (private) — decoded bytes of a leaf part.
 - **`own_body`** (private) — accepts only the requested body kind (prevents mail-parser's text↔html synthesis).
