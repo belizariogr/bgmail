@@ -1,0 +1,10 @@
+[package]
+name = "litehtml_render"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Pinned to the litehtml-rs commit evaluated in the spike (vendors litehtml 8836bc1).
+[dependencies]
+litehtml = { git = "https://github.com/franzos/litehtml-rs", rev = "662ed3a", features = ["pixbuf", "html"] }
+png = "0.18"

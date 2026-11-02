@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Source for the `bgmail` binary: app entry, views, webview/CEF, locale, config, and OS helpers.
+Source for the `bgmail` binary: app entry, views, mail HTML, locale, config, and OS helpers.
 
 ## Ownership
 
@@ -34,13 +34,63 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ## API Catalog
 
-_624 functions/methods documented._
+_688 functions/methods documented._
+
+### `src/account_setup.rs`
+
+GPUI-free logic of Settings ▸ Accounts: the "Add account" form, account
+health, and localized mapping of protocol errors and provider notes. All
+network calls are injected as closures so the job bodies are unit-tested.
+
+#### Types / constants
+
+- **const `GOOGLE`** (pub(crate)): `"google"` OAuth provider id.
+- **const `SECURITY_OPTIONS`** (pub(crate)): `[Tls, StartTls, None]` (picker order).
+- **struct `ManualFields`** (pub(crate)): typed IMAP/SMTP host, port (text), security, and username.
+- **enum `FormError`** (pub(crate)): `InvalidEmail`, `PasswordRequired`, `HostRequired`, `InvalidPort`, `AlreadyAdded`.
+- **enum `ConnectPlan`** (pub(crate)): `Ready(AccountConfig)` or `Discover { email, username }` (no server typed).
+- **enum `SetupFailure`** (pub(crate)): `Form`, `Remote(RemoteError)`, `DifferentGoogleAccount`, `GoogleUnavailable`, `SaveFailed(String)`.
+- **struct `FailureMessage`** (pub(crate)): `key: Key` + optional raw `detail`.
+- **struct `ConnectOutcome`** (pub(crate)): config `tried` (if any) + `result`.
+- **enum `AccountHealth`** (pub(crate)): `Local`, `UpToDate`, `Syncing`, `Offline`, `SignInFailed`, `PasswordMissing`, `GoogleUnavailable`, `Error`.
+- **enum `ProviderBadge`** (pub(crate)): `Local`, `Imap`, `Gmail`.
+
+#### Functions / methods
+
+- **`ManualFields::from_config(config)`**: fields prefilled from a preset/discovered config (ports as text).
+- **`ManualFields::is_blank()`**: no IMAP and no SMTP host typed (Connect must discover).
+- **`FormError::key()`**: localized message key per error.
+- **`is_valid_email(email)`**: loose shape check — one `@`, non-empty local part, domain (dotless allowed: `localhost`, intranet hosts) with non-empty labels not starting/ending in `-`, no whitespace/control chars.
+- **`parse_port(text)`**: trimmed `1..=65535`, else `None`.
+- **`port_after_security_change(current, old, new, imap)`**: new conventional port when the field is empty or holds `old`'s default (IMAP or SMTP table); `None` keeps a custom port.
+- **`is_duplicate(email, existing)`**: case-insensitive, trimmed match against stored addresses.
+- **`plan_password_connect(email, password, manual, existing)`**: validates in order (e-mail → duplicate → password non-empty → both hosts → both ports); username defaults to the e-mail; blank servers → `Discover`, else `Ready` with `AuthKind::Password` and the default sync window.
+- **`with_password_auth(config, email, username)`**: a discovered/preset config as a password account (Gmail app-password path reuses preset servers).
+- **`is_google_address(email)`**: the preset's `oauth == Some("google")` (gmail.com, googlemail.com).
+- **`preset_note(email)`**: the provider's `PresetNote`, if any.
+- **`note_key(note)`**: `AppPasswordRequired` / `OAuthRequired` / `ProtonBridge` / `EnableImapFirst` → localized keys.
+- **`google_account_email(typed, from_tokens)`**: the typed address when valid, else Google's reported one when valid.
+- **`google_config(email)`**: Gmail preset servers, username = address, `AuthKind::OAuth2 { provider: "google" }`.
+- **`same_google_account(expected, from_tokens)`**: re-sign-in check (case-insensitive; absent e-mail accepted).
+- **`error_key(kind, oauth, user_cancelled)`**: Auth → wrong password / app-password hint (Google: access denied); Network → can't reach server; Tls → certificate; Cancelled → cancelled/timed out, or `None` when the user cancelled; Protocol/NotFound/Unsupported/Other → unexpected answer.
+- **`shows_error_detail(kind)`**: raw server text is shown except for Auth and Cancelled.
+- **`SetupFailure::from(FormError | RemoteError)`**: conversions for `?`.
+- **`SetupFailure::message(oauth, user_cancelled)`**: `FailureMessage` (Remote via `error_key` + detail rule; Different account; Google not configured; Save failed + DB error text); `None` for a user cancellation.
+- **`run_password_connect(plan, discover, test)`**: `Discover` → `discover` + `with_password_auth` (nothing found → `HostRequired`); then `test`; returns the tried config and the verdict.
+- **`run_google_sign_in(typed, existing, authorize, test)`**: authorize → pick the address (`InvalidEmail` if none) → refuse duplicates → `google_config` → `test(config, refresh_token)`; returns config + refresh token.
+- **`run_google_reauth(expected_login, authorize)`**: authorize → `DifferentGoogleAccount` unless `same_google_account` → refresh token.
+- **`AccountHealth::key()`** / **`is_problem()`**: status text key (`Error` reuses `StatusSyncError`) / whether it needs attention (sign-in failed, password missing, Google unavailable, error).
+- **`account_health(provider, uses_oauth, status, start_error)`**: local provider → `Local`; start error wins (MissingSecret → `SignInFailed` for OAuth else `PasswordMissing`; OAuthUnavailable → `GoogleUnavailable`; NotRemote → `Error`); then status (none/Connecting/Syncing → `Syncing`, Idle → `UpToDate`, Offline, AuthFailed → `SignInFailed`, Error).
+- **`ProviderBadge::for_provider(provider)`** / **`label(language)`**: `gmail`/`local`/other → badge; "Local" is localized, "IMAP"/"Gmail" are names.
+- **`security_label(security, language)`**: "TLS", "STARTTLS", localized "None".
+- Tests: e-mail shapes, port bounds, security/port switching, duplicates, form → config (trim, username override), discovery plan, validation order + keys, manual round trip, password-auth conversion, Gmail detection/config, Google address choice, re-sign-in match, preset notes, error mapping + detail rule, failure messages, the three job bodies with fake network closures, health folding, badges and security labels.
 
 ### `src/actions.rs`
 
 #### Types / constants
 
-- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
+- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`, `FindInMessage`, `MessagePrint`, `MessageReply`, `MessageReplyAll`, `MessageForward`, `MessageToggleRead`, `GetNewMail`, `SelectNextMessage`, `SelectPreviousMessage`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
+- `SelectNextMessage` / `SelectPreviousMessage` are handled by the message list itself (key context `MessageList`), not globally.
 - **struct `MoveMessageToFolder`**: Parameterized action carrying a folder storage path (`path: SharedString`). Dispatched when the user picks a move target from menus or the command palette.
 
 #### Functions / methods
@@ -78,7 +128,7 @@ _(No functions — only action types.)_
 - **`build_menus`** (pub, L65)
   - Signature: `pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu>`
   - Purpose: Builds the full menu tree for the main mail window.
-  - Behavior: Assembles App, File (compose + settings), Edit, View (sidebar toggle + command palette), and Message menus. Message actions are added only when `commands::command_enabled` allows them; move-to-folder items come from `ctx.move_targets()` filtered the same way. Flag label switches between flag/unflag based on `ctx.message_starred()`. Move targets appear in a submenu when non-empty.
+  - Behavior: Assembles App, File (compose + settings), Edit, View (sidebar toggle + command palette), Mailbox (Get New Mail → `GetNewMail`, always) and Message menus. Message starts with Reply / Reply All / Forward / Mark as Read|Unread (label from `ctx.message_unread()`), a separator, then the delete group (separator after it when non-empty), archive/junk/flag/print and Move To. Message actions are added only when `commands::command_enabled` allows them; move-to-folder items come from `ctx.move_targets()` filtered the same way. Flag label switches between flag/unflag based on `ctx.message_starred()`. Move targets appear in a submenu when non-empty.
 
 - **`build_compose_menus`** (pub, L158)
   - Signature: `pub fn build_compose_menus(language: Language) -> Vec<Menu>`
@@ -139,384 +189,6 @@ _(No functions — only action types.)_
   - Signature: `fn compose_menus_include_send_attach_close_and_discard()` (test)
   - Purpose: Validates compose surface File menu contents and absence of reader-only menus.
   - Behavior: Checks Send, Attach, Close, and Discard labels exist; asserts Message and View menus are not present.
-
-### `src/cef_osr.rs`
-
-#### Types / constants
-
-- **const `EVENTFLAG_SHIFT_DOWN`** (private, L46): CEF `cef_event_flags_t` bit for Shift held during mouse/keyboard events.
-- **const `EVENTFLAG_CONTROL_DOWN`** (private, L47): CEF event flag for Control held.
-- **const `EVENTFLAG_ALT_DOWN`** (private, L48): CEF event flag for Alt held.
-- **const `EVENTFLAG_LEFT_MOUSE_BUTTON`** (private, L49): CEF event flag OR'd into move/wheel events while the left button is down.
-- **const `EVENTFLAG_MIDDLE_MOUSE_BUTTON`** (private, L50): CEF event flag for middle button held.
-- **const `EVENTFLAG_RIGHT_MOUSE_BUTTON`** (private, L51): CEF event flag for right button held.
-- **const `EVENTFLAG_COMMAND_DOWN`** (private, L52): CEF event flag for Meta/Command held.
-- **const `VK_BACK`** (private, L55): Windows virtual-key code for Backspace, used in CEF `KeyEvent::windows_key_code`.
-- **const `VK_TAB`** (private, L56): Virtual-key code for Tab.
-- **const `VK_RETURN`** (private, L57): Virtual-key code for Enter/Return.
-- **const `VK_ESCAPE`** (private, L58): Virtual-key code for Escape.
-- **const `VK_SPACE`** (private, L59): Virtual-key code for Space.
-- **const `VK_PRIOR`** (private, L60): Virtual-key code for Page Up.
-- **const `VK_NEXT`** (private, L61): Virtual-key code for Page Down.
-- **const `VK_END`** (private, L62): Virtual-key code for End.
-- **const `VK_HOME`** (private, L63): Virtual-key code for Home.
-- **const `VK_LEFT`** (private, L64): Virtual-key code for Left arrow.
-- **const `VK_UP`** (private, L65): Virtual-key code for Up arrow.
-- **const `VK_RIGHT`** (private, L66): Virtual-key code for Right arrow.
-- **const `VK_DOWN`** (private, L67): Virtual-key code for Down arrow.
-- **const `VK_DELETE`** (private, L68): Virtual-key code for Delete.
-- **enum `MouseButton`** (pub, L74): Logical mouse button (Left, Right, Middle) forwarded to CEF; independent of GPUI's `MouseButton`.
-- **static `BROWSER_CREATE_COUNT`** (private, L91): Atomic counter of successful windowless browser creations; used to detect accidental re-creation.
-- **struct `CefRuntime`** (private, L103): Owns the CEF `App`, process `Args`, and a `ready` cell that must outlive `cef::initialize`.
-- **struct `BgApp`** (private, L212): CEF app state; holds the `ready` cell passed to the browser-process handler.
-- **struct `BgBrowserProcess`** (private, L267): Browser-process handler state; sets `ready` when CEF context initializes.
-- **type `FrameBuffer`** (private, L287): Tuple `(width, height, Vec<u8>)` of a BGRA paint buffer from CEF `on_paint`.
-- **struct `BgRender`** (private, L290): Render-handler state: shared frame mutex, logical view size, and device scale factor.
-- **struct `BgDisplay`** (private, L389): Display-handler state: host event channel and localized download-notification text.
-- **struct `BgContextMenu`** (private, L483): Marker type for the context-menu handler that suppresses native Chromium menus.
-- **struct `BgLoad`** (private, L526): Load-handler state: host channel for redraw requests after main-frame load.
-- **struct `BgRequest`** (private, L563): Marker type for the request handler that opens external URLs in the system browser.
-- **const `IPC_CONSOLE_PREFIX`** (private, L632): Prefix (`__BGMAIL_IPC__`) prepended to bridged IPC messages logged via `console.log`.
-- **struct `OsrBrowser`** (pub, L750): Windowless CEF browser rendering one e-mail body off-screen; owns paint buffer and GPUI texture state.
-
-#### Functions / methods
-
-
-- **`browser_create_count`** (pub, L96)
-  - Signature: `pub fn browser_create_count() -> u64`
-  - Purpose: Returns how many [`OsrBrowser`] instances have been created since process start.
-  - Behavior: Loads `BROWSER_CREATE_COUNT` with relaxed ordering. Intended for leak diagnostics and tests; message switches must not increment it.
-- **`build_app`** (private, L111)
-  - Signature: `fn build_app(ready: Rc<Cell<bool>>) -> App`
-  - Purpose: Builds the CEF `App` with command-line tweaks and a browser-process handler wired to `ready`.
-  - Behavior: Wraps `BgApp { ready }` in `AppBuilder::new`. Does not initialize CEF.
-- **`run_if_subprocess`** (pub, L123)
-  - Signature: `pub fn run_if_subprocess() -> bool`
-  - Purpose: Detects and runs CEF sub-processes so `main` can exit early without starting GPUI.
-  - Behavior: Calls `execute_process`; returns `true` when `--type=` is present (sub-process ran to completion). Returns `false` in the browser process (`execute_process` returns -1) so boot continues.
-- **`initialize`** (pub, L152)
-  - Signature: `pub fn initialize() -> bool`
-  - Purpose: Initializes CEF for windowless OSR with an external message pump.
-  - Behavior: Idempotent: returns `true` immediately if already initialized. On success stores `CefRuntime` in thread-local `CEF` and enables windowless rendering, external pump, and no-sandbox. Returns `false` if `cef::initialize` fails.
-- **`pump`** (pub, L189)
-  - Signature: `pub fn pump()`
-  - Purpose: Advances CEF's message loop one tick.
-  - Behavior: Calls `do_message_loop_work` only when CEF is initialized; otherwise no-op.
-- **`shutdown_cef`** (pub, L196)
-  - Signature: `pub fn shutdown_cef()`
-  - Purpose: Shuts down CEF on app quit.
-  - Behavior: Takes and drops `CefRuntime` from thread-local storage, then calls `cef::shutdown`. No-op if never initialized.
-- **`is_ready`** (pub, L205)
-  - Signature: `pub fn is_ready() -> bool`
-  - Purpose: Reports whether CEF context initialization finished and browsers can be created.
-  - Behavior: Returns `true` when thread-local `CEF` exists and its `ready` cell is set by `on_context_initialized`.
-- **`expected_physical_size`** (private, L360)
-  - Signature: `fn expected_physical_size(width: i32, height: i32, scale: f32) -> (u32, u32)`
-  - Purpose: Computes the physical pixel dimensions CEF should paint for a logical view size and scale factor.
-  - Behavior: Clamps scale to ≥0.01, rounds `width×scale` and `height×scale` to `u32`. Used to detect stale frames after resize.
-- **`frame_matches_view`** (private, L370)
-  - Signature: `fn frame_matches_view(frame_w: u32, frame_h: u32, expected_w: u32, expected_h: u32) -> bool`
-  - Purpose: Checks whether a painted buffer matches the expected view size within rounding tolerance.
-  - Behavior: Returns `true` when width and height each differ by at most 1 pixel from expected.
-- **`store_paint_buffer`** (private, L377)
-  - Signature: `fn store_paint_buffer(slot: &mut Option<FrameBuffer>, width: u32, height: u32, src: &[u8])`
-  - Purpose: Stores a CEF `on_paint` buffer, reusing allocation when dimensions unchanged.
-  - Behavior: Copies into existing `Vec` when `(w,h,len)` match; otherwise allocates a new `(width, height, src.to_vec())` tuple.
-- **`map_cef_cursor`** (private, L439)
-  - Signature: `fn map_cef_cursor(type_: CursorType) -> WebviewCursor`
-  - Purpose: Maps CEF cursor types to portable [`WebviewCursor`] for GPUI.
-  - Behavior: Compares raw cursor enum values; maps I-beam, hand, resize variants, etc. Falls back to `Arrow` for unmapped types (including default pointer).
-- **`handle_ipc`** (private, L637)
-  - Signature: `fn handle_ipc(message: &str, to_host: &Sender<HostEvent>, notify_body: &str)`
-  - Purpose: Routes bridged document IPC from the console bridge to host events or local actions.
-  - Behavior: Parses via [`parse_ipc_message`]. Hover, copy, image-shown, body-mousedown, and palette go to `to_host` via `try_send`. Open-external and download-image run on the main thread (`open_in_new_window`, `download_image`). Unknown messages are ignored.
-- **`open_in_new_window`** (private, L663)
-  - Signature: `fn open_in_new_window(url: &str)`
-  - Purpose: Opens a link or image outside the reader webview.
-  - Behavior: External `http`/`https`/`mailto` URLs open via `open::that_detached`. Base64 `data:` images are written to a temp file and opened by the OS default app. Other URLs are no-op.
-- **`download_image`** (private, L677)
-  - Signature: `fn download_image(url: &str, _notify_body: &str)`
-  - Purpose: Saves an image to Downloads without a file dialog.
-  - Behavior: Decodes base64 `data:` URIs and writes to a unique path under [`downloads_dir`]. Non-data remote URLs fall back to opening in the browser. Silently returns on missing home dir or I/O failure.
-- **`persist_temp_file`** (private, L696)
-  - Signature: `fn persist_temp_file(extension: &str, bytes: &[u8]) -> Option<std::path::PathBuf>`
-  - Purpose: Materializes inline image bytes to a uniquely named temp file for OS viewing.
-  - Behavior: Builds `bgmail-image-{nanos}.{extension}` in the system temp dir, writes bytes, returns path on success; `None` on clock or I/O failure.
-- **`ipc_shim_script`** (private, L713)
-  - Signature: `fn ipc_shim_script() -> String`
-  - Purpose: Builds the inline script that defines `window.ipc.postMessage` via prefixed `console.log`.
-  - Behavior: Returns an HTML `<script>` tag embedding `IPC_CONSOLE_PREFIX` so [`DisplayHandler::on_console_message`] can intercept messages.
-- **`compose_document`** (private, L723)
-  - Signature: `fn compose_document(html: &str) -> String`
-  - Purpose: Injects IPC shim and content script into a rendered e-mail HTML document.
-  - Behavior: Inserts shim immediately after `<head>` (or prepends if no head). Inserts [`CONTENT_SCRIPT`] immediately before `</body>` (or appends). Returns the augmented document unchanged if markers are absent.
-- **`data_url`** (private, L740)
-  - Signature: `fn data_url(html: &str) -> String`
-  - Purpose: Encodes a composed HTML document as a `data:text/html` URL for CEF navigation.
-  - Behavior: Calls `compose_document`, then percent-encodes the result with `urlencoding::encode`.
-- **`modifier_flags`** (pub, L1133)
-  - Signature: `pub fn modifier_flags(shift: bool, control: bool, alt: bool, meta: bool) -> u32`
-  - Purpose: Converts GPUI modifier booleans to CEF `event_flags` bitmask.
-  - Behavior: ORs `EVENTFLAG_*_DOWN` bits for each true modifier; returns 0 when none are set.
-- **`windows_virtual_key`** (private, L1152)
-  - Signature: `fn windows_virtual_key(key: &str) -> Option<i32>`
-  - Purpose: Maps GPUI key names to Windows virtual-key codes for CEF key events.
-  - Behavior: Handles named keys (backspace, arrows, etc.) and single ASCII letters/digits/symbols. Returns `None` for unknown multi-char keys or non-ASCII single chars.
-- **`key_characters`** (private, L1186)
-  - Signature: `fn key_characters(key: &str, key_char: Option<&str>, modifiers: u32) -> (u16, u16)`
-  - Purpose: Builds CEF character and unmodified-character fields for key events.
-  - Behavior: Unmodified comes from `key_char`, else first char of `key`. When Control or Command is down and the char is A–Z/a–z, character becomes ASCII control code (Ctrl+C → 3); otherwise character equals unmodified.
-
-##### Context: `App` (CEF handler)
-
-- **`on_before_command_line_processing`** (private, L222)
-  - Signature: `fn on_before_command_line_processing(&self, _process_type: Option<&CefString>, command_line: Option<&mut CommandLine>)`
-  - Purpose: Applies reader-specific Chromium command-line switches before process launch.
-  - Behavior: Disables extensions, background networking, smooth scrolling, background throttling/occlusion, and on-device ML features. No-op when `command_line` is `None`.
-- **`browser_process_handler`** (private, L258)
-  - Signature: `fn browser_process_handler(&self) -> Option<BrowserProcessHandler>`
-  - Purpose: Supplies the browser-process handler that signals CEF readiness.
-  - Behavior: Returns `BrowserProcessHandlerBuilder` wrapping `BgBrowserProcess` with a clone of `ready`.
-
-##### Context: `BrowserProcessHandler` (CEF handler)
-
-- **`on_context_initialized`** (private, L277)
-  - Signature: `fn on_context_initialized(&self)`
-  - Purpose: Marks CEF as ready to create browsers after context init.
-  - Behavior: Sets `self.handler.ready` to `true`.
-
-##### Context: `RenderHandler` (CEF handler)
-
-- **`view_rect`** (private, L307)
-  - Signature: `fn view_rect(&self, _browser: Option<&mut Browser>, rect: Option<&mut Rect>)`
-  - Purpose: Reports the logical pixel size CEF should render into.
-  - Behavior: When `rect` is present and stored size is non-zero, sets origin (0,0) and width/height from shared `BgRender.size`. Leaves rect unchanged if size is zero.
-- **`screen_info`** (private, L320)
-  - Signature: `fn screen_info(&self, _browser: Option<&mut Browser>, screen_info: Option<&mut ScreenInfo>) -> c_int`
-  - Purpose: Reports device scale factor for HiDPI OSR rendering.
-  - Behavior: Sets `device_scale_factor` from `BgRender.scale` and returns 1 when `screen_info` is present; returns 0 otherwise.
-- **`on_paint`** (private, L332)
-  - Signature: `fn on_paint(&self, _browser: Option<&mut Browser>, type_: PaintElementType, _dirty_rects: Option<&[Rect]>, buffer: *const u8, width: c_int, height: c_int)`
-  - Purpose: Captures main-view BGRA paint buffers from CEF OSR.
-  - Behavior: Ignores non-default paint types, null buffers, and non-positive dimensions. Copies `width×height×4` bytes from the CEF buffer into the shared frame mutex via `store_paint_buffer`. Uses `unsafe` slice over CEF-owned memory for the duration of the callback only.
-
-##### Context: `DisplayHandler` (CEF handler)
-
-- **`on_console_message`** (private, L400)
-  - Signature: `fn on_console_message(&self, _browser: Option<&mut Browser>, _level: LogSeverity, message: Option<&CefString>, _source: Option<&CefString>, _line: c_int) -> c_int`
-  - Purpose: Intercepts IPC bridge messages logged by the injected shim.
-  - Behavior: Strips `IPC_CONSOLE_PREFIX` and routes payload through `handle_ipc`. Returns 1 (handled) for bridge messages; returns 0 for ordinary console output.
-- **`on_cursor_change`** (private, L419)
-  - Signature: `fn on_cursor_change(&self, _browser: Option<&mut Browser>, _cursor: c_ulong, type_: CursorType, _custom_cursor_info: Option<&CursorInfo>) -> c_int`
-  - Purpose: Forwards page-requested cursor changes to the GPUI host.
-  - Behavior: Maps CEF cursor via `map_cef_cursor`, sends `HostEvent::CursorChanged` over `try_send`, returns 1 so CEF does not set the OS cursor.
-
-##### Context: `ContextMenuHandler` (CEF handler)
-
-- **`on_before_context_menu`** (private, L491)
-  - Signature: `fn on_before_context_menu(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _params: Option<&mut ContextMenuParams>, model: Option<&mut MenuModel>)`
-  - Purpose: Clears Chromium's native context menu before display.
-  - Behavior: Calls `model.clear()` when present so only the HTML [`CONTENT_SCRIPT`] menu appears.
-- **`run_context_menu`** (private, L505)
-  - Signature: `fn run_context_menu(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _params: Option<&mut ContextMenuParams>, _model: Option<&mut MenuModel>, callback: Option<&mut RunContextMenuCallback>) -> c_int`
-  - Purpose: Cancels platform context-menu display under windowless OSR.
-  - Behavior: Calls `callback.cancel()` when present; returns 1 to indicate custom handling.
-
-##### Context: `LoadHandler` (CEF handler)
-
-- **`on_load_end`** (private, L536)
-  - Signature: `fn on_load_end(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, _http_status_code: c_int)`
-  - Purpose: Wakes rendering after the main document finishes loading.
-  - Behavior: Ignores subframe loads. On main frame: unhides browser, sets focus, invalidates paint, sends `HostEvent::OsrNeedsRedraw` to GPUI.
-
-##### Context: `RequestHandler` (CEF handler)
-
-- **`on_before_browse`** (private, L571)
-  - Signature: `fn on_before_browse(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, request: Option<&mut Request>, _user_gesture: c_int, _is_redirect: c_int) -> c_int`
-  - Purpose: Blocks in-webview navigation to external URLs.
-  - Behavior: When request URL is external per [`is_external_link`], opens it with `open::that_detached` and returns 1 (cancel navigation). Returns 0 for in-document `data:` loads and fragments.
-
-##### Context: `Client` (CEF handler)
-
-- **`render_handler`** (private, L605)
-  - Signature: `fn render_handler(&self) -> Option<RenderHandler>`
-  - Purpose: Exposes the OSR render handler to CEF.
-  - Behavior: Clones and returns the stored `RenderHandler`.
-- **`display_handler`** (private, L609)
-  - Signature: `fn display_handler(&self) -> Option<DisplayHandler>`
-  - Purpose: Exposes the display handler (console IPC bridge and cursor).
-  - Behavior: Clones and returns the stored `DisplayHandler`.
-- **`request_handler`** (private, L613)
-  - Signature: `fn request_handler(&self) -> Option<RequestHandler>`
-  - Purpose: Exposes external-link navigation handler.
-  - Behavior: Clones and returns the stored `RequestHandler`.
-- **`context_menu_handler`** (private, L617)
-  - Signature: `fn context_menu_handler(&self) -> Option<ContextMenuHandler>`
-  - Purpose: Exposes the native menu suppression handler.
-  - Behavior: Clones and returns the stored `ContextMenuHandler`.
-- **`load_handler`** (private, L621)
-  - Signature: `fn load_handler(&self) -> Option<LoadHandler>`
-  - Purpose: Exposes the main-frame load-end handler.
-  - Behavior: Clones and returns the stored `LoadHandler`.
-
-##### Context: `OsrBrowser`
-
-- **`new`** (pub, L779)
-  - Signature: `pub fn new(html: &str, to_host: Sender<HostEvent>, notify_body: String) -> Option<Self>`
-  - Purpose: Creates a windowless CEF browser loading the given HTML via a `data:` URL.
-  - Behavior: Returns `None` when [`is_ready`] is false or `browser_host_create_browser_sync` fails. Wires render, display, load, request, and context-menu handlers; increments `BROWSER_CREATE_COUNT`. Initial size 800×600, scale 1.0.
-- **`set_html`** (pub, L848)
-  - Signature: `pub fn set_html(&mut self, html: &str) -> (bool, Option<Arc<RenderImage>>)`
-  - Purpose: Navigates to new HTML when the document changed (message or theme).
-  - Behavior: No-op returning `(false, None)` when HTML unchanged. Otherwise `load_url` on main frame, clears pending paint buffer, takes previous GPUI texture, wakes/unfocuses host and invalidates. Returns `(true, previous_texture)`.
-- **`pump_hard`** (pub, L874)
-  - Signature: `pub fn pump_hard(&self)`
-  - Purpose: Runs several message-loop ticks after navigation or activation.
-  - Behavior: Calls [`pump`] eight times in a loop.
-- **`set_notify_text`** (pub, L881)
-  - Signature: `pub fn set_notify_text(&self, body: String)`
-  - Purpose: Updates localized download-notification text without rebuilding the browser.
-  - Behavior: Replaces the string in shared `notify_body` `RefCell`.
-- **`set_size`** (pub, L888)
-  - Signature: `pub fn set_size(&mut self, width: f32, height: f32, scale_factor: f32) -> bool`
-  - Purpose: Updates logical view size and device scale for OSR rendering.
-  - Behavior: Clamps dimensions to ≥1 logical pixel. Returns `false` when unchanged. On change notifies screen info (if scale changed), calls `was_resized`, and invalidates paint to force a new buffer.
-- **`set_visible`** (pub, L911)
-  - Signature: `pub fn set_visible(&mut self, visible: bool)`
-  - Purpose: Shows or hides the OSR browser to pause background painting.
-  - Behavior: Early return when visibility unchanged. Calls `host.was_hidden(0|1)` and updates `visible` flag.
-- **`take_frame`** (pub, L925)
-  - Signature: `pub fn take_frame(&mut self) -> Option<(Arc<RenderImage>, Option<Arc<RenderImage>>)>`
-  - Purpose: Consumes the latest CEF paint as a GPUI texture.
-  - Behavior: Takes pending `(w,h,bytes)` from frame mutex; builds BGRA `RenderImage`. Returns `(new, previous)` where `previous` is the last displayed texture for disposal. Returns `None` when no new frame pending or image build fails.
-- **`has_pending_frame`** (pub, L943)
-  - Signature: `pub fn has_pending_frame(&self) -> bool`
-  - Purpose: Reports unconsumed paint buffers waiting in the shared mutex.
-  - Behavior: Returns whether frame mutex holds `Some(_)`.
-- **`current_frame`** (pub, L948)
-  - Signature: `pub fn current_frame(&self) -> Option<Arc<RenderImage>>`
-  - Purpose: Returns the last uploaded GPUI texture for repaint without consuming a new buffer.
-  - Behavior: Clones `self.current`.
-- **`current_frame_px`** (pub, L953)
-  - Signature: `pub fn current_frame_px(&self) -> Option<(u32, u32)>`
-  - Purpose: Returns physical pixel dimensions of the current displayed frame.
-  - Behavior: Returns `self.current_px` copy.
-- **`current_frame_fits_view`** (pub, L959)
-  - Signature: `pub fn current_frame_fits_view(&self) -> bool`
-  - Purpose: Checks whether the displayed buffer matches the current view geometry.
-  - Behavior: Compares `current_px` to `expected_physical_size` of stored logical size and scale via `frame_matches_view`. Returns `false` when no current frame.
-- **`flush_input`** (pub, L970)
-  - Signature: `pub fn flush_input(&self)`
-  - Purpose: Delivers coalesced wheel input and advances the message loop before sampling frames.
-  - Behavior: Sends pending wheel via `send_wheel` if any, then calls [`pump`].
-- **`mouse_move`** (pub, L978)
-  - Signature: `pub fn mouse_move(&self, x: f32, y: f32, modifiers: u32)`
-  - Purpose: Forwards mouse movement at logical view coordinates to CEF.
-  - Behavior: Flushes pending wheel first. Sends `MouseEvent` with OR'd held-button flags via `send_mouse_move_event`.
-- **`mouse_click`** (pub, L993)
-  - Signature: `pub fn mouse_click(&self, x: f32, y: f32, button: MouseButton, pressed: bool, click_count: i32)`
-  - Purpose: Forwards mouse press/release and tracks held-button flags for drag selection.
-  - Behavior: Flushes pending wheel. Updates `buttons` cell on press/release. Sends click event with mouse-up flag inverted (0=down, 1=up).
-- **`has_mouse_capture`** (pub, L1028)
-  - Signature: `pub fn has_mouse_capture(&self) -> bool`
-  - Purpose: Reports whether any mouse button is currently held in the OSR view.
-  - Behavior: Returns `buttons != 0`.
-- **`mouse_wheel`** (pub, L1034)
-  - Signature: `pub fn mouse_wheel(&self, x: f32, y: f32, delta_x: f32, delta_y: f32)`
-  - Purpose: Coalesces scroll-wheel deltas until the next flush or paint.
-  - Behavior: Sums deltas into `pending_wheel`, keeping the latest pointer position. Does not send to CEF immediately.
-- **`flush_pending_wheel`** (private, L1043)
-  - Signature: `fn flush_pending_wheel(&self)`
-  - Purpose: Sends accumulated wheel delta if one is queued.
-  - Behavior: Takes `pending_wheel` and calls `send_wheel` when present.
-- **`send_wheel`** (private, L1049)
-  - Signature: `fn send_wheel(&self, x: f32, y: f32, delta_x: f32, delta_y: f32)`
-  - Purpose: Forwards a scroll-wheel event to CEF.
-  - Behavior: No-op when both deltas round to zero integers. Otherwise sends `send_mouse_wheel_event` with held-button modifiers.
-- **`set_focus`** (pub, L1066)
-  - Signature: `pub fn set_focus(&self, focused: bool)`
-  - Purpose: Sets OSR browser keyboard focus for shortcuts and caret behavior.
-  - Behavior: Calls `host.set_focus(1|0)` when host is available.
-- **`key_event`** (pub, L1074)
-  - Signature: `pub fn key_event(&self, pressed: bool, key: &str, key_char: Option<&str>, modifiers: u32)`
-  - Purpose: Forwards keyboard press/release to CEF.
-  - Behavior: No-op when `windows_virtual_key` returns `None` or host missing. On press sends RAWKEYDOWN then CHAR event; on release sends KEYUP. Character fields from `key_characters`.
-- **`dismiss_context_menu`** (pub, L1113)
-  - Signature: `pub fn dismiss_context_menu(&self)`
-  - Purpose: Closes the HTML context menu from the host on outside clicks.
-  - Behavior: Executes `window.__rmCloseMenu&&window.__rmCloseMenu()` on the main frame when available.
-
-##### Context: `Drop for OsrBrowser`
-
-- **`drop`** (private, L1122)
-  - Signature: `fn drop(&mut self)`
-  - Purpose: Force-closes the CEF browser when the GPUI wrapper is dropped.
-  - Behavior: Calls `host.close_browser(1)` to prevent orphaned windowless browsers.
-
-##### Context: `tests`
-
-- **`data_url_percent_encodes_the_document`** (private, L1208)
-  - Signature: `fn data_url_percent_encodes_the_document()`
-  - Purpose: Asserts `data_url` percent-encodes spaces and ampersands in HTML.
-  - Behavior: Checks prefix and absence of raw special characters in the URL string.
-- **`compose_document_injects_shim_first_and_content_last`** (private, L1218)
-  - Signature: `fn compose_document_injects_shim_first_and_content_last()`
-  - Purpose: Verifies injection order of IPC shim and content script.
-  - Behavior: Asserts shim prefix appears before content script markers and before `<title>`.
-- **`compose_document_falls_back_without_head_or_body`** (private, L1231)
-  - Signature: `fn compose_document_falls_back_without_head_or_body()`
-  - Purpose: Verifies document composition works on minimal HTML fragments.
-  - Behavior: Asserts both scripts are present alongside bare markup.
-- **`modifier_flags_map_expected_bits`** (private, L1239)
-  - Signature: `fn modifier_flags_map_expected_bits()`
-  - Purpose: Verifies modifier bitmask mapping.
-  - Behavior: Asserts individual and combined flag values match CEF constants.
-- **`windows_virtual_key_maps_letters_and_named_keys`** (private, L1255)
-  - Signature: `fn windows_virtual_key_maps_letters_and_named_keys()`
-  - Purpose: Verifies GPUI key name to VK mapping.
-  - Behavior: Asserts letter case insensitivity, named keys, and unknown key rejection.
-- **`key_characters_use_control_codes_for_shortcuts`** (private, L1264)
-  - Signature: `fn key_characters_use_control_codes_for_shortcuts()`
-  - Purpose: Verifies Ctrl/Cmd produces ASCII control codes in character field.
-  - Behavior: Asserts Ctrl+C → (3, 'c') and plain typing leaves character unchanged.
-- **`map_cef_cursor_hand_and_ibeam`** (private, L1274)
-  - Signature: `fn map_cef_cursor_hand_and_ibeam()`
-  - Purpose: Verifies common CEF cursor mappings.
-  - Behavior: Asserts HAND→Hand, IBEAM→IBeam, POINTER→Arrow.
-- **`store_paint_buffer_reuses_allocation_for_same_size`** (private, L1281)
-  - Signature: `fn store_paint_buffer_reuses_allocation_for_same_size()`
-  - Purpose: Verifies in-place buffer reuse when dimensions match.
-  - Behavior: Asserts pointer stability and updated bytes after second paint of same size.
-- **`store_paint_buffer_reallocates_when_size_changes`** (private, L1293)
-  - Signature: `fn store_paint_buffer_reallocates_when_size_changes()`
-  - Purpose: Verifies reallocation when paint dimensions change.
-  - Behavior: Asserts new width and byte length after size change.
-- **`coalesce_wheel_deltas_sums_offsets`** (private, L1302)
-  - Signature: `fn coalesce_wheel_deltas_sums_offsets()`
-  - Purpose: Verifies wheel coalescing logic mirrors `mouse_wheel` accumulation.
-  - Behavior: Uses local `coalesce` helper; asserts summed deltas and latest position.
-- **`coalesce`** (private, nested in L1304)
-  - Signature: `fn coalesce(pending: Option<(f32,f32,f32,f32)>, x: f32, y: f32, dx: f32, dy: f32) -> (f32, f32, f32, f32)`
-  - Purpose: Test helper mirroring pending wheel accumulation.
-  - Behavior: Sums deltas when pending exists; otherwise starts a new tuple with latest coordinates.
-- **`expected_physical_size_scales_logical_view`** (private, L1322)
-  - Signature: `fn expected_physical_size_scales_logical_view()`
-  - Purpose: Verifies logical-to-physical size scaling.
-  - Behavior: Asserts 1.0, 2.0, and 1.5 scale factors round correctly.
-- **`frame_matches_view_allows_one_pixel_slack`** (private, L1329)
-  - Signature: `fn frame_matches_view_allows_one_pixel_slack()`
-  - Purpose: Verifies ±1px tolerance in frame/view matching.
-  - Behavior: Asserts exact match and 1px off pass; 20px off fails.
-- **`browser_create_is_single_call_site_and_set_html_navigates`** (private, L1336)
-  - Signature: `fn browser_create_is_single_call_site_and_set_html_navigates()`
-  - Purpose: Static source check that only one CEF browser is ever created per process.
-  - Behavior: Parses production source (pre-`#[cfg(test)]`) and asserts one `browser_host_create_browser_sync`, presence of `load_url`, and `Drop for OsrBrowser`.
-- **`browser_create_count_is_zero_without_cef_init`** (private, L1362)
-  - Signature: `fn browser_create_count_is_zero_without_cef_init()`
-  - Purpose: Verifies counter stays zero when CEF is never initialized in unit tests.
-  - Behavior: Asserts `browser_create_count() == 0`.
-
-
 
 ### `src/command_palette.rs`
 
@@ -581,7 +253,7 @@ _(No functions — only action types.)_
 
 #### Types / constants
 
-- **enum `CommandId`**: Identifies a command in menus and the palette (compose, settings, message actions, move-to-folder with path).
+- **enum `CommandId`**: Identifies a command in menus and the palette (compose, settings, message actions incl. `MessagePrint` (enabled with a selected message, even in Trash), move-to-folder with path).
 - **struct `CommandContext`**: Snapshot of UI state (selected message, detail, folders) used to decide command availability and labels.
 - **struct `CommandEntry`**: One palette row: `id` plus localized `label`.
 
@@ -693,200 +365,205 @@ _(No functions — only action types.)_
 
 ### `src/compose.rs`
 
+Real compose window (new message, reply, reply all, forward). GPUI-free
+logic (validation, draft building, attachment reading/merging, titles,
+focus choice) lives in module functions so it is unit-tested without a
+window.
+
 #### Types / constants
 
-- **`COMPOSE_DEFAULT_WIDTH`** (pub, L23)
-  - Signature: `pub const COMPOSE_DEFAULT_WIDTH: f32 = 790.0`
-  - Purpose: Default compose window width in logical pixels on first open.
-  - Behavior: Used by `Config::default` and clamped upward by `clamp_compose_size`.
+- **`COMPOSE_DEFAULT_WIDTH`** / **`COMPOSE_DEFAULT_HEIGHT`** (pub, L32/L34)
+  - Purpose: Default compose window size (790×720) on first open.
+  - Behavior: Used by `Config::default`; clamped upward by `clamp_compose_size`.
 
-- **`COMPOSE_DEFAULT_HEIGHT`** (pub, L25)
-  - Signature: `pub const COMPOSE_DEFAULT_HEIGHT: f32 = 720.0`
-  - Purpose: Default compose window height in logical pixels on first open.
-  - Behavior: Persisted in config defaults and respected unless below minimum height.
+- **`COMPOSE_MIN_WIDTH`** / **`COMPOSE_MIN_HEIGHT`** (pub, L36/L38)
+  - Purpose: Minimum compose window size (480×400).
+  - Behavior: Enforced by `clamp_compose_size` and the window's `window_min_size`.
 
-- **`COMPOSE_MIN_WIDTH`** (pub, L27)
-  - Signature: `pub const COMPOSE_MIN_WIDTH: f32 = 480.0`
-  - Purpose: Minimum allowed compose window width.
-  - Behavior: Enforced by `clamp_compose_size` when restoring saved sizes.
+- **`COMPOSE_POSITION_UNSET`** (pub, L42)
+  - Purpose: Sentinel coordinate (-1) stored when the window was never placed.
+  - Behavior: Negative x/y make `open_bounds` center the window.
 
-- **`COMPOSE_MIN_HEIGHT`** (pub, L29)
-  - Signature: `pub const COMPOSE_MIN_HEIGHT: f32 = 400.0`
-  - Purpose: Minimum allowed compose window height.
-  - Behavior: Enforced by `clamp_compose_size` when restoring saved sizes.
+- **`ATTACHMENT_LIMIT_BYTES`** (pub, L46)
+  - Purpose: Total attachment cap per message (25 MB = 26 214 400 bytes).
+  - Behavior: Checked from file metadata before reading (`read_attachments`) and again on merge (`merge_attachments`).
 
-- **`COMPOSE_POSITION_UNSET`** (pub, L33)
-  - Signature: `pub const COMPOSE_POSITION_UNSET: f32 = -1.0`
-  - Purpose: Sentinel coordinate stored in config when the compose window has never been placed.
-  - Behavior: Negative x/y values cause `open_bounds` to center the window instead of using saved origin.
+- **`KEY_CONTEXT`** (private, L49) — `"ComposeView"`, key context of the compose root (scopes the send shortcut).
 
-- **`FIELD_LABEL_WIDTH`** (private, L65)
-  - Signature: `const FIELD_LABEL_WIDTH: f32 = 72.0`
-  - Purpose: Fixed width of the From/To/Cc/Subject label column in pixels.
-  - Behavior: Applied in `field_row` and the To row so header rows align visually.
+- **`SEND_MAC`** / **`SEND_OTHER`** (pub, L51/L53)
+  - Purpose: Send shortcut (`cmd-enter` / `ctrl-enter`).
+  - Behavior: Bound to `ComposeSend` in `KEY_CONTEXT` by `ensure_key_bindings`.
 
-- **`ComposeView`** (pub, L68)
-  - Signature: `pub struct ComposeView { accounts, from_account, show_cc_bcc, root, last_reported_bounds, white_background }`
-  - Purpose: GPUI entity rendering the standalone new-message window (visual mock).
-  - Behavior: Holds mock field state, a weak link to `RootView` for bounds persistence and close notification, cached white-background preference, and defers bounds sync to avoid re-entrancy during render.
+- **`FIELD_LABEL_WIDTH`** (private, L56) — 72 px label column of every header row.
+
+- **`BODY_MIN_LINES`** (private, L58) — 12-row minimum body height (big click target).
+
+- **`ComposeAccount`** (pub, L91)
+  - Signature: `pub struct ComposeAccount { id: i64, name, email, can_send: bool }`
+  - Purpose: An account offered in the From picker (built by `RootView::compose_accounts`).
+  - Behavior: `can_send == false` for local/demo accounts (listed, marked "Can't send", rejected on Send).
+
+- **`ComposeInit`** (pub, L101)
+  - Signature: `pub struct ComposeInit { account_id: Option<i64>, draft: mail_core::Draft, replaces_outgoing: Option<i64> }`
+  - Purpose: Prefill for reply / reply all / forward (built by `RootView::reply_to_selected`) and for editing an unsent message (`compose_init_from_outgoing`, which sets `replaces_outgoing` to its outbox row id).
+
+- **`AddressField`** (private enum, L109) — `To | Cc | Bcc`, the address-list fields.
+
+- **`ComposeFocus`** (private enum, L117) — `To | Body`, initial keyboard focus.
+
+- **`ComposeFields`** (private, L124) — snapshot of to/cc/bcc/subject/body text for validation.
+
+- **`ReplyHeaders`** (private, L134) — `in_reply_to` + `references` carried from the init draft.
+
+- **`ComposeErrors`** (private, L142)
+  - Purpose: Per-field address errors (inline under To/Cc/Bcc) plus a banner message.
+  - `field(f)` returns the field's error; `field_mut(f)` its slot; `has_field_errors()` is true when any of to/cc/bcc is set.
+
+- **`AttachmentBatch`** (private, L173) — result of a background read: `files`, `too_large` (cap hit), `failed` (unreadable names).
+
+- **`ComposeKeysBound`** (private global, L183) — marker so the send bindings are registered once per app.
+
+- **`ComposeView`** (pub, L188)
+  - Purpose: GPUI entity of the compose window.
+  - Behavior: Owns `TextInput` entities for To/Cc/Bcc/Subject, a `TextArea` body (inside a scroll container tracked via `body_scroll`), the From index + picker state, Cc/Bcc visibility, attachments (+ count of background loads), reply headers, `ComposeErrors`, `sending`/`edited` flags, weak `RootView`, its own `AnyWindowHandle`, last reported bounds, last title, cached white-background pref and the `Changed` subscriptions.
 
 #### Functions / methods
 
 ##### Context: `module`
 
-- **`open_bounds`** (pub, L38)
-  - Signature: `pub fn open_bounds(origin: Point<gpui::Pixels>, window_size: Size<gpui::Pixels>, cx: &App) -> Bounds<gpui::Pixels>`
-  - Purpose: Computes initial window bounds from persisted compose geometry.
-  - Behavior: Clamps size via `clamp_compose_size`. When `compose_position_is_unset(origin)`, returns centered bounds; otherwise uses the saved origin with clamped size.
+- **`open_bounds`** (pub, L63)
+  - Signature: `pub fn open_bounds(origin: Point<Pixels>, window_size: Size<Pixels>, cx: &App) -> Bounds<Pixels>`
+  - Behavior: Clamps size via `clamp_compose_size`; centered bounds when `compose_position_is_unset(origin)`, else saved origin.
 
-- **`clamp_compose_size`** (pub, L52)
-  - Signature: `pub fn clamp_compose_size(window_size: Size<gpui::Pixels>) -> Size<gpui::Pixels>`
-  - Purpose: Ensures stored compose dimensions meet minimum width/height.
-  - Behavior: Takes the max of each dimension with `COMPOSE_MIN_WIDTH` / `COMPOSE_MIN_HEIGHT`.
+- **`clamp_compose_size`** (pub, L77) — max of each dimension with the minimums.
 
-- **`compose_position_is_unset`** (pub, L60)
-  - Signature: `pub fn compose_position_is_unset(origin: Point<gpui::Pixels>) -> bool`
-  - Purpose: Detects whether persisted coordinates mean "center on first open".
-  - Behavior: Returns true when either x or y converts to a negative `f32`.
+- **`compose_position_is_unset`** (pub, L85) — true when x or y is negative.
 
-- **`compose_body_colors`** (private, L363)
-  - Signature: `fn compose_body_colors(white_background: bool) -> (Option<Hsla>, Color)`
-  - Purpose: Chooses compose body background and placeholder colors, mirroring the reader.
-  - Behavior: When `white_background` is true, returns white fill plus a custom mid-gray placeholder; otherwise transparent background with `Color::Disabled` placeholder.
+- **`compose_body_colors`** (private, L961)
+  - Signature: `fn compose_body_colors(white_background: bool) -> (Option<Hsla>, Option<Hsla>)`
+  - Behavior: White-background pref → `(white, black)` (dark text on white, mirroring the reader); otherwise `(None, None)` (theme colors).
 
-- **`window_title`** (pub, L425)
-  - Signature: `pub fn window_title(language: Language) -> &'static str`
-  - Purpose: Localized window title for compose windows.
-  - Behavior: Resolves `Key::ComposeWindowTitle` for the given language.
+- **`ensure_key_bindings`** (private, L1039)
+  - Behavior: First call binds `SEND_MAC`/`SEND_OTHER` → `ComposeSend` in `KEY_CONTEXT` and sets `ComposeKeysBound`; later calls are no-ops.
 
-- **`compose_body_uses_white_background_when_reader_pref_is_on`** (private, L436)
-  - Signature: `fn compose_body_uses_white_background_when_reader_pref_is_on()` (test)
-  - Purpose: Verifies white-background color mapping for compose body.
-  - Behavior: Asserts `compose_body_colors(true)` yields a background and `compose_body_colors(false)` yields none with disabled placeholder color.
+- **`set_input`** (private, L1051) — `TextInput::set_content` on an entity (no `Changed` event).
 
-- **`clamp_compose_size_enforces_minimums`** (private, L445)
-  - Signature: `fn clamp_compose_size_enforces_minimums()` (test)
-  - Purpose: Ensures undersized stored dimensions are raised to minimums.
-  - Behavior: Clamps 100×200 to `COMPOSE_MIN_WIDTH` × `COMPOSE_MIN_HEIGHT`.
+- **`window_title`** (pub, L1056) — localized "New Message" (`Key::ComposeWindowTitle`), used by root for the initial title.
 
-- **`clamp_compose_size_leaves_large_sizes_unchanged`** (private, L452)
-  - Signature: `fn clamp_compose_size_leaves_large_sizes_unchanged()` (test)
-  - Purpose: Ensures sizes above minimums pass through unchanged.
-  - Behavior: Clamps 900×800 and expects identical output.
+- **`title_for_subject`** (private, L1062) — trimmed subject, or `window_title` when blank.
 
-- **`compose_position_unset_detects_negative_coordinates`** (private, L459)
-  - Signature: `fn compose_position_unset_detects_negative_coordinates()` (test)
-  - Purpose: Covers sentinel and normal coordinate detection.
-  - Behavior: Negative x or y is unset; (0, 0) is considered set.
+- **`account_index`** (private, L1073)
+  - Behavior: Position of `id` in `accounts`; else first `can_send` account; else 0.
 
-- **`window_title_is_localized`** (private, L469)
-  - Signature: `fn window_title_is_localized()` (test)
-  - Purpose: Checks English and Portuguese compose titles.
-  - Behavior: Expects "New Message" and "Nova mensagem".
+- **`account_label`** (private, L1080) — `Name <email>`, or the bare email when the name is blank.
 
-- **`new_view_defaults_to_first_account_and_hidden_cc_bcc`** (private, L475)
-  - Signature: `fn new_view_defaults_to_first_account_and_hidden_cc_bcc()` (test)
-  - Purpose: Validates initial `ComposeView` state with sample accounts.
-  - Behavior: Expects `from_account == 0`, hidden Cc/Bcc, and first account email as From address.
+- **`initial_focus`** (private, L1091)
+  - Behavior: `Body` when the init draft has `in_reply_to` or recipients (replies: caret before the quote); `To` for blank messages and forwards.
 
-- **`selected_from_address_is_empty_without_accounts`** (private, L484)
-  - Signature: `fn selected_from_address_is_empty_without_accounts()` (test)
-  - Purpose: Ensures empty account list yields empty From address.
-  - Behavior: Constructs view with no accounts and expects `""`.
+- **`invalid_address_message`** (private, L1101) — localized `"Invalid address: a, b"`.
 
-- **`toggle_cc_bcc_flips_visibility`** (private, L490)
-  - Signature: `fn toggle_cc_bcc_flips_visibility()` (test)
-  - Purpose: Documents expected toggle semantics (logic-only test).
-  - Behavior: Flips a boolean twice to assert show/hide behavior pattern.
+- **`parse_field`** (private, L1110) — `mail_core::parse_address_list`; invalid tokens become `(vec![], Some(message))`.
 
-- **`cycle_from_account_wraps`** (private, L499)
-  - Signature: `fn cycle_from_account_wraps()` (test)
-  - Purpose: Documents wrap-around account cycling (logic-only test).
-  - Behavior: Increments from last index modulo account count expecting index 0.
+- **`build_draft`** (private, L1120)
+  - Signature: `fn build_draft(from: Option<&ComposeAccount>, fields: &ComposeFields, reply: &ReplyHeaders, attachments: &[OutgoingAttachment], language: Language) -> Result<Draft, ComposeErrors>`
+  - Behavior: Errors in order: invalid tokens per field; no recipients at all (`ComposeNoRecipients` banner); missing or local From account (`ComposeLocalAccount` banner). On success: `from = Address(name, email)`, trimmed subject, body as `text`, `html: None`, reply headers and a copy of the attachments.
+
+- **`attachments_total`** (private, L1162) — sum of attachment byte lengths.
+
+- **`attachment_name`** (private, L1167) — file name of a path (lossy), or the whole path when it has none.
+
+- **`read_attachments`** (private, L1176)
+  - Signature: `fn read_attachments(paths: &[PathBuf], used: usize, cap: usize) -> AttachmentBatch`
+  - Behavior: Blocking (run via `background_spawn`). Non-files/unreadable → `failed`; files that would exceed `cap` (metadata size, re-checked after reading) → skipped with `too_large`; others read with `mail_core::guess_mime_type`.
+
+- **`merge_attachments`** (private, L1212) — appends files while the total stays within `cap`; returns whether any was rejected.
+
+- **`attachment_error_message`** (private, L1232) — banner text combining `ComposeAttachTooLarge` and `ComposeAttachReadFailed: names`; `None` when nothing failed.
 
 ##### Context: `ComposeView`
 
-- **`new`** (pub, L88)
-  - Signature: `pub fn new(accounts: Vec<Account>, root: WeakEntity<RootView>, white_background: bool) -> Self`
-  - Purpose: Creates a compose view seeded with accounts and preferences.
-  - Behavior: Initializes first account selected, Cc/Bcc hidden, no reported bounds, and stores the weak root handle plus white-background flag.
+- **`new`** (pub, L234)
+  - Signature: `pub fn new(accounts: Vec<ComposeAccount>, root: WeakEntity<RootView>, white_background: bool, init: Option<ComposeInit>, window: &mut Window, cx: &mut Context<Self>) -> Self`
+  - Behavior: Ensures key bindings, creates the editors (To placeholder `ComposeFieldPlaceholder`, body placeholder `ComposeBodyPlaceholder`, `min_lines(BODY_MIN_LINES)`, `track_scroll`), subscribes to `Changed` (address fields clear their error; all mark edited), picks the From account and calls `apply_init`.
 
-- **`set_white_background`** (pub(crate), L100)
-  - Signature: `pub(crate) fn set_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
-  - Purpose: Applies white-compose preference pushed from the main view without reading `RootView` during render.
-  - Behavior: Updates cached flag and calls `cx.notify()` only when the value changes.
+- **`apply_init`** (pub(crate), L305)
+  - Behavior: Replaces every field from `init` (blank when `None`): From via `account_index(init.account_id)`, `replaces_outgoing`, To/Cc/Bcc via `format_address_list`, subject, body (caret at start), attachments, reply headers; shows Cc/Bcc when prefilled; clears errors, picker and `edited`; focuses per `initial_focus`. Root calls it when a reply is opened while the window is already open.
 
-- **`toggle_cc_bcc`** (private, L108)
-  - Signature: `fn toggle_cc_bcc(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Shows or hides Cc and Bcc header rows.
-  - Behavior: Flips `show_cc_bcc` and notifies for re-render.
+- **`set_white_background`** (pub(crate), L340) — updates the cached pref and notifies on change.
 
-- **`cycle_from_account`** (private, L114)
-  - Signature: `fn cycle_from_account(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Mock From-account selector cycling through available accounts.
-  - Behavior: No-op when `accounts` is empty; otherwise increments index modulo length and notifies.
+- **`mark_edited`** (private, L347) — sets `edited` and notifies.
 
-- **`send_message`** (pub(crate), L123)
+- **`on_address_changed`** (private, L353) — clears that field's inline error, marks edited.
+
+- **`toggle_cc_bcc`** (private, L359) — flips Cc/Bcc row visibility.
+
+- **`toggle_from_menu`** / **`close_from_menu`** (private, L364/L369) — open/close the From picker (never opens without accounts).
+
+- **`select_from_account`** (private, L375) — sets the From index (when in range), clears the banner, closes the picker.
+
+- **`selected_account`** (private, L383) — the chosen `ComposeAccount`, if any.
+
+- **`fields`** (private, L387) — snapshots the editors into `ComposeFields`.
+
+- **`can_send_now`** (private, L397) — no attachment loads pending and not already sending.
+
+- **`send_message`** (pub(crate), L405)
   - Signature: `pub(crate) fn send_message(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Placeholder send action until the domain layer exists.
-  - Behavior: Intentionally empty (ignores `cx`).
+  - Behavior: No-op unless `can_send_now`. Runs `build_draft`; on errors stores them (showing Cc/Bcc when they hold one). On success sets `sending` and, in a spawned task (the menu action reaches here while `RootView` is leased), calls `RootView::send_draft(account_id, draft, replaces_outgoing)`, then `finish_send`; when sent, notifies `on_compose_window_closed` and removes the window via the stored handle.
 
-- **`attach_file`** (pub(crate), L128)
-  - Signature: `pub(crate) fn attach_file(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Placeholder attach action until a file picker exists.
-  - Behavior: Intentionally empty (ignores `cx`).
+- **`finish_send`** (private, L454) — clears `sending`; on `Err` shows the message in the banner; returns whether it was sent.
 
-- **`discard_draft`** (pub(crate), L133)
-  - Signature: `pub(crate) fn discard_draft(&mut self, window: &mut Window, cx: &mut Context<Self>)`
-  - Purpose: Mock discard that closes the compose window.
-  - Behavior: Delegates to `close_window`.
+- **`attach_file`** (pub(crate), L465) — `prompt_for_paths` (files, multiple) then `attach_paths` with the selection.
 
-- **`close_window`** (pub(crate), L138)
-  - Signature: `pub(crate) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>)`
-  - Purpose: Closes the compose window and notifies the main view.
-  - Behavior: Defers work: upgrades `root` to call `on_compose_window_closed`, then removes the window. Avoids synchronous root updates during close handling.
+- **`attach_paths`** (private, L482)
+  - Behavior: Increments pending loads (Send disabled), runs `read_attachments` on `background_spawn` with the bytes already attached, then `finish_attachments`. Also used by drag-and-drop (`ExternalPaths`).
 
-- **`sync_menus_if_active`** (private, L150)
-  - Signature: `fn sync_menus_if_active(&self, window: &Window, language: Language, cx: &mut Context<Self>)`
-  - Purpose: Keeps the global menu bar on the compose surface when this window is active.
-  - Behavior: Calls `app_menus::sync_compose_menus` when `window.is_window_active()`.
+- **`finish_attachments`** (private, L503) — decrements pending loads, merges under the cap, marks edited when files were added, shows `attachment_error_message` in the banner.
 
-- **`selected_from_address`** (private, L156)
-  - Signature: `fn selected_from_address(&self) -> &str`
-  - Purpose: Returns the email of the currently selected From account.
-  - Behavior: Looks up `accounts[from_account]` email or returns empty string.
+- **`remove_attachment`** (private, L520) — removes the chip at `index` and marks edited.
 
-- **`render_toolbar`** (private, L163)
-  - Signature: `fn render_toolbar(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement`
-  - Purpose: Builds the bottom toolbar (discard, attach, send).
-  - Behavior: Renders bordered row with trash icon (discard), flexible spacer, attachment icon, and filled Send button wired to mock handlers.
+- **`dismiss_error`** (private, L527) — hides the banner.
 
-- **`render_header`** (private, L206)
-  - Signature: `fn render_header(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement`
-  - Purpose: Builds the compose header fields (From, To, optional Cc/Bcc, Subject).
-  - Behavior: From row cycles accounts on click; To row shows placeholder and Cc/Bcc toggle; optional Cc/Bcc rows and Subject row use `field_row`. Uses theme border and muted label colors.
+- **`discard_draft`** (pub(crate), L534)
+  - Behavior: Closes immediately when nothing was edited; otherwise `window.prompt(Warning, ComposeDiscardConfirm, ComposeDiscardDetail, [Discard, Cancel])` and closes only on Discard.
 
-- **`cc_bcc_toggle`** (private, L288)
-  - Signature: `fn cc_bcc_toggle(&self, language: Language, text_color: Hsla, hover_bg: Hsla, cx: &mut Context<Self>) -> impl IntoElement`
-  - Purpose: Compact Cc/Bcc toggle aligned with 12px field rows.
-  - Behavior: Renders localized label with hover background, stops mouse-down propagation, and toggles Cc/Bcc visibility on click.
+- **`close_window`** (pub(crate), L559) — deferred: notifies `RootView::on_compose_window_closed`, then removes the window.
 
-- **`field_row`** (private, L312)
-  - Signature: `fn field_row(&self, label: &'static str, placeholder: impl Into<SharedString>, value_slot: Option<impl IntoElement>, border: Hsla) -> impl IntoElement`
-  - Purpose: One labeled header row with optional interactive value slot.
-  - Behavior: Fixed-width muted label, bottom border, and either a custom value element or disabled placeholder label.
+- **`sync_menus_if_active`** (private, L571) — `app_menus::sync_compose_menus` while the window is active.
 
-- **`render_body`** (private, L352)
-  - Signature: `fn render_body(&self, language: Language, white_background: bool) -> impl IntoElement`
-  - Purpose: Builds the message body placeholder area.
-  - Behavior: Flex-grow region with optional white background and localized body placeholder text.
+- **`sync_title`** (private, L578) — sets the platform title to `title_for_subject` when it changed (follows subject edits and language).
+
+- **`render_toolbar`** (private, L586) — Discard (trash), spacer, "Loading attachments…" while reads run, Attach, Send (dimmed and inert unless `can_send_now`).
+
+- **`render_header`** (private, L640) — From picker row, To row (+ Cc/Bcc toggle), optional Cc/Bcc rows, Subject row, each with its inline error.
+
+- **`render_from_picker`** (private, L698) — chosen account label + "Can't send" (warning color) for local accounts + chevron; renders the menu when open.
+
+- **`render_from_menu`** (private, L742) — `ui::ContextMenu` of accounts (local ones with a "Can't send" hint), `deferred(anchored())` under the From value.
+
+- **`cc_bcc_toggle`** (private, L768) — compact Cc/Bcc toggle that keeps the To row height.
+
+- **`field_row`** (private, L793)
+  - Signature: `fn field_row(&self, label: &'static str, value: AnyElement, trailing: Option<AnyElement>, error: Option<&str>, border: Hsla) -> impl IntoElement`
+  - Behavior: Fixed label column, value at `ui_text_size(-1)`, optional trailing control, error line (`Color::Error`) aligned with the value, bottom border.
+
+- **`render_attachments`** (private, L837) — chip per attachment: `attachments::file_family` icon, name, `attachments::human_size`, remove button with tooltip.
+
+- **`render_error_banner`** (private, L906) — error icon + message + dismiss, above the toolbar; `None` without a banner.
+
+- **`render_body`** (private, L938) — scrollable (`track_scroll`) body with the white-background colors; mouse-down anywhere in it focuses the text area.
 
 ##### Context: `Render for ComposeView`
 
-- **`render`** (private, L380)
-  - Signature: `fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement`
-  - Purpose: Renders the full compose window and wires actions/menus/bounds sync.
-  - Behavior: When windowed bounds change, defers `root.sync_compose_window_bounds`. Syncs compose menus if active. Builds vertical layout with header, body, toolbar; registers `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, and `ComposeClose` actions.
+- **`render`** (private, L970)
+  - Behavior: Defers `root.sync_compose_window_bounds` when bounds changed; syncs menus and title; root has `key_context("ComposeView")`, actions `ComposeSend`/`ComposeAttach`/`ComposeDiscard`/`ComposeClose`, file drop target (`drag_over` highlight + `on_drop::<ExternalPaths>` → `attach_paths`); lays out header, chips, body, banner, toolbar, plus a full-window click catcher while the From picker is open.
+
+##### Tests (`#[cfg(test)]`)
+
+- `compose_body_uses_white_background_when_reader_pref_is_on`, `clamp_compose_size_*`, `compose_position_unset_detects_negative_coordinates`, `window_title_is_localized`, `title_follows_subject_or_falls_back`, `send_shortcuts_parse` — window/geometry/title contracts.
+- `account_index_prefers_requested_then_sending_account`, `account_label_shows_name_and_email`, `initial_focus_is_body_for_replies_and_to_otherwise` — From choice and focus.
+- `build_draft_maps_fields_and_reply_headers`, `build_draft_reports_invalid_tokens_per_field`, `build_draft_requires_a_recipient_and_a_sending_account`, `compose_errors_field_mut_targets_the_field`, `invalid_address_message_is_localized` — validation contract.
+- `read_attachments_reads_files_and_reports_failures`, `merge_attachments_enforces_cap`, `attachment_name_uses_file_name`, `attachment_error_message_combines_parts`, `attachment_limit_is_25_mb` — attachments contract.
 
 
 ### `src/config.rs`
@@ -1000,6 +677,66 @@ _(No functions — only action types.)_
   - Behavior: Combines system temp dir, process id, and nanosecond timestamp.
 
 
+### `src/crash_guard.rs`
+
+#### Types / constants
+
+- **struct `CrashGuard`** (pub, Clone): Path of the reader's render marker (`reader-render.guard` beside the mail database).
+
+#### Functions / methods
+
+- **`CrashGuard::beside(db_path)`**: Guard for that database.
+- **`CrashGuard::take_unfinished()`**: Message id left by a run that crashed while rendering it (marker cleared); `None` otherwise.
+- **`CrashGuard::begin(id)`**: Writes the marker before rendering formatted HTML (best effort).
+- **`CrashGuard::finish()`**: Removes the marker once a frame showing it was drawn.
+- Tests: unfinished renders reported once; finished renders leave no marker.
+
+### `src/print.rs`
+
+#### Types / constants
+
+- **const `STALE_AFTER`** (private): 10 minutes; older print pages are deleted on the next print.
+
+#### Functions / methods
+
+- **`print_dir()`** (pub): `<temp dir>/bgmail-print`.
+- **`nonce()`** (pub): 16 hex digits from the process's random hasher keys, the clock, a counter and the pid (CSP nonce and file name).
+- **`write_print_page(dir, html, nonce)`** (pub): Creates the private directory, removes stale pages, writes `message-<nonce>.html` as a new private file; returns its path.
+- **`remove_stale_pages(dir, now, age)`** (pub): Deletes `message-*.html` older than `age`; returns how many.
+- **`create_private_dir(dir)`** / **`create_private_file(path)`** (pub(crate); also used by `attachments`): Unix modes 0700 / 0600 (create-new); elsewhere plain creation (Windows' temp dir is per user).
+- Tests: nonces differ; pages are private, never overwritten; only stale pages are removed.
+
+### `src/attachments.rs`
+
+Reader attachment chips' presentation and the file side of Open / Save As… /
+Save to Downloads. Sender-supplied names are always sanitized; writers never
+overwrite (a ` (n)` suffix is added while a name is taken).
+
+#### Types / constants
+
+- **const `STALE_AFTER`** (private): 24 h; opened attachments older than this are deleted on the next open.
+- **const `MAX_STEM_CHARS`** (private): 120; longer stems are cut (extension kept).
+- **const `FALLBACK_NAME`** (private): `"attachment"`, used when nothing usable is left of a name.
+- **const `MAX_DEDUPE`** (private): 1000 ` (n)` candidates before giving up.
+- **enum `FileFamily`** (pub): `Image`, `Pdf`, `Archive`, `Audio`, `Video`, `Text`, `Other`.
+
+#### Functions / methods
+
+- **`FileFamily::icon(self)`** (pub): chip icon — `FileImage`, `FilePdf`, `FileArchive`, `FileAudio`, `FileVideo`, `FileText`, `File`.
+- **`file_family(mime_type, filename)`** (pub): family from the (case-insensitive) MIME top/sub type (`image/*`, `audio/*`, `video/*`, `text/*`, `application/pdf`, archive and word-processor types); generic types fall back to `family_from_extension`.
+- **`family_from_extension(filename)`** (private): family from the lowercase extension; unknown → `Other`.
+- **`human_size(bytes, language)`** (pub): `"N B"` under 1 KB, else KB/MB/GB/TB base 1024 with one decimal under 10 (`"1.2 MB"`, `"15 KB"`); Portuguese uses a decimal comma.
+- **`sanitize_filename(name)`** (pub): last `/`- or `\`-separated segment only; control chars and `: * ? " < > |` → `_`; trims surrounding whitespace and dots (no hidden dotfiles); empty → `"attachment"`; stem cut to `MAX_STEM_CHARS`; Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) get a `_` prefix.
+- **`split_extension(name)`** (private): `(stem, ext)`; a leading dot or an "extension" over 16 chars is not an extension.
+- **`numbered_name(name, n)`** (private): `name` for 0, else `stem (n).ext`.
+- **`extract(raw, part_index)`** (pub): decoded bytes via `mail_core::attachment_content`; `NotFound` error when the part is missing.
+- **`open_dir()`** (pub): `<temp dir>/bgmail-attachments`.
+- **`downloads_dir()`** (pub) / **`downloads_dir_in(home)`** (private): `~/Downloads` when it exists, else home (`HOME`/`USERPROFILE`), else the temp dir.
+- **`write_unique(dir, filename, data, private)`** (pub): creates `dir` (private → 0700 via `print::create_private_dir`), then create-new files `sanitize_filename(filename)`, `… (1)`, … until one is free (private → 0600); writes `data`, returns the path. Races are safe (create-new, `AlreadyExists` → next name).
+- **`write_for_open(filename, data)`** (pub): removes stale files in `open_dir()`, then private `write_unique` there.
+- **`remove_stale_files(dir, now, age)`** (pub): deletes regular files older than `age`; returns how many (best effort).
+- Tests: families, sizes (EN/PT), sanitizing (traversal, Windows paths, control/reserved chars, dotfiles, device names, long names), numbering, unique/private writes (Unix modes), stale removal, Downloads fallback, part extraction from a raw MIME message, `write_for_open`.
+
 ### `src/data.rs`
 
 #### Types / constants
@@ -1007,7 +744,7 @@ _(No functions — only action types.)_
 - **`EMBEDDED_IMAGE_BYTES`** (private, L17)
   - Signature: `const EMBEDDED_IMAGE_BYTES: &[u8]`
   - Purpose: Raw PNG bytes baked into the binary for the first sample message.
-  - Behavior: Loaded via `include_bytes!` from `assets/tweezers.png`; encoded to a `data:` URI for inline webview rendering without file access.
+  - Behavior: Loaded via `include_bytes!` from `assets/tweezers.png`; encoded to a `data:` URI so the reader renders it without file access.
 
 - **`EMBEDDED_IMAGE_WIDTH`** (private, L22)
   - Signature: `const EMBEDDED_IMAGE_WIDTH: u32 = 700`
@@ -1047,7 +784,7 @@ _(No functions — only action types.)_
 - **`MessageBody`** (pub, L149)
   - Signature: `pub enum MessageBody { Html(SharedString), Text(SharedString) }`
   - Purpose: Reader content variant for HTML or plain-text bodies.
-  - Behavior: Carries full body string; HTML is rendered in the webview, text in a plain viewer.
+  - Behavior: Carries full body string; both are rendered by the reader (`mail_html` wraps text in `<pre>`).
 
 - **`Message`** (pub, L156)
   - Signature: `pub struct Message { sender, sender_email, subject, preview, body, time, unread, starred, has_attachment }`
@@ -1228,6 +965,9 @@ _(None at module top level — conversion helpers only.)_
 
 #### Functions / methods
 
+- **`sample_dir_messages(dir)`** (pub): Development (`BGMAIL_SAMPLE_DIR`): every `*.html` in `dir`, sorted, as extra unread inbox messages of the default account after the samples; subject from `<title>` (`html_title`) else the file stem, sender = file stem.
+- **`html_title(html)`** (private): Text of `<title>` with whitespace collapsed; `None` when missing/empty.
+
 ##### Context: `module`
 
 - **`seed_accounts`** (pub, L12)
@@ -1291,7 +1031,21 @@ _(None at module top level — conversion helpers only.)_
   - Behavior: Strips tags from sample HTML and retains visible text content.
 
 
+### `src/dates.rs`
+
+Message dates in the local zone (chrono `clock`); the formatting core takes explicit `NaiveDateTime`s so tests don't depend on the machine's zone.
+- **`local(unix)`** (private): local wall-clock time; `None` for `<= 0`/out of range.
+- **`format_list_date(time, now, language)`** (pub): today → `HH:MM`; 1 day → "Yesterday"/"Ontem"; 2–6 days → weekday; older/future → short date (`Mar 4` / `04/03`, other years `3/4/24` / `04/03/24`).
+- **`format_full_date(time, language)`** (pub): reader date (`Oct 31, 2026 at 14:07` / `31/10/2026 14:07`).
+- **`short_date`**, **`weekday`** (private): helpers above (weekday index clamped to Sunday).
+- **`list_date(unix, fallback, language)`** / **`full_date(...)`** (pub): local formatting, or `fallback` (legacy `received_at` text of local/demo rows) when the time is unknown.
+- **`clock_time(unix)`** (pub): local `HH:MM` (empty when unknown) — status bar "Updated at".
+- **`now_unix()`** (pub): current unix seconds (Date header of sent mail).
+- Tests: today/yesterday/weekday/short/future dates per language, full dates, fallbacks, live formatting, clock time, weekday clamp.
+
 ### `src/locale.rs`
+
+- **`reply_attribution(language, date, sender)`** (pub): "On {date}, {sender} wrote:" / "Em {date}, {sender} escreveu:".
 
 #### Types / constants
 
@@ -1306,9 +1060,9 @@ _(None at module top level — conversion helpers only.)_
   - Behavior: `[English, Portuguese]`.
 
 - **`Key`** (pub, L38)
-  - Signature: `pub enum Key { … }` (64 UI string keys)
+  - Signature: `pub enum Key { … }` (66 UI string keys)
   - Purpose: Typed catalog of translatable UI chrome strings.
-  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings, toolbar, commands, compose, context menu, and status strings.
+  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`), plain-text fallback notices (`NoticeTooLarge`, `NoticeTooDeep`, `NoticeCrashed`, `NoticeShowFormatted`), status strings, Settings ▸ Accounts (`Account*`: form labels, provider notes, health, errors) and `NotificationsHint`.
 
 - **`GlobalLanguage`** (private, L332)
   - Signature: `struct GlobalLanguage(Language)`
@@ -1341,22 +1095,34 @@ _(None at module top level — conversion helpers only.)_
 - **`message_count`** (pub, L295)
   - Signature: `pub fn message_count(language: Language, count: usize) -> String`
   - Purpose: Localized message-list header count.
-  - Behavior: English `"{count} messages"`; Portuguese `"{count} mensagens"`.
+  - Behavior: `"{count} message|messages"` / `"{count} mensagem|mensagens"` (singular only for exactly 1, via `messages_noun`).
 
 - **`status_counts`** (pub, L303)
   - Signature: `pub fn status_counts(language: Language, accounts: usize, messages: usize) -> String`
   - Purpose: Status bar left segment with account and message totals.
-  - Behavior: English `"{accounts} accounts · {messages} messages"`; Portuguese uses "contas" and "mensagens".
+  - Behavior: `"{accounts} account(s) · {messages} message(s)"`; Portuguese "conta(s)" / "mensagem|mensagens"; each noun singular only for 1.
 
 - **`status_search_counts`** (pub, L311)
   - Signature: `pub fn status_search_counts(language: Language, accounts: usize, showing: usize, total: usize) -> String`
   - Purpose: Status bar left segment while search filtering is active.
-  - Behavior: English `"{accounts} accounts · {showing} of {total} messages"`; Portuguese uses "de" phrasing.
+  - Behavior: `"{accounts} account(s) · {showing} of {total} message(s)"` (noun agrees with `total`); Portuguese "de".
 
 - **`status_unread`** (pub, L324)
   - Signature: `pub fn status_unread(language: Language, unread: usize) -> String`
-  - Purpose: Status bar right segment with unread count and sync hint.
-  - Behavior: English `"{unread} unread · Updated just now"`; Portuguese uses "não lidas · Atualizado agora".
+  - Purpose: Status bar right segment with the unread count.
+  - Behavior: English `"{unread} unread"`; Portuguese `"1 não lida"` / `"{n} não lidas"`.
+
+- **`status_updated_at`** (pub) — "Updated at HH:MM" text for the status bar.
+- **`status_unsent`** (pub)
+  - Signature: `pub fn status_unsent(language: Language, unsent: usize) -> String`
+  - Purpose: Status bar indicator of outgoing messages that stopped retrying.
+  - Behavior: English `"{n} unsent"`; Portuguese `"1 não enviada"` / `"{n} não enviadas"`.
+
+- **`plural`** / **`messages_noun`** / **`accounts_noun`** (private): pick singular (count == 1) or plural forms; shared by the count helpers above.
+
+- **`status_zoom`** (pub)
+  - Signature: `pub fn status_zoom(language: Language, zoom: f32) -> String`
+  - Purpose: Status bar note for the reader's page zoom: `"Zoom {percent}%"` (both languages).
 
 - **`init`** (pub, L337)
   - Signature: `pub fn init(language: Language, cx: &mut App)`
@@ -1383,6 +1149,8 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Confirms `Language::default()` is English.
   - Behavior: Equality assertion on default enum value.
 
+- **`counts_use_singular_only_for_one`** (test): singular/plural of accounts, messages, unread and unsent counts in EN and PT-BR (including "0 … messages", search counts agreeing with the total).
+
 - **`formatted_strings_include_arguments`** (private, L463)
   - Signature: `fn formatted_strings_include_arguments()` (test)
   - Purpose: Verifies dynamic status strings embed numeric arguments.
@@ -1395,6 +1163,72 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Reads active language from the GPUI app global.
   - Behavior: Returns `self.global::<GlobalLanguage>().0`.
 
+
+### `src/mail_html.rs`
+
+#### Types / constants
+
+- **struct `RenderedEmail`** (pub): Full themed HTML document for `html_view` plus `blocked_images` (remote `<img>` withheld) for the privacy shield.
+- **struct `DocumentColors`** (pub): Page `background`, `text`, `accent`; `is_dark()` (background lightness < 0.5) selects the dark scheme.
+- **struct `PrintHeader`** (pub): Subject, sender and date (with localized labels) printed above a message.
+- **const `PRINT_COLORS`** (private): Light page colors used for printing whatever the theme.
+- **const `DISALLOWED_ELEMENTS`** (private): Selector of elements stripped with their content (scripts, frames, media, form controls, `base`/`meta`/`link`, scripting surfaces, scriptable SVG parts).
+- **const `URL_ATTRIBUTES`** (private): Attributes vetted for dangerous URL schemes.
+- **const `RESOURCE_ATTRIBUTES`** (private): Attributes that fetch on render; blocked for remoteness when loading is off.
+
+#### Functions / methods
+
+- **`DocumentColors::is_dark`** (pub): `background.l < 0.5`.
+- **`plain_text`** (pub): Readable text of an HTML body for the plain-text fallback: one linear scan (no tree), drops tags/comments, skips `script`/`style`/`head`/`title` content, blank lines around paragraph blocks and line breaks at line blocks, tabs between cells, decoded entities, collapsed whitespace except in `<pre>`.
+- **`find_ascii_ci`** (private): Byte index of the first ASCII-case-insensitive occurrence of an ASCII needle (no lower-cased copy of the haystack; used to skip `script`/`style`/`head`/`title` content in linear time).
+- **`decode_entities`** (private): Named basics, `&nbsp;`, decimal/hex references (`;` looked for in the next 12 bytes, never cutting a multi-byte character); unknown entities kept.
+- **`is_openable_link`** (pub): Whether a clicked link may be opened outside the app: `http(s)://` and `mailto:` only (case-insensitive, trimmed).
+- **`email_document`** (pub)
+  - Signature: `pub fn email_document(colors: DocumentColors, body: &MessageBody, load_remote: bool) -> RenderedEmail`
+  - Purpose: Builds the reader document for a body.
+  - Behavior: HTML bodies are sanitized keeping remote sources only with `load_remote` (else blocked and counted); document CSS: 16px body text (Chromium's default), plain text in the body font; plain text is escaped into `<pre class="plain">`. Wraps the result in a document with `document_css` that starts with the body's own doctype (`leading_doctype`, so legacy mail keeps its quirks mode), else `<!DOCTYPE html>`.
+- **`leading_doctype`** (private): The doctype an HTML body starts with, after a BOM, whitespace, `<?…?>` declarations and comments; `None` without one.
+- **`print_document`** (pub)
+  - Signature: `pub fn print_document(header: &PrintHeader, body: &MessageBody, nonce: &str, load_remote: bool) -> String`
+  - Purpose: Standalone page for printing a message in the system browser.
+  - Behavior: `email_document` with `PRINT_COLORS`, plus in `<head>` (first) a Content-Security-Policy (`default-src 'none'; img-src data:` (plus `http: https:` with `load_remote`)`; style-src 'unsafe-inline'; script-src 'nonce-…'`), the subject as title, header styles and a nonce'd script calling `print()` on load; the escaped header opens `<body>`. Remote content stays blocked by the sanitizer and, as defense in depth, by the CSP.
+- **`document_css`** (private): Theme stylesheet (color scheme, page colors/padding/font, links in accent, blocked-image placeholder, code/pre/blockquote/hr styles).
+- **`css_color`** / **`css_color_alpha`** / **`channel`** (private): Theme colors → CSS `rgb()`/`rgba()`; channel clamps and rounds to 0–255.
+- **`sanitize_html`** (private, test-only): `sanitize_html_inner` without the remote-image report.
+- **`sanitize_html_inner`** (private)
+  - Signature: `fn sanitize_html_inner(html: &str, load_remote: bool, shown: &HashSet<String>) -> (String, bool, usize)`
+  - Purpose: Streaming `lol_html` sanitizer; returns (html, has remote `<img>`, blocked count).
+  - Behavior: Drops `DISALLOWED_ELEMENTS` with content, neutralizes attributes on every element, and (remote loading off) blanks CSS `url(...)`. Rewrite failures drop the body.
+- **`strip_css_urls`** / **`find_url_open`** (private): Empty every CSS `url(...)` (case-insensitive `url(` detection); applied by `sanitize_html_inner` only to `style` attributes and `<style>` text (buffered across chunks) when remote content is blocked.
+- **`neutralize_attributes`** (private): Removes `on*`, `contenteditable`, dangerous-scheme URLs, scripted `style`, and (unless allowed) remote resource attributes / `srcset`; a blocked remote `<img src>` is kept as `data-rm-blocked-src`; returns the image's blocked state.
+- **`is_dangerous_url`** / **`is_remote_url`** / **`style_has_script_vector`** (private): URL scheme and CSS vector checks.
+- **`escape_html`** (private): Escapes `& < > " '`.
+- Tests: HTML escaping, plain text (structure, entities, broken markup, multi-byte characters at entity/tag cuts, case-insensitive skipped blocks), openable links, colors, document wrapping (HTML verbatim, plain text escaped, color scheme), disallowed elements, SVG scriptable parts, event handlers, dangerous schemes, legacy style vectors, safe markup kept, remote detection and blocking (attributes, `href` kept, CSS urls), remote image policy (`load_remote`, `shown`), documents always blocking remote images.
+
+### `src/mail_service.rs`
+
+Bridge between the UI and `mail_sync::Engine` (plain Rust; the event loop lives in `RootView`).
+- **enum `StartError { NotRemote, MissingSecret, OAuthUnavailable(provider) }`** — why an account couldn't start.
+- **`credential_for(config, secret)`** (pub): keychain bytes → `protocols::Credential` (password, or OAuth refresh token + provider from `oauth_provider`); empty/non-UTF-8 → `MissingSecret`.
+- **`connector_for(config_json, secret)`** (pub): `AccountConfig` JSON + secret → `Arc<dyn MailConnector>` (`ImapSmtpConnector`, default `ConnectOptions`); local `{}` → `NotRemote`.
+- **enum `OverallStatus { None, Syncing, UpToDate(ts), Offline(msg), AuthFailed(id), Error(msg) }`** and **`overall_status(statuses)`** (pub): folds per-account statuses, most urgent first (auth → error → offline → syncing → up to date, newest `last_sync`).
+- **type `BlockingJob = Box<dyn FnOnce() + Send>`**: worker start/stop work that may wait up to `mail_sync::STOP_TIMEOUT`; callers run it off the UI thread (`cx.background_spawn`).
+- **struct `MailService`** (engine held in an `Arc` shared with its jobs): `new(db_path) -> (Self, Receiver<SyncEvent>)` (unbounded channel, default `EngineOptions`); `engine()`; `start_account(id, connector) -> BlockingJob` (status `Connecting` now; the job (re)starts the worker); `stop_account(id) -> BlockingJob` (forgets the status now; the job stops the threads); `set_status(id, status)` (ignored for accounts not running); `status(id)`; `overall()`; `process_queue(id)` (`Command::ProcessQueue`).
+- **`job(id, work)`** (private): wraps `work(&Engine)` in a `BlockingJob` tagged with a new generation; jobs run one at a time (`job_serial`) and a job whose generation is no longer the account's newest is skipped (last request wins, no two jobs race on one worker slot).
+- **`lock(mutex)`** (private): poison-tolerant `Mutex::lock`.
+- Tests: password credential, missing/invalid secret, unknown OAuth provider, local accounts, status folding order, statuses only for running accounts, only the newest job per account runs.
+
+### `src/notifications.rs`
+
+Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT behind one API), always shown off the UI thread.
+- **struct `Notice { summary, body }`**.
+- **`notices_for(account, messages, language)`** (pub): one notice per message (sender or account name; subject or "(no subject)"/"(sem assunto)") up to 3; a burst becomes one "N new messages" summary.
+- **`notify_new_mail(account, messages, language)`** (pub): spawns a short-lived thread showing the notices (errors logged).
+- **const `WINDOW_APP_ID`** = `io.github.belizariogr.bgmail` (packager `identifier`; the NSIS shortcut's AppUserModelID).
+- **`shortcut_candidates(programs_dirs)`** (private): `BGMail.lnk` and `BGMail\BGMail.lnk` under each Start Menu `Programs` folder.
+- **`windows_app_id()`** (private, Windows only): `Some(WINDOW_APP_ID)` when an installer shortcut exists under `%APPDATA%` / `%PROGRAMDATA%` Start Menu, else `None` (unpackaged runs keep notify-rust's PowerShell id: Windows drops toasts from an unregistered id).
+- **`show(notice)`** (private): `notify_rust::Notification` with app name "BGMail"; on Windows also `.app_id(windows_app_id())` when registered.
+- Tests: empty, per-message notices with fallbacks, burst summary, shortcut candidates + app id value.
 
 ### `src/main.rs`
 
@@ -1409,7 +1243,7 @@ _(None at module top level — conversion helpers only.)_
 
 - **`is_command_palette_keystroke`** (private, L56)
   - Signature: `fn is_command_palette_keystroke(keystroke: &Keystroke) -> bool`
-  - Purpose: Detects Ctrl+P / Cmd+P command-palette shortcut.
+  - Purpose: Detects the Ctrl+Shift+P / Cmd+Shift+P command-palette shortcut (Ctrl/Cmd+P prints).
   - Behavior: Matches key P (case-insensitive) without Shift when Control or platform (Cmd) modifier is held.
 
 - **`toggle_command_palette`** (private, L62)
@@ -1432,20 +1266,15 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Defers closing the focused auxiliary window.
   - Behavior: Calls `RootView::close_focused_auxiliary_window` (compose or settings).
 
+- **`schedule_find_in_message`** (private)
+  - Signature: `fn schedule_find_in_message(cx: &mut App)`
+  - Purpose: Opens the reader's find bar in the main window.
+  - Behavior: Defers `RootView::open_find_bar`. Registered globally so Cmd/Ctrl+F works even when nothing in the main window is focused.
+
 - **`register_global_menu_actions`** (private, L105)
   - Signature: `fn register_global_menu_actions(cx: &mut App)`
   - Purpose: Registers app-wide action handlers for macOS menu bar.
-  - Behavior: Maps each GPUI action to deferred menu/compose handlers so items stay enabled when webview holds focus.
-
-- **`init_cef_osr`** (private, L140)
-  - Signature: `fn init_cef_osr()`
-  - Purpose: Initializes CEF OSR when feature enabled.
-  - Behavior: With `cef-osr`: calls `cef_osr::initialize` and logs failure. Without feature: no-op.
-
-- **`shutdown_cef_osr`** (private, L151)
-  - Signature: `fn shutdown_cef_osr()`
-  - Purpose: Shuts down CEF after app exit.
-  - Behavior: With `cef-osr`: calls `cef_osr::shutdown_cef`. Without feature: no-op.
+  - Behavior: Maps each GPUI action to deferred menu/compose handlers so items stay enabled when focus is in a compose/settings window. `MessageReply`/`MessageReplyAll`/`MessageForward`/`MessageToggleRead` → the matching `CommandId`, `GetNewMail` → `CommandId::SyncNow` (via `schedule_menu_command`, which checks `command_enabled`).
 
 - **`app_menus`** (private, L161)
   - Signature: `fn app_menus() -> Vec<Menu>`
@@ -1455,17 +1284,17 @@ _(None at module top level — conversion helpers only.)_
 - **`register_command_palette_shortcuts`** (private, L168)
   - Signature: `fn register_command_palette_shortcuts(cx: &mut App)`
   - Purpose: Wires command palette toggle action and keystroke interceptor.
-  - Behavior: Registers `ToggleCommandPalette` handler and intercepts Ctrl/Cmd+P globally, stopping propagation.
+  - Behavior: Registers `ToggleCommandPalette` handler and intercepts Ctrl/Cmd+Shift+P globally, stopping propagation.
 
 - **`main`** (private, L181)
   - Signature: `fn main()`
   - Purpose: Application entry point.
-  - Behavior: Handles CEF sub-process re-exec, startup milestones, theme/locale init, window open with persisted bounds, Windows cloaked maximize sequence, persistence hooks, globals, and CEF shutdown after `Application::run` returns.
+  - Behavior: Startup milestones, theme/locale init, window open with persisted bounds (main window `app_id` `root::WINDOW_APP_ID` = Wayland app_id / X11 WM_CLASS, matching the packaged `BGMail.desktop`), Windows cloaked maximize sequence, persistence hooks and globals.
 
 - **`command_palette_shortcut_matches_ctrl_p_and_cmd_p`** (private, L391)
   - Signature: `fn command_palette_shortcut_matches_ctrl_p_and_cmd_p()`
   - Purpose: Test: palette shortcut detection.
-  - Behavior: Asserts Ctrl+P, Cmd+P, and uppercase P match; plain P does not.
+  - Behavior: Asserts Ctrl/Cmd+Shift+P (also uppercase) match; Ctrl/Cmd+P without Shift and plain P do not.
 
 ### `src/root.rs`
 
@@ -1475,6 +1304,7 @@ _(None at module top level — conversion helpers only.)_
 - **const `LIST_MIN_WIDTH`**: Minimum message-list column width (350px).
 - **const `READER_MIN_WIDTH`**: Minimum reading-pane width (550px).
 - **const `WINDOW_MIN_WIDTH` / `WINDOW_MIN_HEIGHT`**: Minimum main window size (950×480px); exported for startup clamping.
+- **const `WINDOW_APP_ID`** = `"BGMail"`: Wayland app_id / X11 WM_CLASS of the main, compose and settings windows (matches the packaged `BGMail.desktop`).
 - **const `NARROW_BREAKPOINT`**: Window width (1200px) below which sidebar auto-collapses and floats when reopened.
 - **const `RESIZE_HANDLE_WIDTH`**: Hit width of column resize dividers (6px).
 - **const `FOLD_ANIM_MS`**: Fixed sidebar account fold animation duration (90ms).
@@ -1485,27 +1315,22 @@ _(None at module top level — conversion helpers only.)_
 - **const `SEARCH_FIELD_WIDTH` / `SEARCH_ICON_WIDTH`**: Expanded and collapsed search control widths.
 - **const `SEARCH_DEBOUNCE_MS`**: Delay before search query reloads the message list (150ms).
 - **const `READER_LIGHT_TEXT`**: Near-black body text when reader uses forced white background.
-- **const `READER_LINE_SCROLL`**: Pixels per wheel line forwarded to OSR browser (40px).
-- **const `SEARCH_COLLAPSE_WIDTH` / `TOOLBAR_FIXED_OVERHEAD` / `ACTIONS_*_WIDTH`**: Toolbar layout breakpoints for search collapse and action-group visibility.
 - **enum `ResizeHandle`**: Which column divider is being dragged (`Sidebar` or `List`).
 - **struct `ResizeDrag`**: GPUI drag payload wrapping `ResizeHandle`.
 - **enum `Selection`**: Sidebar selection — unified `Global` mailbox or account `Mailbox` with folder path.
 - **struct `FoldAnim`**: In-flight account fold animation token and direction.
-- **enum `SettingsSection`**: Settings window section (General, Accounts, Appearance, Notifications, Privacy).
-- **struct `WebviewSignature`**: Memo key for reader HTML (message id, colors, language, remote-load and white-bg prefs).
-- **struct `RootView`**: Main application view state (layout, selection, webview, search, palette, auxiliary windows, persistence).
-- **struct `SettingsView`**: Preferences window content with section navigation.
+- **struct `ReaderSignature`**: Memo key for the reader document (message id, page colors (incl. the white-background preference), "show formatted anyway", and whether remote content loads).
+- **struct `AttachmentMenu`**: Open attachment chip menu: window position and the `AttachmentRow` it acts on.
+- **const `TOOLBAR_FIXED_OVERHEAD`** (140px, compose + get-mail) / **`ACTIONS_1/2/3_WIDTH`** (92 / 193 / 322px): toolbar budget used by `visible_action_groups`.
+- **struct `ReaderMenu`**: Open reader context menu: window position, `HitInfo`, whether text was selected.
+- **struct `FindBar`**: Open find bar: query `TextInput`, match count, current match, input observation.
+- **const `MAX_FORMATTED_HTML_BYTES`** (1 MB): HTML bodies above it are shown as plain text unless the user asks for the formatted version.
+- **enum `ReaderNotice`**: Why a message is shown as plain text: `TooLarge`, `Unrenderable` (`RenderError`), `Crashed` (crash guard).
+- **`plain_text_reason`** (private): `Crashed` if the message crashed the renderer, else `TooLarge` above the limit unless shown formatted anyway, else `None`.
+- **struct `RootView`**: Main application view state (layout, selection, reader `HtmlView`, search, palette, auxiliary windows, persistence). List state: `list_scroll: UniformListScrollHandle`, `list_focus`, `attachments` (chips of the selected message), `attachment_menu`.
 
 #### Functions / methods
 
-- **`reader_mouse_button`** (private, L108)
-  - Signature: `fn reader_mouse_button(button: MouseButton) -> Option<WebviewMouseButton>`
-  - Purpose: Maps GPUI mouse buttons to webview buttons.
-  - Behavior: Maps left/right/middle; drops navigation buttons unused in email bodies.
-- **`webview_cursor_style`** (private, L118)
-  - Signature: `fn webview_cursor_style(cursor: WebviewCursor) -> CursorStyle`
-  - Purpose: Maps page cursor requests to GPUI cursor styles.
-  - Behavior: Translates WebviewCursor variants (IBeam, Hand, resize cursors, etc.) to GPUI equivalents.
 - **`mail_list_query`** (private, L179)
   - Signature: `fn mail_list_query(selection: &Selection, search: &str) -> MailListQuery`
   - Purpose: Builds SQLite list query for current sidebar selection or active search.
@@ -1522,33 +1347,30 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn chevron_svg(color: Hsla, angle: f32) -> Svg`
   - Purpose: Rotatable chevron SVG for account disclosure.
   - Behavior: Renders right-pointing chevron rotated by `angle` radians (0= collapsed, π/2= expanded).
+- **`visible_attachments`** (private)
+  - Signature: `fn visible_attachments(db, detail: Option<&MessageDetail>) -> Vec<AttachmentRow>`
+  - Purpose: Chips of the selected message.
+  - Behavior: Non-inline `db.list_attachments` rows; empty without a message or while `body_state == BODY_STATE_HEADERS` (BodyReady reloads the detail).
+- **`system_folder_rank`** (private)
+  - Signature: `fn system_folder_rank(path: &str) -> Option<usize>`
+  - Purpose: Sidebar order of system folders.
+  - Behavior: Inbox, Drafts, Sent, Archive, Junk, Trash, Flagged → 0..6; user folders `None`.
+- **`sidebar_ordered`** (private)
+  - Signature: `fn sidebar_ordered(folders: Vec<Folder>) -> Vec<Folder>`
+  - Purpose: Folder order for the sidebar (and move targets).
+  - Behavior: System folders by rank, then user folders by lowercase display name (path when empty). Applied when folders are loaded (`new_with_database`, `reload_from_database`).
+- **`adjacent_index`** (private)
+  - Signature: `fn adjacent_index(current: Option<usize>, len: usize, step: isize) -> Option<usize>`
+  - Purpose: Keyboard row movement.
+  - Behavior: `None` for an empty list; no current → first (down) / last (up); else clamped `current + step`.
 - **`ui_accounts`** (private, L461)
   - Signature: `fn ui_accounts(accounts: &[storage::Account]) -> Vec<data::Account>`
   - Purpose: Adapts storage accounts for legacy compose/settings UI types.
   - Behavior: Maps name/email fields; leaves mailboxes empty.
-- **`settings_row`** (private, L3684)
-  - Signature: `fn settings_row(label: impl Into<SharedString>, value: impl Into<SharedString>) -> impl IntoElement`
-  - Purpose: Settings UI row with muted label and value.
-  - Behavior: Horizontal flex row with spaced labels.
-- **`should_dismiss_webview_context_menu`** (pub(crate), L3903)
-  - Signature: `pub(crate) fn should_dismiss_webview_context_menu(click: Point<Pixels>, webview_bounds: Option<Bounds<Pixels>>) -> bool`
-  - Purpose: Whether a host click should dismiss the in-page context menu.
-  - Behavior: Returns false when click is inside reader bounds (CEF handles it); true for chrome clicks or when bounds unknown.
 - **`can_open_command_palette`** (pub(crate), L3911)
   - Signature: `pub(crate) fn can_open_command_palette(main_window_active: bool) -> bool`
   - Purpose: Gate for opening the command palette.
   - Behavior: Returns `main_window_active` — palette only opens when main window is key.
-##### Context: `SettingsSection`
-
-- **`title_key`** (private, L227)
-  - Signature: `fn title_key(self) -> Key`
-  - Purpose: Locale key for section title.
-  - Behavior: Maps each section to its Key variant.
-
-- **`icon`** (private, L237)
-  - Signature: `fn icon(self) -> IconName`
-  - Purpose: Icon for section nav.
-  - Behavior: Maps each section to Settings/Account/Palette/Flag/Shield icons.
 ##### Context: `RootView`
 
 - **`new`** (pub, L473)
@@ -1569,12 +1391,12 @@ _(None at module top level — conversion helpers only.)_
 - **`clear_message_selection`** (private, L605)
   - Signature: `fn clear_message_selection(&mut self)`
   - Purpose: Clears selected message and reader state.
-  - Behavior: Resets selected id, detail, and webview signature.
+  - Behavior: Resets selected id, detail, attachment chips + their menu, and reader signature.
 
 - **`reload_selected_detail`** (private, L611)
   - Signature: `fn reload_selected_detail(&mut self)`
   - Purpose: Reloads full body for selected message.
-  - Behavior: Fetches MessageDetail from DB when an id is selected.
+  - Behavior: Fetches MessageDetail from DB when an id is selected, reloads `attachments` (`visible_attachments`) and drops an attachment menu that belongs to another message.
 
 - **`on_message_selection_changed`** (private, L617)
   - Signature: `fn on_message_selection_changed(&mut self, cx: &mut Context<Self>)`
@@ -1621,10 +1443,45 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Runs closure on compose view if open.
   - Behavior: Updates compose entity and returns closure result or None.
 
-- **`refresh_after_message_action`** (private, L698)
-  - Signature: `fn refresh_after_message_action(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Post-action UI refresh.
-  - Behavior: Reloads list, syncs menus, invalidates webview signature, notifies.
+- **`move_selection`** (private)
+  - Signature: `fn move_selection(&mut self, step: isize, cx) -> bool`
+  - Purpose: Keyboard navigation (`SelectNextMessage` / `SelectPreviousMessage`).
+  - Behavior: `select_adjacent_message`, then `reveal_selected_message` and `on_message_selection_changed` (opens it: marks read, fetches a missing body); false when nothing moved.
+
+- **`select_adjacent_message`** (private)
+  - Signature: `fn select_adjacent_message(&mut self, step: isize) -> bool`
+  - Purpose: Pure core of `move_selection`.
+  - Behavior: Moves `selected_message_id` by `adjacent_index` (clamped, no wrap; no selection → first row going down, last going up) and invalidates the reader signature.
+
+- **`reveal_selected_message`** (private)
+  - Signature: `fn reveal_selected_message(&self)`
+  - Purpose: Keeps the selected row visible.
+  - Behavior: `UniformListScrollHandle::scroll_to_item(ix, Top)` (only scrolls when the row is out of view). Also called by `run_message_action` for the row that replaced a removed message.
+
+- **`attachment_raw`** (private)
+  - Signature: `fn attachment_raw(&mut self, attachment, failure: Key, cx) -> Option<Vec<u8>>`
+  - Purpose: Raw RFC 822 source holding an attachment.
+  - Behavior: `db.message_raw(message_id)`; a missing body shows `failure` in the status bar.
+
+- **`open_attachment`** (pub(crate))
+  - Signature: `pub(crate) fn open_attachment(&mut self, attachment: AttachmentRow, cx)`
+  - Purpose: Chip menu ▸ Open.
+  - Behavior: Closes the menu; on a background task `attachments::extract` + `attachments::write_for_open` (private temp dir), then `cx.open_with_system`; failures → "Could not open the attachment: …" status note.
+
+- **`save_attachment_as`** (pub(crate))
+  - Signature: `pub(crate) fn save_attachment_as(&mut self, attachment: AttachmentRow, cx)`
+  - Purpose: Chip menu ▸ Save As….
+  - Behavior: `cx.prompt_for_new_path(downloads_dir, sanitized name)`; on a chosen path extracts and writes (overwrite confirmed by the dialog) on a background task; result via `report_attachment_saved`. Cancel does nothing.
+
+- **`save_attachment_to_downloads`** (pub(crate))
+  - Signature: `pub(crate) fn save_attachment_to_downloads(&mut self, attachment: AttachmentRow, cx)`
+  - Purpose: Chip menu ▸ Save to Downloads.
+  - Behavior: Background extract + `attachments::write_unique(downloads_dir, name, data, false)` (never overwrites); result via `report_attachment_saved`.
+
+- **`report_attachment_saved`** (private)
+  - Signature: `fn report_attachment_saved(&mut self, result: io::Result<PathBuf>, cx)`
+  - Purpose: Status note after a save.
+  - Behavior: "Attachment saved: <path>" or "Could not save the attachment: <error>".
 
 - **`ensure_command_palette`** (private, L705)
   - Signature: `fn ensure_command_palette(&mut self, cx: &mut Context<Self>)`
@@ -1640,11 +1497,6 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `pub(crate) fn toggle_command_palette(&mut self, window: &Window, cx: &mut Context<Self>)`
   - Purpose: Public palette toggle entry.
   - Behavior: Delegates to internal toggle.
-
-- **`toggle_command_palette_from_webview`** (private, L748)
-  - Signature: `fn toggle_command_palette_from_webview(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Schedules palette toggle from webview IPC.
-  - Behavior: Sets deferred flag handled next render frame.
 
 - **`toggle_command_palette_internal`** (private, L753)
   - Signature: `fn toggle_command_palette_internal(&mut self, window: &Window, cx: &mut Context<Self>)`
@@ -1671,10 +1523,20 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Runs a command by id.
   - Behavior: Dispatches to compose/settings/sidebar/message handlers, then closes palette.
 
+- **`remote_allowed_for`** (private): Whether a message loads remote content: `load_remote_images` or loaded from the shield this session (`remote_allowed`).
+- **`load_remote_for_selected`** (private): Shield click: adds the selected message to `remote_allowed` (re-renders through the `ReaderSignature`).
+- **`set_load_remote_images`** (private): "Always load remote images" (Settings ▸ Privacy): persists and refreshes windows.
+- **`set_notifications_enabled`** (pub(crate)): Settings ▸ Notifications switch: sets `notifications_enabled`, persists via `request_save`, notifies.
+
+- **`print_message`** (pub(crate))
+  - Signature: `pub(crate) fn print_message(&mut self, cx: &mut Context<Self>)`
+  - Purpose: Prints the selected message through the system browser.
+  - Behavior: Builds the `PrintHeader` (sender with address, `received_at`), the print page (`mail_html::print_document` with a fresh `print::nonce`, remote images when allowed for the message), writes it with `print::write_print_page` and opens it with `cx.open_with_system` (errors logged).
+
 - **`delete_message_to_trash`** (pub(crate), L830)
   - Signature: `pub(crate) fn delete_message_to_trash(&mut self, cx: &mut Context<Self>)`
   - Purpose: Moves selected message to trash.
-  - Behavior: No-op without selection; DB move then refresh_after_message_action.
+  - Behavior: No-op without selection; `run_message_action(mail_actions::trash)` (next row selected and revealed).
 
 - **`delete_message_permanently`** (pub(crate), L838)
   - Signature: `pub(crate) fn delete_message_permanently(&mut self, cx: &mut Context<Self>)`
@@ -1740,6 +1602,11 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn request_save(&mut self, cx: &mut Context<Self>)`
   - Purpose: Debounced settings persistence.
   - Behavior: Increments save token, spawns timer; latest token wins, writes on background thread.
+
+- **`ensure_list_focus`** (private)
+  - Signature: `fn ensure_list_focus(&mut self, cx) -> FocusHandle`
+  - Purpose: Focus handle of the message list (key context `MessageList`).
+  - Behavior: Created on first use. `render` defers focusing it whenever nothing in the window is focused (startup, after the search field blurs) and the palette is closed; clicking a row focuses it.
 
 - **`ensure_scrollbar_states`** (private, L1047)
   - Signature: `fn ensure_scrollbar_states(&mut self, cx: &mut Context<Self>)`
@@ -1838,83 +1705,40 @@ _(None at module top level — conversion helpers only.)_
 
 - **`on_main_window_activated`** (pub(crate), L1264)
   - Signature: `pub(crate) fn on_main_window_activated(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Wakes OSR reader after window activation.
-  - Behavior: Pumps CEF hard and notifies webview when composited reader exists.
+  - Purpose: Reacts to the main window becoming active.
+  - Behavior: Refreshes the custom caption layout and notifies.
 
-- **`ensure_cef_osr_tick`** (private, L1277)
-  - Signature: `fn ensure_cef_osr_tick(&mut self, cx: &mut Context<Self>)`
-  - Purpose: Starts background CEF pump loop.
-  - Behavior: Spawns periodic tick while OSR webview exists so Chromium keeps painting when window inactive.
+- **`step_match`** (private)
+  - Signature: `fn step_match(current: usize, count: usize, step: isize) -> usize`
+  - Purpose: Next/previous find match index, wrapping; 0 without matches.
 
-- **`sync_webview`** (private, L1316)
-  - Signature: `fn sync_webview(&mut self, window, cx: &mut Context<Self>)`
-  - Purpose: Creates/updates embedded email webview.
-  - Behavior: Builds HTML when signature changes, reuses browser instance on message switch, hides when no selection, handles host events.
+- **`reader_selection_color`** (private)
+  - Signature: `fn reader_selection_color(accent: Hsla) -> [u8; 4]`
+  - Purpose: Reader selection highlight: the accent at 35% opacity as RGBA (readable over dark and light text).
 
-- **`handle_host_event`** (private, L1422)
-  - Signature: `fn handle_host_event(&mut self, event: HostEvent, cx: &mut Context<Self>)`
-  - Purpose: Handles webview IPC on foreground.
-  - Behavior: Routes hover, clipboard, image shown, palette toggle, cursor, context menu dismiss, etc.
+- **`on_reader_event`** (private)
+  - Signature: `fn on_reader_event(&mut self, view: Entity<HtmlView>, event: &HtmlViewEvent, cx)`
+  - Purpose: Handles reader events.
+  - Behavior: `LinkHovered` → status bar `hovered_link`; `LinkActivated` → `cx.open_url` when `is_openable_link`; `ZoomChanged` → `reader_zoom` (status bar); `ContextMenu` → opens `ReaderMenu` (records whether text is selected).
 
-- **`reader_relative_position`** (private, L1457)
-  - Signature: `fn reader_relative_position(&self, position) -> Option<(f32, f32)>`
-  - Purpose: Window coords to reader-local coords.
-  - Behavior: Subtracts webview_bounds origin; None before first layout.
+- **`open_find_bar`** (pub(crate))
+  - Signature: `pub(crate) fn open_find_bar(&mut self, window, cx)`
+  - Purpose: Opens (or focuses) the find bar while a message is shown.
+  - Behavior: Creates the query input on first open (its changes re-run the search, deferred) and focuses it.
 
-- **`on_reader_mouse_move`** (private, L1467)
-  - Signature: `fn on_reader_mouse_move(&mut self, event, _window, cx)`
-  - Purpose: Forwards mouse move to OSR (Linux).
-  - Behavior: Translates coords, forwards to webview with modifiers; updates cursor style.
+- **`close_find_bar`** (private): Drops the bar, clears the reader's find highlight (`find("")`) and focuses the reader.
+- **`run_find`** (private): Searches the reader for the query, resets to the first match and selects it.
+- **`step_find`** (private): Moves to the next/previous match (`step_match`) and selects it (the reader scrolls it into view).
 
-- **`on_reader_mouse_down`** (private, L1497)
-  - Signature: `fn on_reader_mouse_down(&mut self, event, window, cx)`
-  - Purpose: Forwards mouse down to OSR.
-  - Behavior: Ensures reader focus, forwards press, tracks click count for double-click.
-
-- **`on_reader_mouse_up`** (private, L1523)
-  - Signature: `fn on_reader_mouse_up(&mut self, event, _window, cx)`
-  - Purpose: Forwards mouse up to OSR.
-  - Behavior: Translates coords and releases button in webview.
-
-- **`on_reader_scroll`** (private, L1544)
-  - Signature: `fn on_reader_scroll(&mut self, event, _window, cx)`
-  - Purpose: Forwards wheel scroll to OSR.
-  - Behavior: Converts scroll delta (lines vs pixels) and sends wheel event.
-
-- **`on_reader_key_down`** (private, L1568)
-  - Signature: `fn on_reader_key_down(&mut self, event, _window, cx)`
-  - Purpose: Forwards key down to OSR.
-  - Behavior: Maps modifiers and sends key press to webview.
-
-- **`on_reader_key_up`** (private, L1591)
-  - Signature: `fn on_reader_key_up(&mut self, event, _window, cx)`
-  - Purpose: Forwards key up to OSR.
-  - Behavior: Sends key release to webview.
-
-- **`ensure_reader_focus`** (private, L1614)
-  - Signature: `fn ensure_reader_focus(&mut self, cx) -> Option<&FocusHandle>`
-  - Purpose: Lazily creates reader focus handle.
-  - Behavior: Creates FocusHandle on first use for keyboard routing.
-
-- **`image_shown`** (private, L1629)
-  - Signature: `fn image_shown(&mut self, url: String, cx: &mut Context<Self>)`
-  - Purpose: Records user revealed a blocked remote image.
-  - Behavior: Adds URL to per-message shown set, decrements blocked count, notifies.
-
-- **`set_hovered_link`** (private, L1639)
-  - Signature: `fn set_hovered_link(&mut self, url: String, cx: &mut Context<Self>)`
-  - Purpose: Updates status bar hovered link.
-  - Behavior: Stores URL and notifies only when changed.
-
-- **`set_load_remote_images`** (private, L1648)
-  - Signature: `fn set_load_remote_images(&mut self, value: bool, cx: &mut Context<Self>)`
-  - Purpose: Toggles global remote image loading pref.
-  - Behavior: Persists, invalidates webview signature, notifies for re-sanitize.
+- **`sync_reader`** (private)
+  - Signature: `fn sync_reader(&mut self, window: &mut Window, cx: &mut Context<Self>)`
+  - Purpose: Keeps the reader document in sync with the selected message and theme.
+  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, picks plain text per `plain_text_reason` (`mail_html::plain_text`), builds the sanitized themed document (`mail_html::email_document`, remote content per `remote_allowed_for`, with `Resources::allow_remote` to match), parses it with `HtmlDocument::try_parse` (falling back to plain text, `Unrenderable`, when too deep; dark appearance for dark pages, `reader_selection_color`), records the blocked image count (0 for plain text) and the notice, marks formatted HTML renders in the `CrashGuard` from before parsing until the next frame (`window.on_next_frame`), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
 
 - **`set_reader_white_background`** (private, L1658)
   - Signature: `fn set_reader_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
   - Purpose: Toggles reader white background pref.
-  - Behavior: Persists and invalidates webview signature.
+  - Behavior: Persists and refreshes windows (the reader signature includes the page colors).
 
 - **`set_compose_white_background`** (private, L1668)
   - Signature: `fn set_compose_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
@@ -1930,6 +1754,11 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `pub(crate) fn open_compose(&mut self, _window, cx: &mut Context<Self>)`
   - Purpose: Opens or focuses compose window.
   - Behavior: Creates ComposeView window or activates existing; syncs compose menus.
+
+- **`open_compose_with`** (pub(crate))
+  - Signature: `pub(crate) fn open_compose_with(&mut self, init: Option<ComposeInit>, _window, cx: &mut Context<Self>)`
+  - Purpose: Opens the compose window, optionally prefilled (reply / reply all / forward).
+  - Behavior: New windows carry `app_id: WINDOW_APP_ID`. When a compose window is open, hands a `Some(init)` to it via `ComposeView::apply_init` and activates it. Otherwise opens a window with persisted bounds, the localized title and `ComposeView::new(self.compose_accounts(), root, compose_white_background, init, window, cx)`; `on_window_should_close` notifies `on_compose_window_closed`.
 
 - **`select_mailbox`** (private, L1780)
   - Signature: `fn select_mailbox(&mut self, selection: Selection, cx: &mut Context<Self>)`
@@ -2009,7 +1838,7 @@ _(None at module top level — conversion helpers only.)_
 - **`render_toolbar`** (private, L2067)
   - Signature: `fn render_toolbar(&mut self, window, cx) -> impl IntoElement`
   - Purpose: Renders unified top toolbar.
-  - Behavior: Window drag region, list controls when docked, compose/actions/search, theme and sidebar toggles.
+  - Behavior: Window drag region, list controls when docked, compose + Get mail (`IconName::Refresh` → `sync_now`), centered action groups and search, sidebar/settings toggles. Groups: reply / reply all / forward (→ `reply_to_selected(ReplyKind::…)`), trash / archive / junk, flag / mark read|unread (`IconName::Mail`, label from the unread state) / move. Each message button is `.disabled` unless `commands::command_enabled` allows its command; tooltips show the shortcuts.
 
 - **`render_search_control`** (private, L2321)
   - Signature: `fn render_search_control(&self, compact_search, search_bg, language, cx) -> AnyElement`
@@ -2068,91 +1897,58 @@ _(None at module top level — conversion helpers only.)_
 
 - **`render_message_list`** (private, L2766)
   - Signature: `fn render_message_list(&mut self, cx) -> impl IntoElement`
-  - Purpose: Renders scrollable message list column.
-  - Behavior: Optional list header when sidebar undocked, message rows, scrollbar.
+  - Purpose: Renders the virtualized message list column.
+  - Behavior: Optional list header when sidebar undocked; GPUI `uniform_list` over `list_messages` (only visible rows are built; uniform row height measured from the first row) tracked by `list_scroll: UniformListScrollHandle`; the existing `ui::Scrollbar` reads its `base_handle`. A click below the rows clears the selection; search with no results shows "No results". The column tracks `list_focus`, sets key context `MessageList` and handles `SelectNextMessage` / `SelectPreviousMessage`.
 
 - **`render_message_row`** (private, L2847)
   - Signature: `fn render_message_row(&self, message, cx) -> impl IntoElement`
   - Purpose: Single message list row.
-  - Behavior: Sender, subject preview, date, unread/flag/attachment indicators; click selects message.
+  - Behavior: Sender, subject preview, date, unread/flag/attachment indicators; click focuses the list and selects/opens the message.
 
-- **`shield_is_blocked`** (private, L2952)
-  - Signature: `fn shield_is_blocked(&self) -> bool`
-  - Purpose: Red privacy shield state.
-  - Behavior: Remote content present, blocking on, message not fully unblocked.
+- **`render_attachments`** (private)
+  - Signature: `fn render_attachments(&self, cx) -> Option<impl IntoElement>`
+  - Purpose: Attachment chips under the reader header (after To/Cc).
+  - Behavior: `None` without attachments; otherwise a wrapping row of bordered chips (family icon, single-line file name, muted `human_size`), max 280px wide; clicking a chip opens `AttachmentMenu` at the click.
 
-- **`shield_is_loaded`** (private, L2959)
-  - Signature: `fn shield_is_loaded(&self) -> bool`
-  - Purpose: Green privacy shield state.
-  - Behavior: Had remote images and blocked count is zero.
+- **`render_attachment_menu`** (private)
+  - Signature: `fn render_attachment_menu(&self, cx) -> impl IntoElement`
+  - Purpose: Chip menu (`ui::ContextMenu`): Open, separator, Save As…, Save to Downloads.
+  - Behavior: Anchored at the click (snapped to the window); an occluding overlay closes it on any outside mouse-down; entries call `open_attachment` / `save_attachment_as` / `save_attachment_to_downloads`.
 
 - **`render_privacy_shield`** (private, L2968)
   - Signature: `fn render_privacy_shield(&self, cx) -> impl IntoElement`
   - Purpose: Privacy shield on reader subject line.
-  - Behavior: Red clickable shield when blocked, green when loaded, empty slot otherwise for layout stability.
+  - Behavior: Red clickable shield with a "Blocked images: N · Click to load" tooltip while the message has blocked remote images (click: `load_remote_for_selected`); an empty slot of the same size otherwise (layout stability).
 
-- **`render_privacy_menu`** (private, L3038)
-  - Signature: `fn render_privacy_menu(&self, cx) -> impl IntoElement`
-  - Purpose: Dropdown from privacy shield.
-  - Behavior: Deferred anchored menu to load remote images for this message; hides webview while open.
+- **`render_reader_notice`** (private)
+  - Signature: `fn render_reader_notice(&self, cx) -> impl IntoElement`
+  - Purpose: Notice above a message shown as plain text (reason text); `TooLarge` adds "Show formatted" (adds the message to `formatted_anyway`).
+
+- **`render_find_bar`** (private)
+  - Signature: `fn render_find_bar(&self, cx) -> impl IntoElement`
+  - Purpose: Find bar under the reader header.
+  - Behavior: Search-styled query field, "n of m"/"No matches" status, previous/next (`ChevronUp`/`ChevronDown`) and close buttons; Enter = next, Shift+Enter = previous, Escape closes.
+
+- **`render_reader_menu`** (private)
+  - Signature: `fn render_reader_menu(&self, cx) -> impl IntoElement`
+  - Purpose: Reader context menu (`ui::ContextMenu`) anchored at the click.
+  - Behavior: Openable links → Open link / Copy link; a selection → Copy (with shortcut hint); always Select all. A full-window occluding layer closes it on any click.
 
 - **`render_reader`** (private, L3100)
   - Signature: `fn render_reader(&mut self, cx) -> impl IntoElement`
   - Purpose: Renders reading pane.
-  - Behavior: Empty state, header with subject/sender/actions, composited webview or text fallback, privacy UI.
-
-- **`render_text_fallback`** (private, L3274)
-  - Signature: `fn render_text_fallback(&self, message, cx) -> impl IntoElement`
-  - Purpose: Plain-text reader when webview unavailable.
-  - Behavior: Scrollable preformatted plain_text body.
+  - Behavior: Empty state, fixed header with subject/sender/date and privacy shield, and the body area hosting the reader `HtmlView` (white background when forced).
 
 - **`render_status_bar`** (private, L3300)
   - Signature: `fn render_status_bar(&self, cx) -> impl IntoElement`
   - Purpose: Bottom status bar.
-  - Behavior: Shows hovered link URL centered when present.
-##### Context: `SettingsView`
-
-- **`new`** (private, L3379)
-  - Signature: `fn new(accounts: Vec<data::Account>, root: WeakEntity<RootView>) -> Self`
-  - Purpose: Constructs settings view.
-  - Behavior: Stores accounts, default General section, weak root link.
-
-- **`close_window`** (private, L3387)
-  - Signature: `fn close_window(&mut self, window, cx: &mut Context<Self>)`
-  - Purpose: Closes settings window.
-  - Behavior: Notifies root and removes window.
-
-- **`render_nav`** (private, L3399)
-  - Signature: `fn render_nav(&self, cx) -> impl IntoElement`
-  - Purpose: Settings section sidebar nav.
-  - Behavior: Lists sections with icons; click switches section.
-
-- **`render_content`** (private, L3443)
-  - Signature: `fn render_content(&self, cx) -> impl IntoElement`
-  - Purpose: Active settings section body.
-  - Behavior: Renders General/Accounts/Appearance/Notifications/Privacy content.
-
-- **`render_language_picker`** (private, L3609)
-  - Signature: `fn render_language_picker(&self, language, cx) -> impl IntoElement`
-  - Purpose: Language selector control.
-  - Behavior: Buttons for EN/PT; updates locale global and refreshes app.
-
-- **`remote_images_button`** (private, L3636)
-  - Signature: `fn remote_images_button(&self, id, label, selected, value, cx) -> impl IntoElement`
-  - Purpose: Segmented remote-images toggle button.
-  - Behavior: Styled button; click sets load_remote_images on root.
-##### Context: `Render for SettingsView`
-
-- **`render`** (private, L3660)
-  - Signature: `fn render(&mut self, _window, cx: &mut Context<Self>) -> impl IntoElement`
-  - Purpose: Settings window layout.
-  - Behavior: Split nav + content with titlebar close handling.
+  - Behavior: Counts on the left; on the right the reader zoom (`status_zoom`, only when not 100%), "N unsent" (`status_unsent`, `Color::Warning`, click → `toggle_unsent_panel`) while `unsent` is non-empty, the sync text and the unread count; the hovered link URL centered when present.
 ##### Context: `Render for RootView`
 
 - **`render`** (private, L3697)
   - Signature: `fn render(&mut self, window, cx: &mut Context<Self>) -> impl IntoElement`
   - Purpose: Main RootView render.
-  - Behavior: Full three-column layout, toolbar, deferred palette/search/webview sync, content_ready gate, window frame wrap.
+  - Behavior: Full three-column layout, toolbar, deferred palette/search/reader sync, content_ready gate, window frame wrap.
 ##### Context: `module (tests)`
 
 - **`test_view`** (private, L3921)
@@ -2165,20 +1961,10 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Test: sidebar visible by default.
   - Behavior: Asserts show_sidebar true on new view.
 
-- **`sync_webview_reuses_osr_browser_on_message_switch`** (private, L3935)
-  - Signature: `fn sync_webview_reuses_osr_browser_on_message_switch()`
-  - Purpose: Test: structural OSR reuse guard.
-  - Behavior: Source contains navigate-only and retry-without-signature comments.
-
 - **`command_palette_only_opens_when_main_window_is_focused`** (private, L3947)
   - Signature: `fn command_palette_only_opens_when_main_window_is_focused()`
   - Purpose: Test: can_open_command_palette gate.
   - Behavior: True when active, false when not.
-
-- **`webview_context_menu_dismiss_skips_clicks_inside_reader`** (private, L3953)
-  - Signature: `fn webview_context_menu_dismiss_skips_clicks_inside_reader()`
-  - Purpose: Test: context menu dismiss bounds.
-  - Behavior: Inside reader=false dismiss; outside=true; no bounds=true.
 
 - **`command_palette_starts_closed`** (private, L3976)
   - Signature: `fn command_palette_starts_closed()`
@@ -2360,6 +2146,124 @@ _(None at module top level — conversion helpers only.)_
   - Purpose: Test: command_context trash detection.
   - Behavior: After trash move, message_in_trash true in context.
 
+- **`sidebar_orders_system_folders_then_user_folders_alphabetically`** / **`adjacent_index_clamps_and_starts_from_the_ends`** / **`keyboard_selection_moves_through_the_list`** / **`attachments_follow_the_selected_message_body`** (tests): sidebar folder order and ranks; row-step clamping; arrow-key selection over the seeded list (no wrap); chips list only non-inline attachments, none for headers-only bodies, cleared with the selection.
+
+#### Sync engine, accounts, reply/send (added with Stage 3)
+
+- **`start_mail(cx)`** (pub(crate)): creates `MailService` once (engine on `db_path`), spawns the task awaiting `SyncEvent`s into `on_sync_event`, and starts every remote account. Called from `main` after the window exists (never blocks the first frame).
+- **`start_account(account, cx)`** (private): skips `local` accounts; reads the secret with `cx.read_credentials(config.secret_key())` asynchronously, then `start_account_with_secret`.
+- **`start_account_with_secret(id, config_json, secret, cx)`** (private): returns when the id is no longer in `accounts` (removed while its keychain read was pending; a new worker would outlive it); builds the connector (`mail_service::connector_for`) and runs `MailService::start_account`'s job on `cx.background_spawn` (replacing a worker waits for the old one), or records a `StartError` (status bar / settings show it).
+- **`on_sync_event(event, cx)`** (private): `Status` → service status (ignored for accounts being removed); `Sent`/`SendFailed` also `refresh_unsent`; `SentCopyFailed` → `StatusSentCopyFailed` note; `MailboxChanged`/`FoldersChanged`/`BodyReady`/`Sent` → `schedule_reload` (BodyReady also re-renders the open message); `NewMail` → desktop notifications when `notifications_enabled`; `BodyFailed`/`Sent`/`SendFailed` → status notes.
+- **`set_status_note(note, cx)`** (private): shows a note in the status bar for 6 s (token-guarded timer).
+- **`schedule_reload(cx)`** (private): coalesces event bursts into one `reload_from_database` 250 ms later.
+- **`reload_from_database()`** (pub(crate)): re-reads accounts (minus `removing_accounts`), folders, the current list (also minus removing accounts, in `reload_message_list`) and the unsent rows (`refresh_unsent`).
+- **`refresh_unsent()`** (private): `load_unsent` into `unsent`, reusing parsed subjects; closes the panel when empty.
+- **`sync_now(cx)`** (pub(crate)): `Command::Reconnect` for every account (clears back-off/auth failure and syncs).
+- **`accounts()`**, **`account_status(id)`**, **`account_start_error(id)`** (pub(crate)): read access for the settings window.
+- **`add_remote_account(name, config, secret, cx)`** (pub(crate)): creates the account (`imap`/`gmail` provider), writes the secret to the keychain (`store_secret`), reloads and starts syncing with the in-memory secret (the new worker begins with a full sync).
+- **`update_account_secret(id, secret, cx)`** (pub(crate)): rewrites the keychain secret and restarts the account (worker restart off the UI thread via `start_account_with_secret`).
+- **`store_secret(config, secret, cx)`** (private): `cx.write_credentials` on a background task (errors logged).
+- **`remove_account(id, cx)`** (pub(crate)): never blocks the UI thread. Immediately: takes `MailService::stop_account`'s job, adds the id to `removing_accounts` (hidden from accounts/folders/list/unsent), fixes selection/mailbox, reloads. Background: runs the stop job, then `storage::Database::open(db_path)?.delete_account(id)` on its own connection. Afterwards: drops the id from `removing_accounts`, on success deletes the keychain secret; a failure becomes a `StatusRemoveAccountFailed` note and the account comes back working (secret kept, worker restarted after the reload). The status-bar unread total may still count its mail until the delete finishes.
+- **`toggle_unsent_panel(cx)`** (pub(crate)): opens/closes the unsent panel (only opens with rows).
+- **`report_unsent_error(error, cx)`** (private): `UnsentActionFailed: {error}` status note.
+- **`retry_unsent(id, cx)`** (pub(crate)): `storage::Database::retry_outgoing(id)`; when it changed the row, `MailService::process_queue(account)` + "Updating…" note; error → note; refreshes.
+- **`edit_unsent(id, window, cx)`** (pub(crate)): reads the row with `outgoing` (ignored unless stopped), parses its raw (`parse_message`, default when unparseable), closes the panel and opens compose with `compose_init_from_outgoing`. The row is kept until the edited copy is queued (`send_draft` replaces it), so closing compose loses nothing.
+- **`discard_unsent(id, window, cx)`** (pub(crate)): `window.prompt` (Warning; `ComposeDiscardConfirm` / `UnsentDiscardDetail`, Discard / Cancel); Discard → `delete_outgoing(id)` (error → note), refreshes.
+- **`render_unsent_panel(cx)`** (private): full-window occluder (mouse-down outside closes) with a scrollable elevated panel above the status bar's right edge: title, then per row the subject (or "(no subject)"), "To: recipients", `last_error` (`Color::Error`), the "May already have been sent" hint (`Color::Warning`) for `maybe_sent`, and Retry / Edit / Discard buttons.
+- **`open_selected_message()`** (private): marks the opened message read (`mail_sync::actions::set_read` + queue) and asks for its body (`Command::FetchBody`) when only headers are stored.
+- **`after_action(account_id, outcome)`** (private): wakes the account's worker when an action queued server work.
+- **`run_message_action(cx, action)`** (private): runs a `mail_sync::actions` function on the selected message (an error, e.g. "database is locked", becomes a `StatusActionFailed: {error}` status note), reloads the list and selects the message that took its place (opening it).
+- **`toggle_message_read(cx)`** (pub(crate)): read ↔ unread for the selected message (stays selected).
+- Message actions `delete_message_to_trash`, `restore_message`, `archive_message`, `mark_message_junk`, `toggle_message_flag`, `move_message_to_folder`, `delete_message_permanently` (only in Trash) all go through `run_message_action` (local change now, server op queued).
+- **`compose_accounts()`** (pub(crate)): `ComposeAccount`s (sending accounts first; local ones `can_send = false`).
+- **`reply_to_selected(kind, window, cx)`** (pub(crate)): parses the stored raw message (or `parsed_from_detail`), builds a `mail_core::prepare_reply` draft with localized quote labels (`locale::reply_attribution`, `Key::Quote*`, `Key::ForwardHeader`), carries attachments on forward, opens compose with it.
+- **`send_draft(account_id, draft, replaces_outgoing, cx)`** (pub(crate)): refuses local accounts / no recipients (localized errors), builds the RFC 822 message (`new_message_id` + `unique_token`, `build_message`), then queues it and wakes the worker. With `replaces_outgoing` (an edited unsent message) queueing is `replace_outgoing`, atomic with removing the original; when the original was retried meanwhile nothing is queued and `ComposeOriginalSending` is returned, so both can't go out.
+- **`open_settings_section(section, window, cx)`** (pub(crate)): focuses the open settings window on `section`, or opens a new one **deferred** (`cx.defer`) — the settings view reads `RootView` while rendering and GPUI renders a new window synchronously, which would re-enter the entity being updated (panic found in the GUI run). The settings window carries `app_id: WINDOW_APP_ID`.
+- **`render_recipients(message, cx)`** (private): "To:"/"Cc:" lines under the sender (hidden when empty).
+- **`sync_status_text(language)`** (private): status bar sync text: a recent note, else start errors, else `OverallStatus` (Updating… / Updated at HH:MM / Offline / Sign-in failed: email / Sync error).
+- **`render_welcome(cx)`** (private): shown instead of list + reader while no account exists; "Add account…" opens Settings ▸ Accounts.
+- Module helpers: **`parsed_from_detail(detail)`** (stored detail → minimal `ParsedMessage` for reply/forward of local/demo mail), **`forwarded_attachments(raw, parsed)`** (non-inline parts as `OutgoingAttachment`s), **`unique_token()`** (random-seeded hash of a counter + time for Message-IDs), **struct `UnsentItem { id, account_id, subject, recipients, error, maybe_sent }`**, **`unsent_item(row, subject)`** (outbox row → panel summary: recipients comma-joined, blank `last_error` → `None`, `maybe_sent` from `OutgoingState::MaybeSent`), **`load_unsent(db, removing, previous)`** (`failed_outgoing` minus removing accounts; subjects reused from `previous` by id, else parsed from one `outgoing` read (the listing has no raw); read error logged and `previous` kept), **`compose_init_from_outgoing(row, parsed)`** (`ComposeInit` for Edit: from/to/cc/subject/text/threading headers/attachments from the parsed raw, envelope recipients missing from To/Cc restored as Bcc, `replaces_outgoing = row.id`).
+- Tests: `unsent_item_summarizes_the_row`, `compose_init_from_outgoing_restores_the_draft`, `removing_an_account_hides_it_until_reload_clears_it` (see the tests module).
+- Tests (existing, still contracts): `find_steps_wrap_around`, `plain_text_reasons_follow_crash_size_and_override`, `reader_selection_is_a_translucent_accent`, plus the layout/selection/action tests listed above.
+
+### `src/settings.rs`
+
+Settings window (General, Accounts, Appearance, Notifications, Privacy).
+Accounts and preferences live in `RootView`; this view reads them through a
+weak handle and re-renders when the root notifies. Network work (discovery,
+login tests, Google sign-in) runs on the background executor; decisions are
+in `account_setup`.
+
+#### Types / constants
+
+- **consts `DISCOVERY_DELAY`** (600 ms debounce after the last e-mail keystroke), **`DISCOVERY_TIMEOUT`** (8 s per autoconfig request), **`OAUTH_TIMEOUT`** (5 min browser sign-in).
+- **enum `SettingsSection`** (pub(crate)): General, Accounts, Appearance, Notifications, Privacy; `ALL` in nav order.
+- **struct `AccountForm`** (private): the inline "Add account" form — `TextInput`s (name, e-mail, masked password, IMAP/SMTP host+port, username), IMAP/SMTP `Security`, `show_manual`, `manual_edited` (user typed in a server field → discovery stops overwriting), `gmail_app_password` (Gmail over IMAP instead of Google sign-in), cached `google_client` (`oauth_provider("google")`), discovery `discovery_seq`/`looking_up`/task, `checking` + connect task, current `FailureMessage`, input subscriptions.
+- **enum `OAuthTarget`** (private): `NewAccount` or `Account(id)` (re-sign-in).
+- **struct `OAuthFlow`** (private): running sign-in — target, `CancelToken`, `user_cancelled`, finish + browser-opener tasks. Only one at a time (it owns a loopback port).
+- **struct `SettingsView`** (pub(crate)): `section`, weak `root`, root observation, lazy `form`, `form_open`, inline `password_edit (account id, masked TextInput)`, `oauth`, per-account `account_messages`.
+
+#### Functions / methods
+
+##### Context: `SettingsSection`
+
+- **`title_key`** (private): locale key of the section title.
+- **`icon`** (private): nav icon (Settings/Account/Palette/Flag/Shield).
+
+##### Context: `AccountForm`
+
+- **`new(language, cx)`** (private): creates the inputs (password masked via `TextInput::set_masked`), subscribes to `TextInputEvent::Changed`: e-mail → `SettingsView::on_email_changed`; name/password → clear the message; server fields → `manual_edited = true` + clear the message. Defaults TLS/STARTTLS; reads the Google client once.
+- **`text(input, cx)`** (private): content of an input as `String`.
+- **`email(cx)`** (private): trimmed e-mail field.
+- **`manual_fields(cx)`** (private): snapshot of the server fields as `account_setup::ManualFields`.
+- **`set_manual(fields, cx)`** (private): writes fields into the inputs with `set_content` (no `Changed` event, so not counted as a user edit) and sets both securities.
+- **`uses_google_sign_in(email)`** (private): Gmail address + Google client configured + user didn't choose the app-password path → the password field becomes "Sign in with Google".
+
+##### Context: `SettingsView`
+
+- **`new(_accounts, root)`** (pub(crate)): General section, no form; the `data::Account` snapshot from the caller is ignored (the live list comes from `root`).
+- **`show_section(section, cx)`** (pub(crate)): switches section; `Accounts` also opens the form (welcome-screen "Add account").
+- **`close_window(window, cx)`** (pub(crate)): deferred — notifies `RootView::on_settings_window_closed`, removes the window.
+- **`accounts(cx)`** / **`existing_emails(cx)`** (private): `RootView::accounts()` snapshot / their addresses (duplicate check).
+- **`health(account, cx)`** (private): `account_setup::account_health` from provider, `uses_oauth`, `RootView::account_status` and `account_start_error`.
+- **`on_email_changed(cx)`** (private): clears the message, bumps `discovery_seq`, drops a pending lookup. Unless `manual_edited`: invalid address → blank server fields; preset domain → fields from the preset immediately; otherwise blank fields and a task that waits `DISCOVERY_DELAY`, sets `looking_up`, runs `protocols::discover_config` on the background executor and fills the fields if the sequence is still current and the user hasn't edited them.
+- **`set_security(imap, security, cx)`** (private): segmented-control click; the port follows `port_after_security_change`; marks the fields edited.
+- **`connect(cx)`** (private): ignored while busy; `plan_password_connect` (errors → form message); otherwise `checking`, and a background job `run_password_connect(plan, discover_config, test_account(Credential::Password))`, then `finish_password_connect`.
+- **`finish_password_connect(name, password, outcome, cx)`** (private): clears `checking`; shows the tried servers in the fields (unless edited); success → `add_account`; failure → message, and opens "Manual settings" for non-auth failures.
+- **`add_account(name, config, secret, cx)`** (private): `RootView::add_remote_account`; success drops the form and closes it; an error becomes `SetupFailure::SaveFailed`.
+- **`start_oauth(target, provider, job, finish, cx)`** (private): one sign-in: creates a `CancelToken` and a bounded channel; the background job gets an `authorize` closure (`protocols::authorize(provider, open_browser = send URL on the channel, cancel, OAUTH_TIMEOUT)`); a foreground task receives the URL and calls `cx.open_url`; on completion takes `self.oauth` and calls `finish(this, result, user_cancelled)`.
+- **`sign_in_with_google(cx)`** (private): needs the Google client (else `GoogleUnavailable` message) and an empty or valid e-mail; job = `run_google_sign_in` with `test_account(Credential::OAuth)`; success → `add_account(name, config, refresh_token)`.
+- **`sign_in_again(account_id, cx)`** (private): OAuth accounts only; provider missing → row message; job = `run_google_reauth(username)`; success → `RootView::update_account_secret(id, refresh_token)`; failure → row message.
+- **`cancel_oauth(cx)`** (private): marks `user_cancelled` and cancels the token (the finish handler then resets without an error).
+- **`begin_password_edit(account_id, window, cx)`** (private): inline masked "New password" input, focused.
+- **`save_password(cx)`** (private): non-empty → `RootView::update_account_secret` (stores in the keychain, reconnects); closes the editor.
+- **`confirm_remove(account_id, window, cx)`** (private): `window.prompt` (Warning; local mail is deleted) with Remove / Cancel; Remove → `RootView::remove_account`, clears row state.
+- **`render_nav(cx)`** (private): section list with icons; click switches section.
+- **`render_content(window, cx)`** (private): section title + body. General: name/version/language; Accounts: `render_accounts`; Appearance: theme + white reader/compose switches; Notifications: switch bound to `RootView::notifications_enabled` (`set_notifications_enabled`) + hint; Privacy: always-load-remote-images switch.
+- **`render_accounts(window, cx)`** (private): bordered list of `render_account_row`, then the form (created lazily) when `form_open` or no remote account exists, else an "Add account…" button.
+- **`render_account_row(account, last, window, cx)`** (private): name + provider badge, e-mail, health text (error/warning/success/muted color; "Finish signing in…" while its sign-in runs). Actions: Cancel (sign-in running) / "Sign in again" (OAuth) / "Update password" (password, non-local), and "Remove" (all, incl. local). Inline password editor (Save / Cancel) and the row's failure message below.
+- **`render_form(has_remote, window, cx)`** (private): title, Name, E-mail, preset note; Google mode: "Sign in with Google" + "Use an app password instead"; otherwise (Gmail without client: the `BGMAIL_GOOGLE_CLIENT_ID/SECRET` explanation) Password (+ "Sign in with Google instead" for Gmail with a client). "Manual settings" disclosure with the "Looking up…" hint (hidden in Google mode). Message, then footer: while signing in "Finish signing in in your browser…" + Cancel; else Cancel (only when a remote account exists) and Connect ("Checking…" and no click while busy).
+- **`render_manual(form, window, cx)`** (private): IMAP and SMTP blocks (host, port, security picker) and the user name.
+- **`render_language_picker(language, cx)`** (private): EN/PT buttons; sets the locale global.
+
+##### Context: `Drop for SettingsView`
+
+- **`drop`** (private): cancels a running sign-in so the loopback listener doesn't wait out its timeout after the window closes.
+
+##### Context: `Render for SettingsView`
+
+- **`render`** (private): registers the root observation on first render; nav + scrollable content; `ComposeClose` closes the window.
+
+##### Context: `module`
+
+- **`settings_row(label, value)`** (private): muted label / value row.
+- **`input_box(input, window, cx)`** (private): bordered field box; border follows focus.
+- **`labeled_field(label, input, window, cx)`** (private): small muted caption above an `input_box`.
+- **`security_picker(imap, selected, language, cx)`** (private): TLS / STARTTLS / None segmented buttons → `set_security`.
+- **`badge_element(label, cx)`** (private): provider badge.
+- **`note_element(text)`** (private): warning-icon note (provider requirement, Google setup).
+- **`message_element(message, language)`** (private): localized error line + optional muted raw detail.
+
 ### `src/shortcuts.rs`
 
 #### Types / constants
@@ -2367,12 +2271,20 @@ _(None at module top level — conversion helpers only.)_
 - **const `COMPOSE_MAC` / `COMPOSE_OTHER`**: GPUI binding strings for New Message (Cmd+N / Ctrl+N).
 - **const `SETTINGS_MAC` / `SETTINGS_OTHER`**: Binding strings for Settings (Cmd+, / Ctrl+,).
 - **const `TOGGLE_SIDEBAR_MAC` / `TOGGLE_SIDEBAR_OTHER`**: Binding strings for sidebar toggle.
-- **const `COMMAND_PALETTE_MAC` / `COMMAND_PALETTE_OTHER`**: Binding strings for command palette.
+- **const `COMMAND_PALETTE_MAC` / `COMMAND_PALETTE_OTHER`**: `cmd-shift-p` / `ctrl-shift-p`, the command palette (as in Zed).
 - **const `DELETE_MESSAGE_MAC` / `DELETE_MESSAGE_OTHER`**: Binding strings for move-to-trash.
 - **const `ARCHIVE_MAC` / `ARCHIVE_OTHER`**: Binding strings for archive.
 - **const `MARK_JUNK_MAC` / `MARK_JUNK_OTHER`**: Binding strings for mark junk.
 - **const `TOGGLE_FLAG_MAC` / `TOGGLE_FLAG_OTHER`**: Binding strings for flag/unflag.
 - **const `COMPOSE_CLOSE_MAC` / `COMPOSE_CLOSE_OTHER`**: Binding strings for closing compose window.
+- **const `FIND_MAC` / `FIND_OTHER`**: `cmd-f` / `ctrl-f`, open the reader's find bar.
+- **const `PRINT_MAC` / `PRINT_OTHER`**: `cmd-p` / `ctrl-p`, print the selected message.
+- **const `MESSAGE_LIST_CONTEXT`**: `"MessageList"`, key context of the focused message list.
+- **const `REPLY_*` / `REPLY_ALL_*` / `FORWARD_*`**: `cmd-r`/`ctrl-r`, `cmd-shift-r`/`ctrl-shift-r`, `cmd-shift-f`/`ctrl-shift-f` (macOS Mail).
+- **const `TOGGLE_READ_MAC` / `TOGGLE_READ_OTHER`**: `cmd-shift-u` / `ctrl-shift-m` (Ctrl+Shift+U is the IBus/GTK Unicode-entry key on Linux).
+- **const `GET_MAIL_MAC` / `GET_MAIL_OTHER`**: `cmd-shift-n` / `ctrl-shift-n`.
+- **const `LIST_NEXT_KEYS` / `LIST_PREVIOUS_KEYS` / `LIST_DELETE_KEYS`**: `down`/`j`, `up`/`k`, `delete`/`backspace` — bound only in `MessageList`.
+- **const `GLOBAL_CHORDS`** (test-only): every global chord pair, for the collision test.
 
 #### Functions / methods
 
@@ -2387,7 +2299,7 @@ _(None at module top level — conversion helpers only.)_
 - **`bind_app_shortcuts`** (pub, L60)
   - Signature: `pub fn bind_app_shortcuts(cx: &mut App)`
   - Purpose: Registers global key bindings for menu-driven actions.
-  - Behavior: Binds both macOS and Windows/Linux chords for each action. Command palette bindings also register under the `TextInput` context so they work while typing in search fields.
+  - Behavior: Binds both macOS and Windows/Linux chords for each action (incl. reply/reply all/forward/toggle read/get new mail). Command palette bindings also register under the `TextInput` context so they work while typing in search fields. Plain list keys (`LIST_*_KEYS` → `SelectNextMessage`, `SelectPreviousMessage`, `MessageDelete`) are bound in `MESSAGE_LIST_CONTEXT` only, so they never fire inside a text field.
 
 - **`format_binding_parses_compose_shortcut`** (private, L95)
   - Signature: `fn format_binding_parses_compose_shortcut()`
@@ -2398,6 +2310,8 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn settings_comma_binding_parses()`
   - Purpose: Test: settings comma bindings parse as valid keystrokes.
   - Behavior: Asserts both macOS and non-macOS settings bindings parse successfully.
+
+- **`global_chords_parse_and_never_collide`** / **`mail_shortcuts_mirror_macos_mail`** (tests): every global chord parses and is unique; the mail chords match macOS Mail and the list keys are unmodified keys.
 
 - **`primary_binding_follows_platform`** (private, L109)
   - Signature: `fn primary_binding_follows_platform()`
@@ -2438,434 +2352,6 @@ _(None at module top level — conversion helpers only.)_
   - Signature: `fn elapsed_grows_after_mark_start()`
   - Purpose: Test: elapsed time increases after `mark_start`.
   - Behavior: Calls `mark_start`, sleeps briefly, and asserts `elapsed()` does not decrease.
-
-### `src/web_view.rs`
-
-#### Types / constants
-
-- **enum `WebviewMouseButton`** (pub, L25): Mouse button (Left, Right, Middle) forwarded from the reader; platform-independent of GPUI's `MouseButton`.
-- **enum `WebviewCursor`** (pub, L34): CSS-like cursor kind requested by the page; mapped to GPUI `CursorStyle` by the reader on OSR.
-- **const `WEBVIEW_SUPPORTED`** (pub, L53): Compile-time flag: `true` when the `cef-osr` feature is enabled.
-- **struct `ContextMenuLabels<'a>`** (pub, L69): Localized strings for custom image/link/selection context menus, embedded as `data-rm-*` attributes on `<body>`.
-- **struct `RenderedEmail`** (pub, L93): Output of document rendering: full HTML plus remote-image privacy metadata for the reader shield.
-- **struct `DocumentColors`** (pub, L110): Theme colors for page background/text/accent and separately for context-menu popup colors.
-- **enum `IpcMessage<'a>`** (pub(crate), L365): Parsed IPC tag from the injected content script (hover, open, download, copy, show-image, body-mousedown, palette).
-- **enum `HostEvent`** (pub, L406): Foreground actions the webview requests from GPUI (hover URL, clipboard, image shown, overlay dismiss, palette, cursor, redraw).
-- **const `COMMAND_PALETTE_SHORTCUT_SCRIPT`** (private, L428/L431): Inline keydown script for Ctrl/Cmd+P; empty string when `cef-osr` is disabled.
-- **const `CONTENT_SCRIPT`** (pub(crate), L450): Injected JS for hover reporting, custom context menus, copy/select-all shortcuts, and menu dismissal hook.
-- **const `DISALLOWED_ELEMENTS`** (private, L667): Comma-separated selector list of HTML elements stripped entirely (and their content) during sanitization.
-- **const `URL_ATTRIBUTES`** (private, L675): Attribute names vetted for dangerous URL schemes during sanitization.
-- **const `RESOURCE_ATTRIBUTES`** (private, L696): Subset of URL attributes that auto-fetch on render; blocked for remoteness when loading is off.
-- **const `COMPOSITES_IN_GPUI`** (pub, platform): Whether the backend paints into a GPUI texture (`true` for CEF OSR, `false` for stub).
-- **struct `EmailWebView`** (pub, platform): GPUI-facing webview wrapper; real OSR backend or no-op stub depending on `cef-osr` feature.
-- **const `INPUT_WARM_FRAMES`** (private, platform/cef-osr, L985): GPUI frames to keep redrawing after pointer input so late CEF paints land.
-- **const `LOAD_WARM_FRAMES`** (private, platform/cef-osr, L989): GPUI frames to keep redrawing after document reload/navigation.
-
-#### Functions / methods
-
-##### Context: `module`
-
-- **`pump_platform_events`** (pub, L57)
-  - Signature: `pub fn pump_platform_events()`
-  - Purpose: Advances CEF's external message pump from the app frame loop.
-  - Behavior: Calls `cef_osr::pump` when `cef-osr` feature is enabled; otherwise no-op.
-- **`email_document`** (pub, L118)
-  - Signature: `pub fn email_document(colors: DocumentColors, body: &MessageBody, labels: ContextMenuLabels, load_remote: bool, shown: &HashSet<String>) -> RenderedEmail`
-  - Purpose: Builds a complete themed HTML document for an e-mail body.
-  - Behavior: Sanitizes HTML or escapes plain text into inner markup. Wraps in DOCTYPE/html with theme CSS, localized `data-rm-*` menu labels, command-palette script, and returns `RenderedEmail` with `has_remote` and `blocked_images` counts.
-- **`document_css`** (private, L164)
-  - Signature: `fn document_css(colors: DocumentColors) -> String`
-  - Purpose: Generates the inline stylesheet for rendered message documents.
-  - Behavior: Sets CSS variables from theme colors, picks light/dark `color-scheme` from background luminance, styles typography/links/code/blockquote/scrollbar, and blocked-image placeholders.
-- **`css_color`** (private, L219)
-  - Signature: `fn css_color(color: Hsla) -> String`
-  - Purpose: Formats an opaque theme color as `rgb(r, g, b)`.
-  - Behavior: Converts `Hsla` to `Rgba` and rounds channels to 0–255.
-- **`css_color_alpha`** (private, L230)
-  - Signature: `fn css_color_alpha(color: Hsla, alpha: f32) -> String`
-  - Purpose: Formats a translucent theme color as `rgba(r, g, b, a)`.
-  - Behavior: Clamps alpha to [0, 1] and formats RGB channels like `css_color`.
-- **`channel`** (private, L241)
-  - Signature: `fn channel(value: f32) -> u8`
-  - Purpose: Converts a normalized 0–1 color channel to an 8-bit value.
-  - Behavior: Clamps to [0, 1], multiplies by 255, rounds to `u8`.
-- **`is_external_link`** (pub(crate), L249)
-  - Signature: `pub(crate) fn is_external_link(url: &str) -> bool`
-  - Purpose: Classifies URLs that should open in the system browser instead of the reader webview.
-  - Behavior: Trims and lowercases; returns `true` for `http://`, `https://`, and `mailto:` prefixes.
-- **`decode_data_uri`** (pub(crate), L261)
-  - Signature: `pub(crate) fn decode_data_uri(url: &str) -> Option<(&'static str, Vec<u8>)>`
-  - Purpose: Parses base64-encoded `data:` URIs into MIME-derived extension and raw bytes.
-  - Behavior: Requires `data:` prefix (case-insensitive), comma-separated metadata with `base64`, non-empty decoded payload. Returns `None` for plain URLs, text `data:` URIs, or decode failures.
-- **`extension_for_mime`** (private, L284)
-  - Signature: `fn extension_for_mime(mime: &str) -> &'static str`
-  - Purpose: Maps a MIME type to a file extension for materialized temp/download files.
-  - Behavior: Matches common image and PDF types; returns `"bin"` for unknown MIME.
-- **`downloads_dir`** (pub(crate), L302)
-  - Signature: `pub(crate) fn downloads_dir() -> Option<std::path::PathBuf>`
-  - Purpose: Resolves the user's Downloads folder from environment.
-  - Behavior: Uses `$HOME/Downloads` or `%USERPROFILE%\Downloads`; returns `None` when home is missing or empty.
-- **`unique_download_path`** (pub(crate), L314)
-  - Signature: `pub(crate) fn unique_download_path(dir: &Path, stem: &str, extension: &str, exists: impl Fn(&Path) -> bool) -> std::path::PathBuf`
-  - Purpose: Picks a non-colliding download path like browsers (`stem (n).ext`).
-  - Behavior: Tries `stem.ext`, then increments `n` until `exists` returns false for the candidate.
-- **`base64_decode`** (private, L332)
-  - Signature: `fn base64_decode(input: &str) -> Option<Vec<u8>>`
-  - Purpose: Decodes standard RFC 4648 base64 without external dependencies.
-  - Behavior: Skips whitespace and `=` padding; returns `None` on invalid alphabet bytes. Delegates 6-bit values to nested `sextet`.
-- **`sextet`** (private, nested in L333)
-  - Signature: `fn sextet(byte: u8) -> Option<u32>`
-  - Purpose: Maps one base64 character to its 6-bit value.
-  - Behavior: Handles A–Z, a–z, 0–9, `+`, `/`; returns `None` for other bytes.
-- **`parse_ipc_message`** (pub(crate), L388)
-  - Signature: `pub(crate) fn parse_ipc_message(message: &str) -> Option<IpcMessage<'_>>`
-  - Purpose: Parses `"tag\npayload"` IPC strings from the content script.
-  - Behavior: Maps tags H/O/D/C/S/B/P to enum variants; unknown tags or missing newline return `None`. Body-mousedown and palette ignore payload.
-- **`applescript_string`** (private, L628, macOS only)
-  - Signature: `fn applescript_string(input: &str) -> String`
-  - Purpose: Escapes a string for safe embedding in AppleScript literals.
-  - Behavior: Wraps in double quotes; backslash-escapes `\` and `"` characters.
-- **`sanitize_html`** (private, L717, `#[cfg(test)]`)
-  - Signature: `fn sanitize_html(html: &str, load_remote: bool) -> String`
-  - Purpose: Test helper returning only the sanitized HTML string.
-  - Behavior: Calls `sanitize_html_inner` with empty `shown` set and discards metadata tuple.
-- **`sanitize_html_inner`** (private, L726)
-  - Signature: `fn sanitize_html_inner(html: &str, load_remote: bool, shown: &HashSet<String>) -> (String, bool, usize)`
-  - Purpose: Sanitizes HTML and reports remote-image presence and blocked count.
-  - Behavior: Uses `lol_html` to remove disallowed elements and neutralize attributes on survivors. When `load_remote` is false, also blanks CSS `url(...)` via `strip_css_urls`. On rewrite failure returns empty string. Updates `has_remote` and `blocked` counters from `neutralize_attributes`.
-- **`strip_css_urls`** (private, L768)
-  - Signature: `fn strip_css_urls(css: &str) -> String`
-  - Purpose: Neutralizes remote fetches from inline CSS by emptying every `url(...)`.
-  - Behavior: Scans case-insensitively for `url(`; replaces each with `url()`. Unterminated `url(` drops remainder of input.
-- **`find_url_open`** (private, L793)
-  - Signature: `fn find_url_open(s: &str) -> Option<usize>`
-  - Purpose: Finds the byte index of the next case-insensitive `url(` substring.
-  - Behavior: Scans ASCII windows of four bytes; returns start index or `None`.
-- **`neutralize_attributes`** (private, L822)
-  - Signature: `fn neutralize_attributes(el: &mut Element, load_remote: bool, shown: &HashSet<String>) -> Option<bool>`
-  - Purpose: Strips dangerous or remote-loading attributes from a surviving element.
-  - Behavior: Collects doomed attribute names first, then removes them. Drops `on*`, `contenteditable`, dangerous URLs, script-vector styles, and remote resource attrs when blocking. Blocked remote `<img src>` stashes URL in `data-rm-blocked-src`. Returns `Some(blocked)` for remote images, else `None`.
-- **`is_dangerous_url`** (private, L879)
-  - Signature: `fn is_dangerous_url(value: &str) -> bool`
-  - Purpose: Detects URL schemes that execute or load active content.
-  - Behavior: Normalizes scheme by stripping whitespace/control chars. `javascript:`/`vbscript:` are dangerous; `data:` is dangerous except raster images (not SVG). Relative URLs without scheme are safe.
-- **`is_remote_url`** (private, L911)
-  - Signature: `fn is_remote_url(value: &str) -> bool`
-  - Purpose: Detects URLs that fetch from the network on render.
-  - Behavior: True for `http`/`https` schemes and protocol-relative `//` URLs; false for `data:`, `cid:`, fragments, and relative paths.
-- **`style_has_script_vector`** (private, L930)
-  - Signature: `fn style_has_script_vector(style: &str) -> bool`
-  - Purpose: Detects legacy CSS expressions that could carry script vectors.
-  - Behavior: Case-insensitive substring search for `javascript:`, `expression(`, `-moz-binding`, `behavior:`.
-- **`escape_html`** (private, L938)
-  - Signature: `fn escape_html(input: &str) -> String`
-  - Purpose: Escapes HTML-significant characters in plain text.
-  - Behavior: Replaces `& < > " '` with entity references; passes other chars through.
-
-##### Context: `platform` (`feature = "cef-osr"`)
-
-- **`map_button`** (private, L1239)
-  - Signature: `fn map_button(button: WebviewMouseButton) -> MouseButton`
-  - Purpose: Maps portable webview mouse buttons to CEF OSR `MouseButton`.
-  - Behavior: One-to-one enum match for Left, Right, Middle.
-
-##### Context: `EmailWebView` (`feature = "cef-osr"`)
-
-- **`new`** (pub, L994)
-  - Signature: `pub fn new(_window: &Window, html: &str, to_host: Sender<HostEvent>, notify_body: String) -> Option<Self>`
-  - Purpose: Creates the CEF OSR webview wrapper for the reader pane.
-  - Behavior: Returns `None` when `OsrBrowser::new` fails. Initializes visibility, load warm-frame budget, and `awaiting_paint` for first navigation.
-- **`set_html`** (pub, L1010)
-  - Signature: `pub fn set_html(&mut self, html: &str) -> Option<Arc<gpui::RenderImage>>`
-  - Purpose: Reloads the document when HTML changed and returns the previous GPUI texture to drop.
-  - Behavior: Delegates to inner browser; on navigation sets `awaiting_paint`, resets warm frames to `LOAD_WARM_FRAMES`, and calls `pump_hard`. Returns previous image from inner `set_html`.
-- **`set_notify_text`** (pub, L1021)
-  - Signature: `pub fn set_notify_text(&self, body: String)`
-  - Purpose: Updates localized download-notification text on the live browser.
-  - Behavior: Forwards to `OsrBrowser::set_notify_text`.
-- **`on_window_activated`** (pub, L1027)
-  - Signature: `pub fn on_window_activated(&mut self)`
-  - Purpose: Resumes OSR rendering when the GPUI window regains focus.
-  - Behavior: Marks visible, sets inner visible/focused, pumps hard, extends warm frames, and re-enters `awaiting_paint` if no current frame.
-- **`on_osr_tick`** (pub, L1041)
-  - Signature: `pub fn on_osr_tick(&mut self) -> bool`
-  - Purpose: Keeps CEF pumping between GPUI paints when the window may be inactive.
-  - Behavior: Returns `false` when hidden. Otherwise pumps hard when awaiting paint, warm frames remain, or a pending frame exists; returns `true` to request GPUI `notify`.
-- **`note_load_progress`** (pub, L1055)
-  - Signature: `pub fn note_load_progress(&mut self)`
-  - Purpose: Extends redraw loop after main-document load-end from CEF.
-  - Behavior: Sets `awaiting_paint`, bumps warm frames to at least `LOAD_WARM_FRAMES`, calls `pump_hard`.
-- **`position`** (pub, L1064)
-  - Signature: `pub fn position(&mut self, _bounds: Bounds<Pixels>)`
-  - Purpose: Marks the webview visible; actual sizing happens in `paint`.
-  - Behavior: Sets visible flag and inner `set_visible(true)`.
-- **`hide`** (pub, L1070)
-  - Signature: `pub fn hide(&mut self)`
-  - Purpose: Hides the webview when no message is shown or overlays cover it.
-  - Behavior: Clears visible, warm frames, and awaiting-paint; hides inner browser.
-- **`paint`** (pub, L1089)
-  - Signature: `pub fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, _cx: &mut gpui::App) -> bool`
-  - Purpose: Syncs size, flushes input, uploads CEF frame, and composites into the reader.
-  - Behavior: No-op when hidden. Updates inner size/scale; on resize extends warm frames. Pumps hard while awaiting paint else flushes input. Takes new frame and drops previous GPUI texture. Paints 1:1 at top-left when buffer size mismatches view (avoids stretch distortion). Returns `true` when another GPUI frame should be scheduled (warm frames, pending frame, or size mismatch).
-- **`handle_mouse_move`** (pub, L1169)
-  - Signature: `pub fn handle_mouse_move(&self, x: f32, y: f32, shift: bool, control: bool, alt: bool, meta: bool)`
-  - Purpose: Forwards mouse move with modifier flags to CEF.
-  - Behavior: Calls inner `mouse_move` with `modifier_flags`.
-- **`handle_mouse_button`** (pub, L1183)
-  - Signature: `pub fn handle_mouse_button(&mut self, x: f32, y: f32, button: WebviewMouseButton, pressed: bool, click_count: i32)`
-  - Purpose: Forwards mouse press/release to CEF.
-  - Behavior: Maps button, forwards click, sets `INPUT_WARM_FRAMES` warm budget.
-- **`handle_scroll`** (pub, L1197)
-  - Signature: `pub fn handle_scroll(&mut self, x: f32, y: f32, delta_x: f32, delta_y: f32)`
-  - Purpose: Queues coalesced scroll-wheel input until next paint.
-  - Behavior: Forwards to inner `mouse_wheel`; sets warm frames.
-- **`handle_key`** (pub, L1204)
-  - Signature: `pub fn handle_key(&mut self, pressed: bool, key: &str, key_char: Option<&str>, shift: bool, control: bool, alt: bool, meta: bool)`
-  - Purpose: Forwards keyboard events to CEF with modifiers.
-  - Behavior: Calls inner `key_event`; sets warm frames.
-- **`set_focused`** (pub, L1224)
-  - Signature: `pub fn set_focused(&self, focused: bool)`
-  - Purpose: Sets OSR keyboard focus for shortcuts inside the document.
-  - Behavior: Delegates to inner `set_focus`.
-- **`dismiss_context_menu`** (pub, L1229)
-  - Signature: `pub fn dismiss_context_menu(&self)`
-  - Purpose: Closes the HTML context menu from GPUI outside-click handling.
-  - Behavior: Delegates to inner `dismiss_context_menu`.
-- **`has_mouse_capture`** (pub, L1234)
-  - Signature: `pub fn has_mouse_capture(&self) -> bool`
-  - Purpose: Reports held mouse buttons for drag-selection redraw scheduling.
-  - Behavior: Delegates to inner `has_mouse_capture`.
-
-##### Context: `EmailWebView` (`not(feature = "cef-osr")` stub)
-
-- **`new`** (pub, L1261)
-  - Signature: `pub fn new(...) -> Option<Self>`
-  - Purpose: Stub constructor when no webview backend is available.
-  - Behavior: Always returns `None` so the reader falls back to plain text.
-- **`set_html`** (pub, L1269)
-  - Signature: `pub fn set_html(&mut self, _html: &str) -> Option<Arc<gpui::RenderImage>>`
-  - Purpose: Stub no-op document reload.
-  - Behavior: Always returns `None`.
-- **`on_window_activated`** (pub, L1272)
-  - Signature: `pub fn on_window_activated(&mut self)`
-  - Purpose: Stub activation handler.
-  - Behavior: Empty body.
-- **`on_osr_tick`** (pub, L1273)
-  - Signature: `pub fn on_osr_tick(&mut self) -> bool`
-  - Purpose: Stub OSR tick.
-  - Behavior: Always returns `false`.
-- **`note_load_progress`** (pub, L1276)
-  - Signature: `pub fn note_load_progress(&mut self)`
-  - Purpose: Stub load-progress hook.
-  - Behavior: Empty body.
-- **`set_notify_text`** (pub, L1277)
-  - Signature: `pub fn set_notify_text(&self, _body: String)`
-  - Purpose: Stub notification text update.
-  - Behavior: Empty body.
-- **`position`** (pub, L1278)
-  - Signature: `pub fn position(&mut self, _bounds: Bounds<Pixels>)`
-  - Purpose: Stub visibility/position hook.
-  - Behavior: Empty body.
-- **`dismiss_context_menu`** (pub, L1279)
-  - Signature: `pub fn dismiss_context_menu(&self)`
-  - Purpose: Stub context-menu dismiss.
-  - Behavior: Empty body.
-- **`hide`** (pub, L1280)
-  - Signature: `pub fn hide(&mut self)`
-  - Purpose: Stub hide hook.
-  - Behavior: Empty body.
-- **`paint`** (pub, L1281)
-  - Signature: `pub fn paint(...) -> bool`
-  - Purpose: Stub paint/composite hook.
-  - Behavior: Always returns `false`.
-- **`handle_mouse_move`** (pub, L1289)
-  - Signature: `pub fn handle_mouse_move(...)`
-  - Purpose: Stub mouse-move forwarder.
-  - Behavior: Empty body.
-- **`handle_mouse_button`** (pub, L1299)
-  - Signature: `pub fn handle_mouse_button(...)`
-  - Purpose: Stub mouse-button forwarder.
-  - Behavior: Empty body.
-- **`handle_scroll`** (pub, L1308)
-  - Signature: `pub fn handle_scroll(&self, ...)`
-  - Purpose: Stub scroll forwarder.
-  - Behavior: Empty body.
-- **`handle_key`** (pub, L1309)
-  - Signature: `pub fn handle_key(...)`
-  - Purpose: Stub keyboard forwarder.
-  - Behavior: Empty body.
-- **`set_focused`** (pub, L1320)
-  - Signature: `pub fn set_focused(&self, _focused: bool)`
-  - Purpose: Stub focus hook.
-  - Behavior: Empty body.
-- **`has_mouse_capture`** (pub, L1321)
-  - Signature: `pub fn has_mouse_capture(&self) -> bool`
-  - Purpose: Stub mouse-capture query.
-  - Behavior: Always returns `false`.
-
-##### Context: `tests`
-
-- **`body_html`** (private, L1332)
-  - Signature: `fn body_html() -> MessageBody`
-  - Purpose: Returns sample HTML message body for document tests.
-  - Behavior: Static `"Hello world"` paragraph HTML.
-- **`doc_colors`** (private, L1338)
-  - Signature: `fn doc_colors(background: Hsla, text: Hsla, accent: Hsla) -> DocumentColors`
-  - Purpose: Builds test `DocumentColors` with menu colors matching page colors.
-  - Behavior: Sets `menu_bg`/`menu_text` from background/text.
-- **`labels`** (private, L1348)
-  - Signature: `fn labels() -> ContextMenuLabels<'static>`
-  - Purpose: Returns default English context-menu labels for tests.
-  - Behavior: Static string literals including ⌘C copy shortcut.
-- **`escapes_html_special_characters`** (private, L1361)
-  - Signature: `fn escapes_html_special_characters()`
-  - Purpose: Verifies `escape_html` entity encoding.
-  - Behavior: Asserts all significant characters are escaped.
-- **`external_links_route_to_the_browser`** (private, L1369)
-  - Signature: `fn external_links_route_to_the_browser()`
-  - Purpose: Verifies http/https/mailto are external.
-  - Behavior: Asserts true for common external URL forms including trimmed/case variants.
-- **`in_document_navigations_stay_in_place`** (private, L1377)
-  - Signature: `fn in_document_navigations_stay_in_place()`
-  - Purpose: Verifies in-document URLs are not external.
-  - Behavior: Asserts false for about/data/fragment/empty URLs.
-- **`base64_decode_reverses_known_vectors`** (private, L1385)
-  - Signature: `fn base64_decode_reverses_known_vectors()`
-  - Purpose: Verifies RFC 4648 decode vectors and whitespace tolerance.
-  - Behavior: Asserts known encodings decode to expected byte strings.
-- **`base64_decode_rejects_out_of_alphabet_bytes`** (private, L1398)
-  - Signature: `fn base64_decode_rejects_out_of_alphabet_bytes()`
-  - Purpose: Verifies invalid base64 returns `None`.
-  - Behavior: Asserts `not*valid` fails decode.
-- **`decode_data_uri_extracts_image_bytes`** (private, L1403)
-  - Signature: `fn decode_data_uri_extracts_image_bytes()`
-  - Purpose: Verifies PNG data URI decoding.
-  - Behavior: Asserts extension `png` and bytes `foo` for known URI.
-- **`decode_data_uri_is_case_insensitive_on_the_scheme`** (private, L1412)
-  - Signature: `fn decode_data_uri_is_case_insensitive_on_the_scheme()`
-  - Purpose: Verifies `DATA:` scheme prefix works.
-  - Behavior: Asserts JPEG extension on uppercase scheme URI.
-- **`decode_data_uri_rejects_non_data_and_non_base64`** (private, L1419)
-  - Signature: `fn decode_data_uri_rejects_non_data_and_non_base64()`
-  - Purpose: Verifies rejection of HTTP URLs, text data URIs, and empty payloads.
-  - Behavior: Asserts all return `None`.
-- **`extension_for_mime_maps_known_image_types`** (private, L1428)
-  - Signature: `fn extension_for_mime_maps_known_image_types()`
-  - Purpose: Verifies MIME→extension mapping table.
-  - Behavior: Asserts png/jpg/gif/svg and unknown→bin.
-- **`parse_ipc_message_routes_known_tags`** (private, L1437)
-  - Signature: `fn parse_ipc_message_routes_known_tags()`
-  - Purpose: Verifies all IPC tags parse to expected variants.
-  - Behavior: Asserts H/O/D/C/S/P including empty hover payload.
-- **`parse_ipc_message_rejects_unknown_or_malformed`** (private, L1464)
-  - Signature: `fn parse_ipc_message_rejects_unknown_or_malformed()`
-  - Purpose: Verifies unknown tags and missing newline fail.
-  - Behavior: Asserts `None` for bad tag and missing separator.
-- **`unique_download_path_appends_counter_when_taken`** (private, L1471)
-  - Signature: `fn unique_download_path_appends_counter_when_taken()`
-  - Purpose: Verifies browser-style numbered suffix when paths exist.
-  - Behavior: Uses injectable `exists` closure; asserts `(3)` suffix when lower numbers taken.
-- **`applescript_string_quotes_and_escapes`** (private, L1486, macOS)
-  - Signature: `fn applescript_string_quotes_and_escapes()`
-  - Purpose: Verifies AppleScript literal escaping.
-  - Behavior: Asserts quoting and backslash escapes for `"` and `\`.
-- **`channels_clamp_and_round`** (private, L1493)
-  - Signature: `fn channels_clamp_and_round()`
-  - Purpose: Verifies color channel clamping and rounding.
-  - Behavior: Asserts 0, 255, and clamp behavior for out-of-range inputs.
-- **`css_color_is_opaque_rgb`** (private, L1501)
-  - Signature: `fn css_color_is_opaque_rgb()`
-  - Purpose: Verifies opaque RGB formatting from HSLA.
-  - Behavior: Asserts black and white extremes.
-- **`document_wraps_html_body_verbatim`** (private, L1507)
-  - Signature: `fn document_wraps_html_body_verbatim()`
-  - Purpose: Verifies HTML body passes through document wrapper with theme CSS.
-  - Behavior: Asserts DOCTYPE, body content, dark scheme, and scrollbar CSS present.
-- **`document_escapes_and_wraps_plain_text`** (private, L1531)
-  - Signature: `fn document_escapes_and_wraps_plain_text()`
-  - Purpose: Verifies plain-text bodies become escaped `<pre class="plain">`.
-  - Behavior: Asserts escaping and light color scheme.
-- **`sanitize_strips_disallowed_elements_and_their_content`** (private, L1551)
-  - Signature: `fn sanitize_strips_disallowed_elements_and_their_content()`
-  - Purpose: Verifies dangerous/embed elements and content are removed.
-  - Behavior: Asserts safe paragraphs remain; script/iframe/form/etc. absent.
-- **`sanitize_keeps_svg_but_removes_its_scriptable_parts`** (private, L1597)
-  - Signature: `fn sanitize_keeps_svg_but_removes_its_scriptable_parts()`
-  - Purpose: Verifies inline SVG art survives but script/SMIL/foreignObject do not.
-  - Behavior: Asserts `<svg>`/`<rect>` remain; scriptable parts stripped.
-- **`sanitize_strips_event_handlers_and_contenteditable`** (private, L1618)
-  - Signature: `fn sanitize_strips_event_handlers_and_contenteditable()`
-  - Purpose: Verifies inline handlers and contenteditable removed.
-  - Behavior: Asserts div/text remain; handler attrs absent.
-- **`sanitize_neutralizes_dangerous_url_schemes`** (private, L1632)
-  - Signature: `fn sanitize_neutralizes_dangerous_url_schemes()`
-  - Purpose: Verifies javascript/vbscript/SVG data URLs stripped from attrs.
-  - Behavior: Asserts elements remain but dangerous `href`/`src` values removed.
-- **`is_dangerous_url_classifies_schemes`** (private, L1649)
-  - Signature: `fn is_dangerous_url_classifies_schemes()`
-  - Purpose: Verifies scheme classifier edge cases.
-  - Behavior: Asserts dangerous script/data cases and safe relative/raster data cases.
-- **`sanitize_drops_style_with_legacy_script_vectors`** (private, L1665)
-  - Signature: `fn sanitize_drops_style_with_legacy_script_vectors()`
-  - Purpose: Verifies legacy CSS script vectors cause style attr removal.
-  - Behavior: Asserts expression/javascript substrings absent after sanitize.
-- **`sanitize_preserves_safe_markup_and_inline_styles`** (private, L1677)
-  - Signature: `fn sanitize_preserves_safe_markup_and_inline_styles()`
-  - Purpose: Verifies benign markup, links, and inline data images kept when remote allowed.
-  - Behavior: Asserts style, https link, and data image survive.
-- **`is_remote_url_detects_network_resources`** (private, L1687)
-  - Signature: `fn is_remote_url_detects_network_resources()`
-  - Purpose: Verifies remote URL detector for http(s) and protocol-relative URLs.
-  - Behavior: Asserts network URLs true; data/cid/relative/fragment false.
-- **`sanitize_blocks_remote_resources_when_disabled`** (private, L1701)
-  - Signature: `fn sanitize_blocks_remote_resources_when_disabled()`
-  - Purpose: Verifies remote images blocked with stash in `data-rm-blocked-src`.
-  - Behavior: Asserts tracker URL appears once in blocked-src; srcset removed; data image kept.
-- **`sanitize_keeps_remote_link_href_when_blocking`** (private, L1719)
-  - Signature: `fn sanitize_keeps_remote_link_href_when_blocking()`
-  - Purpose: Verifies link hrefs survive remote blocking (click-time navigation).
-  - Behavior: Asserts href kept; image src blocked to data attribute only.
-- **`sanitize_does_not_stash_blocked_src_when_remote_enabled`** (private, L1733)
-  - Signature: `fn sanitize_does_not_stash_blocked_src_when_remote_enabled()`
-  - Purpose: Verifies remote-enabled mode keeps live image src.
-  - Behavior: Asserts src present; no blocked-src attribute.
-- **`sanitize_keeps_remote_resources_when_enabled`** (private, L1741)
-  - Signature: `fn sanitize_keeps_remote_resources_when_enabled()`
-  - Purpose: Verifies remote pixel URL retained when loading enabled.
-  - Behavior: Asserts https src in output.
-- **`strip_css_urls_empties_every_url`** (private, L1748)
-  - Signature: `fn strip_css_urls_empties_every_url()`
-  - Purpose: Verifies CSS url blanking including case, multiples, and unterminated input.
-  - Behavior: Asserts `url()` replacements; unterminated drops tail; plain CSS unchanged.
-- **`sanitize_blocks_css_url_resources_when_disabled`** (private, L1765)
-  - Signature: `fn sanitize_blocks_css_url_resources_when_disabled()`
-  - Purpose: Verifies style-block and inline CSS urls blanked when remote off.
-  - Behavior: Asserts tracker host absent; two `url()` placeholders remain.
-- **`sanitize_keeps_css_url_resources_when_enabled`** (private, L1774)
-  - Signature: `fn sanitize_keeps_css_url_resources_when_enabled()`
-  - Purpose: Verifies CSS background URLs kept when remote loading on.
-  - Behavior: Asserts CDN URL present in sanitized output.
-- **`document_strips_disallowed_elements_from_html_body`** (private, L1781)
-  - Signature: `fn document_strips_disallowed_elements_from_html_body()`
-  - Purpose: Verifies full document pipeline strips disallowed tags from HTML bodies.
-  - Behavior: Asserts safe paragraph kept; iframe/input/video absent in final HTML.
-- **`document_reports_remote_image_state`** (private, L1804)
-  - Signature: `fn document_reports_remote_image_state()`
-  - Purpose: Verifies `RenderedEmail` remote/blocked counts across load and shown settings.
-  - Behavior: Asserts blocked=1 when off, 0 when on or individually shown; local body has no remote.
-- **`document_embeds_escaped_menu_labels`** (private, L1834)
-  - Signature: `fn document_embeds_escaped_menu_labels()`
-  - Purpose: Verifies menu labels appear HTML-escaped in data attributes.
-  - Behavior: Asserts all `data-rm-*` keys present with escaped quotes.
-- **`document_embeds_command_palette_shortcut_script`** (private, L1867, cef-osr)
-  - Signature: `fn document_embeds_command_palette_shortcut_script()`
-  - Purpose: Verifies command-palette IPC script is embedded in rendered documents.
-  - Behavior: Asserts `window.ipc.postMessage('P\n')` substring in HTML.
-- **`content_script_runs_menu_actions_on_mousedown`** (private, L1885, cef-osr)
-  - Signature: `fn content_script_runs_menu_actions_on_mousedown()`
-  - Purpose: Verifies content script uses mousedown (not click) and blocked-image menu ordering.
-  - Behavior: Asserts mousedown handler, menu.contains guard, and blocked-src branch precedes getAttribute src branch.
-
 
 ### `src/window_drag.rs`
 

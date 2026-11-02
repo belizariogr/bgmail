@@ -1,0 +1,75 @@
+{
+  "mailgun-billing": {
+    "score": 8,
+    "issues": [
+      "[médio]{layout} Linhas da tabela de fatura (bordas superiores das linhas e as duas linhas grossas do Total) aparecem interrompidas por pequenos vãos (~2px) entre as células, em vez de uma linha contínua como no Chromium",
+      "[baixo]{layout} Linhas da tabela de itens ~2-3px mais altas e conteúdo do cartão ~4% mais alto que no Chromium"
+    ],
+    "css_suspect": "border-collapse: collapse / border-spacing em <table> (bordas por célula não fundidas)"
+  },
+  "mjml-austin": {
+    "score": 8,
+    "issues": [
+      "[médio]{layout} Hero 'Get in person support': aparece uma emenda/linha horizontal na faixa de fundo (~y=275 da folha) e a segunda parte do bloco (título 'IN AUSTIN') extrapola ~2px à direita da parte de cima, quebrando a continuidade da imagem de fundo",
+      "[baixo]{layout} 'AUSTIN CONVENTION CENTER' / '123 MAIN STREET, 78701' com espaços entre palavras visivelmente maiores que no Chromium (letter-spacing aplicado em dobro nos espaços)",
+      "[baixo]{layout} Botões 'RSVP Today' e 'Book an Appointment' ~3px mais altos; e-mail ~1% mais alto no total"
+    ],
+    "css_suspect": "background-image em tabela/VML do hero dividido em duas linhas (background-position/size por célula); letter-spacing em espaços"
+  },
+  "postmark-comment-notification": {
+    "score": 7,
+    "issues": [
+      "[médio]{layout} Fundo cinza do <body> não se propaga para toda a viewport: abaixo do rodapé (~70px) fica branco, enquanto no Chromium o cinza preenche a página inteira",
+      "[médio]{layout} Bloco branco do corpo do e-mail fica recuado ~5px das bordas laterais, deixando uma moldura cinza que não existe no Chromium (largura 100% + padding/margin calculado diferente)",
+      "[baixo]{layout} Espaçamentos verticais maiores (cabeçalho, caixa de anexos e rodapé ~10-15px mais baixos)"
+    ],
+    "css_suspect": "propagação do background do body para o canvas; width:100% com margin/padding em tabela do corpo"
+  },
+  "re-02-matte-welcome": {
+    "score": 7,
+    "issues": [
+      "[alto]{paint} Títulos grandes com letter-spacing negativo têm espaçamento entre palavras errado: 'Welcome to' renderiza como 'Welcometo' (espaço colapsado) e 'Your first week in' com espaços irregulares; na referência Blitz CPU o texto está correto",
+      "[médio]{layout} Itens da checklist ('Complete your profile' etc.) recuados ~5px à esquerda e com setas ~10px mais para dentro; linhas ~10px mais altas que no Chromium",
+      "[baixo]{layout} Bloco 'Try Composer today' com imagens decorativas e título ~40px mais abaixo; e-mail ~2% mais alto"
+    ],
+    "css_suspect": "letter-spacing negativo no shaping de texto do GPUI (espaços); padding de células da lista"
+  },
+  "re-airbnb-review": {
+    "score": 7,
+    "issues": [
+      "[alto]{paint} Avatar do anfitrião aparece quadrado no html_view; no Chromium e na referência Blitz CPU é circular (border-radius:50% na <img> não aplicado como recorte)",
+      "[baixo]{layout} Conteúdo ~5% mais alto (citação quebra em 4 linhas com textos deslocados), sem impacto no layout"
+    ],
+    "css_suspect": "border-radius em <img> (clip de imagem não aplicado na pintura GPUI)"
+  },
+  "re-github-access-token": {
+    "score": 9.5,
+    "issues": [
+      "[baixo]{layout} Título quebra em ponto diferente ('created' na primeira linha) por métrica de fonte; cartão e rodapé ~8px mais abaixo"
+    ],
+    "css_suspect": ""
+  },
+  "re-nike-receipt": {
+    "score": 8.5,
+    "issues": [
+      "[baixo]{layout} E-mail ~7% mais alto: seções (produto, Order Number/Date, Top Picks, Get Help) com espaçamentos verticais ~10-20px maiores",
+      "[baixo]{layout} Título do produto quebra em 'Brazil 2022/23 Stadium Away / Women's Nike Dri-FIT Soccer Jersey' (mais estreito) e imagens dos 'Top Picks' ligeiramente maiores/sem espaçamento idêntico"
+    ],
+    "css_suspect": "line-height/padding em células de tabela"
+  },
+  "re-notion-magic-link": {
+    "score": 9.5,
+    "issues": [
+      "[baixo]{layout} Espaçamentos verticais ~5-8px maiores; caixa de código de login ~4px mais alta"
+    ],
+    "css_suspect": ""
+  },
+  "re-stripe-welcome": {
+    "score": 8.5,
+    "issues": [
+      "[baixo]{layout} Texto quebra em mais linhas ('handy.', 'site.' em linha própria), deixando o cartão ~8% mais alto; largura do cartão e botão corretas",
+      "[baixo]{layout} Botão 'View your Stripe Dashboard' ~3px mais alto"
+    ],
+    "css_suspect": "métrica de fonte/line-height"
+  }
+}

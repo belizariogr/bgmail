@@ -7,15 +7,16 @@ use std::ops::Range;
 
 use gpui::{
     actions, fill, point, px, relative, App, Bounds, ClipboardItem, Context, CursorStyle, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable,
-    GlobalElementId, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
-    UnderlineStyle, Window,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, GlobalElementId, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun,
+    UTF16Selection, Window,
 };
 use theme::ActiveTheme;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::prelude::*;
+use crate::text_area::marked_text_runs;
 
 #[cfg(target_os = "windows")]
 pub fn set_native_text_focus(window: &Window) {
@@ -68,7 +69,7 @@ actions!(
 );
 
 /// Byte offset of the previous word start (Windows-style Ctrl+Left).
-fn previous_word_start(content: &str, offset: usize) -> usize {
+pub(crate) fn previous_word_start(content: &str, offset: usize) -> usize {
     if offset == 0 {
         return 0;
     }
@@ -95,7 +96,7 @@ fn previous_word_start(content: &str, offset: usize) -> usize {
 }
 
 /// Byte offset of the next word start (Windows-style Ctrl+Right).
-fn next_word_start(content: &str, offset: usize) -> usize {
+pub(crate) fn next_word_start(content: &str, offset: usize) -> usize {
     let len = content.len();
     if offset >= len {
         return len;
@@ -113,6 +114,33 @@ fn next_word_start(content: &str, offset: usize) -> usize {
         pos += ch.len_utf8();
     }
     pos
+}
+
+/// Folds `\r\n` / `\r` / `\n` into single spaces for a one-line field.
+pub(crate) fn single_line(text: &str) -> String {
+    text.replace("\r\n", " ").replace(['\r', '\n'], " ")
+}
+
+/// Glyph drawn for every character of a masked (password) field.
+const MASK_CHAR: char = '\u{2022}';
+
+/// Display text of a masked field: one [`MASK_CHAR`] per character.
+pub(crate) fn masked_text(content: &str) -> String {
+    content.chars().map(|_| MASK_CHAR).collect()
+}
+
+/// Maps a byte offset of `content` to the same position in [`masked_text`].
+pub(crate) fn masked_offset(content: &str, offset: usize) -> usize {
+    content[..offset.min(content.len())].chars().count() * MASK_CHAR.len_utf8()
+}
+
+/// Inverse of [`masked_offset`]: a byte offset of the masked text back to a
+/// character boundary of `content`.
+pub(crate) fn unmasked_offset(content: &str, display_offset: usize) -> usize {
+    content
+        .char_indices()
+        .nth(display_offset / MASK_CHAR.len_utf8())
+        .map_or(content.len(), |(ix, _)| ix)
 }
 
 /// Registers the key bindings consumed by [`TextInput`]. Call once at app startup.
@@ -178,6 +206,14 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// Events emitted by [`TextInput`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextInputEvent {
+    /// The user changed the text (typing, IME, paste, cut, delete).
+    /// Programmatic `clear` does not emit it.
+    Changed,
+}
+
 /// Single-line editable text field.
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -189,7 +225,11 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Password field: draws bullets and refuses copy/cut.
+    masked: bool,
 }
+
+impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl TextInput {
     /// Creates an empty field with the given placeholder.
@@ -204,6 +244,32 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            masked: false,
+        }
+    }
+
+    /// Masks the text (password fields): each character is drawn as a
+    /// bullet and copy/cut are disabled.
+    pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        self.masked = masked;
+        cx.notify();
+    }
+
+    /// Offset in the drawn line for a byte offset of the content.
+    fn display_offset(&self, offset: usize) -> usize {
+        if self.masked {
+            masked_offset(&self.content, offset)
+        } else {
+            offset
+        }
+    }
+
+    /// Byte offset of the content for an offset in the drawn line.
+    fn content_offset(&self, display_offset: usize) -> usize {
+        if self.masked {
+            unmasked_offset(&self.content, display_offset)
+        } else {
+            display_offset
         }
     }
 
@@ -216,6 +282,16 @@ impl TextInput {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.content = SharedString::default();
         self.selected_range = 0..0;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    /// Replaces the text (line breaks become spaces: the field is single-line)
+    /// and puts the caret at the end. Like `clear`, does not emit
+    /// [`TextInputEvent::Changed`].
+    pub fn set_content(&mut self, text: impl AsRef<str>, cx: &mut Context<Self>) {
+        self.content = single_line(text.as_ref()).into();
+        self.selected_range = self.content.len()..self.content.len();
         self.marked_range = None;
         cx.notify();
     }
@@ -354,7 +430,7 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -362,7 +438,7 @@ impl TextInput {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -397,7 +473,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        self.content_offset(line.closest_index_for_x(position.x - bounds.left()))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -520,6 +596,9 @@ impl EntityInputHandler for TextInput {
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range = None;
+        if !(range.is_empty() && new_text.is_empty()) {
+            cx.emit(TextInputEvent::Changed);
+        }
         cx.notify();
     }
 
@@ -550,6 +629,9 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .map(|new_range| new_range.start + range.start..new_range.end + range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        if !(range.is_empty() && new_text.is_empty()) {
+            cx.emit(TextInputEvent::Changed);
+        }
         cx.notify();
     }
 
@@ -564,11 +646,11 @@ impl EntityInputHandler for TextInput {
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(range.start),
+                bounds.left() + last_layout.x_for_index(self.display_offset(range.start)),
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(range.end),
+                bounds.left() + last_layout.x_for_index(self.display_offset(range.end)),
                 bounds.bottom(),
             ),
         ))
@@ -582,7 +664,7 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let utf8_index = self.content_offset(last_layout.index_for_x(point.x - line_point.x)?);
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -649,7 +731,14 @@ impl Element for TextInputElement {
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), colors.text_muted)
         } else {
-            (content, style.color)
+            (
+                if input.masked {
+                    masked_text(&content).into()
+                } else {
+                    content
+                },
+                style.color,
+            )
         };
 
         let run = TextRun {
@@ -660,39 +749,18 @@ impl Element for TextInputElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
-            vec![
-                TextRun {
-                    len: marked_range.start,
-                    ..run.clone()
-                },
-                TextRun {
-                    len: marked_range.end - marked_range.start,
-                    underline: Some(UnderlineStyle {
-                        color: Some(run.color),
-                        thickness: px(1.0),
-                        wavy: false,
-                    }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: display_text.len() - marked_range.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect()
-        } else {
-            vec![run]
-        };
+        let marked_range = input
+            .marked_range
+            .as_ref()
+            .map(|range| input.display_offset(range.start)..input.display_offset(range.end));
+        let runs = marked_text_runs(display_text.len(), marked_range.as_ref(), run);
 
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
 
-        let cursor_pos = line.x_for_index(cursor);
+        let cursor_pos = line.x_for_index(input.display_offset(cursor));
         let (selection, cursor) = if selected_range.is_empty() {
             let caret_top = bounds.top() + px(4.0);
             let caret_bottom = bounds.bottom() - px(4.0);
@@ -711,11 +779,13 @@ impl Element for TextInputElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selected_range.start),
+                            bounds.left()
+                                + line.x_for_index(input.display_offset(selected_range.start)),
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selected_range.end),
+                            bounds.left()
+                                + line.x_for_index(input.display_offset(selected_range.end)),
                             bounds.bottom(),
                         ),
                     ),
@@ -810,7 +880,33 @@ impl Focusable for TextInput {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_word_start, previous_word_start};
+    use super::{
+        masked_offset, masked_text, next_word_start, previous_word_start, single_line,
+        unmasked_offset,
+    };
+
+    #[test]
+    fn masking_draws_one_bullet_per_character_and_maps_offsets() {
+        let content = "pá\u{e9}s";
+        assert_eq!(masked_text(content), "\u{2022}".repeat(4));
+        assert_eq!(masked_text(""), "");
+        // "p" is 1 byte, "á" and "é" are 2: byte 3 is after the second char.
+        assert_eq!(masked_offset(content, 3), 6);
+        assert_eq!(masked_offset(content, content.len()), 12);
+        assert_eq!(unmasked_offset(content, 6), 3);
+        assert_eq!(unmasked_offset(content, 12), content.len());
+        // Offsets inside a bullet round down to the character boundary.
+        assert_eq!(unmasked_offset(content, 4), 1);
+        for (ix, _) in content.char_indices() {
+            assert_eq!(unmasked_offset(content, masked_offset(content, ix)), ix);
+        }
+    }
+
+    #[test]
+    fn single_line_folds_line_breaks_into_spaces() {
+        assert_eq!(single_line("a\r\nb\nc\rd"), "a b c d");
+        assert_eq!(single_line("plain"), "plain");
+    }
 
     #[test]
     fn previous_word_start_moves_to_prior_word() {

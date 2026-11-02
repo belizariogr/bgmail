@@ -1,0 +1,88 @@
+{
+  "ham-00-tribute-ca": {"score": 9.0, "issues": [
+    "[baixo] Cartões da coluna esquerda inferior (Bonnie Laufer/Ricardo Montalban, Jeremy Northam) quebram em mais linhas que no Chromium e ficam ~10-15 px mais altos, empurrando o rodapé ~13 px para baixo.",
+    "[baixo] Abaixo do campo 'Subscribe a friend' o html_view desenha um botão/input vazio (caixa branca) que no Chromium não aparece.",
+    "[baixo] O placeholder do <object>/Flash no rodapé ('Adobe Flash Player is no longer supported') não é desenhado; fica só a faixa cinza."],
+    "css_suspect": "quebra de texto em células estreitas com <font size=1>; <input type=image/submit> sem src; <object>/<embed> sem fallback"},
+  "ham-01-newsletter-online-co": {"score": 7.5, "issues": [
+    "[médio] Linhas da tabela 'Most Popular Titles' e 'Top Movers' ficam ~49-50 px de altura contra ~41 px no Chromium (+8 px por linha); acumulado, o conteúdo principal desce ~130 px e o e-mail fica ~6% mais alto (3886 vs 3666 px).",
+    "[médio] Cabeçalhos de seção feitos com <img alt> ('Reviews & Features', 'CNET's Exclusive', 'This Week's Top Ten Downloads') ganham ~10-25 px extras de espaço vertical acima/abaixo em relação ao Chromium.",
+    "[baixo] A coluna lateral direita (Search/Updates & Drivers) desce ~10-25 px em relação ao Chromium por causa do espaço extra acima."],
+    "css_suspect": "linhas separadoras de tabela com <img height=1>/spacer em <td> herdando line-height da fonte (strut) em vez de colapsar; altura de linha em <td> com <font size>"},
+  "ham-02-oracleeblast-com": {"score": 9.5, "issues": [
+    "[baixo] Todo o conteúdo fica ~7 px acima do Chromium a partir do logo/alt do topo (alt do logo ocupa menos altura).",
+    "[baixo] Quebras de linha pontuais diferentes no corpo principal (coluna central levemente mais larga), sem impacto de layout."],
+    "css_suspect": "altura da caixa de alt text de <img> inline"},
+  "ham-03-handango-com": {"score": 8.5, "issues": [
+    "[médio] Na seção 'Personal Productivity / Travel / Games', as listas <ol> têm margens verticais menores que no Chromium (~8-12 px a menos antes/depois de cada título), fazendo a coluna esquerda ficar ~25 px mais curta e a imagem central/coluna 'Access Your Favorite Names' subir ~15 px.",
+    "[baixo] Na lista de produtos do topo, a descrição começa na mesma linha do título com quebras diferentes ('Workstyle Desktop Edition: Stay' na 1ª linha), deixando cada bloco ~1 linha mais curto em alguns itens.",
+    "[baixo] O bloco 'Sponsor' e o texto do SplashShopper sobem ~20 px em relação ao Chromium."],
+    "css_suspect": "margin de <ol>/<p> dentro de <font size=1> (em relativo à fonte) e quebra de linha em células com largura fixa"},
+  "ham-04-wrox-com": {"score": 9.4, "issues": [
+    "[baixo] O conteúdo inteiro fica ~7-10 px acima a partir do cabeçalho (alt 'Wrox Press' ocupa menos altura).",
+    "[baixo] Caracteres não-ASCII (aspas, ™, 'François') aparecem corretos no html_view, enquanto o Chromium mostra mojibake ('Ã', 'Â'); diferença de decodificação de charset, não de layout."],
+    "css_suspect": "altura de linha de <img alt> inline; detecção de charset"},
+  "ham-05-motleyfool-com": {"score": 9.2, "issues": [
+    "[baixo] O texto da coluna principal quebra em menos linhas que no Chromium, deixando o e-mail ~3% mais curto (4182 vs 4308 px); a coluna lateral de links fica relativamente mais baixa em relação ao texto.",
+    "[baixo] Rodapé mostra '©' correto onde o Chromium mostra '�' (charset)."],
+    "css_suspect": "largura efetiva da coluna principal/padding de célula (cellpadding) e métricas de fonte"},
+  "ham-06-mediaunspun-imakenew": {"score": 9.3, "issues": [
+    "[baixo] Texto da coluna principal quebra um pouco diferente (coluna ~5 px mais larga), deixando o e-mail ~1,5% mais curto; blocos 'Sponsor' sobem ~10-40 px ao longo do e-mail.",
+    "[baixo] 'Send as HTML' sem mojibake (Chromium mostra 'SendÂ asÂ HTML')."],
+    "css_suspect": "largura de coluna em tabela com width percentual + borda lateral"},
+  "ham-07-lockergnome-com": {"score": 9.4, "issues": [
+    "[baixo] A linha de 5 estrelas ('Reviewer's Tilt') abaixo do bloco GnomeDVD (imagens sem alt) não ocupa espaço no html_view, enquanto o Chromium reserva ~16 px; o parágrafo seguinte fica ~10 px mais acima.",
+    "[baixo] Itens da barra lateral (GNOMESPECIALS, Coldplay etc.) ficam ~4-8 px mais abaixo que no Chromium."],
+    "css_suspect": "<img> sem alt e sem dimensões colapsando para 0 em vez de ícone 16x16"},
+  "ham-08-euromailer-lists-app": {"score": 8.0, "issues": [
+    "[médio] A coluna lateral direita desce visivelmente: a lista 'New PowerBook / New Book / ...' começa em ~155 px contra ~117 px no Chromium, e a lista de acessórios ('Battery Crystal iBook ...') em ~350 px contra ~277 px (~40-70 px de deslocamento).",
+    "[médio] O botão de imagem 'Submit' do formulário da lateral (input type=image com alt) não mostra o texto alt; só aparece o campo de texto.",
+    "[baixo] Imagens espaçadoras sem alt (cantos, linhas de ícones no topo/rodapé) não reservam espaço, alterando levemente os espaçamentos verticais do topo e do rodapé."],
+    "css_suspect": "<img> sem dimensões/alt colapsando a 0 (Chromium reserva 16x16) afetando alturas de linha da tabela lateral; <input type=image> sem renderizar alt"},
+  "ham-09-bounce-winxpnews-com": {"score": 9.2, "issues": [
+    "[baixo] O texto do corpo quebra um pouco mais largo que no Chromium (ex.: '...but you only told' cabe na 1ª linha), encurtando parágrafos longos em 1 linha e gerando deslocamento vertical acumulado de até ~40 px.",
+    "[baixo] A imagem flutuada à direita dentro dos blocos de anúncio (iHateSpam/PestPatrol) não reserva espaço, ao contrário do ícone do Chromium."],
+    "css_suspect": "largura disponível/padding do body ou métricas de fonte Verdana; <img align=right> sem dimensões"},
+  "ham-10-sneakemail-com": {"score": 9.5, "issues": [
+    "[baixo] Após o primeiro bloco patrocinado, todo o conteúdo fica ~12 px acima do Chromium (o bloco não reserva altura para a imagem flutuada sem src).",
+    "[baixo] Imagens 'Presented By' e de cabeçalho de seção sem alt não reservam espaço (~16 px a menos cada)."],
+    "css_suspect": "<img align> sem dimensões colapsando a 0"},
+  "ham-11-cteyyyyi-cjsias-bwmm": {"score": 9.3, "issues": [
+    "[baixo] A pilha de 5 imagens espaçadoras do topo (sem alt) não ocupa espaço; o cartão principal começa ~7 px acima.",
+    "[baixo] Preços com '€' corretos no html_view onde o Chromium mostra '‹' (charset); layout idêntico."],
+    "css_suspect": "<img> sem alt/dimensões colapsando a 0"},
+  "ham-12-buy4now-ie": {"score": 9.8, "issues": [
+    "[baixo] Praticamente idêntico; apenas os quadros de imagem bloqueada aparecem sem ícone (esperado)."],
+    "css_suspect": ""},
+  "ham-13-hermes-sun-com": {"score": 9.4, "issues": [
+    "[baixo] O botão de imagem 'Search' ao lado do campo de busca (input type=image com alt) não é desenhado; no Chromium aparece um quadro com o texto 'Search', o que também deixa o texto de boas-vindas ~15 px mais alto no html_view.",
+    "[baixo] Pequenas diferenças de quebra de linha nos parágrafos; deslocamento vertical de ~10-15 px ao longo do e-mail."],
+    "css_suspect": "<input type=image> sem fallback de alt"},
+  "ham-14-applenews-lists-appl": {"score": 9.5, "issues": [
+    "[baixo] Pequenas diferenças de quebra de linha nas colunas laterais ('singer/ songwriter'), com deslocamentos de ~5 px."],
+    "css_suspect": ""},
+  "ham-15-crrvja-cjsias-uhbeqs": {"score": 9.5, "issues": [
+    "[baixo] Imagens espaçadoras do topo sem alt não reservam espaço; o cabeçalho branco começa ~6 px acima.",
+    "[baixo] Apóstrofos e marcadores corretos no html_view onde o Chromium mostra mojibake."],
+    "css_suspect": "<img> sem alt/dimensões"},
+  "ham-16-reply-yahoo-com": {"score": 8.3, "issues": [
+    "[médio] O texto alt longo da foto ('Captured weapons-grade uranium...') é desenhado com entrelinha bem maior (~13 px vs ~11,7 px no Chromium) e sem a moldura do Chromium, tornando o bloco ~60 px mais alto; o e-mail fica ~7% mais alto (2150 vs 2014 px).",
+    "[baixo] O texto abaixo do alt e o rodapé (Mail to Friend, Search, copyright) descem ~85 px em relação ao Chromium.",
+    "[baixo] Botão 'Search' do rodapé fica alguns px abaixo da linha do select/input."],
+    "css_suspect": "line-height/font-size do alt text de <img> com largura fixa (Chromium usa a fonte do contexto com entrelinha normal compacta)"},
+  "ham-17-ummail4-unitedmedia": {"score": 4.5, "issues": [
+    "[alto] A linha de links inferior do cartão (Modify Your Account / Buy This Strip / Send This Strip / Month of Dilbert) e o texto 'You need to go online to see today's strip...' se desmontam: 'Buy This Strip/Send This Strip' e 'You need to go online' vazam para fora da tabela, na coluna direita (x≈950-1050 no sheet), e um grande bloco azul (fundo da tabela) aparece no lugar onde deveria haver links sobre fundo branco.",
+    "[médio] A área branca de produtos é ~60 px mais curta: 'View all products' fica em ~265 px contra ~330 px no Chromium.",
+    "[médio] Os rótulos 'Books' e 'Graphic' (texto/alt) não aparecem; no lugar há pequenos quadros vazios de imagem.",
+    "[baixo] O banner 'Ad' do topo e o 'Daily Dilbert' à direita não mostram o texto alt 'Ad'/'Daily Dilbert' cortado como o Chromium."],
+    "css_suspect": "tabela com colspan/rowspan e <td> de largura fixa contendo imagens bloqueadas com width/height: cálculo de larguras de coluna e overflow de célula (célula com nowrap/width maior que a tabela) — conteúdo sai do container"},
+  "ham-18-berkshireeagle-com": {"score": 9.0, "issues": [
+    "[baixo] Falta a linha vertical divisória entre a coluna de manchetes e a coluna 'Breaking News' (no Chromium vai de ~68 a ~410 px).",
+    "[baixo] A caixa 'Breaking News' começa ~12 px acima e a coluna direita quebra algumas linhas de forma diferente ('Sports Headlines' em duas linhas)."],
+    "css_suspect": "célula separadora com <img> 1px de largura/bgcolor ou borda de <td> não desenhada"},
+  "ham-19-xmr3-com": {"score": 9.2, "issues": [
+    "[baixo] Texto em alemão aparece corretamente (ä, ö, ü, –) no html_view, enquanto o Chromium mostra mojibake UTF-8/Latin-1 ('fÃ¼r'); diferença de charset, não de layout.",
+    "[baixo] A partir da seção 'PC-Shop' a entrelinha dos parágrafos é um pouco maior, acumulando ~20 px de deslocamento até o fim (e-mail ~1,8% mais alto).",
+    "[baixo] Ícone de imagem após 'Bitte registrieren Sie sich hier' não é reservado (imagem sem alt)."],
+    "css_suspect": "line-height em linha com caractere de fonte maior ('!' em <font size> maior) e detecção de charset"}
+}

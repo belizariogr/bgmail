@@ -1,4 +1,11 @@
-//! Rows returned from SQLite queries.
+//! Rows returned from SQLite queries and inputs for sync writes.
+
+/// Provider of local/mock accounts (no server behind them).
+pub const PROVIDER_LOCAL: &str = "local";
+/// Generic IMAP/SMTP account.
+pub const PROVIDER_IMAP: &str = "imap";
+/// Gmail account (IMAP with Gmail extensions).
+pub const PROVIDER_GMAIL: &str = "gmail";
 
 /// A connected account.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,6 +13,10 @@ pub struct Account {
     pub id: i64,
     pub name: String,
     pub email: String,
+    /// `local`, `imap` or `gmail` (see the `PROVIDER_*` constants).
+    pub provider: String,
+    /// Opaque connection settings owned by callers (JSON text, `{}` when unset).
+    pub config_json: String,
 }
 
 /// A folder within an account.
@@ -17,6 +28,11 @@ pub struct Folder {
     pub path: String,
     /// Display name for custom folders; empty for system folders (localized in UI).
     pub display_name: String,
+    /// Server mailbox name; `None` for local-only folders.
+    pub remote_name: Option<String>,
+    /// Special-use role (`inbox`, `sent`, `drafts`, `trash`, `junk`, `archive`,
+    /// `all`, `flagged`, `important`, `custom`) or `None`.
+    pub role: Option<String>,
 }
 
 /// A message row for the list column (no raw body).
@@ -30,6 +46,9 @@ pub struct MessageListItem {
     /// Plain-text preview (first line / excerpt).
     pub preview: String,
     pub received_at: String,
+    /// Unix seconds; `0` for local/mock rows (ordered by `sort_order` instead).
+    pub date_ts: i64,
+    pub thread_id: Option<String>,
     pub unread: bool,
     pub starred: bool,
     pub has_attachment: bool,
@@ -48,8 +67,21 @@ pub struct MessageDetail {
     /// `html` or `text`.
     pub raw_format: String,
     pub received_at: String,
+    pub date_ts: i64,
+    /// Display-formatted recipient lists (opaque to storage).
+    pub to_addrs: String,
+    pub cc_addrs: String,
+    pub reply_to: String,
+    pub message_id_hdr: Option<String>,
+    pub in_reply_to: Option<String>,
+    /// Space-separated Message-IDs from the `References` header.
+    pub references_hdr: String,
+    pub thread_id: Option<String>,
+    /// `0` = headers only (body not downloaded yet), `1` = body present.
+    pub body_state: u8,
     pub unread: bool,
     pub starred: bool,
+    pub answered: bool,
     pub has_attachment: bool,
     pub folders_csv: String,
 }
@@ -66,4 +98,169 @@ pub enum MailListQuery {
     },
     /// Full-text search across all accounts/folders.
     Search(String),
+}
+
+/// IMAP synchronization checkpoint of one folder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FolderSyncState {
+    pub uid_validity: Option<u32>,
+    pub uid_next: Option<u32>,
+    pub highest_modseq: Option<u64>,
+    /// Unix seconds of the last successful sync.
+    pub synced_at: Option<i64>,
+}
+
+/// Where a message lives on the server: one `(folder, uid)` pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageLocation {
+    pub folder_id: i64,
+    pub remote_name: Option<String>,
+    pub path: String,
+    pub uid: u32,
+}
+
+/// Headers and flags of a message discovered on the server (body comes later).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewRemoteMessage {
+    pub sender: String,
+    pub sender_email: String,
+    pub subject: String,
+    pub preview: String,
+    pub plain_text: String,
+    pub to_addrs: String,
+    pub cc_addrs: String,
+    pub reply_to: String,
+    pub message_id_hdr: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references_hdr: String,
+    pub thread_id: Option<String>,
+    pub date_ts: i64,
+    /// Display string shown in the list (kept as-is).
+    pub received_at: String,
+    pub unread: bool,
+    pub starred: bool,
+    pub answered: bool,
+    pub has_attachment: bool,
+    pub size: u64,
+    pub gm_msgid: Option<u64>,
+}
+
+/// Result of [`crate::Database::record_remote_message`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteInsert {
+    pub message_id: i64,
+    /// `true` when a new message row was created (not a merge or a known
+    /// location).
+    pub created: bool,
+}
+
+/// Attachment metadata extracted from a downloaded body.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewAttachment {
+    /// Index of the MIME part inside the raw message (caller-defined numbering).
+    pub part_index: u32,
+    pub filename: String,
+    pub mime_type: String,
+    pub size: u64,
+    pub content_id: Option<String>,
+    /// Inline parts (e.g. `cid:` images) do not count as attachments in the list.
+    pub inline: bool,
+}
+
+/// Stored attachment metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentRow {
+    pub id: i64,
+    pub message_id: i64,
+    pub part_index: u32,
+    pub filename: String,
+    pub mime_type: String,
+    pub size: u64,
+    pub content_id: Option<String>,
+    pub inline: bool,
+}
+
+/// A server-side action queued while the UI already shows its result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingOp {
+    pub id: i64,
+    pub account_id: i64,
+    /// Caller-defined action name (`move`, `flag`, `expunge`, …).
+    pub kind: String,
+    pub message_id: Option<i64>,
+    /// Opaque JSON owned by callers.
+    pub payload: String,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    /// Unix seconds.
+    pub created_at: i64,
+}
+
+/// Delivery state of an outbox row (`outbox.state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OutgoingState {
+    /// Waiting to be sent once `next_attempt_at` is due.
+    Queued,
+    /// Claimed by a worker (`lease_at` set) while the SMTP transaction runs.
+    Sending,
+    /// The connection broke after the transaction started: the server may
+    /// have accepted it. Never retried automatically — the user decides.
+    MaybeSent,
+    /// Permanently rejected too many times; never retried automatically.
+    Failed,
+    /// Sent; only the copy into the Sent folder (IMAP APPEND) is still due.
+    AppendPending,
+}
+
+impl OutgoingState {
+    /// Value stored in `outbox.state`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Sending => "sending",
+            Self::MaybeSent => "maybe_sent",
+            Self::Failed => "failed",
+            Self::AppendPending => "append_pending",
+        }
+    }
+
+    /// Parses `outbox.state`; unknown values read as `Queued` (fail open: a
+    /// row is never silently stuck).
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "sending" => Self::Sending,
+            "maybe_sent" => Self::MaybeSent,
+            "failed" => Self::Failed,
+            "append_pending" => Self::AppendPending,
+            _ => Self::Queued,
+        }
+    }
+
+    /// No automatic retry is coming: the row waits for a user decision.
+    pub fn is_stopped(self) -> bool {
+        matches!(self, Self::MaybeSent | Self::Failed)
+    }
+}
+
+/// A message waiting to be sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutgoingRow {
+    pub id: i64,
+    pub account_id: i64,
+    pub sender: String,
+    pub recipients: Vec<String>,
+    /// Raw RFC 822 bytes.
+    pub raw: Vec<u8>,
+    pub message_id_hdr: Option<String>,
+    /// Permanent (5xx) rejections; transient failures only count in
+    /// `deferrals`.
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    /// Unix seconds.
+    pub created_at: i64,
+    pub state: OutgoingState,
+    /// Unix seconds before which the row is not retried (0 = due now).
+    pub next_attempt_at: i64,
+    /// Transient failures in a row (drives the backoff schedule).
+    pub deferrals: u32,
 }

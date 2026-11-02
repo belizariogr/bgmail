@@ -63,8 +63,10 @@ mod tests {
 
     #[test]
     fn selection_clamps_to_last_entry() {
-        let mut state = CommandPaletteState::default();
-        state.selected_ix = 5;
+        let mut state = CommandPaletteState {
+            selected_ix: 5,
+            ..Default::default()
+        };
         state.clamp_selection(3);
         assert_eq!(state.selected_ix, 2);
     }

@@ -5,22 +5,28 @@
 //! The domain layer will be added in later stages (see `docs/PLANEJAMENTO.md` and
 //! `TODO.md`).
 
+mod account_setup;
 mod actions;
 mod app_menus;
-#[cfg(feature = "cef-osr")]
-mod cef_osr;
+mod attachments;
 mod command_palette;
 mod command_palette_overlay;
 mod commands;
 mod compose;
 mod config;
+mod crash_guard;
 mod data;
+mod dates;
 mod db_seed;
 mod locale;
+mod mail_html;
+mod mail_service;
+mod notifications;
+mod print;
 mod root;
+mod settings;
 mod shortcuts;
 mod startup;
-mod web_view;
 mod window_drag;
 mod window_frame;
 
@@ -33,9 +39,11 @@ use gpui::{
 
 use crate::commands::CommandId;
 use actions::{
-    ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, MessageArchive,
-    MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessageRestore, MessageToggleFlag,
-    MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette, ToggleSidebar,
+    ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, FindInMessage,
+    GetNewMail, MessageArchive, MessageDelete, MessageDeletePermanent, MessageForward,
+    MessageMarkJunk, MessagePrint, MessageReply, MessageReplyAll, MessageRestore,
+    MessageToggleFlag, MessageToggleRead, MoveMessageToFolder, OpenSettings, Quit,
+    ToggleCommandPalette, ToggleSidebar,
 };
 use compose::ComposeView;
 use root::{RootView, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH};
@@ -52,10 +60,11 @@ struct CommandPaletteShortcut {
 
 impl Global for CommandPaletteShortcut {}
 
-/// Whether `keystroke` is the command-palette shortcut (Ctrl+P / Cmd+P).
+/// Whether `keystroke` is the command-palette shortcut (Ctrl+Shift+P /
+/// Cmd+Shift+P, as in Zed; Ctrl/Cmd+P prints).
 fn is_command_palette_keystroke(keystroke: &Keystroke) -> bool {
     keystroke.key.eq_ignore_ascii_case("p")
-        && !keystroke.modifiers.shift
+        && keystroke.modifiers.shift
         && (keystroke.modifiers.control || keystroke.modifiers.platform)
 }
 
@@ -101,8 +110,19 @@ fn schedule_compose_close(cx: &mut App) {
     });
 }
 
-/// Global handlers keep macOS menu items enabled when a native webview holds focus.
+/// Opens the reader's find bar in the main window. Global so the shortcut also
+/// works when nothing in the main window has focus yet.
+fn schedule_find_in_message(cx: &mut App) {
+    let main = cx.global::<MainWindow>().0;
+    cx.defer(move |cx| {
+        let _ = main.update(cx, |root, window, cx| root.open_find_bar(window, cx));
+    });
+}
+
+/// Global handlers keep macOS menu items enabled when focus is outside the main
+/// view tree (compose/settings windows).
 fn register_global_menu_actions(cx: &mut App) {
+    cx.on_action(|_: &FindInMessage, cx| schedule_find_in_message(cx));
     cx.on_action(|_: &ComposeNew, cx| schedule_menu_command(CommandId::ComposeNew, cx));
     cx.on_action(|_: &OpenSettings, cx| schedule_menu_command(CommandId::OpenSettings, cx));
     cx.on_action(|_: &ToggleSidebar, cx| schedule_menu_command(CommandId::ToggleSidebar, cx));
@@ -113,9 +133,19 @@ fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &MessageRestore, cx| schedule_menu_command(CommandId::MessageRestore, cx));
     cx.on_action(|_: &MessageArchive, cx| schedule_menu_command(CommandId::MessageArchive, cx));
     cx.on_action(|_: &MessageMarkJunk, cx| schedule_menu_command(CommandId::MessageMarkJunk, cx));
+    cx.on_action(|_: &MessagePrint, cx| schedule_menu_command(CommandId::MessagePrint, cx));
     cx.on_action(|_: &MessageToggleFlag, cx| {
         schedule_menu_command(CommandId::MessageToggleFlag, cx);
     });
+    cx.on_action(|_: &MessageReply, cx| schedule_menu_command(CommandId::MessageReply, cx));
+    cx.on_action(|_: &MessageReplyAll, cx| {
+        schedule_menu_command(CommandId::MessageReplyAll, cx);
+    });
+    cx.on_action(|_: &MessageForward, cx| schedule_menu_command(CommandId::MessageForward, cx));
+    cx.on_action(|_: &MessageToggleRead, cx| {
+        schedule_menu_command(CommandId::MessageToggleRead, cx);
+    });
+    cx.on_action(|_: &GetNewMail, cx| schedule_menu_command(CommandId::SyncNow, cx));
     cx.on_action(|action: &MoveMessageToFolder, cx| {
         schedule_menu_command(CommandId::MoveToFolder(action.path.clone()), cx);
     });
@@ -132,28 +162,6 @@ fn register_global_menu_actions(cx: &mut App) {
         schedule_compose_close(cx);
     });
 }
-
-/// The HTML reader is Chromium via CEF windowless off-screen rendering on every
-/// platform, composited by GPUI as a texture. Initialize CEF once up front; the
-/// reader drives its message pump each frame and it is shut down on quit.
-#[cfg(feature = "cef-osr")]
-fn init_cef_osr() {
-    if !cef_osr::initialize() {
-        eprintln!("BGMail: CEF initialization failed; HTML reader disabled");
-    }
-}
-
-#[cfg(not(feature = "cef-osr"))]
-fn init_cef_osr() {}
-
-/// Shuts the CEF runtime down on exit. No-op when the feature is disabled.
-#[cfg(feature = "cef-osr")]
-fn shutdown_cef_osr() {
-    cef_osr::shutdown_cef();
-}
-
-#[cfg(not(feature = "cef-osr"))]
-fn shutdown_cef_osr() {}
 
 /// Builds the macOS application menu. The first menu's name becomes the bold
 /// "app menu" in the global menu bar, so it carries the application name.
@@ -179,18 +187,8 @@ fn register_command_palette_shortcuts(cx: &mut App) {
 }
 
 fn main() {
-    // CEF re-executes this binary for each of its sub-processes (renderer, GPU,
-    // utility, …), passing a `--type=` switch. Those must run CEF's sub-process
-    // logic and exit before we bring up GPUI.
-    #[cfg(feature = "cef-osr")]
-    if cef_osr::run_if_subprocess() {
-        return;
-    }
-
     startup::mark_start();
     startup::log_milestone("main entered");
-
-    init_cef_osr();
 
     Application::new()
         .with_assets(ui::Assets)
@@ -201,6 +199,7 @@ fn main() {
             // Initialize localization (English by default).
             locale::init(locale::Language::default(), cx);
             ui::bind_keys(cx);
+            html_view::init(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
             shortcuts::bind_app_shortcuts(cx);
             cx.set_menus(app_menus());
@@ -241,6 +240,7 @@ fn main() {
                         window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
                         titlebar: Some(window_frame::main_titlebar_options()),
                         window_decorations: window_frame::main_window_decorations(),
+                        app_id: Some(root::WINDOW_APP_ID.into()),
                         // Windows opens hidden so we can cloak it and run the
                         // (asynchronous) maximize + first layout off-screen, then reveal
                         // the finished window — see the spawn below. Elsewhere GPUI shows
@@ -271,6 +271,9 @@ fn main() {
                             RootView::new(settings)
                         });
                         view.update(cx, |view, cx| {
+                            // Sync starts after the window exists; it never
+                            // blocks the first frame (threads + async keychain).
+                            view.start_mail(cx);
                             cx.observe_window_activation(window, |this, window, cx| {
                                 if window.is_window_active() {
                                     this.on_main_window_activated(cx);
@@ -376,9 +379,6 @@ fn main() {
 
             cx.activate(true);
         });
-
-    // `run` blocks until the app exits; tear CEF down cleanly afterward.
-    shutdown_cef_osr();
 }
 
 #[cfg(test)]
@@ -414,9 +414,19 @@ mod tests {
             key_char: None,
         };
         let plain_p = Keystroke::default();
-        assert!(is_command_palette_keystroke(&ctrl_p));
-        assert!(is_command_palette_keystroke(&cmd_p));
-        assert!(is_command_palette_keystroke(&uppercase_ctrl_p));
+        let shifted = |keystroke: &Keystroke| Keystroke {
+            modifiers: gpui::Modifiers {
+                shift: true,
+                ..keystroke.modifiers
+            },
+            ..keystroke.clone()
+        };
+        assert!(is_command_palette_keystroke(&shifted(&ctrl_p)));
+        assert!(is_command_palette_keystroke(&shifted(&cmd_p)));
+        assert!(is_command_palette_keystroke(&shifted(&uppercase_ctrl_p)));
+        // Ctrl/Cmd+P without Shift is Print.
+        assert!(!is_command_palette_keystroke(&ctrl_p));
+        assert!(!is_command_palette_keystroke(&cmd_p));
         assert!(!is_command_palette_keystroke(&plain_p));
     }
 }

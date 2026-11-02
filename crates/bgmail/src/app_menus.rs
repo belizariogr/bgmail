@@ -3,8 +3,8 @@
 //! GPUI 0.2 does not expose a `disabled` flag on [`MenuItem`]; unavailable message
 //! actions are omitted from the Message menu rather than shown greyed out. Menu items
 //! are validated with [`App::is_action_available`], which requires a global
-//! [`App::on_action`] handler when focus is outside the main view tree (e.g. the
-//! native e-mail webview). Keyboard shortcuts are registered in [`crate::shortcuts`]
+//! [`App::on_action`] handler when focus is outside the main view tree (e.g. a
+//! compose or settings window). Keyboard shortcuts are registered in [`crate::shortcuts`]
 //! and appear in the menu bar automatically via GPUI's keymap integration.
 //!
 //! When a compose window is key, [`MenuSurface::Compose`] menus replace the mail
@@ -13,9 +13,11 @@
 use gpui::{App, Global, Menu, MenuItem, SystemMenuType};
 
 use crate::actions::{
-    ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, MessageArchive,
-    MessageDelete, MessageDeletePermanent, MessageMarkJunk, MessageRestore, MessageToggleFlag,
-    MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette, ToggleSidebar,
+    ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew, ComposeSend, GetNewMail,
+    MessageArchive, MessageDelete, MessageDeletePermanent, MessageForward, MessageMarkJunk,
+    MessagePrint, MessageReply, MessageReplyAll, MessageRestore, MessageToggleFlag,
+    MessageToggleRead, MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette,
+    ToggleSidebar,
 };
 use crate::commands::{self, CommandContext, CommandId};
 use crate::locale::{Key, Language};
@@ -73,6 +75,42 @@ pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
     let mut message_items = Vec::new();
     push_if_enabled(
         &mut message_items,
+        Key::ToolbarReply.tr(language),
+        MessageReply,
+        CommandId::MessageReply,
+        ctx,
+    );
+    push_if_enabled(
+        &mut message_items,
+        Key::ToolbarReplyAll.tr(language),
+        MessageReplyAll,
+        CommandId::MessageReplyAll,
+        ctx,
+    );
+    push_if_enabled(
+        &mut message_items,
+        Key::ToolbarForward.tr(language),
+        MessageForward,
+        CommandId::MessageForward,
+        ctx,
+    );
+    push_if_enabled(
+        &mut message_items,
+        if ctx.message_unread() {
+            Key::CommandMarkRead.tr(language)
+        } else {
+            Key::CommandMarkUnread.tr(language)
+        },
+        MessageToggleRead,
+        CommandId::MessageToggleRead,
+        ctx,
+    );
+    if !message_items.is_empty() {
+        message_items.push(MenuItem::separator());
+    }
+    let destructive_start = message_items.len();
+    push_if_enabled(
+        &mut message_items,
         Key::CommandDelete.tr(language),
         MessageDelete,
         CommandId::MessageDelete,
@@ -92,7 +130,7 @@ pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
         CommandId::MessageRestore,
         ctx,
     );
-    if message_items.len() > 1 {
+    if message_items.len() > destructive_start {
         message_items.push(MenuItem::separator());
     }
     push_if_enabled(
@@ -118,6 +156,13 @@ pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
         },
         MessageToggleFlag,
         CommandId::MessageToggleFlag,
+        ctx,
+    );
+    push_if_enabled(
+        &mut message_items,
+        Key::CommandPrint.tr(language),
+        MessagePrint,
+        CommandId::MessagePrint,
         ctx,
     );
     if !move_items.is_empty() {
@@ -146,6 +191,13 @@ pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action(Key::CommandPalette.tr(language), ToggleCommandPalette),
             ],
+        },
+        Menu {
+            name: "Mailbox".into(),
+            items: vec![MenuItem::action(
+                Key::CommandSyncNow.tr(language),
+                GetNewMail,
+            )],
         },
         Menu {
             name: "Message".into(),
@@ -240,6 +292,16 @@ mod tests {
                 raw_content: "Hello".into(),
                 raw_format: "text".into(),
                 received_at: "2024-01-01".into(),
+                date_ts: 0,
+                to_addrs: String::new(),
+                cc_addrs: String::new(),
+                reply_to: String::new(),
+                message_id_hdr: None,
+                in_reply_to: None,
+                references_hdr: String::new(),
+                thread_id: None,
+                body_state: 1,
+                answered: false,
                 unread: true,
                 starred: false,
                 has_attachment: false,
@@ -252,6 +314,8 @@ mod tests {
                     account_id,
                     path: system::INBOX.into(),
                     display_name: String::new(),
+                    remote_name: None,
+                    role: None,
                 }],
             )]),
         }
@@ -267,6 +331,49 @@ mod tests {
         assert!(menu_has_action_label(
             message_menu,
             Key::CommandDelete.tr(Language::English),
+        ));
+    }
+
+    #[test]
+    fn message_menu_offers_reply_forward_and_read_toggle() {
+        let menus = build_menus(&ctx_with_inbox_message(), Language::English);
+        let message_menu = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "Message")
+            .expect("Message menu");
+        for key in [
+            Key::ToolbarReply,
+            Key::ToolbarReplyAll,
+            Key::ToolbarForward,
+            // The selected message is unread.
+            Key::CommandMarkRead,
+        ] {
+            assert!(menu_has_action_label(
+                message_menu,
+                key.tr(Language::English)
+            ));
+        }
+        let empty = build_menus(&CommandContext::default(), Language::English);
+        let empty_message = empty
+            .iter()
+            .find(|menu| menu.name.as_ref() == "Message")
+            .expect("Message menu");
+        assert!(!menu_has_action_label(
+            empty_message,
+            Key::ToolbarReply.tr(Language::English)
+        ));
+    }
+
+    #[test]
+    fn mailbox_menu_always_offers_get_new_mail() {
+        let menus = build_menus(&CommandContext::default(), Language::English);
+        let mailbox = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "Mailbox")
+            .expect("Mailbox menu");
+        assert!(menu_has_action_label(
+            mailbox,
+            Key::CommandSyncNow.tr(Language::English)
         ));
     }
 

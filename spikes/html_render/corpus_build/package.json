@@ -1,0 +1,1 @@
+{"name":"corpus-build","private":true,"type":"module","dependencies":{"@react-email/render":"^2.2.0","mjml":"^5.4.1","puppeteer-core":"^25.16.0","react":"^19.3.1","react-dom":"^19.3.1","react-email":"^6.11.6","tailwindcss":"^4.3.3","tsx":"^4.23.15"}}

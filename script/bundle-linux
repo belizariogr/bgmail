@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Builds the release tarball that script/install.sh unpacks into ~/.local.
+# Layout: bgmail.app/{bin/bgmail, share/applications, share/icons/hicolor}.
+# Set BGMAIL_BINARY to package an existing binary instead of building.
+
+set -euo pipefail
+
+if [[ $# -gt 0 ]]; then
+    echo "Usage: ${0##*/}"
+    echo "Writes \${CARGO_TARGET_DIR:-target}/release/bgmail-linux-<arch>.tar.gz"
+    exit 1
+fi
+
+cd "$(dirname "$0")/.."
+
+target_dir="${CARGO_TARGET_DIR:-target}"
+binary="${BGMAIL_BINARY:-}"
+if [[ -z "$binary" ]]; then
+    cargo build --release -p bgmail --bin BGMail
+    binary="$target_dir/release/BGMail"
+fi
+
+temp="$(mktemp -d)"
+trap 'rm -rf "$temp"' EXIT
+app="$temp/bgmail.app"
+mkdir -p "$app/bin" "$app/share/applications"
+install -m 755 "$binary" "$app/bin/bgmail"
+
+for size in 16 24 32 48 64 128 256 512 1024; do
+    icons="$app/share/icons/hicolor/${size}x${size}/apps"
+    mkdir -p "$icons"
+    cp "assets/appIcon/BGMail-$size.png" "$icons/bgmail.png"
+done
+
+# The template is shared with cargo-packager (handlebars). The desktop file is
+# named after the GPUI app_id, so compositors match windows to it.
+comment="$(sed -n 's/^description = "\(.*\)"$/\1/p' crates/bgmail/Cargo.toml | sed 's/[&|\\]/\\&/g')"
+sed -e '/^{{#if comment}}$/d' -e '/^{{\/if}}$/d' \
+    -e 's|{{name}}|BGMail|' -e "s|{{comment}}|$comment|" \
+    -e 's|{{exec}}|bgmail|' -e 's|{{icon}}|bgmail|' \
+    crates/bgmail/packaging/linux/BGMail.desktop > "$app/share/applications/BGMail.desktop"
+
+archive="$target_dir/release/bgmail-linux-$(uname -m).tar.gz"
+mkdir -p "$(dirname "$archive")"
+tar -czf "$archive" -C "$temp" bgmail.app
+echo "$archive"

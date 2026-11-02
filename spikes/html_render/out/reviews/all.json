@@ -1,0 +1,928 @@
+[
+ {
+  "email": "cerberus-hybrid",
+  "summary_pt": "Template Cerberus híbrido: hero, colunas 2/3 fluidas, blocos zigue-zague com dir=rtl, imagem de fundo e rodapé escuro/verde.",
+  "blitz": {
+   "score": 8,
+   "issues": [
+    "[médio] Segundo bloco zigue-zague (td dir=\"rtl\") não é invertido: imagem fica à esquerda em vez da direita",
+    "[baixo] Espaçamentos verticais ligeiramente maiores entre blocos (cards e botões um pouco mais altos)"
+   ],
+   "css_suspect": "atributo dir=rtl em td/inline-block"
+  },
+  "litehtml": {
+   "score": 2,
+   "issues": [
+    "[crítico] Layout híbrido de colunas colapsa: colunas 2/3 viram coluna estreita empurrada à direita com grande área branca à esquerda e conteúdo transbordando a borda direita",
+    "[alto] Logo 200x50 ausente e imagem hero 1360x600 deslocada para a direita/cortada",
+    "[alto] Container de 680px ignorado: blocos brancos ocupam/estouram a largura de 800px",
+    "[alto] Texto da faixa com imagem de fundo vira uma linha só que estoura à direita, com placeholder gigante '68…' sobreposto",
+    "[médio] Texto do primeiro bloco e do rodapé sem quebra no container, cortado na borda direita"
+   ],
+   "css_suspect": "display:inline-block + max-width em div de coluna, width:100% em img com max-width, mso/ghost tables"
+  }
+ },
+ {
+  "email": "cerberus-responsive",
+  "summary_pt": "Template Cerberus responsivo: hero, bloco com background-image, grades de 2 e 3 colunas, cards imagem+texto alternados e rodapé com faixa verde.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamentos verticais ligeiramente maiores entre blocos (botões e cards um pouco mais altos)"
+   ],
+   "css_suspect": "line-height/padding em td"
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[médio] Card 'imagem à direita' (dir=rtl) renderizado com imagem à esquerda, igual ao card anterior",
+    "[médio] Espaçador entre a seção de cards e o bloco de texto seguinte sumiu: os dois cartões brancos ficam colados, separados só por uma linha",
+    "[baixo] Links do rodapé ('View as a Web Page', 'unsubscribe') sem sublinhado",
+    "[baixo] Texto sobre o background-image quebra em 5 linhas em vez de 4 (padding/largura levemente diferentes)"
+   ],
+   "css_suspect": "dir=rtl em td/table; altura de td espaçador (font-size/line-height 0); text-decoration em links"
+  }
+ },
+ {
+  "email": "client-apple-mail",
+  "summary_pt": "Mensagem simples do Apple Mail com imagem inline e citação recuada (blockquote).",
+  "blitz": {
+   "score": 10,
+   "issues": [],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamentos verticais um pouco maiores (altura total ~4% maior), sem impacto visual relevante"
+   ],
+   "css_suspect": ""
+  }
+ },
+ {
+  "email": "client-gmail-reply",
+  "summary_pt": "Resposta do Gmail com lista, destaque em amarelo, assinatura em cinza/fonte pequena e citação com borda à esquerda.",
+  "blitz": {
+   "score": 7,
+   "issues": [
+    "[médio] Assinatura perde a hierarquia: cargo 'Gerente de Projetos · Acme Ltda' sai em preto em vez de cinza e o telefone sai em tamanho normal em vez de fonte pequena"
+   ],
+   "css_suspect": "color/font-size em <font> ou estilo inline herdado na assinatura"
+  },
+  "litehtml": {
+   "score": 9,
+   "issues": [
+    "[baixo] Texto quebra em mais linhas por métricas de fonte maiores, aumentando levemente a altura da citação"
+   ],
+   "css_suspect": ""
+  }
+ },
+ {
+  "email": "client-outlook-desktop",
+  "summary_pt": "E-mail texto estilo Outlook desktop com tabela de indicadores, lista, assinatura e citação de mensagem anterior.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Linhas da tabela de indicadores ligeiramente mais altas e espaçamento vertical um pouco maior"
+   ],
+   "css_suspect": "line-height/mso-line-height em td"
+  },
+  "litehtml": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamento vertical entre blocos ligeiramente maior que no Chromium"
+   ],
+   "css_suspect": "margens de p (MsoNormal)"
+  }
+ },
+ {
+  "email": "leemunroe-responsive",
+  "summary_pt": "E-mail transacional simples com card branco arredondado, botão CTA azul e rodapé centralizado.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Botão e parágrafos com espaçamento vertical um pouco maior que no Chromium"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 8,
+   "issues": [
+    "[baixo] Link 'Unsubscribe' do rodapé sem sublinhado",
+    "[baixo] Botão levemente mais largo e card com padding ligeiramente diferente"
+   ],
+   "css_suspect": "text-decoration em links"
+  }
+ },
+ {
+  "email": "mailgun-billing",
+  "summary_pt": "Recibo simples em cartão branco centralizado com tabela de itens e total.",
+  "blitz": {
+   "score": 0,
+   "issues": [
+    "[crítico] Render totalmente em branco: apenas o fundo cinza aparece, nenhum conteúdo (cartão, textos e tabela ausentes)"
+   ],
+   "css_suspect": "possível falha de layout/parse no container principal (display:block em td / max-width em tabela)"
+  },
+  "litehtml": {
+   "score": 9,
+   "issues": [
+    "[baixo] Diferenças mínimas de espaçamento; layout praticamente idêntico ao Chromium"
+   ],
+   "css_suspect": ""
+  }
+ },
+ {
+  "email": "mjml-austin",
+  "summary_pt": "Newsletter MJML com cabeçalho escuro, hero com imagem de fundo, texto, botões, grade de 2 imagens, mapa e rodapé social.",
+  "blitz": {
+   "score": 8,
+   "issues": [
+    "[médio] Hero com imagem de fundo dividido em dois blocos: emenda escura visível entre o ícone e o título 'Get in person support', com pequeno degrau na borda direita",
+    "[baixo] Espaçamentos verticais ligeiramente maiores (botões e parágrafos), card um pouco mais alto"
+   ],
+   "css_suspect": "background-image/background-size em seções MJML adjacentes (arredondamento de altura)"
+  },
+  "litehtml": {
+   "score": 9,
+   "issues": [
+    "[baixo] Pequenas diferenças de quebra de linha e espaçamento nos parágrafos e no rodapé"
+   ],
+   "css_suspect": ""
+  }
+ },
+ {
+  "email": "mjml-black-friday",
+  "summary_pt": "Promoção MJML em fundo preto com logo, menu, imagem hero, título, botão branco e texto legal.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Leve aumento de espaçamento vertical entre blocos (botão e rodapé ligeiramente mais abaixo)"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 7,
+   "issues": [
+    "[médio] Botão \"Shop Now\" alinhado à esquerda em vez de centralizado",
+    "[baixo] Logo ALLURA levemente deslocado para a esquerda"
+   ],
+   "css_suspect": "align/text-align em td de botão MJML (margin auto em tabela)"
+  }
+ },
+ {
+  "email": "mjml-newsletter",
+  "summary_pt": "Newsletter MJML com seções coloridas, colunas imagem+texto, screenshot de código e rodapé com ícones sociais.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Pequenos acréscimos de espaçamento vertical entre seções"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 8,
+   "issues": [
+    "[baixo] Logo do cabeçalho alinhado à esquerda em vez de centralizado"
+   ],
+   "css_suspect": "align=center / text-align em td com imagem"
+  }
+ },
+ {
+  "email": "mjml-racoon",
+  "summary_pt": "Newsletter MJML de e-commerce com hero laranja, grade de produtos em 3 e 2 colunas, blocos lado a lado e rodapé escuro/laranja.",
+  "blitz": {
+   "score": 8,
+   "issues": [
+    "[baixo] Seções de produtos e rodapé de ícones mais altas (espaçamento extra), aumentando a altura total",
+    "[baixo] Títulos do rodapé (\"PAYMENT METHODS\") quebram em duas linhas"
+   ],
+   "css_suspect": "line-height/padding em colunas mj-column"
+  },
+  "litehtml": {
+   "score": 9,
+   "issues": [
+    "[baixo] Grade de produtos ligeiramente mais compacta; nomes não quebram como no Chromium"
+   ],
+   "css_suspect": ""
+  }
+ },
+ {
+  "email": "mjml-real-estate",
+  "summary_pt": "Newsletter MJML imobiliária com hero com imagem de fundo e card sobreposto, seções 2/3 colunas, ícones e CTAs.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Seções ligeiramente mais altas (espaçamento vertical maior), sem impacto visual relevante"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 7,
+   "issues": [
+    "[médio] Ícone do caminhão e botão 'Call to action' alinhados à esquerda em vez de centralizados",
+    "[médio] Divisor horizontal antes da seção 'Lorem Ipsum' com imagem alinhado à esquerda em vez da direita",
+    "[médio] Logo do rodapé alinhado à esquerda em vez de centralizado",
+    "[baixo] Link 'Unsubscribe' do rodapé sem sublinhado"
+   ],
+   "css_suspect": "align=center em td/table de imagem e botão (margin:0 auto em tabela)"
+  }
+ },
+ {
+  "email": "mjml-recast",
+  "summary_pt": "Newsletter MJML com ilustração no topo, lista de artigos com miniatura à direita, banners e ícones sociais.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamentos verticais ligeiramente maiores entre artigos"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 8,
+   "issues": [
+    "[baixo] Texto do corpo em cinza bem mais claro que no Chromium (contraste menor)",
+    "[baixo] Link 'Recast.AI' sem sublinhado",
+    "[baixo] Títulos dos artigos quebram em mais linhas (coluna de texto um pouco mais estreita)"
+   ],
+   "css_suspect": "color herdada em mj-text/div; text-decoration em links"
+  }
+ },
+ {
+  "email": "mjml-ticketshop",
+  "summary_pt": "Promo MJML de venda de ingressos com hero fotográfico, CTA sobreposto, blocos de álbum/banner, logos de parceiros e rodapé amarelo.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Pequenas diferenças de espaçamento vertical (≈1,5% mais alto)"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 7,
+   "issues": [
+    "[médio] Botão 'BUY TICKETS' no hero alinhado à esquerda em vez de centralizado",
+    "[médio] Botão 'OUR PARTNERS' alinhado à esquerda em vez de centralizado"
+   ],
+   "css_suspect": "align=center em td de botão MJML (tabela com margin auto)"
+  }
+ },
+ {
+  "email": "mjml-welcome-email",
+  "summary_pt": "Boas-vindas MJML com imagem de cabeçalho, bloco azul com título, texto e botão 'Login' arredondado.",
+  "blitz": {
+   "score": 10,
+   "issues": [],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 10,
+   "issues": [],
+   "css_suspect": ""
+  }
+ },
+ {
+  "email": "postmark-comment-notification",
+  "summary_pt": "Notificação de comentário com bloco de anexos cinza, links e rodapé de endereço.",
+  "blitz": {
+   "score": 8,
+   "issues": [
+    "[baixo] Corpo branco com margens laterais (não ocupa a largura toda) e espaçamentos verticais um pouco maiores"
+   ],
+   "css_suspect": "width:100% em tabela com padding/margin"
+  },
+  "litehtml": {
+   "score": 9,
+   "issues": [
+    "[baixo] Bloco de anexos levemente mais largo e espaçamento vertical ligeiramente diferente"
+   ],
+   "css_suspect": ""
+  }
+ },
+ {
+  "email": "postmark-invoice",
+  "summary_pt": "Fatura transacional Postmark com caixa de valor, botão verde, tabela de itens e rodapé cinza.",
+  "blitz": {
+   "score": 8,
+   "issues": [
+    "[baixo] Corpo branco com margem/borda cinza lateral visível em vez de ocupar a largura toda",
+    "[baixo] Espaçamento vertical maior na tabela de itens e entre blocos"
+   ],
+   "css_suspect": "width:100% em tabela body com padding/margin"
+  },
+  "litehtml": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamentos verticais um pouco maiores na tabela de itens"
+   ],
+   "css_suspect": ""
+  }
+ },
+ {
+  "email": "postmark-receipt",
+  "summary_pt": "Recibo Postmark com cupom em caixa tracejada, tabela de itens, botões CTA e rodapé cinza.",
+  "blitz": {
+   "score": 7,
+   "issues": [
+    "[médio] Corpo branco não ocupa a largura toda: aparece uma faixa cinza nas laterais do conteúdo",
+    "[baixo] Padding das células da tabela de itens e espaçamentos verticais maiores (altura ~5% maior)"
+   ],
+   "css_suspect": "width:100% em tabela aninhada / padding de td"
+  },
+  "litehtml": {
+   "score": 9,
+   "issues": [
+    "[baixo] Linha divisória acima do rodapé interno um pouco mais curta que a largura do conteúdo"
+   ],
+   "css_suspect": ""
+  }
+ },
+ {
+  "email": "postmark-welcome",
+  "summary_pt": "E-mail transacional Postmark de boas-vindas com botão CTA, caixas de atributos cinza, links e rodapé.",
+  "blitz": {
+   "score": 8,
+   "issues": [
+    "[baixo] Card de conteúdo branco ganha margem lateral cinza e borda visível; espaçamentos ~5% maiores"
+   ],
+   "css_suspect": "width/padding em .email-body / body_action"
+  },
+  "litehtml": {
+   "score": 7,
+   "issues": [
+    "[médio] Botão 'Do this Next' estreito, com texto quebrado em duas linhas",
+    "[baixo] Links ('email our customer success team', 'live chat', 'help documentation') sem sublinhado"
+   ],
+   "css_suspect": "white-space/largura intrínseca de a.button (display:inline-block); text-decoration em a"
+  }
+ },
+ {
+  "email": "re-02-matte-welcome",
+  "summary_pt": "Boas-vindas com card central arredondado, imagem hero, checklist com setas e seção final com colagem de imagens e rodapé.",
+  "blitz": {
+   "score": 7,
+   "issues": [
+    "[médio] Imagem hero com recuo interno (não encosta nas bordas do card)",
+    "[médio] Espaçamentos verticais maiores na checklist e na seção 'Try Composer'",
+    "[baixo] Texto do rodapé ('marketing emails.') colado na borda inferior do card"
+   ],
+   "css_suspect": "padding em td / line-height"
+  },
+  "litehtml": {
+   "score": 5,
+   "issues": [
+    "[alto] Largura máxima do card ignorada: container ~500px em vez de ~400px (escala)",
+    "[alto] Imagens hero e da colagem não acompanham a largura do card, deixando faixa vazia à direita",
+    "[médio] Sem border-radius e sombra no card"
+   ],
+   "css_suspect": "max-width em container; width:100% em img; border-radius; box-shadow"
+  }
+ },
+ {
+  "email": "re-03-protocol-product-update",
+  "summary_pt": "Atualização de produto em tema escuro (React Email) com imagens, títulos grandes, seção de blog em 2 colunas e rodapé.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamentos verticais ligeiramente maiores, altura total um pouco maior"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 5,
+   "issues": [
+    "[alto] max-width do container ignorado: conteúdo ocupa os 800px inteiros em vez da coluna central estreita",
+    "[médio] Imagens não acompanham a largura do container (ficam menores que a coluna, sobra espaço à direita)",
+    "[baixo] Links \"Explore Smart Tasks\"/\"Read more\" renderizados em fonte monoespaçada"
+   ],
+   "css_suspect": "max-width em tabela/div container; width:100% em img"
+  }
+ },
+ {
+  "email": "re-04-arcane-newsletter",
+  "summary_pt": "Newsletter escura (React Email) com container de 600px, imagens full-bleed, lista numerada, depoimento e rodapé.",
+  "blitz": {
+   "score": 7,
+   "issues": [
+    "[médio] Imagens hero e do produto aparecem recuadas com uma borda clara em vez de sangrar até a borda do container",
+    "[baixo] Link 'See what's new' com fonte maior que no Chromium",
+    "[baixo] Espaçamentos verticais maiores (altura ~5% maior) e pequena faixa branca no topo"
+   ],
+   "css_suspect": "padding/border em img ou td de imagem; font-size em link"
+  },
+  "litehtml": {
+   "score": 4,
+   "issues": [
+    "[alto] Container de 600px ignorado: fundo escuro e conteúdo ocupam os 800px inteiros",
+    "[alto] Imagens não preenchem a largura: faixa de cor diferente à direita da hero e da imagem do produto",
+    "[médio] Texto e colunas da lista numerada esticados pela largura total, mudando a composição"
+   ],
+   "css_suspect": "max-width em tabela container; width:100% em img"
+  }
+ },
+ {
+  "email": "re-04-arcane-order-confirmation",
+  "summary_pt": "Confirmação de pedido com fundo bordô, título serifado grande, itens com miniatura, tabela de totais e rodapé com ícones.",
+  "blitz": {
+   "score": 8,
+   "issues": [
+    "[baixo] Paddings verticais maiores (linhas da tabela de totais e itens mais altas; altura total ~5% maior)",
+    "[baixo] Pequena margem branca no topo antes do container bordô"
+   ],
+   "css_suspect": "padding/line-height em td"
+  },
+  "litehtml": {
+   "score": 5,
+   "issues": [
+    "[alto] Largura máxima do container ignorada: fundo bordô ocupa os 800px inteiros, sem as margens brancas laterais",
+    "[médio] Tabela de totais e divisores se estendem por toda a largura, desalinhados do texto",
+    "[baixo] Título 'Your order has been placed' quebra em 3 linhas em vez de 2"
+   ],
+   "css_suspect": "max-width em tabela/container"
+  }
+ },
+ {
+  "email": "re-05-studio-abandoned-cart",
+  "summary_pt": "Carrinho abandonado com bloco cinza central, card de produto, depoimento, três colunas de benefícios e rodapé centralizado.",
+  "blitz": {
+   "score": 6,
+   "issues": [
+    "[médio] Botões 'Return to cart' alinhados à esquerda em vez de centralizados",
+    "[médio] Título 'Don't take it from us' e textos do rodapé alinhados à esquerda em vez de centralizados",
+    "[baixo] Espaçamentos verticais maiores (altura ~7% maior) com área branca extra no final"
+   ],
+   "css_suspect": "text-align:center herdado / margin:auto em tabela de botão"
+  },
+  "litehtml": {
+   "score": 5,
+   "issues": [
+    "[alto] Container de 600px ignorado: bloco cinza ocupa os 800px inteiros",
+    "[médio] Botões, título 'Don't take it from us' e rodapé alinhados à esquerda em vez de centralizados",
+    "[baixo] Parágrafo de introdução renderizado em fonte monoespaçada e título em serifa, quebrando a hierarquia tipográfica"
+   ],
+   "css_suspect": "max-width em tabela; text-align/margin:auto; font-family com lista de fallback"
+  }
+ },
+ {
+  "email": "re-05-studio-promo",
+  "summary_pt": "Promo Black Friday (react-email) com barra superior, hero com gradiente e anel, depoimento em card, 3 colunas de benefícios e rodapé com ícones sociais.",
+  "blitz": {
+   "score": 6,
+   "issues": [
+    "[médio] Hero com gradiente dividido em dois blocos com borda/sombra visíveis (imagem e CTA), em vez de um fundo contínuo sem borda",
+    "[médio] Texto do rodapé (descrição, endereço, unsubscribe) alinhado à esquerda em vez de centralizado",
+    "[baixo] Faixa escura do topo ligeiramente mais larga que o container"
+   ],
+   "css_suspect": "background linear-gradient em td/container, border/box-shadow, text-align em rodapé"
+  },
+  "litehtml": {
+   "score": 5,
+   "issues": [
+    "[alto] Container de ~600px ignorado: hero, depoimento e rodapé ocupam os 800px inteiros",
+    "[médio] Imagem do anel maior e CTA 'Save up to $80' deslocado para baixo, alongando o hero",
+    "[médio] Rodapé (descrição, ícones sociais, endereço, unsubscribe) alinhado à esquerda em vez de centralizado",
+    "[baixo] Texto da barra superior renderizado em fonte monoespaçada"
+   ],
+   "css_suspect": "max-width em table/div container, text-align/margin auto no rodapé"
+  }
+ },
+ {
+  "email": "re-airbnb-review",
+  "summary_pt": "Aviso de avaliação com avatar circular, citação em caixa cinza, botão CTA e links de perguntas frequentes.",
+  "blitz": {
+   "score": 8,
+   "issues": [
+    "[baixo] Espaçamentos verticais um pouco maiores (~5% de altura extra)",
+    "[baixo] Container ligeiramente mais largo à direita"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 7,
+   "issues": [
+    "[médio] Avatar renderizado quadrado em vez de circular",
+    "[baixo] Link 'Report unsafe behavior' sem sublinhado"
+   ],
+   "css_suspect": "border-radius em img"
+  }
+ },
+ {
+  "email": "re-amazon-review",
+  "summary_pt": "Pedido de avaliação da Amazon com capa de livro, estrelas, faixa CTA azul e rodapé com ícones sociais.",
+  "blitz": {
+   "score": 6,
+   "issues": [
+    "[médio] Borda laranja desenhada em volta de todo o container em vez de apenas no topo",
+    "[baixo] Coluna de texto ao lado da capa mais estreita, quebrando mais linhas; altura total maior"
+   ],
+   "css_suspect": "border-top / border shorthand com border-width zero"
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[médio] max-width do container ignorado: conteúdo se expande até ~800px",
+    "[baixo] Link \"View more\" sem sublinhado"
+   ],
+   "css_suspect": "max-width em tabela container"
+  }
+ },
+ {
+  "email": "re-apple-receipt",
+  "summary_pt": "Recibo da Apple com tabelas aninhadas de dados, linha de item com ícone, total, bloco promocional Apple Card e rodapé longo.",
+  "blitz": {
+   "score": 5,
+   "issues": [
+    "[alto] Bloco promocional sem o logo 'Card' e sem o título 'Save 3% on all your Apple purchases.' — só aparece o link 'Apply and use in minutes'",
+    "[médio] Tabela de dados (Apple ID/Billed to) com células centralizadas verticalmente e padding excessivo, desalinhando as colunas",
+    "[baixo] Linha do total e seções com espaçamentos maiores; separador entre 'Write a Review' e 'Report a Problem' sem espaçamento"
+   ],
+   "css_suspect": "vertical-align em td; display/height em elementos do bloco Apple Card"
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[médio] Linha de TOTAL quebrada: rótulo deslocado à esquerda e borda vertical se estende para baixo da tabela",
+    "[médio] Logo 'Card' alinhado à esquerda em vez de centralizado acima do título",
+    "[baixo] Espaçamentos verticais maiores (altura ~8% maior)"
+   ],
+   "css_suspect": "border em td com rowspan/height; text-align em td"
+  }
+ },
+ {
+  "email": "re-aws-verify-email",
+  "summary_pt": "E-mail AWS de código de verificação: cabeçalho escuro com logo, card branco com código grande e rodapé legal.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamento vertical ~8% maior (cabeçalho e parágrafos mais altos)"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[alto] Container de 600px ignorado: card ocupa toda a largura e encosta/estoura a borda direita",
+    "[médio] Logo AWS alinhado à esquerda em vez de centralizado no cabeçalho"
+   ],
+   "css_suspect": "max-width em table container; align=center em td/img"
+  }
+ },
+ {
+  "email": "re-codepen-challengers",
+  "summary_pt": "Newsletter CodePen com banner, caixas amarelas, imagem grande, bloco PRO, grade de cards em 2 colunas e botão CTA.",
+  "blitz": {
+   "score": 7,
+   "issues": [
+    "[médio] Emojis inline ausentes (cubo de gelo, mão, braço, óculos escuros): deixam lacunas no texto",
+    "[médio] Cards de IDEAS/RESOURCES com padding interno muito maior e texto deslocado para baixo, ficando bem mais altos",
+    "[baixo] Espaçamentos verticais gerais um pouco maiores"
+   ],
+   "css_suspect": "fallback de fonte emoji; padding/vertical-align em td dos cards"
+  },
+  "litehtml": {
+   "score": 8,
+   "issues": [
+    "[baixo] Links do rodapé ('email preferences', 'instantly opt out', 'support') sem sublinhado",
+    "[baixo] Textos quebram um pouco diferente, cards levemente mais altos"
+   ],
+   "css_suspect": "text-decoration em links"
+  }
+ },
+ {
+  "email": "re-dropbox-reset-password",
+  "summary_pt": "Redefinição de senha Dropbox: card branco centralizado com logo, texto e botão azul.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Card levemente mais largo/alto e deslocado alguns pixels"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[médio] Largura do card ignorada: ocupa quase os 800px em vez de ~600px",
+    "[baixo] Texto em cinza mais claro que no Chromium",
+    "[baixo] Link 'more security tips' sem sublinhado"
+   ],
+   "css_suspect": "max-width/width em tabela"
+  }
+ },
+ {
+  "email": "re-github-access-token",
+  "summary_pt": "Notificação curta com título, caixa com borda contendo texto e botão verde, e rodapé.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Pequenas diferenças de espaçamento vertical"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 5,
+   "issues": [
+    "[alto] Largura máxima ignorada: conteúdo e caixa com borda ocupam os 800px inteiros",
+    "[médio] Título em uma única linha e caixa achatada por causa da largura errada"
+   ],
+   "css_suspect": "max-width em container"
+  }
+ },
+ {
+  "email": "re-google-play-policy-update",
+  "summary_pt": "Comunicado de política do Google Play em cartão branco com faixas gráficas azuis, texto e rodapé \"Connect with us\".",
+  "blitz": {
+   "score": 7,
+   "issues": [
+    "[médio] Bloco \"Connect with us\" deslocado para a esquerda e mais largo, desalinhado com o conteúdo do cartão",
+    "[baixo] Parágrafos encostam na borda direita do cartão (padding direito parcialmente ignorado)"
+   ],
+   "css_suspect": "padding/width em td aninhada; margin negativa"
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[médio] Cartão ocupa quase todos os 800px: largura máxima do container ignorada",
+    "[baixo] Faixa decorativa do rodapé sobreposta aos ícones de forma diferente"
+   ],
+   "css_suspect": "max-width em tabela container"
+  }
+ },
+ {
+  "email": "re-koala-welcome",
+  "summary_pt": "Boas-vindas simples com logo, parágrafo, botão de largura total do container e rodapé.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Container ligeiramente mais largo e espaçamentos um pouco maiores"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[alto] Container de ~580px ignorado: texto, botão e divisória ocupam os 800px inteiros"
+   ],
+   "css_suspect": "max-width em container"
+  }
+ },
+ {
+  "email": "re-linear-login-code",
+  "summary_pt": "E-mail Linear com código de login: logo, título, botão largo, texto e código em bloco monoespaçado.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamentos verticais ligeiramente maiores"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[alto] Container de ~560px ignorado: botão 'Login to Linear' e divisor ocupam quase toda a largura de 800px"
+   ],
+   "css_suspect": "max-width em container (div/table)"
+  }
+ },
+ {
+  "email": "re-netlify-welcome",
+  "summary_pt": "Boas-vindas Netlify com logo, card branco com lista de passos, botão CTA, links de navegação e rodapé.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamentos verticais um pouco maiores (altura ~6% maior)"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[médio] Largura máxima do card ignorada: conteúdo ocupa quase os 800px",
+    "[médio] Rodapé ('Unsubscribe', 'Manage Preferences') alinhado à esquerda e dentro da área branca, em vez de centralizado sobre o fundo cinza",
+    "[baixo] Links 'Visit the forums', 'Read the docs', 'Contact an expert' sem sublinhado"
+   ],
+   "css_suspect": "max-width em tabela/div; text-align em td do rodapé"
+  }
+ },
+ {
+  "email": "re-nike-receipt",
+  "summary_pt": "Recibo de envio com rastreio, produto, dados do pedido, grade de 4 recomendações e rodapé com links.",
+  "blitz": {
+   "score": 7,
+   "issues": [
+    "[médio] Altura total ~7% maior por espaçamentos verticais extras entre seções",
+    "[baixo] Colunas Order Number/Order Date deslocadas para a direita",
+    "[baixo] Links do rodapé (Men/Women/Kids/Customize) com espaçamento diferente"
+   ],
+   "css_suspect": "padding/line-height em td"
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[médio] Botão 'Track Package' desalinhado: colado à esquerda junto ao número de rastreio em vez de alinhado à direita",
+    "[médio] Links 'Men Women Kids' amontoados sem espaçamento, 'Customize' separado",
+    "[médio] Telefone e horário de atendimento juntos na mesma célula sem separação",
+    "[baixo] Botão 'Order Status' alinhado à esquerda em vez de centralizado"
+   ],
+   "css_suspect": "width em td / align em tabela; display:inline-block"
+  }
+ },
+ {
+  "email": "re-notion-magic-link",
+  "summary_pt": "E-mail de login com link mágico, bloco de código cinza e assinatura com logo.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamentos verticais ligeiramente maiores"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 7,
+   "issues": [
+    "[médio] Bloco do código de login se estende quase até a borda direita (largura máxima ignorada)"
+   ],
+   "css_suspect": "max-width em div/tabela"
+  }
+ },
+ {
+  "email": "re-papermark-year-in-review",
+  "summary_pt": "Retrospectiva anual Papermark com cartões arredondados com gradientes, estatísticas em 3 colunas, pílulas de países e botões escuros.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamento vertical ligeiramente maior nos cartões"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 5,
+   "issues": [
+    "[alto] max-width do container ignorado: cartões ocupam os 800px inteiros",
+    "[médio] Gradientes de fundo dos cartões perdidos ou muito atenuados (cinza e verde ficam chapados)",
+    "[baixo] Pílulas de países alinhadas à esquerda em vez de centralizadas"
+   ],
+   "css_suspect": "max-width; linear-gradient em background"
+  }
+ },
+ {
+  "email": "re-plaid-verify-identity",
+  "summary_pt": "E-mail de código de verificação Plaid com cartão estreito centralizado, ícone, código grande e rodapé.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Cartão um pouco mais alto que no Chromium"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 5,
+   "issues": [
+    "[alto] Cartão estreito (~360px) ignorado: ocupa os 800px inteiros",
+    "[médio] Título \"Enter the following code...\" alinhado à esquerda em vez de centralizado"
+   ],
+   "css_suspect": "max-width/width em tabela; text-align herdado"
+  }
+ },
+ {
+  "email": "re-raycast-magic-link",
+  "summary_pt": "Magic link com fundo em gradiente, título com emoji, link destacado e rodapé com logo em cinza.",
+  "blitz": {
+   "score": 7,
+   "issues": [
+    "[médio] Emojis ausentes (varinha no título e mãos apontando no link), deixando espaços vazios",
+    "[baixo] Logo do rodapé sai colorido em vez de acinzentado"
+   ],
+   "css_suspect": "fallback de fonte de emoji; filter:grayscale/opacity em img"
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[alto] Container de 600px ignorado: card com gradiente ocupa os 800px inteiros",
+    "[baixo] Logo do rodapé sai colorido em vez de acinzentado"
+   ],
+   "css_suspect": "max-width em container; filter:grayscale em img"
+  }
+ },
+ {
+  "email": "re-slack-confirm",
+  "summary_pt": "E-mail Slack de confirmação com código em caixa cinza, rodapé com logo, ícones sociais e links.",
+  "blitz": {
+   "score": 9,
+   "issues": [
+    "[baixo] Espaçamento vertical ~6% maior (caixa do código e rodapé mais altos)"
+   ],
+   "css_suspect": ""
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[alto] Container de ~560px ignorado: caixa do código e conteúdo ocupam quase toda a largura de 800px",
+    "[baixo] Links do rodapé ('Our blog', 'Policies'…) sem sublinhado"
+   ],
+   "css_suspect": "max-width em container; text-decoration em a"
+  }
+ },
+ {
+  "email": "re-stack-overflow-tips",
+  "summary_pt": "Dicas Stack Overflow: cabeçalho com logo, hero azul com ilustração, seções de texto com lista, botão CTA e rodapé.",
+  "blitz": {
+   "score": 5,
+   "issues": [
+    "[alto] Botão 'I need a break' perdeu padding/fundo: aparece como texto inline com realce azul, não como botão",
+    "[médio] Coluna de texto do hero mais estreita: título e subtítulo quebram em mais linhas e o hero fica mais alto",
+    "[baixo] Caixa '<3' do rodapé esticada por toda a largura",
+    "[baixo] Borda clara visível ao redor da área do logo no topo"
+   ],
+   "css_suspect": "display:inline-block/padding em <a> de botão; width em td do hero"
+  },
+  "litehtml": {
+   "score": 8,
+   "issues": [
+    "[baixo] Caixa '<3' do rodapé esticada por toda a largura",
+    "[baixo] Links do rodapé sem sublinhado",
+    "[baixo] Itens da lista com espaçamento vertical maior"
+   ],
+   "css_suspect": "display:inline-block; text-decoration em links"
+  }
+ },
+ {
+  "email": "re-stripe-welcome",
+  "summary_pt": "Boas-vindas Stripe em card branco centralizado com botão largo, parágrafos com links e rodapé.",
+  "blitz": {
+   "score": 8,
+   "issues": [
+    "[baixo] Altura ~8% maior por espaçamentos e quebras de linha diferentes",
+    "[baixo] Card um pouco mais baixo e com mais espaço inferior"
+   ],
+   "css_suspect": "line-height"
+  },
+  "litehtml": {
+   "score": 5,
+   "issues": [
+    "[alto] Largura máxima do card ignorada: card ocupa ~780px em vez de ~600px",
+    "[médio] Botão CTA e parágrafos esticados acompanhando a largura errada"
+   ],
+   "css_suspect": "max-width em container"
+  }
+ },
+ {
+  "email": "re-twitch-reset-password",
+  "summary_pt": "Aviso de troca de senha da Twitch em cartão branco sobre fundo cinza com logo, texto e rodapé com ícones.",
+  "blitz": {
+   "score": 7,
+   "issues": [
+    "[médio] Texto do corpo ultrapassa a borda direita do cartão branco (padding/largura incorretos)",
+    "[baixo] Espaçamento vertical maior entre cabeçalho e corpo"
+   ],
+   "css_suspect": "padding em td com width fixa (box-sizing)"
+  },
+  "litehtml": {
+   "score": 5,
+   "issues": [
+    "[alto] Cartão de 600px ignorado: conteúdo ocupa os 800px inteiros",
+    "[médio] Ícones sociais do rodapé separados (Twitter à esquerda, Facebook ao centro) em vez de agrupados e centralizados"
+   ],
+   "css_suspect": "max-width em tabela; display:inline-block/width em td de ícones"
+  }
+ },
+ {
+  "email": "re-vercel-invite-user",
+  "summary_pt": "Convite Vercel em card com borda, avatares circulares ligados por seta, botão preto e rodapé de segurança.",
+  "blitz": {
+   "score": 8,
+   "issues": [
+    "[baixo] Avatares e seta mais espaçados entre si; espaçamentos verticais um pouco maiores"
+   ],
+   "css_suspect": "width em td de colunas"
+  },
+  "litehtml": {
+   "score": 5,
+   "issues": [
+    "[alto] Container de ~465px ignorado: card ocupa os 800px inteiros",
+    "[médio] Avatares alinhados à esquerda em vez de centralizados e sem border-radius (quadrados)",
+    "[baixo] Texto do botão 'Join the team' em fonte serifada"
+   ],
+   "css_suspect": "max-width em container; border-radius em img; align em td"
+  }
+ },
+ {
+  "email": "re-yelp-recent-login",
+  "summary_pt": "Alerta Yelp de login recente com card bordado, ilustração no topo, dados de sessão, botão vermelho e rodapé ilustrado.",
+  "blitz": {
+   "score": 7,
+   "issues": [
+    "[médio] Container não centralizado: card e logo deslocados para a esquerda e card um pouco mais largo",
+    "[baixo] Título 'We noticed a recent login…' e espaçamentos maiores, alongando o card (~7% mais alto)"
+   ],
+   "css_suspect": "margin:0 auto / align=center em table container com max-width"
+  },
+  "litehtml": {
+   "score": 6,
+   "issues": [
+    "[alto] Container de 600px ignorado: card fica mais largo que no Chromium",
+    "[médio] Ilustração do topo não preenche a largura do card, deixando faixa branca à direita"
+   ],
+   "css_suspect": "max-width em table; width:100% em img"
+  }
+ }
+]

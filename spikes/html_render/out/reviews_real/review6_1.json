@@ -1,0 +1,58 @@
+{
+  "ham-20-fuckedcompany-com": {"score": 9.0, "issues": [
+    "[baixo] Texto ao lado da caixa flutuante 'InternalMemos.com' (canto superior direito) quebra mais largo que no Chromium: a 1ª linha cabe 'there were a bunch' enquanto o Chromium quebra antes de 'bunch'; o espaçamento horizontal entre o texto e a tabela flutuante é menor, o que muda a quebra dos 4 primeiros parágrafos.",
+    "[baixo] Imagens 'Profile' inline (Limb, Xerox) ficam um pouco menores/mais baixas que no Chromium, gerando deriva vertical de ~2-4 px nas seções seguintes."
+  ], "css_suspect": "table align=right (float) com hspace/margem lateral ausente ou menor; altura da linha de img inline sem src"},
+  "ham-21-mail3-globalscape-co": {"score": 8.7, "issues": [
+    "[médio] No topo da coluna esquerda o html_view desenha uma moldura prateada larga (~165 px) e baixa onde o Chromium mostra só o ícone de imagem quebrada em ~20 px; parece uma imagem com width explícito e height pequeno desenhada como faixa horizontal visível.",
+    "[baixo] Coluna lateral esquerda ligeiramente mais estreita: 'Purchase CuteFTP Pro 3.0 for just $59.95!' quebra em 'Pro / 3.0 for just' em vez de '3.0 / for just'."
+  ], "css_suspect": "img com width/height de atributo sem alt (moldura de placeholder); largura de coluna de tabela com spacer GIFs"},
+  "ham-22-lindows-com": {"score": 9.4, "issues": [
+    "[baixo] Os separadores <hr> entre seções saem como linha escura sólida de 1-2 px; no Chromium são linhas cinza claras com efeito 'inset' (sombreado), bem mais discretas sobre o fundo verde."
+  ], "css_suspect": "estilo padrão do <hr> (border-style: inset, cor cinza) / atributo noshade/color"},
+  "ham-23-optusnet-com-au": {"score": 9.2, "issues": [
+    "[baixo] Logo abaixo de 'Please feel free to forward this email' aparece uma barra/moldura fina horizontal (~180 px) que não existe no Chromium (imagem espaçadora sem alt desenhada como moldura).",
+    "[baixo] Cabeçalho de imagens bloqueadas: ícones/molduras das células superiores (logo Cisco e banner à direita) diferem em tamanho; o Chromium mostra ícones pequenos, html_view molduras que preenchem a célula — layout geral idêntico."
+  ], "css_suspect": "img espaçadora com width/height de atributo sem alt"},
+  "ham-24-allthingsnewengland": {"score": 9.8, "issues": [
+    "[baixo] Linhas <hr> um pouco mais escuras que no Chromium (sem sombreado inset); de resto idêntico."
+  ], "css_suspect": "estilo padrão do <hr>"},
+  "rge-airops-aiops-ai-search-newsletter": {"score": 8.0, "issues": [
+    "[médio] Texto alternativo das imagens de conteúdo some: o Chromium mostra o alt sublinhado/azul ('The Latest-2-4', 'AirOps Ads Library', 'EMEA Launch Recap: Why AI Search Runs on Evidence', '25 ChatGPT Ads Tips From AirOps's Own Tests', 'The AI Search Advantage webinar...'); o html_view mostra apenas um quadradinho vazio centralizado, sem nenhum texto.",
+    "[baixo] Rodapé: 'airops-JuneUpdate-2' (alt do logo) também ausente — só a moldura vazia.",
+    "[baixo] Como o alt não é desenhado, cada seção fica ~3-5 px mais curta (altura total 1927 vs 1940)."
+  ], "css_suspect": "img com width=518/598 + style max-width:100%, border-radius, align=middle dentro de <a>: alt text não renderizado (possível clip pelo border-radius/overflow ou largura colapsada)"},
+  "rge-banfield-pet-hospital-halloween-safety-newsletter": {"score": 7.5, "issues": [
+    "[alto] A faixa ciano de largura total abaixo do cabeçalho (img width=640 com background-color:#02b5df, sem alt) vira um quadradinho ciano de ~10 px centralizado no html_view; no Chromium ocupa toda a largura do card (~640 px).",
+    "[médio] Rodapé: os ícones sociais (img width=35) e o logo Banfield (width=167), sem alt, não deixam nenhuma moldura/espaço visível no html_view; o Chromium mostra 3 ícones à esquerda e o logo à direita acima do endereço.",
+    "[baixo] Corpo desloca ~5 px para baixo por causa da diferença no cabeçalho (994 vs 987 px)."
+  ], "css_suspect": "img sem alt com atributo width (display:block): html_view não aplica o width do atributo quando a imagem falha e não há alt, colapsando para tamanho de ícone/zero"},
+  "rge-bloobloom-halloween-competition": {"score": 6.5, "issues": [
+    "[alto] A moldura preta de 1 px do card só envolve a primeira seção (termina logo abaixo do botão 'ENTER COMPETITION'); nas seções seguintes (imagens dos modelos, rodapé 'CUSTOMER SERVICE', textos legais) faltam as bordas esquerda/direita e a borda inferior, que o Chromium desenha até o fim do card.",
+    "[médio] As seções seguintes aparecem com fundo ligeiramente diferente/sem a continuidade visual do card, dando a impressão de que o e-mail 'quebra' no meio.",
+    "[baixo] Ícones sociais e logo do rodapé: molduras no lugar dos ícones (ok), mas o bloco inteiro fica ~12 px mais baixo (1101 vs 1089)."
+  ], "css_suspect": "border-left/border-right/border-bottom: solid 1px #000 em <td style=...font-size:0px> de seções MJML subsequentes não pintados (só a 1ª seção com border-top recebe bordas) — possível background de div/tabela interna pintado por cima da borda do td"},
+  "rge-den-halloween-black-furniture": {"score": 9.1, "issues": [
+    "[baixo] Bloco de texto e botão 'Shop the Dark Side' ficam ~4 px mais altos que no Chromium, e a grade de produtos ~5 px mais acima; altura total 1045 vs 1059.",
+    "[baixo] Nos cartões da grade, o placeholder da imagem é centralizado (moldura) enquanto o Chromium põe o ícone no canto superior esquerdo; o texto dos links fica no mesmo lugar."
+  ], "css_suspect": "altura de linha de img bloqueada sem alt (ícone 16px vs moldura) acumulando deriva"},
+  "rge-liquid-death-halloween-trick-kids": {"score": 9.7, "issues": [
+    "[baixo] Praticamente idêntico; apenas os placeholders das imagens (alt 'Liquid Death', ícones sociais) com moldura no lugar do ícone quebrado."
+  ], "css_suspect": ""},
+  "rge-logitech-mx-master-4-developer-edition-launch": {"score": 9.0, "issues": [
+    "[baixo] Faixa 'Free shipping / Money-back guarantee / 24/7 customer service': o Chromium mostra caixas de ~26x26 px (imagens sem alt com width/height) acima de cada título; no html_view o espaço existe mas nenhuma moldura é desenhada.",
+    "[baixo] Na grade 'Bundle and save', o alt 'MX Keypad Images' etc. vem colado à moldura e centralizado; no Chromium o ícone fica à esquerda e o texto deslocado à direita — diferença pequena de posição horizontal (~20-40 px).",
+    "[baixo] Imagem de rastreamento no fim aparece centralizada logo abaixo dos links, no Chromium no canto esquerdo; altura total 2232 vs 2245."
+  ], "css_suspect": "img sem alt com width/height de atributo não recebe moldura de placeholder; alinhamento de img broken em td align=center"},
+  "rge-lush-halloween-seasonal-promotion": {"score": 9.5, "issues": [
+    "[baixo] Placeholders das imagens (logo, 'Headline', 'Same-day delivery', 'Click & Collect', 'Massage bars') ficam inline junto ao alt centralizado; no Chromium o ícone fica no canto esquerdo da linha. Texto e cores idênticos; ~2-4 px de deriva vertical acumulada."
+  ], "css_suspect": "posição do ícone de img quebrada com display:block (ignorável)"},
+  "rge-masterclass-uber-growth-course": {"score": 9.3, "issues": [
+    "[baixo] Linha de ícones sociais no rodapé escuro: no Chromium cada alt (TikTok, Instagram, YouTube...) quebra em duas linhas sob o ícone, formando um bloco mais alto; no html_view ficam numa única linha, deixando o rodapé ~10 px mais curto (1869 vs 1885 total).",
+    "[baixo] Alt 'Growth is changing...' começa um pouco mais à direita/sem o ícone à esquerda; irrelevante."
+  ], "css_suspect": "largura de img sem src com width de atributo pequeno — alt text deveria quebrar dentro da largura da caixa (Chromium) mas transborda em uma linha"},
+  "rge-netflix-continue-watching-nobody-wants": {"score": 9.0, "issues": [
+    "[baixo] Nos cartões de miniaturas ('Nobody Wants This', 'Abby Loves Smoothies', 'Love Forever', etc.) a moldura do placeholder sobrepõe o início do alt text: aparecem 'obody Wants This', 'alentine's Day', 'ove Forever' — o primeiro caractere fica coberto/cortado; no Chromium o texto vem após o ícone.",
+    "[baixo] Barra de progresso vermelha sob 'Valentine's Day' um pouco mais longa (~20 px vs ~15 px)."
+  ], "css_suspect": "alt text de img com width pequeno e overflow:hidden — moldura desenhada por cima do texto em vez de antes dele"}
+}

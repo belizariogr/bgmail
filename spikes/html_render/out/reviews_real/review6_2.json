@@ -1,0 +1,85 @@
+{
+  "rge-ollama-mistral-large-open-source": {
+    "score": 9.9,
+    "issues": [],
+    "css_suspect": ""
+  },
+  "rge-organic-valley-thanksgiving-giveaway": {
+    "score": 9.3,
+    "issues": [
+      "[baixo] Título 'Your Thanksgiving feast just got a little more exciting!' e links 'UNSUBSCRIBE'/'PRIVACY' saem em peso regular/médio em vez do traço pesado do Chromium; o HTML pede font-family 'arial black' (fonte ausente -> fallback sem peso extra-negrito), quebras de linha do título diferem levemente mas a altura total bate (1124 vs 1126 px).",
+      "[baixo] Placeholders de imagem (ícones sociais, espaçadores entre os blocos verdes) mostram quadrado prateado em vez do ícone quebrado, posições e espaços equivalentes."
+    ],
+    "css_suspect": "font-family 'arial black' sem fonte local: fallback não sintetiza peso 900 (font-weight implícito da família)"
+  },
+  "rge-pacaso-owner-spotlight-seasonal-homes": {
+    "score": 9.6,
+    "issues": [
+      "[baixo] Alt text dentro das caixas de imagem dos cards (ex.: 'Charles Street, a Pacaso home in London') quebra em pontos diferentes (Chromium recua após o ícone e quebra em 2-3 linhas; html_view ocupa a largura inteira da caixa), sem impacto de layout."
+    ],
+    "css_suspect": "layout do alt text inline em <img> com width/height fixos"
+  },
+  "rge-pillsbury-halloween-costume-recipes": {
+    "score": 8.6,
+    "issues": [
+      "[médio] Alt text do logo 'Pillsbury Logo' (img 98x98, display:block) aparece deslocado para baixo e a segunda linha 'Logo' é cortada pela borda inferior da caixa; no Chromium as duas linhas aparecem inteiras logo abaixo do ícone.",
+      "[médio] Imagens com alt text longo nas grades de receitas (ex.: 'Macaroni and cheese in miniature pot pies...', 'A light blue Dutch oven...') quebram em mais linhas no html_view, deixando as células creme e as seções azuis ~8-14 px mais altas cada; o deslocamento acumula (~21 px no total, 'Trending Easy Dinners' desce ~14 px).",
+      "[baixo] Na seção 'Easy as Pie' e no bloco da Pizza Crescent, alt texts ficam centralizados/alinhados de forma um pouco diferente (Chromium alinha o ícone à esquerda da linha de texto)."
+    ],
+    "css_suspect": "alt text em <img> com display:block + width/height fixos (overflow/clip e quebra de linha do conteúdo de fallback)"
+  },
+  "rge-primal-kitchen-halloween-bogo-collagen": {
+    "score": 9.4,
+    "issues": [
+      "[baixo] Na grade de produtos 2x2, a coluna direita ('Unflavored Collagen Peptides', 'COLLAGEN FUEL® Drink Mix') fica ~8 px mais baixa que no Chromium e o placeholder da imagem não fica alinhado ao topo como na coluna esquerda (Chromium alinha os ícones de ambas as colunas na mesma linha).",
+      "[baixo] Conteúdo inteiro deslocado ~2-3 px para baixo a partir do bloco laranja (altura 1483 vs 1480 px)."
+    ],
+    "css_suspect": "vertical-align/altura de linha de placeholder de <img> sem src carregado em células de tabela"
+  },
+  "rge-promise-gluten-free-fall-brioche-toast": {
+    "score": 9.0,
+    "issues": [
+      "[médio] Rodapé ('No longer want to receive these emails? Unsubscribe' / '© 2026 Promise Gluten Free') começa ~15 px mais abaixo e o bloco termina com ~30 px extras de marrom; total 2977 vs 2929 px (+48 px). A célula anterior contém apenas comentários condicionais MSO e espaços, e divs vazias, que no Chromium têm altura 0.",
+      "[baixo] Molduras das imagens hero (banners marrons com link) em prata em vez do contorno roxo de link do Chromium (item de placeholder, ignorável)."
+    ],
+    "css_suspect": "células/divs só com whitespace e comentários gerando line box (altura de linha) em vez de colapsar para 0"
+  },
+  "rge-pure-halloween-dog-food-education": {
+    "score": 9.7,
+    "issues": [
+      "[baixo] Botão 'Fill their bowl with goodness' e o bloco laranja seguinte ~1-2 px abaixo; alt text 'Frightening Fillers' alinhado igual. Praticamente idêntico."
+    ],
+    "css_suspect": ""
+  },
+  "rge-reverb-halloween-gear-deals": {
+    "score": 9.2,
+    "issues": [
+      "[baixo] Alt text das imagens dentro de <a> ('A yellow Electro-Harmonix Big Muff Pi...', 'Fender Custom Shop '65 Tele...', 'Gretsch G6136B...', 'Reverb') aparece sem sublinhado de link; no Chromium o texto alternativo herda text-decoration underline do <a>.",
+      "[baixo] Alt text da imagem hero ocupa a largura inteira do card (não é recortado na largura da imagem como no Chromium, que corta 'cobwe…'/'spid…')."
+    ],
+    "css_suspect": "text-decoration herdada de <a> não aplicada ao texto de fallback do <img>; overflow:clip do alt text à caixa da imagem"
+  },
+  "rge-rspca-autumn-newsletter": {
+    "score": 9.2,
+    "issues": [
+      "[baixo] Alt texts sublinhados (logo no topo e logo do rodapé com links 'formerly Twitter' etc.) não aparecem: html_view mostra só o quadrado do placeholder onde o Chromium mostra o texto de link sublinhado.",
+      "[baixo] Cada bloco colorido fica ~2-3 px mais baixo cumulativamente (total 2319 vs 2308 px), sem afetar a leitura."
+    ],
+    "css_suspect": "alt text de <img> em caixas pequenas/height fixo suprimido; altura de linha de placeholder de imagem"
+  },
+  "rge-starbucks-black-cat-frappuccino-halloween": {
+    "score": 9.0,
+    "issues": [
+      "[médio] Divisores verticais brancos entre os itens da barra verde de navegação ('GO TO APP | ORDER NOW | EARN & REDEEM | MY BENEFITS') não são pintados; o HTML usa border-right: solid 2px #FFFFFF no <td> de largura 25%.",
+      "[baixo] Alt texts dos ícones sociais e do logo 'STARBUCKS® REWARDS' corretos; demais conteúdo idêntico."
+    ],
+    "css_suspect": "border-right em <td> (tabela sem border-collapse explícito) não pintado"
+  },
+  "rge-thira-brief-art-design-newsletter": {
+    "score": 9.8,
+    "issues": [
+      "[baixo] Diferenças de 1 px em algumas linhas (títulos de seção 'Mildred Thompson...'), imperceptíveis."
+    ],
+    "css_suspect": ""
+  }
+}

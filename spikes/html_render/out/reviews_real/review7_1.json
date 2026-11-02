@@ -1,0 +1,110 @@
+{
+  "ham-20-fuckedcompany-com": {
+    "score": 8.8,
+    "issues": [
+      "[médio] O texto que contorna o quadro flutuante amarelo 'InternalMemos.com' (canto superior direito) encosta na borda do quadro: no Chromium há ~12 px de respiro entre o texto e o float; no html_view as linhas vão até a borda ('there were a bunch' já cabe na 1ª linha), mudando as quebras de todos os parágrafos ao lado do float.",
+      "[baixo] Imagem 'Profile' e o marcador antes de 'pps-' aparecem como moldura vazia/recuo em vez do ícone; espaço preservado, layout equivalente."
+    ],
+    "css_suspect": "hspace/margin do <table align=right> flutuante ignorado (margem horizontal do float não aplicada na área de exclusão)"
+  },
+  "ham-21-mail3-globalscape-co": {
+    "score": 8.5,
+    "issues": [
+      "[médio] Parágrafo 'New Release! GlobalSCAPE is pleased...' no topo: no Chromium o texto está justificado (text-align/align=justify, espaços alargados) e contorna uma imagem flutuante à direita; no html_view o texto fica alinhado à esquerda (bordas irregulares) e ocupa a largura toda, quebrando as linhas em lugares diferentes.",
+      "[baixo] Coluna lateral esquerda ~10 px mais estreita: 'Purchase CuteFTP Pro 3.0' quebra antes de '3.0' no html_view (no Chromium '3.0' fica na 1ª linha).",
+      "[baixo] Várias imagens bloqueadas sem dimensões (espaçadores do cabeçalho, ícone antes de 'Buy Now' e 'Learn More', imagens flutuantes) não reservam espaço nem moldura; posição geral do conteúdo preservada."
+    ],
+    "css_suspect": "text-align: justify (ou <p align=justify>) não aplicado; float de <img align=right> sem dimensões descartado; largura de <td width> da coluna lateral"
+  },
+  "ham-22-lindows-com": {
+    "score": 9.8,
+    "issues": [
+      "[baixo] Imagens bloqueadas (cabeçalho e gráfico da linha do tempo) mostram apenas a área/moldura sem o ícone; dimensões idênticas ao Chromium."
+    ],
+    "css_suspect": ""
+  },
+  "ham-23-optusnet-com-au": {
+    "score": 9.4,
+    "issues": [
+      "[baixo] Rodapé verde-escuro: o link 'click here' em 'please click here to unsubscribe' aparece azul sublinhado no html_view; no Chromium herda a cor branca do texto sem sublinhado visível.",
+      "[baixo] Rodapé verde ~4 px mais baixo e texto um pouco mais alto dentro da faixa."
+    ],
+    "css_suspect": "cor de <a> dentro de <font color> / herança de color para links"
+  },
+  "ham-24-allthingsnewengland": {
+    "score": 9.9,
+    "issues": [],
+    "css_suspect": ""
+  },
+  "rge-airops-aiops-ai-search-newsletter": {
+    "score": 9.8,
+    "issues": [
+      "[baixo] Imagens bloqueadas mostram moldura prateada + alt no lugar do ícone; alinhamento e espaço iguais ao Chromium."
+    ],
+    "css_suspect": ""
+  },
+  "rge-banfield-pet-hospital-halloween-safety-newsletter": {
+    "score": 9.2,
+    "issues": [
+      "[baixo] Todo o conteúdo abaixo do cabeçalho deslocado ~5 px para baixo (logo alt 'Banfie - Pet Hospit' e faixa ciano descem); a pequena imagem alt à esquerda logo abaixo da faixa ciano não aparece.",
+      "[baixo] Rodapé cinza: os ícones sociais e o logo bloqueados não exibem moldura nem ícone (área em branco), enquanto o Chromium mostra os 4 marcadores; espaço vertical preservado."
+    ],
+    "css_suspect": "imagens sem alt e sem dimensões explícitas não recebem moldura; altura de linha da imagem alt no cabeçalho"
+  },
+  "rge-bloobloom-halloween-competition": {
+    "score": 8.6,
+    "issues": [
+      "[médio] Bloco das duas imagens após 'ENTER COMPETITION' ('Model wearing black glasses...' e 'Close-up of orange...'): no html_view aparece uma faixa com finas linhas brancas horizontais acima e abaixo e a borda esquerda preta do contêiner externo fica interrompida nesse trecho; no Chromium o fundo e a borda são contínuos.",
+      "[baixo] O alt da imagem principal ('Model wearing black sunglasses...') quebra com recuo diferente e empurra o conteúdo ~8 px para baixo; diferença acumula até ~12 px no fim (altura 1101 vs 1089)."
+    ],
+    "css_suspect": "tabela aninhada com background/width:100% sobrepondo a borda do contêiner (overflow/pintura de background por cima do border); line-height do alt inline"
+  },
+  "rge-den-halloween-black-furniture": {
+    "score": 9.0,
+    "issues": [
+      "[baixo] Texto monoespaçado de introdução ('This Halloween, we're embracing...') com entrelinha ~1 px menor por linha e cor mais escura; bloco termina ~5 px antes e o botão 'Shop the Dark Side' sobe.",
+      "[baixo] Grade de produtos e seção branca 'Schedule An Appointment' ~9 px mais altas no Chromium; altura total 1045 vs 1059 (-1,3%).",
+      "[baixo] Faixa clara com imagens bloqueadas entre cabeçalho laranja e corpo, e acima da seção branca, sem ícones; espaço equivalente."
+    ],
+    "css_suspect": "line-height / letter-spacing com fonte monoespaçada"
+  },
+  "rge-liquid-death-halloween-trick-kids": {
+    "score": 9.8,
+    "issues": [
+      "[baixo] Imagens bloqueadas (logo, ícones sociais) com moldura prateada em vez do ícone; layout idêntico."
+    ],
+    "css_suspect": ""
+  },
+  "rge-logitech-mx-master-4-developer-edition-launch": {
+    "score": 9.0,
+    "issues": [
+      "[baixo] Faixa de garantias ('Free shipping', 'Money-back guarantee', '24/7 customer service'): o Chromium mostra caixas 26x26 com borda para os ícones bloqueados; no html_view não há moldura (espaço em branco).",
+      "[baixo] Grade 'Bundle and save': alt das imagens ('MX Keypad Images' etc.) centrado com moldura no html_view, enquanto no Chromium o ícone fica à esquerda da célula; texto abaixo alinhado igual.",
+      "[baixo] Imagem final de rastreamento aparece centralizada abaixo dos links do rodapé no html_view; no Chromium fica alinhada à esquerda. Altura total 13 px menor (rodapé legal sobe ~8 px)."
+    ],
+    "css_suspect": "moldura de imagem bloqueada com width/height mas sem alt; text-align herdado em imagem bloco"
+  },
+  "rge-lush-halloween-seasonal-promotion": {
+    "score": 9.3,
+    "issues": [
+      "[baixo] Imagens full-width bloqueadas: no Chromium o ícone fica no canto esquerdo e o alt centralizado; no html_view a moldura fica colada ao alt centralizado. Espaço vertical equivalente (diferença total de 4 px).",
+      "[baixo] Rodapé preto: alts das imagens do app ('LUSH Rewards', 'Download the app') ligeiramente deslocados; ícones sociais como molduras."
+    ],
+    "css_suspect": ""
+  },
+  "rge-masterclass-uber-growth-course": {
+    "score": 9.2,
+    "issues": [
+      "[baixo] Rodapé escuro: os alts dos ícones sociais (Facebook, Instagram, YouTube...) aparecem em uma linha ao lado das molduras no html_view; no Chromium ficam quebrados em duas linhas sob o ícone dentro da largura fixa da imagem, deixando a faixa ~10 px mais alta.",
+      "[baixo] Altura total 14 px menor, concentrada no rodapé."
+    ],
+    "css_suspect": "alt text de <img width=...> não restrito à largura da imagem (sem quebra dentro da caixa)"
+  },
+  "rge-netflix-continue-watching-nobody-wants": {
+    "score": 9.3,
+    "issues": [
+      "[baixo] Miniaturas bloqueadas nos cartões ('Abby Loves Smoothies', 'More like Nobody Wants This', 'My List' etc.): alt exibido com moldura à esquerda e posição ligeiramente diferente; no Chromium o ícone fica no canto e o alt é recortado na caixa da imagem. Estrutura dos cartões, botões e rodapé idênticos."
+    ],
+    "css_suspect": ""
+  }
+}

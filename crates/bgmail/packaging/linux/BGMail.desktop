@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name={{name}}
+GenericName=Mail Client
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Exec={{exec}} %u
+Icon={{icon}}
+Terminal=false
+Categories=Network;Email;
+Keywords=mail;email;e-mail;imap;smtp;
+MimeType=x-scheme-handler/mailto;
+StartupNotify=true
+StartupWMClass=BGMail

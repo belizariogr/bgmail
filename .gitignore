@@ -1,4 +1,6 @@
 /target
+# Build output of the vendored workspaces (vendor/blitz, vendor/taffy)
+/vendor/*/target
 **/*.rs.bk
 *.pdb
 .DS_Store

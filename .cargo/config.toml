@@ -6,3 +6,13 @@
 # ferramentas continuam no XcodeDefault via fallback. A variável é ignorada fora do macOS.
 [env]
 TOOLCHAINS = "com.apple.dt.toolchain.Metal"
+
+# Windows gives the main thread a 1 MB stack (8 MB on Linux/macOS). The HTML
+# reader styles and lays out mail on the UI thread, recursing per nesting
+# level; reserve 8 MB like the other platforms so the nesting limit
+# (`html_view::MAX_NESTING_DEPTH`) holds with the same margin everywhere.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "link-arg=/STACK:8388608"]
+
+[target.'cfg(all(windows, target_env = "gnu"))']
+rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]

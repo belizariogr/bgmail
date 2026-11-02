@@ -1,0 +1,87 @@
+{
+  "client-apple-mail": {
+    "score": 9.5,
+    "issues": [
+      "[baixo]{layout} Espaçamento vertical entre 'Valeu!' e 'Joana' e no bloco citado ~3px maior que no Chromium"
+    ],
+    "css_suspect": "line-height / margens de <br> e blockquote"
+  },
+  "client-gmail-reply": {
+    "score": 8,
+    "issues": [
+      "[médio]{layout} Assinatura: 'Gerente de Projetos · Acme Ltda' perde a cor cinza e o telefone '+55 11 98765-4321' perde o tamanho reduzido (aparece no tamanho/cor do corpo), quebrando a hierarquia da assinatura",
+      "[baixo]{layout} Altura total ~2% maior (espaçamento das linhas)"
+    ],
+    "css_suspect": "atributos legados <font color=... size=...> não mapeados para color/font-size"
+  },
+  "mjml-newsletter": {
+    "score": 9.5,
+    "issues": [
+      "[baixo]{layout} Seções ligeiramente mais altas (~3px cada), altura total ~1% maior"
+    ],
+    "css_suspect": "line-height / métricas de fonte"
+  },
+  "postmark-receipt": {
+    "score": 7.5,
+    "issues": [
+      "[médio]{paint} Borda do cupom '10% off your next purchase!' desenhada sólida e mais escura em vez de tracejada (Blitz CPU desenha tracejada)",
+      "[baixo]{layout} Corpo branco não ocupa toda a largura: faixas cinzas de ~10px nas laterais que não existem no Chromium",
+      "[baixo]{layout} Altura total ~6% maior; linhas da tabela de itens e área antes de 'Download as PDF' mais espaçadas"
+    ],
+    "css_suspect": "border-style: dashed (pintura GPUI); width:100% / margens do wrapper"
+  },
+  "re-04-arcane-newsletter": {
+    "score": 7.5,
+    "issues": [
+      "[médio]{layout} Imagem principal (rosto) e imagem do creme ficam recuadas ~5px dentro do container com borda escura visível ao redor, em vez de ocupar a largura total (Chromium sem moldura)",
+      "[médio]{layout} Altura total ~8% maior; título 'Tips And Resources', citação e blocos numerados com mais espaçamento vertical; citação quebra em 7 linhas contra 6",
+      "[baixo]{layout} Coluna de texto dos itens numerados mais estreita, quebrando em 4 linhas em vez de 3",
+      "[baixo]{paint} Rodapé com espaçamento duplo entre palavras ('barrier-first  formulas', 'Mercantile  Row') só no html_view"
+    ],
+    "css_suspect": "padding/border em <img> com width:100% (box-sizing); line-height dos títulos serif; espaços em branco na moldagem de texto GPUI"
+  },
+  "re-05-studio-abandoned-cart": {
+    "score": 8.5,
+    "issues": [
+      "[baixo]{layout} Altura total ~6% maior: cartão do produto, depoimento e rodapé com mais espaço vertical",
+      "[baixo]{layout} Estrelas '★★★★★' do depoimento bem maiores que no Chromium",
+      "[baixo]{layout} Citação do depoimento quebra em pontos diferentes (texto um pouco mais largo)"
+    ],
+    "css_suspect": "line-height / padding de tabelas; fallback de fonte para glifo ★"
+  },
+  "re-apple-receipt": {
+    "score": 6,
+    "issues": [
+      "[médio]{layout} Bloco de informações (Apple ID / Invoice date / Order ID / Billed to) com padding muito maior e 'BILLED TO' centralizado verticalmente em vez de alinhado ao topo; bloco ~60% mais alto",
+      "[médio]{layout} Linha TOTAL: divisão das colunas errada (célula do valor ocupa ~50% da largura em vez de ~15%) e linha ~2x mais alta",
+      "[médio]{layout} Item HBO Max: texto colado no ícone (sem o espaçamento de ~15px) e links 'Write a Review|Report a Problem' sem espaço em volta do separador",
+      "[baixo]{paint} Ícone do HBO Max sem cantos arredondados (Blitz CPU arredonda)",
+      "[baixo]{layout} Altura total ~15% maior; espaço extra acima e abaixo do bloco Apple Card"
+    ],
+    "css_suspect": "vertical-align:top em td, width de colunas em tabela, padding de td; border-radius em <img> (pintura)"
+  },
+  "re-koala-welcome": {
+    "score": 9.5,
+    "issues": [
+      "[baixo]{layout} Altura total ~3% maior; espaçamentos verticais levemente maiores"
+    ],
+    "css_suspect": "line-height / métricas de fonte"
+  },
+  "re-raycast-magic-link": {
+    "score": 8,
+    "issues": [
+      "[médio]{paint} Emojis (🪄, 👉, 👈) desenhados como glifos monocromáticos de contorno em vez de emoji colorido",
+      "[baixo]{layout} Altura total ~4% maior; ícone do rodapé aparece colorido (vermelho) em vez de cinza",
+      "[baixo]{layout} Gradiente de fundo ligeiramente diferente na região inferior"
+    ],
+    "css_suspect": "fallback para fonte de emoji colorida; filter/opacity no ícone do rodapé"
+  },
+  "re-vercel-invite-user": {
+    "score": 7.5,
+    "issues": [
+      "[médio]{paint} Avatares (foto do Alan e logo do time) aparecem quadrados em vez de circulares (Blitz CPU arredonda corretamente)",
+      "[baixo]{layout} Altura total ~4% maior; mais espaço acima/abaixo dos avatares e do botão 'Join the team'"
+    ],
+    "css_suspect": "border-radius:100% em <img> (clip de imagem no GPUI)"
+  }
+}

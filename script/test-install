@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Exercises bundle-linux → install.sh → uninstall.sh with a dummy binary and a
+# throwaway HOME. No build, no network, nothing touched outside a temp dir.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+temp="$(mktemp -d)"
+trap 'rm -rf "$temp"' EXIT
+home="$temp/home"
+mkdir -p "$home"
+
+fail() {
+    echo "FAIL: $1" >&2
+    exit 1
+}
+
+printf '#!/bin/sh\necho dummy-bgmail\n' > "$temp/fake"
+chmod +x "$temp/fake"
+CARGO_TARGET_DIR="$temp/target" BGMAIL_BINARY="$temp/fake" script/bundle-linux > /dev/null
+bundle="$temp/target/release/bgmail-linux-$(uname -m).tar.gz"
+[[ -f "$bundle" ]] || fail "no tarball"
+
+install() {
+    HOME="$home" SHELL=/bin/zsh BGMAIL_BUNDLE_PATH="$1" script/install.sh
+}
+output="$(install "$bundle")"
+grep -q "add ~/.local/bin to your PATH" <<<"$output" || fail "no PATH hint: $output"
+grep -q "zshrc" <<<"$output" || fail "PATH hint ignores the shell"
+
+[[ "$("$home/.local/bin/bgmail")" == dummy-bgmail ]] || fail "linked binary doesn't run"
+for size in 16 512 1024; do
+    [[ -f "$home/.local/bgmail.app/share/icons/hicolor/${size}x${size}/apps/bgmail.png" ]] \
+        || fail "icon $size missing"
+done
+
+desktop="$home/.local/share/applications/BGMail.desktop"
+grep -qx "Name=BGMail" "$desktop" || fail "Name not rendered"
+grep -qx "Exec=$home/.local/bgmail.app/bin/bgmail %u" "$desktop" || fail "Exec not absolute"
+grep -qx "Icon=$home/.local/bgmail.app/share/icons/hicolor/512x512/apps/bgmail.png" "$desktop" \
+    || fail "Icon not absolute"
+grep -qx "StartupWMClass=BGMail" "$desktop" || fail "StartupWMClass lost"
+grep -q "^Comment=." "$desktop" || fail "Comment not rendered"
+if grep -q "{{" "$desktop"; then fail "unrendered template: $(grep "{{" "$desktop")"; fi
+
+# Reinstalling replaces leftovers; a bad bundle leaves the install working.
+touch "$home/.local/bgmail.app/leftover"
+install "$bundle" > /dev/null
+[[ ! -e "$home/.local/bgmail.app/leftover" ]] || fail "reinstall kept old files"
+mkdir -p "$temp/bad/empty"
+tar -czf "$temp/bad.tar.gz" -C "$temp/bad" empty
+if install "$temp/bad.tar.gz" > /dev/null 2>&1; then fail "accepted a bad bundle"; fi
+[[ -x "$home/.local/bgmail.app/bin/bgmail" ]] || fail "bad bundle broke the install"
+
+# Uninstall keeps user data when not asked otherwise.
+mkdir -p "$home/.config/BGMail"
+touch "$home/.config/BGMail/mail.db"
+HOME="$home" script/uninstall.sh < /dev/null > /dev/null
+[[ ! -e "$home/.local/bgmail.app" ]] || fail "app not removed"
+[[ ! -e "$home/.local/bin/bgmail" ]] || fail "link not removed"
+[[ ! -e "$desktop" ]] || fail "desktop file not removed"
+[[ -f "$home/.config/BGMail/mail.db" ]] || fail "uninstall deleted user data"
+
+# System-wide install, into a temp prefix with a no-op privilege helper.
+prefix="$temp/prefix"
+system() {
+    HOME="$home" PREFIX="$prefix" SUDO=env CARGO_TARGET_DIR="$temp/target" \
+        BGMAIL_BINARY="$temp/fake" script/install-linux-system "$@"
+}
+touch "$home/.config/BGMail/settings"
+system > "$temp/system.log"
+[[ "$("$prefix/bin/bgmail")" == dummy-bgmail ]] || fail "system binary doesn't run"
+desktop="$prefix/share/applications/BGMail.desktop"
+grep -qx "Exec=$prefix/bin/bgmail %u" "$desktop" || fail "system Exec not absolute"
+grep -qx "Icon=$prefix/share/icons/hicolor/512x512/apps/bgmail.png" "$desktop" \
+    || fail "system Icon not absolute"
+[[ -f "$prefix/share/icons/hicolor/1024x1024/apps/bgmail.png" ]] || fail "system icons missing"
+if grep -q "takes precedence" "$temp/system.log"; then fail "warned about an absent ~/.local install"; fi
+
+mkdir -p "$home/.local/share/applications"
+touch "$home/.local/share/applications/BGMail.desktop"
+system | grep -q "takes precedence" || fail "no warning about the ~/.local install"
+
+system --uninstall > /dev/null
+[[ ! -e "$prefix/bin/bgmail" && ! -e "$desktop" ]] || fail "system files not removed"
+# (Icon and desktop caches are regenerated files, not ours.)
+if find "$prefix" -type f ! -name '*.cache' | grep -q .; then
+    fail "system uninstall left files behind"
+fi
+[[ -f "$home/.config/BGMail/mail.db" ]] || fail "system uninstall deleted user data"
+if PREFIX="$prefix" script/install-linux-system --bogus > /dev/null 2>&1; then
+    fail "accepted an unknown option"
+fi
+
+echo "install scripts OK"

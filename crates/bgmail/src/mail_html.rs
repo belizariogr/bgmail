@@ -1,0 +1,1255 @@
+//! E-mail HTML for the reader: sanitizes message bodies and wraps them in a
+//! themed document that `html_view` renders natively.
+//!
+//! Sanitizing stays even though `html_view` runs no scripts and fetches
+//! nothing remote: it strips content a reader must not show (forms, frames,
+//! media, event handlers, dangerous URL schemes) and records which remote
+//! images a message has, so the reader can say what was blocked.
+
+use std::collections::HashSet;
+
+use gpui::{Hsla, Rgba};
+use lol_html::html_content::Element;
+
+use crate::data::MessageBody;
+
+/// A rendered e-mail document plus the privacy metadata the reader needs to
+/// badge the message (blocked remote content).
+pub struct RenderedEmail {
+    /// The full HTML document handed to `html_view`.
+    pub html: String,
+    /// How many remote `<img>` were blocked.
+    pub blocked_images: usize,
+}
+
+/// Theme colors of the message page. The page can be forced white
+/// independently of the app theme (`reader_white_background`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DocumentColors {
+    pub background: Hsla,
+    pub text: Hsla,
+    pub accent: Hsla,
+}
+
+impl DocumentColors {
+    /// Whether the page is dark (drives `prefers-color-scheme`).
+    pub fn is_dark(&self) -> bool {
+        self.background.l < 0.5
+    }
+}
+
+/// Builds a self-contained HTML document for `body`, themed to match the
+/// current app colors. Plain-text bodies are HTML-escaped and wrapped so they
+/// keep their line breaks and wrap to the pane width. Remote resources are
+/// kept only with `load_remote` (the user allowed them, for this message or
+/// always); otherwise they are blocked and counted.
+pub fn email_document(
+    colors: DocumentColors,
+    body: &MessageBody,
+    load_remote: bool,
+) -> RenderedEmail {
+    let (inner, _, blocked_images) = match body {
+        MessageBody::Html(html) => sanitize_html_inner(html, load_remote, &HashSet::new()),
+        MessageBody::Text(plain) => (
+            format!("<pre class=\"plain\">{}</pre>", escape_html(plain)),
+            false,
+            0,
+        ),
+    };
+    // Keep the message's own doctype: a legacy one selects the (quirks)
+    // rendering mode its layout was written for.
+    let doctype = match body {
+        MessageBody::Html(html) => leading_doctype(html),
+        MessageBody::Text(_) => None,
+    }
+    .unwrap_or("<!DOCTYPE html>");
+    let html = format!(
+        "{doctype}<html><head><meta charset=\"utf-8\">\
+         <style>{css}</style></head><body>{inner}</body></html>",
+        css = document_css(colors),
+    );
+    RenderedEmail {
+        html,
+        blocked_images,
+    }
+}
+
+/// What a printed message shows above its body (labels already localized).
+pub struct PrintHeader<'a> {
+    pub subject: &'a str,
+    pub from_label: &'a str,
+    pub from: &'a str,
+    pub date_label: &'a str,
+    pub date: &'a str,
+}
+
+/// Light page colors for printing, whatever the app theme.
+const PRINT_COLORS: DocumentColors = DocumentColors {
+    background: Hsla {
+        h: 0.0,
+        s: 0.0,
+        l: 1.0,
+        a: 1.0,
+    },
+    text: Hsla {
+        h: 0.0,
+        s: 0.0,
+        l: 0.1,
+        a: 1.0,
+    },
+    accent: Hsla {
+        h: 0.6,
+        s: 0.8,
+        l: 0.4,
+        a: 1.0,
+    },
+};
+
+/// A standalone page for printing a message in the system browser: the
+/// sanitized body (remote content still blocked) under a header, on a light
+/// page, opening the print dialog once loaded. A Content-Security-Policy
+/// lets nothing load but `data:` images and only the page's own script run
+/// (`nonce`), so the browser stays as offline as the reader even if the
+/// sanitizer missed something.
+pub fn print_document(
+    header: &PrintHeader,
+    body: &MessageBody,
+    nonce: &str,
+    load_remote: bool,
+) -> String {
+    let rendered = email_document(PRINT_COLORS, body, load_remote);
+    // Remote images the user allowed for this message print too.
+    let images = if load_remote {
+        "data: http: https:"
+    } else {
+        "data:"
+    };
+    let csp = format!(
+        "default-src 'none'; img-src {images}; style-src 'unsafe-inline'; \
+         script-src 'nonce-{nonce}'"
+    );
+    let head = format!(
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
+         <title>{subject}</title>\
+         <style>.bgmail-print-header{{font:13px system-ui,sans-serif;color:#222;\
+         margin:0 0 16px;padding:0 0 12px;border-bottom:1px solid #ccc}}\
+         .bgmail-print-header h1{{font-size:18px;margin:0 0 8px}}\
+         .bgmail-print-header p{{margin:2px 0}}</style>\
+         <script nonce=\"{nonce}\">addEventListener('load',function(){{print()}})</script>",
+        subject = escape_html(header.subject),
+    );
+    let header = format!(
+        "<header class=\"bgmail-print-header\"><h1>{}</h1><p><b>{}:</b> {}</p>\
+         <p><b>{}:</b> {}</p></header>",
+        escape_html(header.subject),
+        escape_html(header.from_label),
+        escape_html(header.from),
+        escape_html(header.date_label),
+        escape_html(header.date),
+    );
+    // The CSP must precede everything else in <head>; the header opens <body>.
+    rendered
+        .html
+        .replacen("<head>", &format!("<head>{head}"), 1)
+        .replacen("<body>", &format!("<body>{header}"), 1)
+}
+
+/// The doctype an HTML body starts with (after a BOM, whitespace, an XML
+/// declaration and comments), if any.
+fn leading_doctype(html: &str) -> Option<&str> {
+    let mut rest = html.trim_start_matches('\u{feff}').trim_start();
+    loop {
+        if rest.starts_with("<?") {
+            rest = rest[rest.find("?>")? + 2..].trim_start();
+        } else if rest.starts_with("<!--") {
+            rest = rest[rest.find("-->")? + 3..].trim_start();
+        } else {
+            break;
+        }
+    }
+    let head = rest.get(..9)?;
+    if !head.eq_ignore_ascii_case("<!doctype") {
+        return None;
+    }
+    Some(&rest[..rest.find('>')? + 1])
+}
+
+/// Whether a link clicked in a message may be opened (in the system browser
+/// or mail handler): web and `mailto:` links only. Message-relative URLs,
+/// `javascript:` and every other scheme are ignored.
+pub fn is_openable_link(url: &str) -> bool {
+    let url = url.trim().to_ascii_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
+}
+
+/// Theme-aware stylesheet shared by every rendered message, so the page
+/// matches the surrounding UI (incl. dark mode) instead of a default white page.
+fn document_css(colors: DocumentColors) -> String {
+    let DocumentColors {
+        background,
+        text,
+        accent,
+    } = colors;
+    let scheme = if colors.is_dark() { "dark" } else { "light" };
+    format!(
+        ":root {{ color-scheme: {scheme}; }}\
+         html {{ background: {bg}; }}\
+         body {{ margin: 0; padding: 16px 24px; background: {bg}; color: {fg}; \
+           font: 16px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; \
+           overflow-wrap: anywhere; }}\
+         a {{ color: {accent}; }}\
+         img[data-rm-blocked-src] {{ background: {soft}; border: 1px dashed {line}; \
+           box-sizing: border-box; min-width: 24px; min-height: 24px; }}\
+         h1, h2, h3 {{ line-height: 1.25; }}\
+         code, pre {{ font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }}\
+         pre {{ white-space: pre-wrap; background: {soft}; padding: 12px; border-radius: 6px; }}\
+         pre.plain {{ background: transparent; padding: 0; font: inherit; }}\
+         code {{ background: {soft}; padding: 1px 4px; border-radius: 4px; }}\
+         blockquote {{ margin: 0; padding-left: 12px; border-left: 3px solid {accent}; opacity: 0.85; }}\
+         hr {{ border: none; border-top: 1px solid {fg}; opacity: 0.15; margin: 16px 0; }}",
+        bg = css_color(background),
+        fg = css_color(text),
+        accent = css_color(accent),
+        // A subtle fill for code blocks/inline code, derived from the text color.
+        soft = css_color_alpha(text, 0.08),
+        // A slightly stronger line for the blocked-image placeholder border.
+        line = css_color_alpha(text, 0.3),
+    )
+}
+
+/// Formats a theme color as an opaque CSS `rgb(...)` string.
+fn css_color(color: Hsla) -> String {
+    let rgba: Rgba = color.into();
+    format!(
+        "rgb({}, {}, {})",
+        channel(rgba.r),
+        channel(rgba.g),
+        channel(rgba.b),
+    )
+}
+
+/// Formats a theme color as a translucent CSS `rgba(...)` string.
+fn css_color_alpha(color: Hsla, alpha: f32) -> String {
+    let rgba: Rgba = color.into();
+    format!(
+        "rgba({}, {}, {}, {:.3})",
+        channel(rgba.r),
+        channel(rgba.g),
+        channel(rgba.b),
+        alpha.clamp(0.0, 1.0),
+    )
+}
+
+fn channel(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// CSS selector matching every element we refuse to render in an e-mail body.
+///
+/// These are stripped (element *and* their content) before the HTML ever reaches
+/// the renderer, so the elements never exist in the DOM:
+/// - **Active/embedding content** (`script`, `object`, `embed`, `applet`):
+///   e-mail must never execute code or load plugins.
+/// - **Frames** (`iframe`, `frame`, `frameset`): sub-documents the reader
+///   doesn't load; they would only leave empty boxes.
+/// - **Media** (`video`, `audio`, `source`, `track`): a reader has no use for
+///   embedded players.
+/// - **Editable/interactive controls** (`input`, `textarea`, `select`, `button`,
+///   `form`): a reader is not a form host; stripping them avoids dead,
+///   confusing affordances.
+/// - **Document/redirect/external-resource heads** (`base`, `meta`, `link`):
+///   `base` rewrites every relative link, `meta[http-equiv=refresh]` redirects the
+///   view, and `link` pulls remote stylesheets/prefetch (tracking). `head`/`title`
+///   are deliberately *kept* so e-mails that ship a full document don't lose their
+///   `<style>`.
+/// - **Misc scripting surfaces** (`canvas`, `dialog`, `portal`).
+///
+/// `svg` is intentionally **kept** (some e-mails use inline vector art), but its
+/// scriptable parts are removed: `script` (covered above), `foreignobject` (hosts
+/// arbitrary HTML) and the SMIL animation family (`animate`, `animatetransform`,
+/// `animatemotion`, `set`) which can assign event-handler attributes at runtime.
+const DISALLOWED_ELEMENTS: &str = "script, object, embed, applet, \
+     iframe, frame, frameset, \
+     video, audio, source, track, \
+     input, textarea, select, button, form, \
+     base, meta, link, canvas, dialog, portal, \
+     foreignobject, animate, animatetransform, animatemotion, set";
+
+/// URL-bearing attributes whose value we vet against dangerous schemes.
+const URL_ATTRIBUTES: &[&str] = &[
+    "href",
+    "src",
+    "action",
+    "formaction",
+    "xlink:href",
+    "poster",
+    "background",
+    "cite",
+    "data",
+    "ping",
+    "longdesc",
+];
+
+/// URL-bearing attributes that *auto-fetch a remote resource when the document
+/// renders* (so they leak an "opened" signal / the reader's IP). These are the
+/// only ones blocked for remoteness. Navigation and metadata URLs — `href`
+/// (links), `cite`, `ping`, `longdesc`, `action` — act on click or fetch
+/// nothing on render, so they are kept (a blocked `href` would break links).
+/// `srcset` is handled separately. Dangerous-scheme vetting still applies to
+/// every [`URL_ATTRIBUTES`] entry regardless.
+const RESOURCE_ATTRIBUTES: &[&str] = &["src", "poster", "background", "data", "xlink:href"];
+
+/// Sanitizes an e-mail HTML fragment so it can never execute code or load
+/// untrusted active content in the renderer.
+///
+/// A real streaming parser ([`lol_html`]) is used rather than regex so malformed
+/// markup can't smuggle anything through. Two passes run on every element:
+/// 1. Disallowed elements (see [`DISALLOWED_ELEMENTS`]) are dropped together with
+///    their content.
+/// 2. Surviving elements have their XSS-bearing attributes neutralized
+///    (see [`neutralize_attributes`]).
+///
+/// `load_remote` is a user preference: when false, attributes pointing at remote
+/// (`http(s)`/protocol-relative) resources are stripped so e-mails can't load
+/// tracking pixels; inline `data:` images are kept regardless. XSS neutralization
+/// happens either way.
+///
+/// Everything else — including inline `style`, tables and links — is preserved
+/// verbatim. If rewriting fails for any reason we drop the body entirely rather
+/// than risk rendering unsanitized content.
+#[cfg(test)]
+fn sanitize_html(html: &str, load_remote: bool) -> String {
+    sanitize_html_inner(html, load_remote, &HashSet::new()).0
+}
+
+/// Like [`sanitize_html`], but also reports the message's remote-image state:
+/// whether it has any remote `<img>` and how many are still blocked. A remote
+/// image is shown (not blocked) when `load_remote` is true or its URL is in
+/// `shown` (individually revealed by the user); blocked images stash their URL
+/// in `data-rm-blocked-src` (a placeholder box, and where a Stage 3 "show
+/// remote image" action will read it).
+fn sanitize_html_inner(
+    html: &str,
+    load_remote: bool,
+    shown: &HashSet<String>,
+) -> (String, bool, usize) {
+    use lol_html::html_content::ContentType;
+    use lol_html::{element, rewrite_str, text, RewriteStrSettings};
+    use std::cell::{Cell, RefCell};
+
+    let has_remote = Cell::new(false);
+    let blocked = Cell::new(0usize);
+    // `<style>` text arrives in chunks (a `url(` may straddle two): buffer it
+    // and emit it once, stripped, at the end of the text node.
+    let style_text = RefCell::new(String::new());
+    let settings = RewriteStrSettings::new()
+        .append_element_content_handler(element!(DISALLOWED_ELEMENTS, |el| {
+            el.remove();
+            Ok(())
+        }))
+        .append_element_content_handler(element!("*", |el| {
+            if let Some(is_blocked) = neutralize_attributes(el, load_remote, shown) {
+                has_remote.set(true);
+                if is_blocked {
+                    blocked.set(blocked.get() + 1);
+                }
+            }
+            Ok(())
+        }))
+        // CSS `url(...)` (background images, web fonts, `@import`) also fetches
+        // remote resources: blank it where CSS lives (inline `style` and
+        // `<style>` blocks), never in the message's text.
+        .append_element_content_handler(element!("[style]", |el| {
+            if !load_remote {
+                if let Some(style) = el.get_attribute("style") {
+                    el.set_attribute("style", &strip_css_urls(&style))?;
+                }
+            }
+            Ok(())
+        }))
+        .append_element_content_handler(text!("style", |chunk| {
+            if load_remote {
+                return Ok(());
+            }
+            style_text.borrow_mut().push_str(chunk.as_str());
+            if chunk.last_in_text_node() {
+                let css = strip_css_urls(&style_text.take());
+                chunk.replace(&css, ContentType::Html);
+            } else {
+                chunk.remove();
+            }
+            Ok(())
+        }));
+
+    let html = rewrite_str(html, settings).unwrap_or_default();
+    (html, has_remote.get(), blocked.get())
+}
+
+/// Empties the contents of every CSS `url(...)` in `css` (an inline `style`
+/// value or a `<style>` block) — `url(http://x.png)` becomes `url()` — so
+/// stylesheets can't fetch remote resources. This is a deliberately blunt
+/// textual pass (equivalent to the regex `url\([^)]*\)` →
+/// `url()`); it does not parse CSS and makes no attempt to tell remote from
+/// inline `data:` URLs, since when remote loading is off neither should fetch.
+fn strip_css_urls(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(idx) = find_url_open(rest) {
+        out.push_str(&rest[..idx]);
+        out.push_str("url(");
+        let after = &rest[idx + 4..];
+        match after.find(')') {
+            Some(close) => {
+                out.push(')');
+                rest = &after[close + 1..];
+            }
+            // Unterminated `url(`: drop everything that follows.
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Byte index of the next case-insensitive `url(` in `s`, if any. `url(` is ASCII,
+/// so the index is always a valid char boundary.
+fn find_url_open(s: &str) -> Option<usize> {
+    s.as_bytes().windows(4).position(|w| {
+        w[0].eq_ignore_ascii_case(&b'u')
+            && w[1].eq_ignore_ascii_case(&b'r')
+            && w[2].eq_ignore_ascii_case(&b'l')
+            && w[3] == b'('
+    })
+}
+
+/// Strips the unwanted attributes from a *surviving* element while keeping the
+/// element itself. Always removed:
+/// - every inline event handler (`on*`),
+/// - `contenteditable` (a reader is not an editor),
+/// - link/source attributes whose value uses a dangerous scheme
+///   (see [`is_dangerous_url`]),
+/// - `style` declarations carrying legacy CSS script vectors
+///   (see [`style_has_script_vector`]).
+///
+/// When `load_remote` is false, also removed: link/source attributes (and
+/// `srcset`) pointing at remote resources, so the message can't phone home. A
+/// blocked `<img src>` is special-cased: its remote URL is preserved in
+/// `data-rm-blocked-src` (the `src` is still dropped, so nothing loads) for a
+/// placeholder and a later "show remote image" action.
+/// Remote images whose URL is in `shown` are let through (the user revealed
+/// them individually), even while `load_remote` is false.
+///
+/// Returns the element's remote-image state: `None` if it is not a remote
+/// `<img>`, or `Some(blocked)` where `blocked` reports whether that image's
+/// remote `src` was withheld this render.
+fn neutralize_attributes(
+    el: &mut Element,
+    load_remote: bool,
+    shown: &HashSet<String>,
+) -> Option<bool> {
+    let is_img = el.tag_name() == "img";
+    // `attributes()` borrows the element, so collect everything we need first and
+    // only mutate (`remove_attribute`/`set_attribute`) once the borrow is released.
+    let mut blocked_img_src = None;
+    let mut img_state: Option<bool> = None;
+    let doomed: Vec<String> = el
+        .attributes()
+        .iter()
+        .filter_map(|attr| {
+            let name = attr.name(); // lower-cased by the parser
+            let value = attr.value();
+            let is_url_attr = URL_ATTRIBUTES.contains(&name.as_str());
+            // A remote `<img src>` is what the reader surfaces and lets the user
+            // unblock one at a time, so track it (and honor the `shown` allowlist).
+            let img_src_remote = is_img && name == "src" && is_url_attr && is_remote_url(&value);
+            let shown_here = img_src_remote && shown.contains(value.as_str());
+            if img_src_remote {
+                let blocked = !load_remote && !shown_here;
+                img_state = Some(blocked);
+                if blocked {
+                    blocked_img_src = Some(value.clone());
+                }
+            }
+            // Only resource-loading attributes are blocked for remoteness;
+            // navigation/metadata URLs (e.g. a link's `href`) are left intact.
+            let is_remote = (RESOURCE_ATTRIBUTES.contains(&name.as_str()) && is_remote_url(&value))
+                || (name == "srcset" && !value.trim().is_empty());
+            let remote_blocked = is_remote && !load_remote && !shown_here;
+            let drop = name.starts_with("on")
+                || name == "contenteditable"
+                || (is_url_attr && is_dangerous_url(&value))
+                || (name == "style" && style_has_script_vector(&value))
+                || remote_blocked;
+            drop.then_some(name)
+        })
+        .collect();
+
+    for name in doomed {
+        el.remove_attribute(&name);
+    }
+    if let Some(src) = blocked_img_src {
+        let _ = el.set_attribute("data-rm-blocked-src", &src);
+    }
+    img_state
+}
+
+/// Whether a URL value uses a scheme that can execute or load active content.
+///
+/// `javascript:`/`vbscript:` always execute; `data:` is blocked unless it is a
+/// raster image (inline `<img>` payloads are common and inert), with SVG excluded
+/// since an SVG document can script. Embedded whitespace/control characters in the
+/// scheme (e.g. `java\tscript:`) are stripped first, mirroring how engines parse it.
+fn is_dangerous_url(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    let Some(colon) = trimmed.find(':') else {
+        // No scheme: relative path, fragment or query — always safe.
+        return false;
+    };
+
+    let scheme: String = trimmed[..colon]
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    match scheme.as_str() {
+        "javascript" | "vbscript" => true,
+        "data" => {
+            let media = trimmed[colon + 1..]
+                .split([';', ','])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            !(media.starts_with("image/") && media != "image/svg+xml")
+        }
+        _ => false,
+    }
+}
+
+/// Whether a URL value loads a resource from the network (so it leaks an "opened"
+/// signal / IP address when rendered). Covers explicit `http`/`https` schemes and
+/// protocol-relative URLs (`//host/...`). Inline `data:`, `cid:` (embedded
+/// attachments), fragments and relative paths are treated as local/safe.
+fn is_remote_url(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    if trimmed.starts_with("//") {
+        return true;
+    }
+    let Some(colon) = trimmed.find(':') else {
+        return false;
+    };
+    let scheme: String = trimmed[..colon]
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(scheme.as_str(), "http" | "https")
+}
+
+/// Whether an inline `style` value carries a legacy CSS script vector. These are
+/// inert on modern WebKit/Chromium, but stripping them is cheap defense-in-depth
+/// for older engines and an explicit signal of intent.
+fn style_has_script_vector(style: &str) -> bool {
+    let lower = style.to_ascii_lowercase();
+    ["javascript:", "expression(", "-moz-binding", "behavior:"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+/// Readable text of an HTML body, for the plain-text fallback (huge,
+/// too-deep or crashing mail). A single linear scan, no tree: tags and
+/// comments are dropped, `script`/`style`/`head`/`title` content skipped,
+/// block elements start new lines, entities decoded, whitespace collapsed
+/// (kept inside `<pre>`).
+pub fn plain_text(html: &str) -> String {
+    // Blocks separated by a blank line, and those that only start a line.
+    const PARAGRAPHS: &[&str] = &[
+        "p",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "table",
+        "blockquote",
+        "pre",
+        "hr",
+        "ul",
+        "ol",
+    ];
+    const LINES: &[&str] = &[
+        "div", "br", "tr", "li", "section", "article", "header", "footer", "dt", "dd",
+    ];
+    const SKIPPED: &[&str] = &["script", "style", "head", "title"];
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut rest = html;
+    let mut pre = 0usize;
+    // Ends the current line; `blank` also leaves an empty line after it.
+    let push_break = |out: &mut String, blank: bool| {
+        while out.ends_with([' ', '\t']) {
+            out.pop();
+        }
+        if out.is_empty() {
+            return;
+        }
+        let wanted = if blank { "\n\n" } else { "\n" };
+        while !out.ends_with(wanted) {
+            if out.ends_with("\n\n") {
+                break;
+            }
+            out.push('\n');
+        }
+    };
+    while !rest.is_empty() {
+        if let Some(comment) = rest.strip_prefix("<!--") {
+            rest = comment.find("-->").map_or("", |end| &comment[end + 3..]);
+            continue;
+        }
+        if rest.starts_with('<') {
+            // An unclosed tag runs to the end (its last character may be
+            // multi-byte, so never cut one byte short of the end).
+            let close = rest.find('>');
+            let tag = &rest[1..close.unwrap_or(rest.len())];
+            rest = &rest[close.map_or(rest.len(), |i| i + 1)..];
+            let closing = tag.starts_with('/');
+            let name: String = tag
+                .trim_start_matches('/')
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if !closing && SKIPPED.contains(&name.as_str()) {
+                // Case-insensitive search without lower-casing the rest of
+                // the body per skipped tag (quadratic on huge mail).
+                let close = format!("</{name}");
+                rest = find_ascii_ci(rest, &close).map_or("", |at| {
+                    let after = &rest[at..];
+                    after.find('>').map_or("", |gt| &after[gt + 1..])
+                });
+                continue;
+            }
+            if name == "pre" {
+                pre = if closing {
+                    pre.saturating_sub(1)
+                } else {
+                    pre + 1
+                };
+            }
+            if PARAGRAPHS.contains(&name.as_str()) {
+                push_break(&mut out, true);
+            } else if LINES.contains(&name.as_str()) {
+                push_break(&mut out, false);
+            } else if (name == "td" || name == "th")
+                && !closing
+                && !out.is_empty()
+                && !out.ends_with(['\n', ' ', '\t'])
+            {
+                out.push('\t');
+            }
+            continue;
+        }
+        let text_end = rest.find('<').unwrap_or(rest.len());
+        let text = decode_entities(&rest[..text_end]);
+        rest = &rest[text_end..];
+        if pre > 0 {
+            out.push_str(&text);
+        } else {
+            for word in text.split_whitespace() {
+                if !out.is_empty() && !out.ends_with(['\n', ' ', '\t']) {
+                    out.push(' ');
+                }
+                out.push_str(word);
+            }
+            if text.ends_with(char::is_whitespace)
+                && !out.ends_with(['\n', ' ', '\t'])
+                && !out.is_empty()
+            {
+                out.push(' ');
+            }
+        }
+    }
+    out.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// Byte index of the first ASCII-case-insensitive occurrence of `needle` (an
+/// ASCII string) in `haystack`; always a char boundary.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+/// Decodes the HTML entities mail text commonly uses: the named basics,
+/// `&nbsp;` and numeric references. Unknown entities are kept as written.
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        // Searched as bytes: a 12-byte cut may fall inside a multi-byte
+        // character, and `;` is ASCII, so its index is a char boundary.
+        let window = &rest.as_bytes()[..rest.len().min(12)];
+        let Some(semi) = window.iter().position(|&b| b == b';') else {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+        let entity = &rest[1..semi];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            "nbsp" => Some(' '),
+            _ => entity
+                .strip_prefix("#x")
+                .or_else(|| entity.strip_prefix("#X"))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .or_else(|| entity.strip_prefix('#').and_then(|dec| dec.parse().ok()))
+                .and_then(char::from_u32),
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Escapes the characters that are significant in HTML text content.
+fn escape_html(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_images_load_only_when_allowed() {
+        let colors = DocumentColors {
+            background: hsla(0.0, 0.0, 1.0, 1.0),
+            text: hsla(0.0, 0.0, 0.1, 1.0),
+            accent: hsla(0.6, 0.8, 0.4, 1.0),
+        };
+        let body = MessageBody::Html("<img src=\"https://cdn.test/a.png\">".into());
+        let blocked = email_document(colors, &body, false);
+        assert_eq!(blocked.blocked_images, 1);
+        assert!(!blocked.html.contains(" src=\"https://cdn.test"));
+        let allowed = email_document(colors, &body, true);
+        assert_eq!(allowed.blocked_images, 0);
+        assert!(allowed.html.contains(" src=\"https://cdn.test/a.png\""));
+        // The print page lets allowed images through its CSP.
+        let header = PrintHeader {
+            subject: "s",
+            from_label: "From",
+            from: "f",
+            date_label: "Date",
+            date: "d",
+        };
+        assert!(print_document(&header, &body, "n", true).contains("img-src data: http: https:"));
+        assert!(print_document(&header, &body, "n", false).contains("img-src data:;"));
+    }
+
+    #[test]
+    fn print_pages_are_light_locked_down_and_headed() {
+        let header = PrintHeader {
+            subject: "Hello <you>",
+            from_label: "From",
+            from: "Ann <ann@x.test>",
+            date_label: "Date",
+            date: "2002-07-09",
+        };
+        let body = MessageBody::Html(
+            "<p>Body</p><img src=\"https://tracker.test/p.gif\"><script>alert(1)</script>".into(),
+        );
+        let html = print_document(&header, &body, "n0nce", false);
+        // The CSP comes first in <head>; only the nonce'd script may run.
+        let head = &html[html.find("<head>").unwrap()..];
+        assert!(head.starts_with("<head><meta http-equiv=\"Content-Security-Policy\""));
+        assert!(html.contains("default-src 'none'; img-src data:"));
+        assert!(html.contains("script-src 'nonce-n0nce'"));
+        assert!(html.contains("<script nonce=\"n0nce\">"));
+        assert_eq!(html.matches("<script").count(), 1);
+        // Header escaped, body sanitized (remote image blocked).
+        assert!(html.contains("<h1>Hello &lt;you&gt;</h1>"));
+        assert!(html.contains("Ann &lt;ann@x.test&gt;"));
+        assert!(html.contains("<p>Body</p>"));
+        assert!(!html.contains(" src=\"https://tracker.test"));
+        // Light page whatever the app theme.
+        assert!(html.contains("color-scheme: light") || !html.contains("color-scheme: dark"));
+    }
+    use gpui::hsla;
+
+    fn body_html() -> MessageBody {
+        MessageBody::Html("<p>Hello <strong>world</strong></p>".into())
+    }
+
+    fn doc_colors(background: Hsla, text: Hsla, accent: Hsla) -> DocumentColors {
+        DocumentColors {
+            background,
+            text,
+            accent,
+        }
+    }
+
+    #[test]
+    fn escapes_html_special_characters() {
+        assert_eq!(
+            escape_html("a < b & c > d \"e\" 'f'"),
+            "a &lt; b &amp; c &gt; d &quot;e&quot; &#39;f&#39;"
+        );
+    }
+
+    #[test]
+    fn channels_clamp_and_round() {
+        assert_eq!(channel(0.0), 0);
+        assert_eq!(channel(1.0), 255);
+        assert_eq!(channel(2.0), 255);
+        assert_eq!(channel(-1.0), 0);
+    }
+
+    #[test]
+    fn css_color_is_opaque_rgb() {
+        assert_eq!(css_color(hsla(0.0, 0.0, 0.0, 1.0)), "rgb(0, 0, 0)");
+        assert_eq!(css_color(hsla(0.0, 0.0, 1.0, 1.0)), "rgb(255, 255, 255)");
+    }
+
+    #[test]
+    fn document_wraps_html_body_verbatim() {
+        let doc = email_document(
+            doc_colors(
+                hsla(0.0, 0.0, 0.1, 1.0),
+                hsla(0.0, 0.0, 0.9, 1.0),
+                hsla(0.6, 0.7, 0.5, 1.0),
+            ),
+            &body_html(),
+            false,
+        )
+        .html;
+        assert!(doc.starts_with("<!DOCTYPE html>"));
+        assert!(doc.contains("<p>Hello <strong>world</strong></p>"));
+        // A dark background selects the dark color scheme.
+        assert!(doc.contains("color-scheme: dark"));
+    }
+
+    #[test]
+    fn document_escapes_and_wraps_plain_text() {
+        let body = MessageBody::Text("1 < 2 & 3".into());
+        let doc = email_document(
+            doc_colors(
+                hsla(0.0, 0.0, 0.95, 1.0),
+                hsla(0.0, 0.0, 0.1, 1.0),
+                hsla(0.6, 0.7, 0.5, 1.0),
+            ),
+            &body,
+            false,
+        )
+        .html;
+        assert!(doc.contains("<pre class=\"plain\">1 &lt; 2 &amp; 3</pre>"));
+        // A light background selects the light color scheme.
+        assert!(doc.contains("color-scheme: light"));
+    }
+
+    #[test]
+    fn sanitize_strips_disallowed_elements_and_their_content() {
+        let dirty = "<p>keep</p>\
+             <script>alert(1)</script>\
+             <iframe src=\"https://evil.test\"></iframe>\
+             <video controls><source src=\"x.mp4\"></video>\
+             <audio src=\"x.mp3\"></audio>\
+             <object data=\"x.swf\"></object>\
+             <embed src=\"x.pdf\">\
+             <form><input name=\"a\"><textarea>t</textarea>\
+             <select><option>o</option></select><button>b</button></form>\
+             <base href=\"https://evil.test/\"><link rel=\"stylesheet\" href=\"x.css\">\
+             <meta http-equiv=\"refresh\" content=\"0;url=https://evil.test\">\
+             <canvas></canvas><dialog>d</dialog>\
+             <p>tail</p>";
+        let clean = sanitize_html(dirty, true);
+
+        assert!(clean.contains("<p>keep</p>"));
+        assert!(clean.contains("<p>tail</p>"));
+        for needle in [
+            "<script",
+            "alert(1)",
+            "<iframe",
+            "<video",
+            "<source",
+            "<audio",
+            "<object",
+            "<embed",
+            "<form",
+            "<input",
+            "<textarea",
+            "<select",
+            "<button",
+            "<base",
+            "<link",
+            "<meta",
+            "<canvas",
+            "<dialog",
+        ] {
+            assert!(
+                !clean.contains(needle),
+                "expected `{needle}` to be stripped, got: {clean}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_keeps_svg_but_removes_its_scriptable_parts() {
+        let dirty = "<svg viewBox=\"0 0 10 10\">\
+             <rect width=\"10\" height=\"10\"></rect>\
+             <script>alert(1)</script>\
+             <foreignObject><body>x</body></foreignObject>\
+             <animate attributeName=\"x\"></animate>\
+             <set attributeName=\"onload\" to=\"alert(1)\"></set>\
+             </svg>";
+        let clean = sanitize_html(dirty, true);
+        let lower = clean.to_ascii_lowercase();
+        assert!(clean.contains("<svg"));
+        assert!(clean.contains("<rect"));
+        for needle in ["<script", "alert(1)", "foreignobject", "<animate", "<set"] {
+            assert!(
+                !lower.contains(needle),
+                "expected `{needle}` to be stripped from svg, got: {clean}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_strips_event_handlers_and_contenteditable() {
+        let clean = sanitize_html(
+            "<div contenteditable=\"true\" onclick=\"steal()\" ONERROR=\"x\">text</div>",
+            true,
+        );
+        let lower = clean.to_ascii_lowercase();
+        assert!(clean.contains("<div"));
+        assert!(clean.contains("text"));
+        assert!(!lower.contains("onclick"));
+        assert!(!lower.contains("onerror"));
+        assert!(!clean.contains("contenteditable"));
+    }
+
+    #[test]
+    fn sanitize_neutralizes_dangerous_url_schemes() {
+        let clean = sanitize_html(
+            "<a href=\"javascript:alert(1)\">a</a>\
+             <a href=\"vbscript:msgbox(1)\">b</a>\
+             <img src=\"data:image/svg+xml,<svg/>\">",
+            true,
+        );
+        let lower = clean.to_ascii_lowercase();
+        assert!(!lower.contains("javascript:"));
+        assert!(!lower.contains("vbscript:"));
+        assert!(!lower.contains("data:image/svg+xml"));
+        // The anchors and image survive — only the unsafe attribute is dropped.
+        assert!(clean.contains("<a"));
+        assert!(clean.contains("<img"));
+    }
+
+    #[test]
+    fn is_dangerous_url_classifies_schemes() {
+        assert!(is_dangerous_url("javascript:alert(1)"));
+        assert!(is_dangerous_url("  JaVaScRiPt:alert(1)"));
+        assert!(is_dangerous_url("java\tscript:alert(1)"));
+        assert!(is_dangerous_url("vbscript:x"));
+        assert!(is_dangerous_url("data:text/html,<b>"));
+        assert!(is_dangerous_url("data:image/svg+xml,<svg/>"));
+        // Safe: relative/fragment/known-good schemes and inline raster images.
+        assert!(!is_dangerous_url("https://example.test/path"));
+        assert!(!is_dangerous_url("mailto:a@b.test"));
+        assert!(!is_dangerous_url("#section"));
+        assert!(!is_dangerous_url("/relative/path"));
+        assert!(!is_dangerous_url("data:image/png;base64,AAAA"));
+    }
+
+    #[test]
+    fn sanitize_drops_style_with_legacy_script_vectors() {
+        let clean = sanitize_html(
+            "<p style=\"width:expression(alert(1))\">a</p>\
+             <p style=\"background:url(javascript:alert(1))\">b</p>",
+            true,
+        );
+        let lower = clean.to_ascii_lowercase();
+        assert!(!lower.contains("expression("));
+        assert!(!lower.contains("javascript:"));
+    }
+
+    #[test]
+    fn sanitize_preserves_safe_markup_and_inline_styles() {
+        let html = "<p style=\"color:red\">Hi <a href=\"https://ex.test\">link</a> \
+             <img src=\"data:image/png;base64,AAAA\"></p>";
+        let clean = sanitize_html(html, true);
+        assert!(clean.contains("style=\"color:red\""));
+        assert!(clean.contains("<a href=\"https://ex.test\">link</a>"));
+        assert!(clean.contains("<img src=\"data:image/png;base64,AAAA\">"));
+    }
+
+    #[test]
+    fn is_remote_url_detects_network_resources() {
+        assert!(is_remote_url("http://tracker.test/p.gif"));
+        assert!(is_remote_url("https://tracker.test/p.gif"));
+        assert!(is_remote_url("  HTTPS://Tracker.test"));
+        assert!(is_remote_url("//tracker.test/p.gif")); // protocol-relative
+                                                        // Local / inline resources are not remote.
+        assert!(!is_remote_url("data:image/png;base64,AAAA"));
+        assert!(!is_remote_url("cid:part1@mail"));
+        assert!(!is_remote_url("/relative.png"));
+        assert!(!is_remote_url("#frag"));
+        assert!(!is_remote_url("images/logo.png"));
+    }
+
+    #[test]
+    fn sanitize_blocks_remote_resources_when_disabled() {
+        let html = "<img src=\"https://tracker.test/pixel.gif\" \
+             srcset=\"https://tracker.test/2x.gif 2x\">\
+             <img src=\"data:image/png;base64,AAAA\">";
+        let clean = sanitize_html(html, false);
+        // The remote URL is preserved out-of-band (so the user can reveal it),
+        // and *only* there: it appears exactly once, inside data-rm-blocked-src,
+        // never as a live src/srcset. The srcset variant is dropped entirely.
+        assert!(clean.contains("data-rm-blocked-src=\"https://tracker.test/pixel.gif\""));
+        assert!(!clean.contains("srcset"));
+        assert!(!clean.contains("2x.gif"));
+        assert_eq!(clean.matches("tracker.test").count(), 1);
+        // Both <img> elements survive; the inline data: image is untouched.
+        assert!(clean.contains("data:image/png;base64,AAAA"));
+        assert_eq!(clean.matches("<img").count(), 2);
+    }
+
+    #[test]
+    fn sanitize_keeps_remote_link_href_when_blocking() {
+        // A link's href is navigation (acts on click), not a render-time fetch,
+        // so it must survive even with remote content blocked.
+        let html = "<a href=\"https://example.test/page\">click</a>\
+             <img src=\"https://tracker.test/pixel.gif\">";
+        let clean = sanitize_html(html, false);
+        assert!(clean.contains("href=\"https://example.test/page\""));
+        // The image, by contrast, is still blocked: its URL only survives
+        // out-of-band in data-rm-blocked-src, never as a live src.
+        assert!(clean.contains("data-rm-blocked-src=\"https://tracker.test/pixel.gif\""));
+        assert_eq!(clean.matches("tracker.test").count(), 1);
+    }
+
+    #[test]
+    fn sanitize_does_not_stash_blocked_src_when_remote_enabled() {
+        let html = "<img src=\"https://cdn.test/pixel.gif\">";
+        let clean = sanitize_html(html, true);
+        assert!(clean.contains("src=\"https://cdn.test/pixel.gif\""));
+        assert!(!clean.contains("data-rm-blocked-src"));
+    }
+
+    #[test]
+    fn sanitize_keeps_remote_resources_when_enabled() {
+        let html = "<img src=\"https://cdn.test/pixel.gif\">";
+        let clean = sanitize_html(html, true);
+        assert!(clean.contains("https://cdn.test/pixel.gif"));
+    }
+
+    #[test]
+    fn strip_css_urls_empties_every_url() {
+        assert_eq!(
+            strip_css_urls("a{background:url(http://x/y.png) no-repeat}"),
+            "a{background:url() no-repeat}"
+        );
+        // Case-insensitive, multiple occurrences, and quotes/whitespace inside.
+        assert_eq!(
+            strip_css_urls("URL( 'http://a' ) and url(\"data:image/png;base64,AAA\")"),
+            "url() and url()"
+        );
+        // Unterminated url( drops the remainder.
+        assert_eq!(strip_css_urls("x url(http://a"), "x url(");
+        // No url(): untouched.
+        assert_eq!(strip_css_urls("color: red"), "color: red");
+    }
+
+    #[test]
+    fn sanitize_blocks_css_url_resources_when_disabled() {
+        let html = "<style>.hero{background-image:url(https://tracker.test/bg.png)}</style>\
+             <p style=\"background:url('https://tracker.test/inline.png')\">hi</p>";
+        let clean = sanitize_html(html, false);
+        assert!(!clean.contains("tracker.test"));
+        assert_eq!(clean.matches("url()").count(), 2);
+    }
+
+    #[test]
+    fn sanitize_leaves_url_text_outside_css_alone() {
+        // Prose mentioning `url(` (no closing paren) used to lose the rest
+        // of the message.
+        let html = "<p>Call curl(1) or use url( to link</p><p>still here</p>\
+             <style>a{background:url(https://t.test/x.png)}</style>";
+        let clean = sanitize_html(html, false);
+        assert!(clean.contains("Call curl(1) or use url( to link"));
+        assert!(clean.contains("<p>still here</p>"));
+        assert!(!clean.contains("t.test"));
+    }
+
+    #[test]
+    fn sanitize_keeps_css_url_resources_when_enabled() {
+        let html = "<p style=\"background:url('https://cdn.test/bg.png')\">hi</p>";
+        let clean = sanitize_html(html, true);
+        assert!(clean.contains("https://cdn.test/bg.png"));
+    }
+
+    #[test]
+    fn document_strips_disallowed_elements_from_html_body() {
+        let body = MessageBody::Html(
+            "<p>safe</p><iframe src=\"x\"></iframe><input><video></video>".into(),
+        );
+        let doc = email_document(
+            doc_colors(
+                hsla(0.0, 0.0, 0.1, 1.0),
+                hsla(0.0, 0.0, 0.9, 1.0),
+                hsla(0.6, 0.7, 0.5, 1.0),
+            ),
+            &body,
+            false,
+        )
+        .html;
+        assert!(doc.contains("<p>safe</p>"));
+        assert!(!doc.contains("<iframe"));
+        assert!(!doc.contains("<input"));
+        assert!(!doc.contains("<video"));
+    }
+
+    #[test]
+    fn remote_image_state_follows_the_policy() {
+        let url = "https://tracker.test/p.gif";
+        let html = format!("<img src=\"{url}\">");
+        let none = HashSet::new();
+        // Loading off → present and blocked; on → present, nothing blocked.
+        assert!(sanitize_html_inner(&html, false, &none).1);
+        assert_eq!(sanitize_html_inner(&html, false, &none).2, 1);
+        assert_eq!(sanitize_html_inner(&html, true, &none).2, 0);
+        // Individually shown images are let through while loading is off.
+        let shown: HashSet<String> = [url.to_string()].into_iter().collect();
+        assert_eq!(sanitize_html_inner(&html, false, &shown).2, 0);
+        // A message without remote resources reports none.
+        let local = sanitize_html_inner("<p>x</p>", false, &none);
+        assert!(!local.1 && local.2 == 0);
+    }
+
+    #[test]
+    fn plain_text_keeps_readable_structure() {
+        let html = "<html><head><title>T</title><style>p{color:red}</style></head>\
+            <body><h1>Hello&nbsp;there</h1><p>One  two\n three &amp; four</p>\
+            <script>alert(1)</script><!-- note --><ul><li>a</li><li>b</li></ul>\
+            <table><tr><td>x</td><td>y</td></tr></table><pre>  keep\n  this</pre></body></html>";
+        assert_eq!(
+            plain_text(html),
+            "Hello there\n\nOne two three & four\n\na\nb\n\nx\ty\n\n  keep\n  this"
+        );
+    }
+
+    #[test]
+    fn plain_text_decodes_entities_and_survives_broken_markup() {
+        assert_eq!(
+            decode_entities("&lt;a&gt; &#233;&#xE9; &bogus; & x"),
+            "<a> éé &bogus; & x"
+        );
+        assert_eq!(plain_text("text <b unclosed"), "text");
+        assert_eq!(plain_text("<script>never closed"), "");
+        assert_eq!(plain_text("a <!-- open comment"), "a");
+    }
+
+    #[test]
+    fn plain_text_never_cuts_multibyte_characters() {
+        // `&` followed by multi-byte text with no `;` in the first 12 bytes.
+        assert_eq!(decode_entities("R&aaaaaaaaaaé"), "R&aaaaaaaaaaé");
+        assert_eq!(plain_text("P&D çççççççç ok"), "P&D çççççççç ok");
+        // An unclosed tag ending in a multi-byte character.
+        assert_eq!(plain_text("1 < 2 é"), "1");
+        assert_eq!(plain_text("x <é"), "x");
+    }
+
+    #[test]
+    fn plain_text_skips_blocks_case_insensitively() {
+        assert_eq!(plain_text("a <STYLE>p{}</Style>b"), "a b");
+        assert_eq!(plain_text("<title>T</TITLE><p>é</p>"), "é");
+        assert_eq!(find_ascii_ci("xx</HeAd>", "</head"), Some(2));
+        assert_eq!(find_ascii_ci("é</p", "</p"), Some(2));
+        assert_eq!(find_ascii_ci("abc", "</p"), None);
+    }
+
+    #[test]
+    fn documents_keep_the_message_doctype() {
+        let legacy = "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">";
+        assert_eq!(
+            leading_doctype(&format!("\u{feff} <!-- x -->{legacy}<html>")),
+            Some(legacy)
+        );
+        assert_eq!(leading_doctype("<p>no doctype</p>"), None);
+        let colors = doc_colors(
+            hsla(0.0, 0.0, 0.1, 1.0),
+            hsla(0.0, 0.0, 0.9, 1.0),
+            hsla(0.6, 0.7, 0.5, 1.0),
+        );
+        let doc = email_document(
+            colors,
+            &MessageBody::Html(format!("{legacy}<p>x</p>").into()),
+            false,
+        );
+        assert!(doc.html.starts_with(legacy));
+        let doc = email_document(colors, &MessageBody::Text("x".into()), false);
+        assert!(doc.html.starts_with("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn only_web_and_mail_links_open() {
+        assert!(is_openable_link("https://example.com/a"));
+        assert!(is_openable_link(" HTTP://example.com"));
+        assert!(is_openable_link("mailto:someone@example.com"));
+        assert!(!is_openable_link("bgmail://message/page.html"));
+        assert!(!is_openable_link("javascript:alert(1)"));
+        assert!(!is_openable_link("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn documents_always_block_remote_images() {
+        let body = MessageBody::Html("<img src=\"https://tracker.test/p.gif\">".into());
+        let colors = doc_colors(
+            hsla(0.0, 0.0, 0.1, 1.0),
+            hsla(0.0, 0.0, 0.9, 1.0),
+            hsla(0.6, 0.7, 0.5, 1.0),
+        );
+        let doc = email_document(colors, &body, false);
+        assert_eq!(doc.blocked_images, 1);
+        assert!(!doc.html.contains(" src=\"https://"));
+        assert!(colors.is_dark());
+    }
+}

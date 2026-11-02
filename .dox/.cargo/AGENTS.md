@@ -9,14 +9,20 @@ overrides) without scattering platform hacks into crate sources.
 
 - Owns: `.cargo/config.toml` and future workspace Cargo config fragments.
 - Does not own: `rust-toolchain.toml` (repo root), crate `Cargo.toml` feature
-  flags, CEF download behavior of the `cef` crate.
+  flags.
 
 ## Local Contracts
 
 - `TOOLCHAINS=com.apple.dt.toolchain.Metal` so GPUI's Metal shader build finds
   Xcode 26+'s unbundled Metal Toolchain. Harmless/ignored on non-macOS.
+  Cargo `[env]` does not override an existing variable: CI macOS jobs export
+  `TOOLCHAINS=com.apple.dt.toolchain.XcodeDefault` (runner Xcode bundles
+  Metal; see `.github/workflows/`).
+- Windows binaries reserve an 8 MB main-thread stack (`/STACK` on MSVC,
+  `--stack` on GNU), matching Linux/macOS: the reader lays out mail on the UI
+  thread and `html_view::MAX_NESTING_DEPTH` assumes that stack.
 - Keep overrides minimal and documented; prefer crate-level features for
-  optional runtime deps (e.g. `bgmail`'s `cef-osr`).
+  optional runtime deps.
 - Do not commit machine-local absolute paths or secrets here.
 
 ## Work Guidance

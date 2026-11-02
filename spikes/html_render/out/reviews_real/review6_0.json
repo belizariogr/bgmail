@@ -1,0 +1,91 @@
+{
+  "ham-00-tribute-ca": {"score": 8.5, "issues": [
+    "[médio] Imagens espaçadoras (spacer GIFs sem alt) viram molduras prateadas visíveis em todas as colunas: dezenas de barrinhas/linhas cinza entre os itens da coluna esquerda e no topo do e-mail, onde o Chromium não desenha nada.",
+    "[baixo] O formulário 'Subscribe a friend' mostra um botão branco vazio extra abaixo do campo de e-mail; o Chromium não mostra nada ali (input type=image sem src/alt).",
+    "[baixo] Itens da coluna esquerda deslocados ~5-10 px para baixo por causa das molduras espaçadoras; altura total +0,7%."],
+    "css_suspect": "img sem alt/sem src com width/height (spacer) desenhada como moldura; input type=image sem alt"},
+  "ham-01-newsletter-online-co": {"score": 7.5, "issues": [
+    "[médio] O <select> 'Downloads' do formulário de busca na coluna direita aparece como uma caixa vazia sem texto nem seta; o rótulo alt 'Search' fica como 'Search Download.com' numa caixa mais larga.",
+    "[médio] As linhas da tabela 'Top Ten Downloads' ficam ~20% mais altas (≈32 px contra ≈27 px), e as alturas do cabeçalho de seção somam ~6% (+220 px) à página inteira.",
+    "[baixo] Cada cabeçalho de seção (imagem alt 'Reviews & Features', 'CNET's Exclusive' etc.) ganha uma linha horizontal extra e ~10 px de espaço abaixo.",
+    "[baixo] O grande anúncio da coluna direita (cinza com ícone no Chromium) vira uma moldura branca vazia."],
+    "css_suspect": "renderização de <select>; altura de linha em td com font size=1/imagens espaçadoras; img com height em cabeçalhos"},
+  "ham-02-oracleeblast-com": {"score": 9.2, "issues": [
+    "[baixo] Espaçadores na barra 'In this issue' aparecem como quadradinhos prateados ao lado dos links.",
+    "[baixo] Conteúdo deslocado ~7 px para cima a partir do cabeçalho; sem impacto de layout."],
+    "css_suspect": "img espaçadora sem alt desenhada como moldura"},
+  "ham-03-handango-com": {"score": 8.6, "issues": [
+    "[baixo] Imagens com link não recebem a borda azul/roxa de link (border padrão de <a><img>) que o Chromium desenha, por exemplo no anúncio 'Sponsor'.",
+    "[baixo] Faixas espaçadoras entre seções viram molduras largas e o bloco Personal Productivity/Sponsor fica ~10-20 px mais alto/deslocado.",
+    "[baixo] A caixa do 'Sponsor' fica mais estreita e alta que a imagem do Chromium (115×65)."],
+    "css_suspect": "borda padrão de img dentro de <a> (border=1 herdando a cor do link); espaçadores"},
+  "ham-04-wrox-com": {"score": 9.0, "issues": [
+    "[baixo] Aspas e apóstrofos cp1252 (bytes C1, ex.: 0x92) somem e deixam um espaço em branco ('can  t', '   unsubscribe  '); o Chromium mostra mojibake 'Â’', mas ao menos mostra o caractere.",
+    "[baixo] Os títulos de seção ficam ~7 px mais acima (margens dos h2/h3 levemente menores)."],
+    "css_suspect": "decodificação de caracteres de controle C1 / windows-1252 (U+0080–U+009F)"},
+  "ham-05-motleyfool-com": {"score": 8.8, "issues": [
+    "[baixo] Espaçadores aparecem como quadradinhos e barras prateadas nos cantos e laterais do cabeçalho azul e do rodapé.",
+    "[baixo] A moldura alt do logo no cabeçalho fica mais larga e ganha linhas extras.",
+    "[baixo] A coluna de texto quebra um pouco mais larga: alguns parágrafos têm uma linha a menos (altura -3%)."],
+    "css_suspect": "espaçadores sem alt; largura de célula de tabela"},
+  "ham-06-mediaunspun-imakenew": {"score": 9.0, "issues": [
+    "[baixo] A área do rodapé abaixo da tabela principal ('Powered by iMakeNews') fica branca; no Chromium o fundo é cinza-claro (#eee) até o fim da página.",
+    "[baixo] A caixa amarela do Sponsor e as seções ficam ~10 px mais acima; os caracteres NBSP aparecem corretamente (o Chromium mostra mojibake 'SendÂ asÂ HTML')."],
+    "css_suspect": "propagação de bgcolor do body/tabela até a altura da viewport"},
+  "ham-07-lockergnome-com": {"score": 9.3, "issues": [
+    "[baixo] Imagens com link (TechTV's Computer Basics, estrelas do 'Reviewer's Tilt') sem a borda azul de link do Chromium.",
+    "[baixo] Itens da barra lateral deslocados alguns px."],
+    "css_suspect": "borda padrão de <a><img>"},
+  "ham-08-euromailer-lists-app": {"score": 6.5, "issues": [
+    "[alto] Espaçadores largos (width=100%) viram longas molduras/linhas horizontais em toda a mensagem: abaixo do título, entre os artigos e no rodapé, criando um visual de 'grade' que o Chromium não tem.",
+    "[médio] A lista lateral (New PowerBook, New Book…) começa ~40 px mais abaixo, e os links de baterias ~70 px mais abaixo, desalinhando a coluna direita do texto principal.",
+    "[baixo] O botão de imagem 'Submit' (input type=image com alt) perde o texto alt; aparece só uma caixa.",
+    "[baixo] Quadrados de espaçador soltos nos cantos (topo/rodapé) em vez de nada."],
+    "css_suspect": "img espaçadora sem alt com width grande desenhada como moldura; input type=image alt; altura de linhas de tabela com espaçadores"},
+  "ham-09-bounce-winxpnews-com": {"score": 9.2, "issues": [
+    "[baixo] As seções ficam ~30-40 px mais acima no fim (molduras alt mais baixas e quebra de linha um pouco mais larga); altura -0,9%.",
+    "[baixo] Espaçadores aparecem como molduras pequenas ao lado de alguns títulos."],
+    "css_suspect": "métrica de fonte/quebra de linha; espaçadores"},
+  "ham-10-sneakemail-com": {"score": 9.5, "issues": [
+    "[baixo] O cabeçalho 'In This Issue' sobe ~12 px e o deslocamento se propaga pela página; não há diferenças estruturais."],
+    "css_suspect": "margem vertical de bloco após tabela de patrocinador"},
+  "ham-11-cteyyyyi-cjsias-bwmm": {"score": 9.0, "issues": [
+    "[baixo] Cinco imagens espaçadoras empilhadas no topo (~60 px no Chromium) colapsam no html_view, e a caixa principal sobe ~7 px.",
+    "[baixo] O símbolo do euro (byte cp1252 0x80) some nos preços ('Now  42.14 Save  5.62')."],
+    "css_suspect": "decodificação windows-1252 C1; img sem src/alt em linha própria"},
+  "ham-12-buy4now-ie": {"score": 9.5, "issues": [
+    "[baixo] Pequenos quadrados de espaçador visíveis nas bordas da coluna e ao lado do bloco DVD."],
+    "css_suspect": "espaçadores sem alt"},
+  "ham-13-hermes-sun-com": {"score": 7.5, "issues": [
+    "[alto] No cabeçalho, a célula 'View this issue as simple text' colapsa numa coluna estreitíssima, uma palavra por linha (6 linhas), em vez de uma linha só; a data vai para baixo.",
+    "[médio] O botão de imagem 'Search' (input type=image com alt) ao lado do campo de busca some, e o campo é reposicionado à direita.",
+    "[baixo] Por causa do cabeçalho, todo o conteúdo desce ~30 px; há uma linha horizontal extra antes de 'USING ZERO-LENGTH ARRAYS'."],
+    "css_suspect": "largura mínima/preferida de td sem width numa tabela com colspan (algoritmo de auto table layout); input type=image"},
+  "ham-14-applenews-lists-appl": {"score": 9.2, "issues": [
+    "[baixo] Espaçadores entre os parágrafos da coluna direita aparecem como pequenos retângulos prateados centralizados.",
+    "[baixo] Itens da coluna direita deslocados ~5-15 px."],
+    "css_suspect": "espaçadores sem alt"},
+  "ham-15-crrvja-cjsias-uhbeqs": {"score": 8.0, "issues": [
+    "[médio] Aspas, apóstrofos e marcadores cp1252 (0x91–0x96, 0x5C/Wingdings) somem e deixam lacunas no texto: 'We  ve improved  Search  to make it', 'Here  s', 'you  ll'. Os marcadores '\\' de 'Did you know?' desaparecem.",
+    "[baixo] Cinco espaçadores empilhados no topo colapsam, e o painel branco sobe ~7 px; o espaçador final do rodapé vira uma moldura grande."],
+    "css_suspect": "decodificação windows-1252 de caracteres C1 (U+0080–U+009F)"},
+  "ham-16-reply-yahoo-com": {"score": 7.5, "issues": [
+    "[médio] O texto alt da imagem 'Captured weapons-grade uranium…' sai sem a moldura com borda e com entrelinha maior: a coluna fica ~60 px mais alta (altura total +6,7%).",
+    "[médio] Os dois <select> ('News Photos', no topo e no rodapé) aparecem como caixas de texto vazias, sem a opção selecionada nem a seta.",
+    "[baixo] O banner de anúncio (cinza com ícone no Chromium) vira uma moldura branca; o alt 'New' perde a moldura."],
+    "css_suspect": "renderização de <select>; img alt inline com width fixa e border (moldura do alt) e line-height"},
+  "ham-17-ummail4-unitedmedia": {"score": 4.5, "issues": [
+    "[crítico] A linha de links 'Buy This Strip / Send This Strip to a Friend / Month of Dilbert' e o alt 'You need to go online to see today's strip…' saem do painel branco e transbordam para a coluna de anúncio à direita (x≈646+), cortados na borda da página.",
+    "[alto] Dentro do painel branco aparece um grande bloco azul (≈600×90 px) onde o Chromium mostra fundo branco com os links.",
+    "[alto] Os rótulos 'Ad', 'Books' e 'Graphic' somem; a saudação 'Hi Justin, enjoy your daily comic…' fica alinhada à direita em vez de à esquerda.",
+    "[médio] O banner de anúncio cinza vira uma moldura vazia, e espaçadores viram dezenas de molduras prateadas pela página."],
+    "css_suspect": "tabelas aninhadas com colspan/width e células com bgcolor; align herdado de td/table; texto em <font size=1>; transbordo de tabela mais larga que a célula pai"},
+  "ham-18-berkshireeagle-com": {"score": 9.0, "issues": [
+    "[baixo] Falta a linha divisória vertical entre a coluna principal e a 'Breaking News' (célula estreita com bgcolor/espaçador).",
+    "[baixo] A coluna 'Breaking News' quebra o texto de forma ligeiramente diferente (Local/Sports Headlines em outras posições)."],
+    "css_suspect": "td de 1 px com bgcolor contendo apenas espaçador (altura/largura mínima)"},
+  "ham-19-xmr3-com": {"score": 9.0, "issues": [
+    "[baixo] Os travessões (bytes C1 0x96 após UTF-8) somem e deixam lacunas: 'Mac-Shop    Cyberdesign'. O resto do UTF-8 sai correto, enquanto o Chromium mostra mojibake.",
+    "[baixo] O espaçamento vertical entre os blocos de shop é ~20 px maior em alguns pontos (altura +1,8%)."],
+    "css_suspect": "mapeamento de C1 (U+0080–U+009F) para windows-1252"}
+}

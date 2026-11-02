@@ -58,6 +58,7 @@ pub enum IconName {
     Refresh,
     ChevronRight,
     ChevronDown,
+    ChevronUp,
     Account,
     Attachment,
     Mail,
@@ -76,6 +77,20 @@ pub enum IconName {
     WindowMaximize,
     /// Window caption: restore (un-maximize).
     WindowRestore,
+    /// Attachment of an unknown type.
+    File,
+    /// Image attachment.
+    FileImage,
+    /// PDF attachment.
+    FilePdf,
+    /// Archive attachment (zip, tar, …).
+    FileArchive,
+    /// Audio attachment.
+    FileAudio,
+    /// Video attachment.
+    FileVideo,
+    /// Text / document attachment.
+    FileText,
 }
 
 impl IconName {
@@ -102,6 +117,7 @@ impl IconName {
             IconName::Refresh => crate::REFRESH,
             IconName::ChevronRight => crate::CHEVRON_RIGHT,
             IconName::ChevronDown => crate::CHEVRON_DOWN,
+            IconName::ChevronUp => crate::CHEVRON_UP,
             IconName::Account => crate::CIRCLE_USER,
             IconName::Attachment => crate::PAPERCLIP,
             IconName::Mail => crate::ENVELOPE,
@@ -116,6 +132,13 @@ impl IconName {
             IconName::WindowMinimize => crate::WINDOW_MINIMIZE,
             IconName::WindowMaximize => crate::WINDOW_MAXIMIZE,
             IconName::WindowRestore => crate::WINDOW_RESTORE,
+            IconName::File => crate::FILE,
+            IconName::FileImage => crate::FILE_IMAGE,
+            IconName::FilePdf => crate::FILE_PDF,
+            IconName::FileArchive => crate::FILE_ZIPPER,
+            IconName::FileAudio => crate::FILE_AUDIO,
+            IconName::FileVideo => crate::FILE_VIDEO,
+            IconName::FileText => crate::FILE_LINES,
         }
     }
 }
@@ -171,7 +194,7 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 34] = [
+    const ALL: [IconName; 42] = [
         IconName::Inbox,
         IconName::Sent,
         IconName::Drafts,
@@ -192,6 +215,7 @@ mod tests {
         IconName::Refresh,
         IconName::ChevronRight,
         IconName::ChevronDown,
+        IconName::ChevronUp,
         IconName::Account,
         IconName::Attachment,
         IconName::Mail,
@@ -206,6 +230,13 @@ mod tests {
         IconName::WindowMinimize,
         IconName::WindowMaximize,
         IconName::WindowRestore,
+        IconName::File,
+        IconName::FileImage,
+        IconName::FilePdf,
+        IconName::FileArchive,
+        IconName::FileAudio,
+        IconName::FileVideo,
+        IconName::FileText,
     ];
 
     #[test]

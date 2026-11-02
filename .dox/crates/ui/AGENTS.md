@@ -3,13 +3,15 @@
 ## Purpose
 
 Small GPUI component library inspired by Zed's `ui` crate: labels, icons,
-buttons, list rows, inputs, scrollbar, tooltip, and flex helpers — enough for
+buttons, list rows, single-line inputs, a multi-line text area, scrollbar,
+tooltip, and flex helpers — enough for
 an e-mail client, without Zed-scale bloat.
 
 ## Ownership
 
 - Owns: visual primitives (`Label`, `Icon`, `Button`, `IconButton`, `ListItem`,
-  `Scrollbar`, `Switch`, `TextInput`, `Tooltip`), `Color`, layout helpers
+  `ContextMenu`, `Scrollbar`, `Switch`, `TextInput`, `TextArea`, `Tooltip`),
+  `Color`, layout helpers
   (`h_flex` / `v_flex`), embedded SVG `Assets` / `IconName`.
 - Does not own: theme palettes (`theme`), app views/windows (`bgmail`), mail
   domain (`storage` / future `mail_core`).
@@ -27,6 +29,24 @@ an e-mail client, without Zed-scale bloat.
 - Prefer reusing existing components over one-off markup in `bgmail`.
 - Windows-only deps for text input stay behind `cfg`; do not leak OS details
   into public component APIs.
+- Text components: `ui::bind_keys(cx)` (once at startup) registers both
+  `TextInput` (context `"TextInput"`) and `TextArea` (context `"TextArea"`)
+  bindings, with macOS `cmd`/`alt` and other-platform `ctrl` variants. Both
+  emit a `Changed` event (`TextInputEvent` / `TextAreaEvent`) on user edits
+  only; programmatic `set_content` / `clear` stay silent. Both own IME via
+  `EntityInputHandler` and call `set_native_text_focus` on click.
+- `TextArea` (compose body): plain text with `\n` line endings only (`\r\n`
+  normalized on load/paste/input), soft-wraps to its width and grows to its
+  content height (`min_lines` floor) — the caller provides the scroll
+  container and may pass its `ScrollHandle` via `track_scroll` for caret
+  autoscroll. Tab is not consumed (parent focus navigation). Its actions are
+  namespaced under `ui::text_area::*`; only `TextArea` / `TextAreaEvent` are
+  re-exported at the crate root.
+- `TextArea` keeps GPUI-free editing logic (text/selection/undo in
+  `text_area/buffer.rs`, soft-wrap row math in `text_area/rows.rs`) separate
+  from the element so it is unit-tested without a window; reshaping happens
+  only when the `LayoutKey` (text revision, width, font, size, color, IME mark,
+  placeholder) changes, and painting skips rows outside the content mask.
 
 ## Work Guidance
 
@@ -39,7 +59,8 @@ an e-mail client, without Zed-scale bloat.
 ## Verification
 
 - Component/unit tests in each module where logic exists (e.g. scrollbar
-  geometry).
+  geometry, `text_area` buffer/rows core). GPUI `test-support` is not enabled
+  for this crate, so element/entity code is covered through its pure helpers.
 - `cargo test -p ui`
 - Workspace clippy/fmt as in parent.
 

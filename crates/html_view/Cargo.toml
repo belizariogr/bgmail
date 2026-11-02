@@ -1,0 +1,70 @@
+[package]
+name = "html_view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native GPUI element that renders HTML (e-mail) using Blitz for style and layout"
+
+[lib]
+path = "src/html_view.rs"
+
+[features]
+default = ["svg"]
+# Inline <svg> and SVG images, painted through the same GPUI display list.
+svg = ["dep:anyrender_svg", "dep:usvg", "blitz-dom/svg"]
+# Flags kept from the vendored blitz-paint so its cfgs stay meaningful.
+custom-widget = []
+scrollbars = []
+tracing = ["dep:tracing"]
+font-embolden = []
+apple-font-embolden = []
+
+[dependencies]
+gpui.workspace = true
+
+# Blitz: parsing (html5ever), styling (Stylo), layout (Taffy + Parley). Vendored
+# from rev e42ee1f with BGMail layout fixes (vendor/blitz).
+blitz-dom = { path = "../../vendor/blitz/packages/blitz-dom", default-features = false, features = ["system-fonts", "woff", "floats", "text-transform-icu"] }
+blitz-html = { path = "../../vendor/blitz/packages/blitz-html", default-features = false }
+url = "2.5.0"
+# Blitz event types (pointer modifiers) used to drive document interaction.
+keyboard-types = "0.8"
+data-url = "0.3.1"
+blitz-traits = { path = "../../vendor/blitz/packages/blitz-traits", default-features = false }
+
+# Dependencies of the vendored painter (src/blitz_paint), versions matching Blitz.
+style = { version = "0.22.0", git = "https://github.com/nicoburns/stylo", rev = "78734bf554bb40af9dc11c0eedbe724f6055697c", package = "stylo" }
+euclid = "0.22"
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "c25605620351786eb6a742b74ea4d289f59ebd84", default-features = false }
+parley = { version = "0.12", default-features = false, features = ["std", "bytemuck"] }
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
+color = "0.3"
+peniko = "0.6.0"
+kurbo = "0.13.1"
+anyrender = "0.14.0"
+anyrender_svg = { version = "0.15.0", optional = true }
+usvg = { version = "0.48.1", optional = true }
+bytemuck = "1"
+# GPUI uploads images as `image::Frame`s (same major as gpui 0.2.2); PNG
+# decodes colour-emoji bitmaps (CBDT/sbix strikes).
+image = { version = "0.25", default-features = false, features = ["png"] }
+smallvec = "1"
+# Remote images (`src/remote.rs`), only for documents that allow them:
+# blocking client on a small background pool, rustls TLS.
+ureq = "3"
+tracing = { version = "0.1", optional = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
+# GPUI (via font-kit) builds yeslogic-fontconfig-sys in `dlopen` mode; fontique
+# (Blitz/Parley's font backend) must use the matching API or it fails to compile.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+fontique = { version = "0.12", default-features = false, features = ["fontconfig-dlopen"] }
+# Browser-like font fallback (`src/fonts.rs`): Chromium's FcFontSort order.
+fontconfig = { version = "0.11", default-features = false, features = ["dlopen"] }
+
+[dev-dependencies]
+url = "2.5.0"
+# The viewer example stitches full-page captures into PNGs; tests encode GIFs.
+image = { version = "0.25", default-features = false, features = ["png", "gif"] }

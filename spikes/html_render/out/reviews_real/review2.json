@@ -1,0 +1,93 @@
+{
+  "rge-ollama-mistral-large-open-source": {
+    "score": 9.8,
+    "issues": [],
+    "css_suspect": ""
+  },
+  "rge-organic-valley-thanksgiving-giveaway": {
+    "score": 8.0,
+    "issues": [
+      "[médio] Faixa branca entre o hero verde e o rodapé (tabela com imagens sem alt GM1200_PlainPasture / Footer Module, ~16px de altura no Chromium) desaparece no html_view: os dois blocos verdes ficam colados num só bloco contínuo",
+      "[médio] Linha de ícones sociais sem alt (6 imagens width=28) colapsa a altura zero no html_view; o Chromium reserva ~30px de linha, então todo o rodapé sobe ~60px (altura total 1058 vs 1126, -6%)",
+      "[baixo] Logo do cabeçalho (sem alt) não reserva espaço; título e 'UNSUBSCRIBE/PRIVACY' em 'arial black' saem com peso normal (fallback de fonte, não layout)"
+    ],
+    "css_suspect": "img quebrada sem alt colapsa para 0x0 em vez de manter caixa inline (Chromium reserva ~16px do ícone + line box); font-family 'arial black' sem fallback de peso"
+  },
+  "rge-pacaso-owner-spotlight-seasonal-homes": {
+    "score": 7.5,
+    "issues": [
+      "[alto] Miniaturas das casas (img width=180 height=126, style width:180px;height:auto;max-width:100%;background-color:#E6E0D5) ficam com altura só da linha do alt text no html_view; no Chromium mantêm a caixa ~116x80 com fundo bege e alt no topo. Cada linha da lista fica ~20px mais baixa e o alt fica centrado verticalmente",
+      "[médio] Altura total 2642 vs 2763 (-4%), acumulada nas 4 linhas da lista 'Homes for the season ahead'",
+      "[baixo] Foto do consultor (sem alt) em 'Get in touch' e logo do rodapé não reservam espaço; alt text de links sem sublinhado"
+    ],
+    "css_suspect": "height:auto em img quebrada não usa a razão de aspecto dos atributos width/height (aspect-ratio implícito) nem pinta background-color da caixa"
+  },
+  "rge-pillsbury-halloween-costume-recipes": {
+    "score": 8.6,
+    "issues": [
+      "[baixo] Alt text das imagens dentro de <a> não sai sublinhado (Chromium sublinha herdando text-decoration do link) em todas as seções (receitas, 'See the Full Week', 'Explore More Pies')",
+      "[baixo] Imagens sem alt/ícones colapsam: seções creme/azul ficam 10–40px mais baixas e o conteúdo sobe (altura total 2270 vs 2325, -2%)",
+      "[baixo] Logo 'Pillsbury Logo' recebe moldura prateada e alt em fonte grande; ícones sociais do rodapé viram caixas com bordas (esperado pelo brief)"
+    ],
+    "css_suspect": "text-decoration propagada do <a> não aplicada ao alt text da img; img quebrada sem alt com altura 0"
+  },
+  "rge-primal-kitchen-halloween-bogo-collagen": {
+    "score": 8.4,
+    "issues": [
+      "[médio] Imagem sem alt acima de 'Made For Real Food™' e a linha de ícones sociais colapsam a 0 no html_view; rodapé sobe ~30–40px em cada ponto (altura 1416 vs 1480, -4%)",
+      "[baixo] Alt text de logos/imagens dentro de links ('Primal Kitchen Logo', 'Buy One. Boo One.') sem sublinhado",
+      "[baixo] Grade de produtos: alt text dos produtos fica sem o espaço do ícone, links deslocados ~10px para cima"
+    ],
+    "css_suspect": "img quebrada sem alt colapsa (sem caixa de ícone 16px); text-decoration não propagada ao alt text"
+  },
+  "rge-promise-gluten-free-fall-brioche-toast": {
+    "score": 6.0,
+    "issues": [
+      "[alto] Seção branca de produtos (Brioche Burger Bun / Hot Dog Buns / Loaf / Sourdough Rolls): html_view reserva caixas vazias de 220x220 (style width:220px;height:220px) para cada imagem, deixando ~360px de branco extra; o Chromium mostra só o ícone pequeno e a seção tem ~135px. Altura total 3385 vs 2929 (+16%)",
+      "[médio] Imagem hero 480x480 e faixas 600x108: no Chromium aparecem caixas com borda/ícone, no html_view espaço vazio sem moldura nem indicação (sem alt). Conteúdo em seguida fica ~13px mais baixo",
+      "[baixo] Logo 'Promise Gluten Free US' sem ícone (aceitável)"
+    ],
+    "css_suspect": "img quebrada com alt e width/height explícitos em CSS: tratamento divergente do Chromium (Chromium cai para inline/ícone, html_view mantém caixa fixa sem desenhar alt nem moldura)"
+  },
+  "rge-pure-halloween-dog-food-education": {
+    "score": 9.4,
+    "issues": [
+      "[baixo] Alt text 'Logo' e 'Human score' (dentro de links) sem sublinhado; 'Frightening Fillers' sem espaço do ícone, deslocado poucos px"
+    ],
+    "css_suspect": "text-decoration não propagada ao alt text de img dentro de <a>"
+  },
+  "rge-reverb-halloween-gear-deals": {
+    "score": 9.3,
+    "issues": [
+      "[baixo] Alt text de todas as imagens dentro de links (produtos Fender/Yamaha/Crate/Gretsch, hero, 'Reverb', 'Download the Reverb App') aparece sem sublinhado; no Chromium é sublinhado e ao lado do ícone",
+      "[baixo] Ícones sociais do rodapé: alt truncado ('Fac', 'You', 'Inst', 'Tik') mostrado em linha única, sem o ícone; layout equivalente"
+    ],
+    "css_suspect": "text-decoration não propagada ao alt text"
+  },
+  "rge-rspca-autumn-newsletter": {
+    "score": 9.0,
+    "issues": [
+      "[baixo] Logo do cabeçalho e logo inferior do rodapé (alt azul em fundo azul) somem no html_view, deixando o espaço vazio; no Chromium aparecem ícone + sublinhado",
+      "[baixo] Alt text dos heros ('A tortoiseshell cat lying on a mat', 'Two grey seals...') sem sublinhado e sem ícone; conteúdo desce ~2–4px por seção (altura 2324 vs 2308)",
+      "[baixo] Ícones sociais viram caixas com borda com alt pequeno (esperado pelo brief)"
+    ],
+    "css_suspect": "text-decoration não propagada ao alt text"
+  },
+  "rge-starbucks-black-cat-frappuccino-halloween": {
+    "score": 8.0,
+    "issues": [
+      "[médio] Logo final 'STARBUCKS® REWARDS' (img 146x136 com style width/height): html_view reserva a caixa inteira e quebra o alt em duas linhas sobrepostas ('STARBUCKS®' sobre 'REWARDS', line-height insuficiente); Chromium mostra o alt numa linha só. Gera ~100px de branco extra no fim (altura 2007 vs 1860, +8%)",
+      "[baixo] Ícones da barra verde (GO TO APP/ORDER NOW/...) e separadores verticais brancos entre eles não aparecem no html_view; rótulos permanecem no lugar",
+      "[baixo] Alt 'Order now' e alt do hero sem ícone; ícones sociais com alt truncado sem sublinhado"
+    ],
+    "css_suspect": "alt text de img quebrada com caixa fixa: line-height do alt menor que o font-size (sobreposição); separadores verticais (provavelmente border-left/img) não pintados"
+  },
+  "rge-thira-brief-art-design-newsletter": {
+    "score": 6.5,
+    "issues": [
+      "[alto] Todos os links 'READ AT ... →' / 'DETAILS →' (a.lk inline com border-bottom:1px solid #301014; padding-bottom:2px; font-size:10px; letter-spacing:0.18em) são pintados como barras sólidas cor #301014 cobrindo o texto: 10 CTAs ficam ilegíveis",
+      "[baixo] Alt 'thira' do logo do rodapé sem ícone; resto (cards, cantos arredondados, iniciais coloridas, tipografia) idêntico"
+    ],
+    "css_suspect": "border-bottom em elemento inline <a> com padding-bottom: a borda/fundo do fragmento inline é pintada como retângulo preenchido sobre todo o line box (provável bug de pintura de borda inline)"
+  }
+}

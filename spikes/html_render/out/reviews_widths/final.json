@@ -1,0 +1,398 @@
+{
+ "mjml-real-estate@375": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Deriva vertical acumulada de ~3px a partir da seção 'Lorem Ipsum' (métricas de linha); layout, cards sobre imagem de fundo, setas e botões idênticos ao Chromium"
+  ],
+  "css_suspect": "line-height normal / métricas de fonte"
+ },
+ "re-apple-receipt@600": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Diferenças de 1–2px em posições verticais; tabelas de cabeçalho, linha TOTAL e rodapé idênticos, corte à direita igual ao Chromium"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "mjml-recast@600": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Deriva de ~1px por bloco; colunas texto+miniatura, divisores e ícones sociais idênticos"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "mjml-recast@375": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Deriva de 1–2px; colunas empilham corretamente no mobile, miniaturas centralizadas como no Chromium"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "mjml-recast@800": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Deriva de ~1px; sem diferenças de layout"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "mjml-recast@1280": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Sem diferenças visíveis além de antialiasing de fonte"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "cerberus-hybrid@800": {
+  "score": 9.7,
+  "issues": [
+   "[baixo] Rodapé escuro ~3px mais baixo (altura total +5px); grade 2 e 3 colunas, blocos texto/imagem invertidos e faixa verde idênticos"
+  ],
+  "css_suspect": "line-height em texto pequeno do rodapé"
+ },
+ "cerberus-responsive@1280": {
+  "score": 9.7,
+  "issues": [
+   "[baixo] Rodapé/faixa verde ~3–5px mais baixos (altura total +5px); demais blocos idênticos"
+  ],
+  "css_suspect": "line-height em texto pequeno do rodapé"
+ },
+ "re-02-matte-welcome@600": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Mesma diferença de reamostragem nas imagens em meio-tom; layout, quebras de linha, divisores e rodapé idênticos"
+  ],
+  "css_suspect": "filtro de reamostragem de imagem, não CSS"
+ },
+ "re-02-matte-welcome@800": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Mesma diferença de reamostragem nas imagens em meio-tom; cartão de 400px centralizado, sombra e espaçamentos idênticos"
+  ],
+  "css_suspect": "filtro de reamostragem de imagem, não CSS"
+ },
+ "re-aws-verify-email@375": {
+  "score": 9.9,
+  "issues": [
+   "[baixo] Sem diferenças visíveis além de antialiasing"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "re-notion-magic-link@375": {
+  "score": 9.9,
+  "issues": [
+   "[baixo] Sem diferenças visíveis além de antialiasing"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "re-stack-overflow-tips@375": {
+  "score": 9.8,
+  "issues": [],
+  "css_suspect": "nenhum"
+ },
+ "client-gmail-reply@600": {
+  "score": 9.9,
+  "issues": [
+   "[baixo] Sem diferenças visíveis; blockquote com borda, lista e destaque idênticos"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "re-papermark-year-in-review@375": {
+  "score": 9.6,
+  "issues": [
+   "[baixo] Colunas da tabela 'Your activity' (25/50/500) deslocadas ~2–3px em relação ao Chromium",
+   "[baixo] Gradientes radiais, raios e pílulas de países idênticos"
+  ],
+  "css_suspect": "distribuição de largura em table-layout auto"
+ },
+ "re-04-arcane-newsletter@600": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Sem diferenças visíveis além de antialiasing; numeração em caixas, citação e rodapé idênticos"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "re-twitch-reset-password@375": {
+  "score": 9.9,
+  "issues": [
+   "[baixo] Sem diferenças visíveis além de antialiasing"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "mjml-black-friday@375": {
+  "score": 9.9,
+  "issues": [],
+  "css_suspect": "nenhum"
+ },
+ "postmark-welcome@375": {
+  "score": 9.9,
+  "issues": [
+   "[baixo] Sem diferenças visíveis; botão com sombra e caixas de informação idênticos"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "mjml-newsletter@800": {
+  "score": 9.9,
+  "issues": [
+   "[baixo] Sem diferenças visíveis; sombra da imagem de código e colunas ícone+texto idênticas"
+  ],
+  "css_suspect": "nenhum relevante"
+ },
+ "re-apple-receipt@375": {
+  "score": 9.7,
+  "issues": [
+   "[baixo] Blocos de texto (bloco de produto e rodapé) deslocados 1–3px verticalmente em relação ao Chromium; layout, cortes à direita e alinhamentos idênticos"
+  ],
+  "css_suspect": "métricas de line-height/fonte; nada estrutural"
+ },
+ "re-02-matte-welcome@375": {
+  "score": 9.7,
+  "issues": [
+   "[baixo] Imagens hero e decorativas (colagem verde em meio-tom) reamostradas com filtro mais suave: o padrão de pontos/moiré visível no Chromium aparece mais liso no html_view; layout, cartão, sombra e textos idênticos"
+  ],
+  "css_suspect": "filtro de reamostragem de imagem (downscale de <img> com width:100%), não CSS"
+ },
+ "client-gmail-reply@375": {
+  "score": 9.9,
+  "issues": [],
+  "css_suspect": ""
+ },
+ "mailgun-billing@375": {
+  "score": 9.0,
+  "issues": [
+   "[médio] Títulos '$33.98 Paid' (h1) e 'Thanks for using Acme Inc.' (h2) renderizados num peso bem mais pesado e largo que no Chromium (~15% mais largos, aparência 'black'); Chromium usa o Bold normal da fonte",
+   "[baixo] Restante (tabela de itens, totais, rodapé) idêntico"
+  ],
+  "css_suspect": "font-weight:800 !important (regra h1/h2 na <style>) — seleção de face/síntese de negrito para peso 800 quando a família só tem 400/700 (deveria cair no Bold 700)"
+ },
+ "re-google-play-policy-update@375": {
+  "score": 9.8,
+  "issues": [],
+  "css_suspect": ""
+ },
+ "cerberus-responsive@375": {
+  "score": 9.5,
+  "issues": [
+   "[baixo] Rodapé escuro ~5px mais alto (linhas com <br><br> e line-height:15px)"
+  ],
+  "css_suspect": "altura de linha de <br> vazio",
+  "note": "verificação própria na it19 (empilhamento corrigido)"
+ },
+ "cerberus-hybrid@600": {
+  "score": 9.6,
+  "issues": [
+   "[baixo] Rodapé escuro ~4px mais alto (espaçamento das linhas com <br><br> e line-height:15px maior que no Chromium); restante idêntico, incluindo colunas híbridas 2+1"
+  ],
+  "css_suspect": "altura de linhas vazias de <br> com line-height fixo em px (strut)"
+ },
+ "leemunroe-responsive@375": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Borda esquerda do cartão branco ~1px mais à direita (x=5 vs 4) e botão 'Call To Action' ~1-2px mais estreito; imperceptível"
+  ],
+  "css_suspect": "arredondamento de largura/padding do container (.container width:100% !important / padding 4px)"
+ },
+ "cerberus-responsive@600": {
+  "score": 9.6,
+  "issues": [
+   "[baixo] Rodapé escuro ~4px mais alto (espaçamento extra nas quebras <br><br> com line-height:15px)"
+  ],
+  "css_suspect": "altura de linhas vazias de <br> com line-height fixo em px (strut)"
+ },
+ "mailgun-billing@600": {
+  "score": 9.0,
+  "issues": [
+   "[médio] h1 '$33.98 Paid' e h2 'Thanks for using Acme Inc.' visivelmente mais pesados/largos que no Chromium (peso 800 não mapeado para Bold)"
+  ],
+  "css_suspect": "font-weight:800 !important em h1/h2 — matching de peso de fonte 800"
+ },
+ "leemunroe-responsive@600": {
+  "score": 9.9,
+  "issues": [],
+  "css_suspect": "nenhum"
+ },
+ "mjml-real-estate@1280": {
+  "score": 9.8,
+  "issues": [],
+  "css_suspect": ""
+ },
+ "re-google-play-policy-update@600": {
+  "score": 9.8,
+  "issues": [],
+  "css_suspect": ""
+ },
+ "mjml-real-estate@800": {
+  "score": 9.8,
+  "issues": [],
+  "css_suspect": ""
+ },
+ "re-stack-overflow-tips@600": {
+  "score": 9.8,
+  "issues": [],
+  "css_suspect": ""
+ },
+ "client-outlook-desktop@375": {
+  "score": 9.9,
+  "issues": [],
+  "css_suspect": ""
+ },
+ "postmark-receipt@375": {
+  "score": 9.9,
+  "issues": [],
+  "css_suspect": ""
+ },
+ "re-papermark-year-in-review@600": {
+  "score": 9.9,
+  "issues": [],
+  "css_suspect": "nenhum"
+ },
+ "re-aws-verify-email@800": {
+  "score": 9.9,
+  "issues": [],
+  "css_suspect": ""
+ },
+ "mjml-welcome-email@375": {
+  "score": 9.9,
+  "issues": [],
+  "css_suspect": ""
+ },
+ "mjml-racoon@375": {
+  "score": 9.7,
+  "issues": [
+   "[baixo] Deriva vertical cumulativa de ~5-7px ao longo do e-mail (títulos/preços dos produtos e rodapé escuro descem alguns px em relação ao Chromium)",
+   "[baixo] Seção 'Discover our Summer Collection' e rodapé laranja ~5px mais baixos que no Chromium"
+  ],
+  "css_suspect": "line-height normal / altura de linhas de texto em células mj-text e imagens inline (strut/baseline) acumulando poucos px"
+ },
+ "re-04-arcane-newsletter@375": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Deriva vertical de 1-3px em blocos de texto; layout, quebras de linha e imagens idênticos ao Chromium"
+  ],
+  "css_suspect": "métricas de fonte (line-height normal) apenas"
+ },
+ "re-nike-receipt@375": {
+  "score": 9.5,
+  "issues": [
+   "[baixo] Grade 'Get Help' (Shipping Status / How to Return…): cada linha ~3px mais alta, empurrando o restante do rodapé ~6px para baixo; demais seções (overflow à direita igual nos dois) idênticas"
+  ],
+  "css_suspect": "altura de linha de <td> com <a> inline font-size:13.5px dentro de contexto 16px (strut/line-height normal)"
+ },
+ "re-nike-receipt@600": {
+  "score": 9.5,
+  "issues": [
+   "[baixo] Linhas de links em 'Get Help' ~3px mais altas cada; rodapé (telefone, Nike.com, links legais) deslocado ~6px para baixo"
+  ],
+  "css_suspect": "line-height normal do strut em td com <a> font-size:13.5px"
+ },
+ "cerberus-responsive@800": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Rodapé (endereço/unsubscribe) e faixa verde ~2-4px mais baixos; restante idêntico"
+  ],
+  "css_suspect": "line-height de texto pequeno (font-size 12px) no rodapé"
+ },
+ "cerberus-hybrid@375": {
+  "score": 9.7,
+  "issues": [
+   "[baixo] Texto do rodapé escuro (Company Name / endereço / telefone) com entrelinha levemente maior, empurrando 'unsubscribe' e a faixa verde ~5-7px para baixo"
+  ],
+  "css_suspect": "line-height normal em texto de 12px no rodapé / quebras <br>"
+ },
+ "re-nike-receipt@800": {
+  "score": 9.5,
+  "issues": [
+   "[baixo] Linhas de 'Get Help' ~3px mais altas; rodapé deslocado ~6px"
+  ],
+  "css_suspect": "line-height normal do strut em td com <a> font-size:13.5px"
+ },
+ "re-03-protocol-product-update@375": {
+  "score": 9.9,
+  "issues": [],
+  "css_suspect": "nenhum"
+ },
+ "cerberus-hybrid@1280": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Rodapé e faixa verde ~3-5px mais baixos; layout de colunas idêntico"
+  ],
+  "css_suspect": "line-height do texto pequeno do rodapé"
+ },
+ "mjml-real-estate@600": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Deriva vertical de 1-2px na segunda metade (seções 'Nullam dictum', '2. offer', rodapé)"
+  ],
+  "css_suspect": "métricas de fonte apenas"
+ },
+ "re-apple-receipt@800": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Conteúdo ~1px acima a partir do bloco de itens; sem diferenças visíveis de layout"
+  ],
+  "css_suspect": "arredondamento de altura de linha"
+ },
+ "re-nike-receipt@1280": {
+  "score": 9.5,
+  "issues": [
+   "[baixo] Linhas de 'Get Help' ~3px mais altas; rodapé deslocado ~6px"
+  ],
+  "css_suspect": "line-height normal do strut em td com <a> font-size:13.5px"
+ },
+ "client-apple-mail@375": {
+  "score": 9.9,
+  "issues": [
+   "[baixo] Diferenças apenas de antialiasing; layout, imagem e blockquote idênticos"
+  ],
+  "css_suspect": "nenhum"
+ },
+ "re-airbnb-review@375": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Bloco final (linha divisória, endereço e 'Report unsafe behavior') ~3px mais baixo"
+  ],
+  "css_suspect": "line-height de parágrafos com font-size 14-18px"
+ },
+ "re-05-studio-promo@375": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Lista 'Try your ring risk-free…' e card de depoimento com deriva de ~1-2px; sem diferenças visíveis"
+  ],
+  "css_suspect": "métricas de fonte apenas"
+ },
+ "re-04-arcane-order-confirmation@375": {
+  "score": 9.9,
+  "issues": [
+   "[baixo] Deriva de 1px em títulos serifados; tabela de totais idêntica"
+  ],
+  "css_suspect": "métricas de fonte apenas"
+ },
+ "re-slack-confirm@375": {
+  "score": 9.7,
+  "issues": [
+   "[baixo] Sublinhado do link 'Slack' estende-se sobre o espaço em branco no fim da linha (Chromium não sublinha o espaço pendente antes da quebra)",
+   "[baixo] Parágrafo 'If you didn't request…' com entrelinha ~1px maior"
+  ],
+  "css_suspect": "text-decoration aplicado a espaço pendente (hanging whitespace) no fim de linha"
+ },
+ "mjml-austin@375": {
+  "score": 9.8,
+  "issues": [
+   "[baixo] Botões 'RSVP Today'/'Book an Appointment' ~1-2px mais baixos; sombra do card e rodapé equivalentes"
+  ],
+  "css_suspect": "altura de linha em botões mj-button"
+ },
+ "re-plaid-verify-identity@375": {
+  "score": 9.4,
+  "issues": [
+   "[baixo] Rodapé 'SECURELY POWERED BY PLAID.' em peso bem mais pesado e ~10% mais largo que no Chromium (aparência extra-black)",
+   "[baixo] Resto (escudo, código 144833, textos) idêntico"
+  ],
+  "css_suspect": "font-weight:800 no <p> do rodapé — matching de peso 800 (deveria usar Bold 700)"
+ },
+ "re-vercel-invite-user@375": {
+  "score": 9.9,
+  "issues": [
+   "[baixo] Diferenças apenas de antialiasing/1px; layout idêntico"
+  ],
+  "css_suspect": "nenhum"
+ }
+}

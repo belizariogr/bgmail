@@ -1,0 +1,100 @@
+{
+  "ham-00-tribute-ca": {"score": 3, "issues": [
+    "[crítico] Conteúdo truncado/sobreposto: a tabela principal de 3 colunas para por volta de y≈1700 e o rodapé (View this issue / subscribe / links / copyright) é desenhado POR CIMA do restante; somem Maybelline, Ralph Fragrances, as três entrevistas da coluna esquerda, o bloco 'We Were Soldiers / The Sweetest Thing / Return to Never Land' e o texto 'Robert De Niro...'. Altura 2036 vs 3357 (-39%).",
+    "[alto] Faixa cinza escura (bloco Flash/rodapé) sobreposta ao copyright, que fica ilegível.",
+    "[médio] Imagens espaçadoras sem alt viram dezenas de molduras/linhas prateadas na coluna esquerda e nos cards (Chromium não mostra nada).",
+    "[baixo] Imagens de destaque (align=left) não flutuam: título 'An island getaway' fica abaixo do quadro em vez de ao lado."
+  ], "css_suspect": "altura de linhas de tabela fixada pelos atributos height de td/tr sem crescer com o conteúdo + overflow recortado; img align=left (float) não suportado"},
+  "ham-01-newsletter-online-co": {"score": 3, "issues": [
+    "[crítico] Bloco 'Browse or bust' (editorial) colapsa numa coluna de ~60px com uma palavra por linha, gerando ~2000px extras; altura 7766 vs 3666 (+112%).",
+    "[alto] Imagem align=left (waynec.gif, hspace=15) não flutua; a célula td width=410 (com </TD><TD> comentado) recebe largura mínima errada.",
+    "[médio] Coluna lateral direita (Search, Updates & Drivers) ultrapassa a borda amarela/externa da tabela; o input de busca e o <select> 'Downloads' somem (só aparece o botão Go!).",
+    "[baixo] Molduras de alt (CNET's Exclusive, Top Ten etc.) ocupam a largura declarada e adicionam linhas horizontais extras."
+  ], "css_suspect": "img align=left/hspace não vira float; algoritmo de largura de colunas de tabela (td width + colspan) resolve para min-content"},
+  "ham-02-oracleeblast-com": {"score": 8.5, "issues": [
+    "[médio] Cor de link ignora <body link=\"#000000\" vlink=\"#000000\">: links ficam azuis em todo o e-mail, no Chromium são pretos.",
+    "[baixo] Logo 'Oracle Technology Network' (width=300 height=65) reserva caixa de 300x65 com moldura; Chromium mostra só o alt inline — desloca o conteúdo ~40px para baixo.",
+    "[baixo] Marcadores espaçadores do índice 'In this issue' viram pequenas molduras prateadas ao lado de cada link."
+  ], "css_suspect": "atributos de apresentação body link/vlink não mapeados para a:link/a:visited; dimensionamento de img quebrada com alt"},
+  "ham-03-handango-com": {"score": 3.5, "issues": [
+    "[crítico] Conteúdo final cortado: o render termina no meio do texto do SplashShopper; somem 'For a limited time...', 'Quick links', unsubscribe e anúncios (altura 1478 vs 1773).",
+    "[alto] Imagens de produto com align=left (80x80) não flutuam: título/descrição de cada produto descem abaixo do quadro, preço/Read More/Buy Now desalinham das linhas.",
+    "[alto] Linhas de tabela sobrepostas: bordas/linhas de células cortam o texto ('Thanksgiving is right around', 'list, saving you all kinds of') na coluna lateral."
+  ], "css_suspect": "img align=left (float) não suportado; altura de tr/td fixada por height e overflow recortado"},
+  "ham-04-wrox-com": {"score": 8, "issues": [
+    "[médio] Imagens de capa quebradas com width/height reservam caixas grandes (~100x130) com alt no topo; Chromium mostra apenas o alt inline — cada seção ganha ~100px, altura total +4%.",
+    "[baixo] Espaçamento vertical diferente: lista 'Recently released' mais espaçada e parágrafos de 'Wrox Announcements' mais apertados que no Chromium.",
+    "[baixo] Caracteres inválidos (apóstrofo/aspas em bytes não decodificáveis) aparecem como espaço em branco ('can  t', 'click   unsubscribe')."
+  ], "css_suspect": "tamanho intrínseco de <img> quebrado com alt (Chromium em quirks colapsa para texto); line-height/margens de <p> com <font size>"},
+  "ham-05-motleyfool-com": {"score": 8.5, "issues": [
+    "[médio] Cor de link ignora <body link=\"#003366\">: links ficam azul padrão em vez de azul-marinho.",
+    "[baixo] Imagens espaçadoras nos cantos do cabeçalho/rodapé viram pequenas molduras prateadas visíveis.",
+    "[baixo] Faixa oliva abaixo do cabeçalho com altura ligeiramente diferente."
+  ], "css_suspect": "body link/vlink/alink não aplicados"},
+  "ham-06-mediaunspun-imakenew": {"score": 9, "issues": [
+    "[baixo] Formulário 'Subscribe': input de texto ultrapassa a borda direita da caixa lateral; radios/checkbox maiores e botão Submit minúsculo.",
+    "[baixo] Logo 'Media Unspun' quebrado aparece como link sem ícone; pequenas diferenças de espaçamento (<5%)."
+  ], "css_suspect": "tamanho intrínseco de controles de formulário (input size=, submit)"},
+  "ham-07-lockergnome-com": {"score": 7, "issues": [
+    "[alto] Imagem 'TechTV's Computer Basics' (align=left hspace=10) não flutua: o texto 'CHRIS TEACHES THE BASICS' começa abaixo/na base da caixa em vez de contorná-la.",
+    "[médio] Imagens quebradas com width/height (logos do topo, Webcam, Winamp, purple flower 300x230) reservam caixas grandes; Chromium mostra só o alt inline — altura +9% (3980 vs 3640).",
+    "[baixo] Logo 'Lockergnome' do topo recortado em caixa de 50px ('Lockerg')."
+  ], "css_suspect": "img align=left/right → float não suportado; dimensionamento de img quebrada com alt"},
+  "ham-08-euromailer-lists-app": {"score": 6.5, "issues": [
+    "[médio] Dezenas de imagens espaçadoras/decorativas viram molduras e linhas prateadas (cabeçalho 'Apple Store eNews' em caixa grande, linhas horizontais entre seções, quadradinhos na coluna direita), poluindo o layout.",
+    "[médio] Botões 'Learn More' e ilustrações reservam caixas com borda e deslocam o texto; blocos de produto (5 DVD-R / Unibrain) ganham caixas vazias e altura extra.",
+    "[baixo] Formulário de busca da coluna direita vira só um input sem o botão 'Submit'."
+  ], "css_suspect": "renderização de <img> quebrada (moldura + alt) para imagens sem alt com dimensões; input type=image ausente"},
+  "ham-09-bounce-winxpnews-com": {"score": 8, "issues": [
+    "[médio] Imagens com align=right (logos 53x24 e anúncios) aparecem à esquerda, em linha própria, em vez de flutuar à direita.",
+    "[baixo] Espaçamento vertical antes dos títulos de seção menor que no Chromium (sem o float à direita empurrando o conteúdo)."
+  ], "css_suspect": "img align=right (float:right) não suportado"},
+  "ham-10-sneakemail-com": {"score": 8.5, "issues": [
+    "[médio] <hr> com align=left/width aparecem centralizados (deslocados ~135px para a direita) sob os títulos de seção e entre as manchetes.",
+    "[baixo] <hr> de seção mais escuro/espesso que o cinza 3D do Chromium.",
+    "[baixo] Imagens sem alt somem por completo (sem reserva de espaço), pequenos deslocamentos verticais."
+  ], "css_suspect": "atributo align de <hr> (margin-left/right auto) ignorado; estilo padrão de hr (border inset cinza)"},
+  "ham-11-cteyyyyi-cjsias-bwmm": {"score": 7, "issues": [
+    "[alto] Borda direita da tabela azul (width=600 cellpadding=5) some: a tabela interna width=596 + padding transborda e cobre a borda; Chromium expande a tabela para caber.",
+    "[médio] O alt do <img width=1 height=1> ('You have just received an HTML-rich eMessage...') não aparece; fica um vazio de ~80px no topo.",
+    "[baixo] Símbolo de moeda (byte inválido) desaparece em 'Now  42.14 Save  5.62'."
+  ], "css_suspect": "largura de tabela com width menor que a soma do conteúdo + cellpadding (deveria crescer); imgs pequenas com alt"},
+  "ham-12-buy4now-ie": {"score": 3, "issues": [
+    "[crítico] Blocos sobrepostos: o texto 'WIN a €2,000 Online Gift Voucher' é desenhado por cima da primeira linha de produtos (Handheld/Music), ficando ilegível.",
+    "[crítico] Bloco 'Lord of the Rings DVD set' some quase todo; só a linha laranja 'Members: €33.99' aparece cortada sob o bloco AIB, que também se sobrepõe ('For more information' sobre o texto).",
+    "[alto] Linhas de tabela com altura menor que o conteúdo (altura total 1481 vs 1766) e o conteúdo vaza para as linhas seguintes."
+  ], "css_suspect": "altura de linhas/td fixada por height sem crescer; img align=left não flutua; overflow das células visível sobre irmãos"},
+  "ham-13-hermes-sun-com": {"score": 9.3, "issues": [
+    "[baixo] Formulário 'In this Issue': input de busca ~2x mais largo e o botão <input type=image> 'Search' não aparece.",
+    "[baixo] 'back to top' + imagem 'Pixel' renderiza o alt como texto colado ('back to topPixel')."
+  ], "css_suspect": "input type=image ausente; largura intrínseca de input size="},
+  "ham-14-applenews-lists-appl": {"score": 5, "issues": [
+    "[alto] Imagens dos artigos (align=left/right, sem alt) não flutuam: viram blocos invisíveis que empurram o texto, criando grandes vazios (~100–250px) antes de cada parágrafo; altura 3271 vs 2517 (+30%).",
+    "[médio] Cabeçalho e lista 'In This Issue' (imagens) viram área branca vazia de ~240px; só a caixa 'In This Issue:' aparece.",
+    "[baixo] Primeira linha de cada artigo recuada/alinhada à direita ('On July 17, tens of thousands') por resto de imagem inline."
+  ], "css_suspect": "img align=left/right (float) não suportado"},
+  "ham-15-crrvja-cjsias-uhbeqs": {"score": 8.5, "issues": [
+    "[baixo] Cabeçalho branco (img 556x128 alt=\" \") e espaçadores do topo posicionados ~40px acima do Chromium.",
+    "[baixo] Separadores azuis (td height=1 bgcolor) são linhas de 1px; no Chromium ficam com ~10px apenas por causa do ícone de imagem quebrada (não é defeito real).",
+    "[baixo] Apóstrofos/marcadores em bytes inválidos aparecem como espaços ('We  ve improved')."
+  ], "css_suspect": "(nenhum defeito relevante) decodificação de bytes inválidos"},
+  "ham-16-reply-yahoo-com": {"score": 4, "issues": [
+    "[alto] A coluna central transborda a viewport: a caixa da foto (alt do Reuters) e o parágrafo da legenda são cortados na borda direita ('more than 33 ...', 'Anatolian Agency said. Authoriti').",
+    "[alto] Layout muito diferente do Chromium: o alt da imagem align=middle vira caixa larga em vez de texto estreito; altura 1085 vs 2014.",
+    "[médio] <select> 'News Photos' nos dois formulários de busca não é renderizado."
+  ], "css_suspect": "largura de tabela/coluna ultrapassando o container (min-content de img quebrada com alt longo); <select> não suportado"},
+  "ham-17-ummail4-unitedmedia": {"score": 2, "issues": [
+    "[crítico] Layout quebrado: tabelas sobrepostas e deslocadas para a direita; o texto 'Hi Justin, enjoy your daily comic...' vira uma coluna de 1 palavra por linha fora da área branca, à direita.",
+    "[crítico] Faixa amarela de saudação fica vazia; os blocos Books/Mints/Graphic se sobrepõem e 'View all products' invade a coluna errada.",
+    "[alto] Caixas 'Buy This Strip' / 'You need to go online...' vazam pela borda direita da viewport."
+  ], "css_suspect": "algoritmo de largura de tabela (colunas com width fixo + rowspan/colspan) e overflow de células"},
+  "ham-18-berkshireeagle-com": {"score": 7.5, "issues": [
+    "[médio] Tabela principal (width=460, align=center) fica ~20% mais larga (~536px) e descentralizada; o texto de cada matéria quebra em linhas mais longas.",
+    "[baixo] Linha divisória vertical entre a coluna de manchetes e 'Breaking News' não aparece.",
+    "[baixo] Caixas dos logos 'Berkshire Eagle' e 'Landmark Credit Union' reservam espaço grande; Chromium mostra só o alt."
+  ], "css_suspect": "atributo width de <table> não respeitado como largura fixa; tabela aninhada align=right"},
+  "ham-19-xmr3-com": {"score": 8.5, "issues": [
+    "[médio] Título 'Der neue Cyberport-Katalog ist da!' fica pequeno (~8pt herdado do body) enquanto no Chromium usa o tamanho padrão da tabela (quirk: tabelas não herdam font-size).",
+    "[baixo] Travessão (byte 0x96 de windows-1252) some ('Mac-Shop    Cyberdesign'); html_view decodifica UTF-8 corretamente onde o Chromium mostra mojibake (não é defeito)."
+  ], "css_suspect": "quirk de modo quirks 'table { font-size: medium }' ausente; mapeamento C1→windows-1252"}
+}

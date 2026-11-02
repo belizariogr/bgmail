@@ -1,0 +1,79 @@
+{
+  "cerberus-hybrid": {
+    "score": 7.0,
+    "issues": [
+      "[alto]{layout} Segunda linha 'thumbnail + texto' (imagem 200x200 à direita no Chromium) é renderizada com a imagem à esquerda e o texto à direita: a inversão de ordem das colunas via dir=rtl é ignorada, as duas linhas ficam idênticas",
+      "[baixo]{layout} Seções ~5-10px mais altas (cartão do hero, grade 310x310, rodapé), altura total ~+1%"
+    ],
+    "css_suspect": "atributo dir=\"rtl\" / direction: rtl em table/td (técnica de inversão de colunas do Cerberus) não suportado no inline layout de células"
+  },
+  "client-outlook-desktop": {
+    "score": 9.5,
+    "issues": [
+      "[baixo]{layout} Células da tabela de indicadores com padding vertical ~1-2px maior e espaçamento entre blocos (lista, assinatura, cabeçalho de resposta) um pouco maior; nada que altere a leitura"
+    ],
+    "css_suspect": "line-height normal / métricas de fonte em td e p (estilos MsoNormal)"
+  },
+  "mjml-real-estate": {
+    "score": 9.0,
+    "issues": [
+      "[baixo]{layout} Linha fina cinza visível no topo do contêiner branco logo abaixo do triângulo decorativo, ausente no Chromium",
+      "[baixo]{layout} Seções com imagem de fundo (Villa Semperin, Window House 23) e colunas ~10-20px mais altas, altura total ~+1.7%"
+    ],
+    "css_suspect": "imagem/divisor decorativo de topo (border ou img com height fracionário) e line-height em colunas mj-column"
+  },
+  "mjml-ticketshop": {
+    "score": 9.5,
+    "issues": [
+      "[baixo]{layout} Blocos 'OUR PARTNERS', logos e rodapé amarelo deslocados ~10-15px para baixo por espaçamentos ligeiramente maiores; layout idêntico"
+    ],
+    "css_suspect": "line-height / altura de linha em mj-text e mj-button"
+  },
+  "postmark-welcome": {
+    "score": 8.5,
+    "issues": [
+      "[baixo]{layout} Corpo branco não ocupa a largura total: aparecem faixas cinza de ~4-6px nas laterais do conteúdo branco (no Chromium o branco vai de borda a borda)",
+      "[baixo]{layout} Espaçamentos verticais maiores entre parágrafos e caixas de atributos (Login Page / Trial Date), altura total ~+4.7%"
+    ],
+    "css_suspect": "width: 100% + margin/padding em table.email-body / email-body_inner (box-sizing ou cellpadding implícito)"
+  },
+  "re-05-studio-promo": {
+    "score": 7.5,
+    "issues": [
+      "[médio]{layout} Cartão do hero (fundo cinza com o anel) e bloco do CTA 'Save up to $80' exibem borda cinza de 1px visível em volta e uma linha separadora entre hero e CTA; no Chromium o hero degrada suavemente para branco/fundo sem bordas",
+      "[médio]{layout} O degradê final do bloco do CTA para o fundo #f5f5f5 não acontece: o bloco termina em retângulo branco com borda, em vez de se fundir com o fundo",
+      "[baixo]{layout} Espaçamentos verticais maiores (depoimento, ícones sociais, rodapé), altura total ~+3.7%"
+    ],
+    "css_suspect": "border com cor rgba/transparente ou box-shadow sutil, e linear-gradient para transparente em background-image do cartão hero"
+  },
+  "re-aws-verify-email": {
+    "score": 8.5,
+    "issues": [
+      "[baixo]{layout} Texto do corpo com line-height maior e quebra em uma linha a mais no parágrafo de abertura; altura total ~+8%",
+      "[baixo]{layout} Faixa escura com o logo AWS com margem interna lateral um pouco maior (~3-4px) dentro do contêiner cinza"
+    ],
+    "css_suspect": "line-height / métricas de fonte em p e padding da tabela externa"
+  },
+  "re-linear-login-code": {
+    "score": 9.5,
+    "issues": [
+      "[baixo]{layout} Elementos ~5px mais abaixo por espaçamentos de linha ligeiramente maiores; resto idêntico"
+    ],
+    "css_suspect": "line-height normal"
+  },
+  "re-slack-confirm": {
+    "score": 8.5,
+    "issues": [
+      "[baixo]{layout} Título e parágrafos com line-height maior; caixa do código DJZ-TLX ~5px mais alta e rodapé (logo, links, copyright) deslocado ~20px para baixo, altura total ~+6%"
+    ],
+    "css_suspect": "line-height / métricas de fonte em h1 e p"
+  },
+  "re-yelp-recent-login": {
+    "score": 7.5,
+    "issues": [
+      "[médio]{layout} Cartão central ~4-5% mais largo que no Chromium (~628px vs 600px), e a imagem de topo (cofre) não encosta nas bordas do cartão: sobra uma margem branca de ~2-4px nas laterais e no topo",
+      "[baixo]{layout} Espaçamentos verticais maiores no corpo do cartão (saudação, lista Time/Device/Location, botão 'Learn More'); altura total ~+6.7%"
+    ],
+    "css_suspect": "box-sizing/border + padding em contêiner com width fixo (border + padding somados à largura) e img width:100% dentro de td com padding"
+  }
+}

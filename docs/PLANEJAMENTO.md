@@ -25,9 +25,10 @@ and lightweight interface.
 
 1. **Visual mock.** Build the full interface with static data to validate the
    layout and — most importantly — the **startup speed**. Largely complete.
-2. **Domain layer (current).** Models, local storage (`crates/storage`, SQLite)
-   and a synchronization state machine. No networking yet.
-3. **Connectivity.** Generic IMAP/POP3 + SMTP and then **Gmail** (OAuth2).
+2. **Domain layer.** Models, local storage (`crates/storage`, SQLite)
+   and a synchronization state machine (`mail_core`, `mail_sync`).
+3. **Connectivity (current).** Generic IMAP + SMTP and **Gmail** (OAuth2 +
+   XOAUTH2). POP3 postponed.
 4. **E-mail client features.** Read, compose, reply, forward, move, mark, search,
    attachments (full list in section 6).
 5. **Polish.** Keyboard shortcuts, accessibility, subtle animations, packaging.
@@ -57,9 +58,15 @@ testing and shorter incremental compile times.
 | `crates/ui`      | Component library (`Label`, `Icon`, `Button`, `ListItem`…).           | ✅ mock |
 | `crates/bgmail`   | Binary: window, layout, UI state and localization.       | ✅ mock + SQLite wired |
 | `crates/storage` | Local persistence (SQLite via `rusqlite`, `mail.db`).    | ✅ Stage 2 |
-| `crates/mail_core` *(future)* | Domain models and business rules, no UI dependency.      | ⬜ |
-| `crates/protocols` *(future)* | IMAP/POP3/SMTP/Gmail abstractions behind *traits*.       | ⬜ |
-| `crates/accounts` *(future)*  | Account and credential management (per-platform keychain). | ⬜ |
+| `crates/html_view` | Native GPUI HTML rendering: Blitz layout, GPUI paint and text. | ✅ reader |
+| `crates/mail_core` | Domain types (addresses, flags, folders), MIME parse/build, reply/thread rules, `MailRemote`/`MailSender` traits + fakes. No UI, no I/O. | ✅ Stage 2 |
+| `crates/mail_sync` | Sync engine: per-account worker + IDLE threads, pure planner, optimistic actions, server-op queue, outbox. | ✅ Stage 2 |
+| `crates/protocols` | IMAP (`imap` + rustls), SMTP (`lettre`), Gmail OAuth2/XOAUTH2, provider presets and autoconfig. Implements `mail_core::MailConnector`. | ✅ Stage 3 |
+
+> No `accounts` crate (decided with two opposing reviews): account config lives
+> in `storage` (`AccountConfig` JSON), secrets in the platform keychain through
+> GPUI's credential API (Keychain / Credential Manager / Secret Service via
+> `oo7`), OAuth and presets in `protocols`.
 
 **Dependency rule:** the UI depends on the domain, never the other way around.
 Domain and protocols do not know about GPUI.

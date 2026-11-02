@@ -1,0 +1,24 @@
+# Standalone workspace: the spike must never join the BGMail workspace build.
+[workspace]
+resolver = "2"
+members = ["blitz_render", "litehtml_render", "compare"]
+
+[profile.release]
+opt-level = 3
+
+# litehtml-rs's sample CPU painter draws images at natural size; the spike
+# patches it (patches/litehtml-rs-pixbuf-image-scaling.patch) so litehtml's
+# layout is judged, not that painter. Apply the patch to a local clone.
+[patch."https://github.com/franzos/litehtml-rs"]
+litehtml = { path = "/home/belizario/dev/_refs/litehtml-rs/litehtml" }
+
+# Blitz patched for the spike (patches/blitz-*.patch): anonymous table cells for
+# non-cell row children and HTML `table align`. Apply to a local clone at e42ee1f.
+[patch."https://github.com/DioxusLabs/blitz"]
+blitz-dom = { path = "/home/belizario/dev/_refs/blitz/packages/blitz-dom" }
+blitz-html = { path = "/home/belizario/dev/_refs/blitz/packages/blitz-html" }
+blitz-net = { path = "/home/belizario/dev/_refs/blitz/packages/blitz-net" }
+blitz-paint = { path = "/home/belizario/dev/_refs/blitz/packages/blitz-paint" }
+blitz-traits = { path = "/home/belizario/dev/_refs/blitz/packages/blitz-traits" }
+debug_timer = { path = "/home/belizario/dev/_refs/blitz/packages/debug_timer" }
+stylo_taffy = { path = "/home/belizario/dev/_refs/blitz/packages/stylo_taffy" }

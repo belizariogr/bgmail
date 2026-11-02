@@ -31,34 +31,18 @@ cargo test --workspace    # runs the tests
 cargo clippy --workspace  # lint
 ```
 
-### HTML reader (CEF off-screen rendering)
+### HTML reader (native)
 
-The HTML reader uses **CEF** (Chromium Embedded Framework) in **windowless
-off-screen rendering** mode on **Windows, Linux and macOS**: Chromium renders each
-message body into an off-screen buffer that GPUI composites as a texture in the
-reader pane (including native **Wayland** on Linux).
+Message bodies are rendered **natively inside GPUI** by `crates/html_view`: no
+webview, no browser runtime. Blitz (vendored in `vendor/blitz`) parses, styles
+and lays out the HTML; the result is painted with GPUI primitives and GPUI's
+own text system. Bodies are sanitized first (`lol_html`), remote content is
+blocked (loading it on request comes with account sync), and mail wider than
+the pane scrolls horizontally. Fidelity against Chromium is tracked in
+`spikes/html_render/REPORT.md`.
 
-The `cef-osr` feature is enabled by default, so plain `cargo run` embeds HTML
-messages. The `cef` crate downloads the matching CEF binary distribution on first
-build, so the initial build needs network access and takes a little longer.
-
-**macOS note:** a production `.app` must ship the CEF framework and helper apps
-(see `bundle-cef-app` from the `cef` crate). Unbundled `cargo run` may need that
-layout before the reader starts.
-
-Runtime dependencies on Linux (Chromium's shared libraries) are typically already
-present on a desktop system; if the browser fails to start, install:
-
-```bash
-sudo apt install libnss3 libnspr4 libgbm1 libasound2 libxkbcommon0 libgtk-3-0
-```
-
-To build without the HTML reader (plain-text reader only):
-`cargo run -p bgmail --no-default-features`.
-
-CEF re-executes the BGMail binary for its own sub-processes (renderer, GPU,
-utility); this is handled automatically at startup and those processes exit on
-their own — no configuration needed.
+On Linux the renderer uses fontconfig (loaded at runtime, like GPUI) to pick
+fonts the way browsers do.
 
 ### macOS: Metal Toolchain (Xcode 26+)
 
@@ -71,6 +55,56 @@ xcodebuild -downloadComponent MetalToolchain
 
 The project's `.cargo/config.toml` sets `TOOLCHAINS = "com.apple.dt.toolchain.Metal"`
 so GPUI's `xcrun -sdk macosx metal` build step finds the installed toolchain.
+
+## Install / Build packages
+
+Tagged releases (`v*`) build installable packages in GitHub Actions
+(`.github/workflows/release.yml`) and attach them to a draft GitHub Release:
+
+| OS | Packages |
+|---|---|
+| macOS (Apple silicon, Intel) | `BGMail.app` inside a `.dmg` (min. macOS 10.15.7) |
+| Linux x86_64 | `.deb`, `.AppImage`, pacman `.tar.gz` + `PKGBUILD` |
+| Windows x86_64 | NSIS `-setup.exe` (per-user, no admin) and WiX `.msi` |
+
+Until signing secrets are configured the builds are **unsigned**: on macOS
+right-click ▸ Open the first time (Gatekeeper), on Windows SmartScreen asks
+for confirmation. On Linux, account passwords are stored through the Secret
+Service, so a keyring (GNOME Keyring, KWallet ≥ 5.97, KeePassXC…) must be
+running.
+
+On Linux, these scripts install without a package manager (same layout as
+Zed's). Only the system-wide one needs root:
+
+```bash
+curl -fL https://github.com/belizariogr/bgmail/releases/latest/download/install.sh | sh  # latest release, into ~/.local
+script/install-linux            # build this checkout, into ~/.local
+script/install-linux-system     # build this checkout, into /usr (asks for sudo)
+script/uninstall.sh             # remove the ~/.local install; asks before deleting mail
+script/install-linux-system --uninstall
+```
+
+To build packages locally, use [cargo-packager](https://github.com/crabnebula-dev/cargo-packager)
+(configured in `[package.metadata.packager]` of `crates/bgmail/Cargo.toml`):
+
+```bash
+cargo install cargo-packager --locked
+cargo packager --release                     # this OS's default formats
+cargo packager --release --formats deb       # just one format
+```
+
+Packages are written to `target/release/` (or `target/<triple>/release/` with
+`--target`). Linux defaults are deb + AppImage + pacman, macOS app + dmg,
+Windows NSIS (`--formats nsis,wix` for the MSI too). On rolling distros whose
+libraries use `.relr.dyn` (e.g. Arch), the AppImage step needs `NO_STRIP=1`
+(linuxdeploy's bundled `strip` is too old); release AppImages are built on
+Ubuntu 22.04 for wider glibc compatibility. Building on Linux needs the GPUI
+development packages, e.g. on Debian/Ubuntu:
+
+```bash
+sudo apt install pkg-config clang libxkbcommon-dev libxkbcommon-x11-dev \
+  libx11-xcb-dev libxcb1-dev libwayland-dev libvulkan1 libfontconfig-dev libfreetype-dev
+```
 
 ## Structure
 

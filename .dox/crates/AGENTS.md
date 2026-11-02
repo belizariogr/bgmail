@@ -14,12 +14,22 @@ isolated tests, and shorter incremental compiles.
 
 ## Local Contracts
 
-- Members (see root `Cargo.toml`): `theme`, `ui`, `storage`, `bgmail`.
+- Members (see root `Cargo.toml`): `theme`, `ui`, `storage`, `mail_core`,
+  `protocols`, `html_view`, `mail_sync`, `bgmail`.
 - **Dependency direction:** UI depends on domain/storage, never the reverse.
   Domain and protocols must not know about GPUI. Today: `bgmail` → `ui` →
   `theme`; `bgmail` → `storage`; `storage` has no GPUI/`ui`/`theme` deps.
-- Future crates (planned, not members yet): `mail_core`, `protocols`,
-  `accounts` — see `docs/PLANEJAMENTO.md` §4.
+  `html_view` depends on `gpui` + Blitz only (no `ui`/`theme`/`storage`).
+  `mail_core` is a leaf domain crate (no GPUI/`ui`/`theme`/`storage`, no I/O);
+  sync/protocol/storage adapters depend on it, never the reverse.
+  `mail_sync` (sync engine) → `mail_core` + `storage`; no GPUI and no protocol
+  crate: it only sees `mail_core::MailConnector`, so the UI injects the real
+  connector (`protocols`) and tests inject `mail_core::fake::FakeConnector`.
+  `protocols` (IMAP/SMTP/OAuth/discovery) → `mail_core` only (no GPUI, no
+  `storage`/`ui`/`theme`); blocking clients on std threads, one rustls 0.23
+  (ring) shared by `imap`, `lettre` and `ureq`.
+- No `accounts` crate (decided): config in `storage`, secrets via GPUI's
+  credential API in `bgmail`, OAuth/presets in `protocols`.
 - Prefer published `gpui` from crates.io (`0.2.2` workspace pin). Local Zed
   (`~/dev/zed`) is read-only reference only.
 - Empty / unused directories under `crates/` are not workspace members and must
@@ -50,4 +60,8 @@ isolated tests, and shorter incremental compiles.
 | `crates/theme/` | [`.dox/crates/theme/AGENTS.md`](theme/AGENTS.md) | Theme colors, appearance, `ActiveTheme` |
 | `crates/ui/` | [`.dox/crates/ui/AGENTS.md`](ui/AGENTS.md) | Reusable GPUI components and semantic `Color` |
 | `crates/storage/` | [`.dox/crates/storage/AGENTS.md`](storage/AGENTS.md) | SQLite mail store, schema, seed, search |
-| `crates/bgmail/` | [`.dox/crates/bgmail/AGENTS.md`](bgmail/AGENTS.md) | App binary: windows, layout, webview, i18n |
+| `crates/mail_core/` | [`.dox/crates/mail_core/AGENTS.md`](mail_core/AGENTS.md) | Mail domain types, MIME parse/build, reply/thread helpers, `MailRemote`/`MailSender` + fakes |
+| `crates/protocols/` | [`.dox/crates/protocols/AGENTS.md`](protocols/AGENTS.md) | IMAP (`ImapRemote`), SMTP (`SmtpSender`), OAuth PKCE loopback, `ImapSmtpConnector`, provider presets + autoconfig |
+| `crates/mail_sync/` | [`.dox/crates/mail_sync/AGENTS.md`](mail_sync/AGENTS.md) | Sync engine: per-account worker/IDLE threads, sync planner, op/outbox replay, optimistic UI actions |
+| `crates/html_view/` | [`.dox/crates/html_view/AGENTS.md`](html_view/AGENTS.md) | Native GPUI HTML rendering (Blitz layout, GPUI paint/text) |
+| `crates/bgmail/` | [`.dox/crates/bgmail/AGENTS.md`](bgmail/AGENTS.md) | App binary: windows, layout, reader, i18n |

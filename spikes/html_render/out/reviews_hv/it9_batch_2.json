@@ -1,0 +1,63 @@
+{
+  "cerberus-responsive": {
+    "score": 9.7,
+    "issues": [
+      "[baixo]{paint} Marcadores das listas (bullets) do bloco 'Praesent laoreet' ~1px menores/mais finos que no Chromium",
+      "[baixo]{layout} Rodapé escuro ('View as a Web Page' / endereço / 'unsubscribe') ~2-3px mais baixo; faixa verde final deslocada ~3px (altura total +5px)"
+    ],
+    "css_suspect": "line-height/metricas de fonte em texto pequeno do rodapé; tamanho do list-style disc"
+  },
+  "leemunroe-responsive": {
+    "score": 9.0,
+    "issues": [
+      "[médio]{layout} Fundo cinza do body (#f4f5f6) não é propagado ao canvas: abaixo do rodapé ('Powered by HTMLemail.io', y≈430px) a área até o fim da viewport fica branca, enquanto no Chromium todo o fundo é cinza"
+    ],
+    "css_suspect": "propagação do background do <body>/<html> para o canvas (root background propagation)"
+  },
+  "mjml-recast": {
+    "score": 9.8,
+    "issues": [
+      "[baixo]{layout} Deriva vertical acumulada de ~1-2px a partir da lista de artigos (títulos/imagens levemente mais baixos que no Chromium)"
+    ],
+    "css_suspect": "arredondamento de line-height em textos pequenos"
+  },
+  "mjml-welcome-email": {
+    "score": 9.9,
+    "issues": [
+      "[baixo]{layout} 'Thanks, / The [[CompanyName]] Team' ~1px mais alto que no Chromium"
+    ],
+    "css_suspect": "métricas de line-height"
+  },
+  "re-04-arcane-order-confirmation": {
+    "score": 9.9,
+    "issues": [],
+    "css_suspect": ""
+  },
+  "re-codepen-challengers": {
+    "score": 9.9,
+    "issues": [],
+    "css_suspect": ""
+  },
+  "re-dropbox-reset-password": {
+    "score": 9.0,
+    "issues": [
+      "[médio]{layout} Fundo azul-claro do body não é propagado ao canvas: abaixo do cartão branco (a partir de y≈540px na resolução cheia) a área restante da viewport fica branca em vez de azul-claro como no Chromium"
+    ],
+    "css_suspect": "propagação do background do <body> para o canvas (root background propagation)"
+  },
+  "re-netlify-welcome": {
+    "score": 9.8,
+    "issues": [
+      "[baixo]{paint} Marcadores (bullets) da lista 'Deploy your first project…' visivelmente menores que os do Chromium"
+    ],
+    "css_suspect": "tamanho do marcador list-style-type: disc"
+  },
+  "re-stack-overflow-tips": {
+    "score": 9.2,
+    "issues": [
+      "[médio]{layout} Selo '<3' no rodapé ocupa toda a largura do conteúdo (~620px) com borda cinza esticada, em vez de caixa compacta (~26px) ajustada ao texto como no Chromium",
+      "[baixo]{paint} Marcadores (bullets) da lista de dicas de busca menores que no Chromium"
+    ],
+    "css_suspect": "max-width: min-content em <p> bloco não suportado (keyword intrínseco em max-width)"
+  }
+}

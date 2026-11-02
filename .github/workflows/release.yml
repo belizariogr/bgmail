@@ -1,0 +1,182 @@
+# Builds installable packages with cargo-packager (config:
+# [package.metadata.packager] in crates/bgmail/Cargo.toml) and, on `v*` tags,
+# attaches them to a draft GitHub Release. Signing/notarization run only when
+# their secrets exist. Contract: .dox/.github/AGENTS.md
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Packaging changes are proven before a tag needs them. Publishing stays
+  # tag-only (see the `release` job).
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - assets/appIcon/**
+      - crates/bgmail/Cargo.toml
+      - crates/bgmail/build.rs
+      - crates/bgmail/packaging/**
+      - rust-toolchain.toml
+      - script/bundle-linux
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PACKAGER_VERSION: 0.11.8
+
+jobs:
+  package:
+    name: Package (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            formats: deb,appimage,pacman
+          - name: macos-aarch64
+            os: macos-15
+            target: aarch64-apple-darwin
+            formats: app,dmg
+          # Cross-compiled on Apple silicon: no dependence on Intel runner images.
+          - name: macos-x86_64
+            os: macos-15
+            target: x86_64-apple-darwin
+            formats: app,dmg
+          - name: windows-x86_64
+            os: windows-latest
+            formats: nsis,wix
+    env:
+      # Booleans only: the secrets themselves are passed to the single step
+      # that needs them, never to the whole job (build scripts run here).
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GPUI system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev \
+            libwayland-dev libvulkan1 libfontconfig-dev libfreetype-dev \
+            libfuse2 file
+
+      - name: macOS build environment
+        if: runner.os == 'macOS'
+        run: |
+          # Metal ships inside the default toolchain on runner images (see ci.yml).
+          echo "TOOLCHAINS=com.apple.dt.toolchain.XcodeDefault" >> "$GITHUB_ENV"
+          # Matches minimum-system-version in the packager config.
+          echo "MACOSX_DEPLOYMENT_TARGET=10.15.7" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          if [ -n "${{ matrix.target }}" ]; then
+            rustup target add "${{ matrix.target }}"
+            # The packager's before-packaging `cargo build` honors this too.
+            echo "CARGO_BUILD_TARGET=${{ matrix.target }}" >> "$GITHUB_ENV"
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
+
+      # Built before any secret is in the environment; the packager's own
+      # before-packaging build is then a no-op.
+      - name: Build release binary
+        run: cargo build --release -p bgmail --bin BGMail
+
+      - name: Configure macOS signing identity
+        if: runner.os == 'macOS' && env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          perl -pi -e 's/^(\[package\.metadata\.packager\.macos\])$/$1\nsigning-identity = "$ENV{APPLE_SIGNING_IDENTITY}"/' crates/bgmail/Cargo.toml
+
+      - name: Import Windows code-signing certificate
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_CERT == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "bgmail-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $manifest = "crates/bgmail/Cargo.toml"
+          (Get-Content $manifest -Raw) -replace '(?m)^\[package\.metadata\.packager\.windows\]\r?$', "[package.metadata.packager.windows]`ncertificate-thumbprint = `"$($cert.Thumbprint)`"" | Set-Content $manifest -NoNewline
+
+      - name: Package
+        env:
+          # macOS: cargo-packager imports the certificate into a temporary
+          # keychain, signs, then notarizes when the notarization vars exist
+          # (Apple ID + app-specific password + team, or App Store Connect API key).
+          APPLE_CERTIFICATE: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_ID: ${{ runner.os == 'macOS' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
+        run: |
+          # Empty values would be read as "set"; drop them so unsigned builds stay unsigned.
+          for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!var}" ] || unset "$var"
+          done
+          args=(--release --formats "${{ matrix.formats }}")
+          if [ -n "${{ matrix.target }}" ]; then args+=(--target "${{ matrix.target }}"); fi
+          cargo packager "${args[@]}"
+
+      # The tarball script/install.sh downloads from the release.
+      - name: Bundle the Linux tarball
+        if: runner.os == 'Linux'
+        run: script/bundle-linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BGMail-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            target/**/release/bgmail-linux-*.tar.gz
+            target/**/release/*.deb
+            target/**/release/*.AppImage
+            target/**/release/BGMail_*.tar.gz
+            target/**/release/PKGBUILD
+            target/**/release/*.dmg
+            target/**/release/*-setup.exe
+            target/**/release/*.msi
+            script/install.sh
+
+  release:
+    name: Draft GitHub Release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List packages
+        run: find dist -type f -exec ls -l {} +
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/**/*

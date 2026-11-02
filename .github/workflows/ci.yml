@@ -1,0 +1,106 @@
+# Checks every push and pull request on the three desktop platforms.
+# Contract: .dox/.github/AGENTS.md
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  linux:
+    name: Linux (fmt, clippy, test)
+    timeout-minutes: 90
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GPUI system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev \
+            libwayland-dev libvulkan1 libfontconfig-dev libfreetype-dev
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --no-fail-fast
+      - run: script/test-install
+
+  macos:
+    name: macOS (build, test)
+    timeout-minutes: 90
+    runs-on: macos-15
+    env:
+      # The repo's .cargo/config.toml selects Xcode 26's separate Metal
+      # toolchain; runner images ship Metal inside the default toolchain.
+      TOOLCHAINS: com.apple.dt.toolchain.XcodeDefault
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p bgmail
+      - run: cargo test --workspace --no-fail-fast
+
+  windows:
+    name: Windows (build, test)
+    timeout-minutes: 90
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p bgmail
+      - run: cargo test --workspace --no-fail-fast
+
+  greenmail:
+    name: GreenMail integration (IMAP/SMTP)
+    runs-on: ubuntu-22.04
+    # Same server and users as crates/protocols/tests/greenmail.sh.
+    services:
+      greenmail:
+        image: greenmail/standalone:2.1.15
+        env:
+          GREENMAIL_OPTS: >-
+            -Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0
+            -Dgreenmail.users=alice:secret@localhost,bob:secret@localhost
+            -Dgreenmail.users.login=email
+        ports:
+          - 3025:3025
+          - 3143:3143
+          - 3465:3465
+          - 3993:3993
+    env:
+      BGMAIL_GREENMAIL: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Wait for the IMAP greeting
+        run: |
+          for _ in $(seq 1 120); do
+            if timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/3143 && head -c 4 <&3' 2>/dev/null | grep -q '^\* OK'; then
+              echo "GreenMail is up"; exit 0
+            fi
+            sleep 0.5
+          done
+          echo "GreenMail did not start" >&2; exit 1
+      - run: cargo test -p protocols --test greenmail -- --ignored
+      - run: cargo test -p mail_sync --test greenmail_e2e -- --ignored

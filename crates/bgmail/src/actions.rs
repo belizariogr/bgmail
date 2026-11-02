@@ -20,6 +20,15 @@ actions!(
         ComposeAttach,
         ComposeDiscard,
         ComposeClose,
+        FindInMessage,
+        MessagePrint,
+        MessageReply,
+        MessageReplyAll,
+        MessageForward,
+        MessageToggleRead,
+        GetNewMail,
+        SelectNextMessage,
+        SelectPreviousMessage,
     ]
 );
 

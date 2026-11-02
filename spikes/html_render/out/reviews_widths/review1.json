@@ -1,0 +1,22 @@
+{
+  "mjml-real-estate@375": {"score": 9.8, "issues": ["[baixo] Deriva vertical acumulada de ~3px a partir da seção 'Lorem Ipsum' (métricas de linha); layout, cards sobre imagem de fundo, setas e botões idênticos ao Chromium"], "css_suspect": "line-height normal / métricas de fonte"},
+  "re-apple-receipt@600": {"score": 9.8, "issues": ["[baixo] Diferenças de 1–2px em posições verticais; tabelas de cabeçalho, linha TOTAL e rodapé idênticos, corte à direita igual ao Chromium"], "css_suspect": "nenhum relevante"},
+  "mjml-recast@600": {"score": 9.8, "issues": ["[baixo] Deriva de ~1px por bloco; colunas texto+miniatura, divisores e ícones sociais idênticos"], "css_suspect": "nenhum relevante"},
+  "mjml-recast@375": {"score": 9.8, "issues": ["[baixo] Deriva de 1–2px; colunas empilham corretamente no mobile, miniaturas centralizadas como no Chromium"], "css_suspect": "nenhum relevante"},
+  "mjml-recast@800": {"score": 9.8, "issues": ["[baixo] Deriva de ~1px; sem diferenças de layout"], "css_suspect": "nenhum relevante"},
+  "mjml-recast@1280": {"score": 9.8, "issues": ["[baixo] Sem diferenças visíveis além de antialiasing de fonte"], "css_suspect": "nenhum relevante"},
+  "cerberus-hybrid@800": {"score": 9.7, "issues": ["[baixo] Rodapé escuro ~3px mais baixo (altura total +5px); grade 2 e 3 colunas, blocos texto/imagem invertidos e faixa verde idênticos"], "css_suspect": "line-height em texto pequeno do rodapé"},
+  "cerberus-responsive@1280": {"score": 9.7, "issues": ["[baixo] Rodapé/faixa verde ~3–5px mais baixos (altura total +5px); demais blocos idênticos"], "css_suspect": "line-height em texto pequeno do rodapé"},
+  "re-02-matte-welcome@600": {"score": 9.0, "issues": ["[médio] Imagens halftone (hero 'Welcome to Collage' e colagem 'Try Composer today') reduzidas sem filtragem adequada: padrão de pontos vira moiré/grão grosso e mais contrastado que no Chromium", "[baixo] Sombra do card, botão 'Explore', setas e rodapé idênticos"], "css_suspect": "amostragem de imagem no downscale (nearest/sem mipmap em vez de filtro bilinear/lanczos)"},
+  "re-02-matte-welcome@800": {"score": 9.0, "issues": ["[médio] Mesmo moiré nas imagens halftone reduzidas (hero e colagem 'Try Composer'): textura mais grossa e ruidosa que no Chromium", "[baixo] Layout, sombra e espaçamentos idênticos"], "css_suspect": "amostragem de imagem no downscale (nearest/sem mipmap)"},
+  "re-aws-verify-email@375": {"score": 9.9, "issues": ["[baixo] Sem diferenças visíveis além de antialiasing"], "css_suspect": "nenhum relevante"},
+  "re-notion-magic-link@375": {"score": 9.9, "issues": ["[baixo] Sem diferenças visíveis além de antialiasing"], "css_suspect": "nenhum relevante"},
+  "re-stack-overflow-tips@375": {"score": 9.2, "issues": ["[médio] Marcadores da lista (ul) menores, ~3px mais altos (parecem sobrescritos) e ~3px mais próximos do texto que no Chromium", "[baixo] Overflow horizontal cortado igual nos dois engines"], "css_suspect": "posicionamento/tamanho do ::marker (list-style-type disc, alinhamento à baseline)"},
+  "client-gmail-reply@600": {"score": 9.9, "issues": ["[baixo] Sem diferenças visíveis; blockquote com borda, lista e destaque idênticos"], "css_suspect": "nenhum relevante"},
+  "re-papermark-year-in-review@375": {"score": 9.6, "issues": ["[baixo] Colunas da tabela 'Your activity' (25/50/500) deslocadas ~2–3px em relação ao Chromium", "[baixo] Gradientes radiais, raios e pílulas de países idênticos"], "css_suspect": "distribuição de largura em table-layout auto"},
+  "re-04-arcane-newsletter@600": {"score": 9.8, "issues": ["[baixo] Sem diferenças visíveis além de antialiasing; numeração em caixas, citação e rodapé idênticos"], "css_suspect": "nenhum relevante"},
+  "re-twitch-reset-password@375": {"score": 9.9, "issues": ["[baixo] Sem diferenças visíveis além de antialiasing"], "css_suspect": "nenhum relevante"},
+  "mjml-black-friday@375": {"score": 9.6, "issues": ["[baixo] Foto hero reduzida um pouco mais serrilhada (linha tracejada no piso mais marcada) que no Chromium; layout idêntico"], "css_suspect": "amostragem de imagem no downscale"},
+  "postmark-welcome@375": {"score": 9.9, "issues": ["[baixo] Sem diferenças visíveis; botão com sombra e caixas de informação idênticos"], "css_suspect": "nenhum relevante"},
+  "mjml-newsletter@800": {"score": 9.9, "issues": ["[baixo] Sem diferenças visíveis; sombra da imagem de código e colunas ícone+texto idênticas"], "css_suspect": "nenhum relevante"}
+}

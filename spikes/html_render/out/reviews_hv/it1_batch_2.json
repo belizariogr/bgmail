@@ -1,0 +1,79 @@
+{
+  "cerberus-responsive": {
+    "score": 9,
+    "issues": [
+      "[baixo]{layout} Espaçamentos verticais ligeiramente maiores em todo o e-mail (cards, botões, rodapé), altura total ~3% maior que no Chromium",
+      "[baixo]{layout} Botão 'Centered Primary Button' e 'Primary Button' alguns px mais altos que no Chromium"
+    ],
+    "css_suspect": "line-height/padding em células de tabela (mso-line-height / line-height herdado em td)"
+  },
+  "leemunroe-responsive": {
+    "score": 8,
+    "issues": [
+      "[médio]{paint} Fundo cinza do body (#f4f5f6) não preenche a viewport: abaixo do rodapé aparece faixa branca, enquanto Chromium e a referência CPU pintam o cinza até o fim",
+      "[baixo]{layout} Botão 'Call To Action' ~6px mais alto e espaçamentos internos do card um pouco maiores; card ~8% mais alto"
+    ],
+    "css_suspect": "propagação do background de body/html para o canvas (root background) na pintura GPUI; padding/line-height do botão"
+  },
+  "mjml-recast": {
+    "score": 9,
+    "issues": [
+      "[baixo]{layout} Imagens de destaque (ex.: banner 'CHAT BOT') e blocos de artigo alguns px mais altos, acumulando ~2-3% de altura extra",
+      "[baixo]{layout} Espaçamento entre título e texto dos artigos levemente maior que no Chromium"
+    ],
+    "css_suspect": "line-height / gaps de linha em imagens inline (display:block vs inline em img dentro de td)"
+  },
+  "mjml-welcome-email": {
+    "score": 9,
+    "issues": [
+      "[baixo]{layout} Botão 'Login' ~3px mais alto e espaçamentos verticais um pouco maiores no bloco azul"
+    ],
+    "css_suspect": "line-height/padding do botão MJML (td com padding + a inline-block)"
+  },
+  "re-04-arcane-order-confirmation": {
+    "score": 7,
+    "issues": [
+      "[médio]{layout} Altura total ~5-8% maior: título 'Your order has been placed' começa mais abaixo e há mais espaço entre seções",
+      "[médio]{layout} Linhas dos produtos ('Daily C Serum', 'Overnight Repair Cream') com ~20px a mais de altura cada; separador entre itens mais afastado",
+      "[médio]{layout} Tabela de totais (Subtotal/Tax/Shipping/Total) com linhas ~30% mais altas e com recuo lateral maior que no Chromium",
+      "[baixo]{layout} Rodapé (texto, ícones sociais, endereço) deslocado para baixo e com espaçamentos maiores"
+    ],
+    "css_suspect": "padding/line-height em células de tabela (React Email Section/Row), possivelmente unidades em/rem ou line-height em px aplicado duas vezes"
+  },
+  "re-codepen-challengers": {
+    "score": 6,
+    "issues": [
+      "[alto]{paint} Emojis grandes dos cards IDEAS/RESOURCES (🌟, 📖) renderizados como blocos de pixels monocromáticos embaralhados; na referência CPU ficam em branco e no Chromium aparecem coloridos",
+      "[médio]{paint} Emojis inline no texto ('cubes 🧊', 'flat screen', 'Your Challenge' 💪, 'Spherical Cubes 😊') aparecem como tofu (□) ou glifo errado; na referência CPU somem",
+      "[baixo]{layout} Colunas IDEAS/RESOURCES com texto quebrando em mais linhas, cards mais altos (~10%) e altura total maior",
+      "[baixo]{layout} Botão 'Go to Challenge Page' e rodapé deslocados ~40px para baixo"
+    ],
+    "css_suspect": "fallback de fonte para emoji colorido (COLR/CBDT) no shaping/rasterização de texto do GPUI"
+  },
+  "re-dropbox-reset-password": {
+    "score": 8.5,
+    "issues": [
+      "[médio]{paint} Fundo azul-claro do body não se estende até o fim da viewport; faixa branca abaixo do card (Chromium e referência CPU preenchem tudo)",
+      "[baixo]{layout} Espaçamento vertical entre parágrafos e botão 'Reset password' ligeiramente maior (~4%)"
+    ],
+    "css_suspect": "propagação do background do body/html para o canvas na pintura GPUI"
+  },
+  "re-netlify-welcome": {
+    "score": 8.5,
+    "issues": [
+      "[baixo]{layout} Altura total ~6% maior: margens entre itens da lista, botão 'Go to your dashboard' e links de rodapé mais espaçados",
+      "[baixo]{layout} Marcadores da lista (bullets) com recuo levemente maior que no Chromium"
+    ],
+    "css_suspect": "margens de ul/li e line-height em px; padding-left padrão de listas"
+  },
+  "re-stack-overflow-tips": {
+    "score": 6,
+    "issues": [
+      "[alto]{layout} Botão 'I need a break' perde o padding e a forma de botão: só o texto fica com fundo azul (como seleção), ~20px de altura a menos que no Chromium",
+      "[médio]{layout} Coluna de texto do banner estreita demais: título quebra em 'Find what you / want, faster' e o banner fica ~20% mais alto",
+      "[médio]{layout} Selo '<3' do rodapé esticado para a largura toda do container em vez de caixa pequena (inline-block não encolhe)",
+      "[baixo]{layout} Container ~5% mais largo e altura total ~6% maior"
+    ],
+    "css_suspect": "padding em elemento inline (<a> com padding sem display:inline-block respeitado), largura de colunas de tabela com width percentual, shrink-to-fit de inline-block/table"
+  }
+}

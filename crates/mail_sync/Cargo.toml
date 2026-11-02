@@ -1,0 +1,22 @@
+[package]
+name = "mail_sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mail_core.workspace = true
+storage.workspace = true
+serde = { workspace = true }
+# Error type of the `storage` API (same version, so features unify).
+rusqlite = "0.37"
+# Pending-op payloads are JSON in `storage::PendingOp::payload`.
+serde_json = { workspace = true }
+# Events to the UI: the GPUI side awaits `recv()`, worker threads `try_send`.
+async-channel = "2"
+
+[dev-dependencies]
+mail_core = { workspace = true, features = ["fake"] }
+tempfile = "3"
+# End-to-end test against a real IMAP/SMTP server (tests/greenmail_e2e.rs).
+protocols.workspace = true

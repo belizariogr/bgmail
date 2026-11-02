@@ -331,7 +331,17 @@
       account cycling are interactive mocks; compose window position/size persist
       in `config.json` (default 790×720, centered on first open)
 ## Stage 2 — Domain layer
-- ⬜ `mail_core` crate: `Account`, `Mailbox`, `Message`, `Thread`, `Attachment`
+- ✅ `mail_core` crate: addresses, flags, folder roles (special-use + names,
+      IMAP UTF-7), MIME parse/build (`mail-parser`/`mail-builder`),
+      reply/forward, threading keys, remote traits (`MailRemote`/`MailSender`)
+      + in-memory `FakeRemote`/`FakeSender` (feature `fake`)
+- ✅ `storage` schema v2: remote folders/UIDs (`message_locations`), raw
+      bodies (BLOB), attachments, pending server ops, outbox, FTS5 trigram
+      search, WAL; v1 databases migrate in place (accounts become `local`)
+- ✅ `ui::TextArea`: multi-line editor (soft wrap, selection, undo/redo, IME)
+      for the compose body; `TextInput`/`TextArea` emit `Changed`
+- ⬜ GPUI `TestAppContext` tests for `TextArea`'s element code (needs gpui
+      `test-support`)
 - ✅ `storage` crate: SQLite persistence (`accounts`, `folders`, `messages` with
       `plain_text` + `raw_content`, `folders_csv` multi-folder membership,
       accent-insensitive `search_text` + tests)
@@ -340,35 +350,286 @@
 - ✅ `RootView` wired to SQLite: folder selection, global mailboxes, list
       preview from plain text, reader from raw HTML/text, search mode
       ("Searching" / "Buscando") across all accounts
-- 🔄 Synchronization state machine
+- ✅ Synchronization state machine (`mail_sync`): per-account worker + IDLE
+      threads, pure planner (folder mapping, UIDVALIDITY reset, windowed
+      header fetch, CONDSTORE flag refresh), optimistic actions + server-op
+      queue, outbox (send then APPEND to Sent unless Gmail), body prefetch,
+      `cid:` images inlined, orphan purge; tested against `FakeRemote`
 
 ## Stage 3 — Connectivity
-- ⬜ `protocols` crate: generic traits (Fetch/Send) + IMAP/POP3/SMTP
-- ⬜ Gmail via OAuth2 + API
-- ⬜ `accounts` crate: account and credential management (per-platform keychain)
+- ✅ `protocols` crate: IMAP (`imap` 3.0-alpha + raw commands parsed with
+      `imap-proto`: X-GM-*, COPYUID, HIGHESTMODSEQ), STARTTLS/TLS on one
+      rustls 0.23 + platform verifier, SMTP (`lettre` transport), IDLE with
+      prompt cancellation; GreenMail + Dovecot integration tests
+      (`tests/greenmail.sh`, env-gated)
+- ✅ Gmail via OAuth2 (PKCE loopback, refresh, id_token e-mail) + XOAUTH2 on
+      IMAP/SMTP; client id from `BGMAIL_GOOGLE_CLIENT_ID`/`_SECRET`
+- ✅ Provider presets (Gmail, Outlook, Yahoo, iCloud, Fastmail, UOL, …) +
+      Mozilla autoconfig/ISPDB + guess
+- ✅ ~~`accounts` crate~~ dropped (decision above); keychain via GPUI
+- ⬜ POP3 (postponed, see decision)
+- ⬜ Microsoft OAuth (Outlook.com requires it; presets flag it)
+- ⬜ Persist rotated OAuth refresh tokens (kept in memory today)
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
-- ⬜ Read / mark read-unread
-- ⬜ Compose / reply / reply all / forward
-- ⬜ Send (SMTP + Gmail)
-- ✅ Move / delete / archive / junk (SQLite folder membership + toolbar/menus)
-- ✅ Star / flag (toggle starred + `sys:flagged` folder)
-- ✅ Command palette (Ctrl/Cmd+P) with contextual message commands — in-window
+- ✅ Read / mark read-unread (opening marks read on the server; toggle via
+      toolbar, menu, palette, Cmd/Ctrl+Shift+U · Ctrl+Shift+M)
+- ✅ Compose / reply / reply all / forward (real fields, From picker,
+      `ui::TextArea` body, quoting, forwarded attachments, address validation)
+- ✅ Send (SMTP + Gmail XOAUTH2) through the outbox; copy APPENDed to Sent
+      unless the server files it (Gmail)
+- ⬜ Drafts (save/resume) and HTML composing (plain text only today)
+- ⬜ Set `\\Answered` on the original after a reply is sent
+- ✅ Move / delete / archive / junk, reflected on the server (optimistic
+      local change + queued op, MOVE or COPY/EXPUNGE)
+- ✅ Star / flag (`\\Flagged` on the server + `sys:flagged` folder)
+- ✅ Command palette (Ctrl/Cmd+Shift+P) with contextual message commands — in-window
       GPUI overlay (no `WindowKind::PopUp`; OSR composites under it on all platforms)
 - ✅ macOS menu bar (File/Edit/View/Message; unavailable actions omitted on GPUI 0.2)
-- ⬜ Attachments (view, download, attach)
-- ⬜ Search (UI mock done — DB-backed accent-insensitive search in Stage 2;
-      full IMAP/search scope in Stage 4)
+- ✅ Attachments: reader chips (Open / Save As… / Save to Downloads,
+      sanitized private temp files), attach in compose (picker, drag & drop,
+      25 MB cap), `cid:` images inlined
+- ✅ Search: local FTS5 trigram over every synced message (accent-insensitive)
+- ⬜ Server-side search for mail outside the sync window (IMAP SEARCH)
+- ✅ Accounts: welcome screen, Settings ▸ Accounts (presets, autoconfig,
+      manual servers, connection test, Google sign-in, update password,
+      remove), secrets in the platform keychain
+- ✅ Status bar sync state (Updating… / Updated at / Offline / sign-in
+      failed), message list virtualized (`uniform_list`), keyboard navigation
+- ✅ Validated end to end: `mail_sync/tests/greenmail_e2e.rs` (engine +
+      real IMAP/SMTP + SQLite) and the running app against GreenMail (add
+      account in the UI, read, reply, trash, IDLE notification, attachment,
+      search, remove account)
+- ✅ Unsent mail panel in the status bar (Retry / Edit / Discard): outbox
+      state machine `queued → sending → append_pending` with `failed` /
+      `maybe_sent` waiting for the user; an edit replaces its original
+      atomically, so both never go out
+- ✅ Two independent reviews of the engine, UI and packaging, all confirmed
+      findings fixed (stale UIDs after UIDVALIDITY, EXPUNGE sparing other
+      clients' `\Deleted`, 4xx back-off, duplicate sends, op/UI races, lost
+      flags after moves without COPYUID, Sent copy retries, autoconfig
+      preferring plaintext, OAuth redirects with a foreign state)
+- ⬜ Known limitation: on servers without MOVE, if COPY works and the expunge
+      fails, each replay leaves another copy in the target. Accepted: skipping
+      the copy could lose mail another client flagged `\Deleted`
+- ✅ Linux install scripts as in Zed (`script/`): tarball into `~/.local`
+      (from a release or this checkout), or system-wide into `/usr`
+- ⬜ Known limitation (Windows): cancelling a network read waits for the peer
+      to close or for the read timeout, since `shutdown` doesn't wake it. Stopping
+      an account still returns at once and detaches the worker
+- ⬜ Threads/conversations view (thread ids are stored; list is flat)
 
 ## Stage 5 — Polish
 - ✅ Rename product to **BGMail** (binary, window/menu titles, themes, docs;
       config/db under `~/.config/BGMail/`)
 - 🔄 Keyboard shortcuts (command palette + Cmd+Q; per-action bindings still TODO)
 - ⬜ Accessibility
-- ⬜ Native notifications
-- ⬜ Packaging (macOS `.app`, Linux, Windows)
+- ✅ Native notifications (`notify-rust`, bursts summarized, Settings switch)
+- 🔄 Packaging: `cargo-packager` metadata, icons, desktop entry, CI + release
+      workflows (GitHub Actions matrix). deb/AppImage/pacman built locally;
+      **macOS and Windows jobs never ran yet** (check the first CI run);
+      signing/notarization secrets are optional and unset
 
 ## Notes / open decisions
+- ✅ **Mail stack decided** (two opposing reviews, 2026-10-31):
+      sync std threads per account (IDLE + command thread, IDLE cancelled by
+      `shutdown()` on a cloned socket) pushing events over `async-channel`;
+      `imap` 3.0.0-alpha.15 without default features over our own rustls 0.23
+      stream; `lettre` 0.11 as SMTP transport only (`send_raw`);
+      `mail-parser` 0.11 (1.0 needs Rust 1.98) + `mail-builder` 2.0; Gmail =
+      IMAP/SMTP with XOAUTH2 (hand-written PKCE loopback OAuth on `ureq`),
+      deduped by `X-GM-MSGID`; secrets through GPUI's credential API
+      (Keychain / Credential Manager / oo7) — so **no `accounts` crate**
+      (config in `storage`, OAuth/presets in `protocols`); crates `mail_core`,
+      `protocols`, `mail_sync`; storage v2 = `messages` + `message_locations`
+      + BLOB bodies + FTS5; **POP3 postponed** (no flags/folders/IDLE; would
+      bend the remote traits around the weakest protocol); packaging with
+      `cargo-packager` in a GitHub Actions matrix; GreenMail (docker) for
+      env-gated integration tests. Risk noted: Google's restricted
+      `mail.google.com` scope needs app verification beyond 100 test users.
+- ✅ Spike: native HTML engine to replace CEF (`spikes/html_render/REPORT.md`).
+      47 e-mails, Chromium as reference. Mean fidelity: **Blitz 7.9/10**
+      (31/47 ≥ 8), **litehtml 6.6/10** (15/47 ≥ 8). Blitz bugs found:
+      XHTML doctype/`xmlns` sniffing parses mail as XML (workaround: force the
+      HTML parser), `<td style="display:block">` content vanishes, `align=center`
+      tables not centered. litehtml: `max-width` on `<table>` ignored (breaks
+      22/47), litehtml-rs sample painter ignores image scaling.
+      With 3 small engine fixes (+48 lines C++: table `max-width`, table
+      `align`/`<center>` centering, intrinsic width honoring `max-width`;
+      `spikes/html_render/patches/`) litehtml reaches **8.1/10** (35/47 ≥ 8,
+      none ≤ 4), on par with Blitz; leftovers are mostly painter-side
+      (underlines, generic font fallback) plus no `box-shadow`.
+      Blitz with 2 engine fixes (anonymous table cell for non-cell row
+      children, HTML `table align`; `patches/blitz-*.patch`, Blitz tests pass)
+      reaches **8.2/10** (36/47 ≥ 8, none ≤ 4).
+- ✅ Reader engine decided: **Blitz** (pure Rust) for parse/style/layout,
+      painted natively by GPUI in a new `crates/html_view` (no webview, no
+      child window, no bitmap).
+- ✅ `crates/html_view` milestone 1: Blitz-based HTML element for GPUI.
+      Builds next to `gpui 0.2.2` (fontique `fontconfig-dlopen`; patched
+      `vendor/serde_fmt`); painter vendored from `blitz-paint` records a
+      display list replayed with GPUI quads/paths/shadows/images/content masks;
+      text drawn word by word with GPUI's `shape_line` at Blitz positions
+      (face resolved from Parley's font); radial/sweep/multi-stop gradients
+      sampled to cached textures; offline resources (`data:`/`cid:`, remote
+      blocked + recorded); `viewer` example. 59 tests.
+- ✅ `html_view` fidelity loop vs Chromium (47-mail corpus, `spikes/html_render`,
+      captures of the real GPUI window): visual score **8.16 → 9.67/10**
+      (41/47 ≥ 9.5, min 8.0); mean SSIM 0.739 → 0.975. Blitz/Taffy now vendored
+      (`vendor/blitz`, `vendor/taffy`) with fixes: legacy table/font attributes
+      (`cellspacing`/`cellpadding`/`border`/`<font>`/named `bgcolor`), td padding
+      UA rule, browser automatic table layout, compressible replaced
+      min-content, replaced elements avoiding floats, float/padding height,
+      `table align`, anonymous cells, `-apple-system`→system-ui, line height
+      quirk ((limited-)quirks docs), line-fit tolerance, inline padding spacers.
+      Painter: per-cluster text placement, colour emoji from CBDT/sbix bitmaps
+      (GPUI 0.2.2 can't draw them), rounded boxes/clips, dashes, grayscale/
+      opacity filters, canvas to viewport bottom, non-finite geometry guard,
+      hierarchical default base URL (relative `src` crashed Blitz).
+- ✅ `html_view` fidelity round 2: score **9.67 → 9.77** (46/47 ≥ 9.5, min
+      9.2), SSIM 0.985. Doctype-less mail renders in standards mode (references
+      regenerated the same way); `dir="rtl"` box-only lines mirrored; keyword
+      `max-width` (`min-content`/`max-content`); anonymous-cell margin
+      collapsing; list markers drawn as Chromium-sized shapes.
+- ✅ `html_view` fidelity round 3 (multi-width): validated at 375/600/800/1280
+      px; reviewed combinations average **9.75** (57/60 ≥ 9.5), SSIM 0.969 /
+      0.982 / 0.989 / 0.994. Browser font policy (one font per generic,
+      per-character fallback like Chromium, default `serif`); responsive
+      stacking (`display:block` cells share one anonymous cell); horizontal
+      scrolling for overflowing mail; collapsed borders counted once; images
+      pre-downscaled; rounded clip corners on partial fills; definite image
+      heights under `max-width`; inline-block baselines (buttons, tables);
+      percent columns summing to 100%; markers on a block item's first line.
+- ⬜ `html_view` remaining: weight 800 picks "Arial Black" when Windows fonts
+      are installed on Linux (Chromium picks Bold; mailgun/plaid 9.0–9.4);
+      quirks-mode strut for text lines (legacy doctypes only; needs Parley);
+      ≤5px `<br>`/line-height drifts; `inline-table` with block content in its
+      first cell keeps a text baseline (Chromium: bottom).
+- ⬜ GPUI 0.2.2 renders CBDT colour emoji as monochrome masks on Linux (whole
+      app, not just mail); `html_view` works around it; upstream/upgrade later.
+- ✅ **Reader roadmap (agreed order, after the fidelity block):**
+  1. ✅ `html_view` milestone 2 — reader integrated and CEF era removed: the
+     reader shows bodies through `HtmlView` (sanitized + themed by the new
+     `mail_html` module, dark/light page, forced-white option, per-message
+     document cache via `ReaderSignature`). Removed `cef_osr.rs`,
+     `web_view.rs` (~3.3k lines), the `cef`/`cef-osr`/`linux-webview`
+     features and deps (`cef`, `open`, `image`, `smallvec`, `urlencoding`,
+     `async-channel`), CEF init/shutdown/sub-process handling, the OSR tick,
+     focus, input forwarding and IPC plumbing, the text fallback, and the
+     remote-content unblock UI (decided with two opposing reviews: no
+     networking before Stage 3; the shield now only reports blocked images,
+     Settings ▸ Privacy explains it). Palette overlay, global menu handlers and
+     the palette key interceptor kept (still needed without a webview).
+  2. ✅ Milestone 3 — interaction: `html_view` drives Blitz's event driver
+     (hover, drag selection, link clicks captured, never navigated),
+     double/triple click word/paragraph, `hit_info`, select all, find with
+     match scrolling, theme selection color; `HtmlView` routes window-level
+     mouse events, sets hand/I-beam cursors, emits `HtmlViewEvent`, handles
+     copy/select-all/arrow/page/home/end keys. BGMail: status-bar link URL,
+     open http/https/mailto in the browser, `ui::ContextMenu` (new, Zed API)
+     with open/copy link, copy, select all, and a find bar (Cmd/Ctrl+F,
+     Enter/Shift+Enter, Esc). Fixed Blitz multi-root selection order with
+     anonymous blocks. Verified in the running app (uinput clicks, wtype).
+     Gaps: selections can't start in blank space; find highlights only the
+     current match.
+  3. ✅ Milestone 4 — robustness: nesting deeper than 256 is refused
+     (`html_view::try_parse`; ~2,000 levels overflowed the 8 MB stack) and
+     never laid out; HTML over 1 MB shown as plain text with "Show
+     formatted"; a crash while rendering a message (panic, stack overflow,
+     OOM: all abort) is remembered by a marker file and that message opens
+     as plain text next time; plain-text extraction is a linear scanner.
+     Windows main thread gets an 8 MB stack. Kept `panic = "abort"` (two
+     opposing reviews: unwinding through Blitz/GPUI state is unsound and
+     doesn't cover overflow/OOM). Measured: 660 KB mail ~60 ms, 2.6 MB
+     ~260 ms (release, UI thread; the Blitz document is not `Send`).
+  4. ✅ Real-mail round. The corpus is `spikes/html_render/corpus_real/`
+     (git-ignored): 25 newsletters from 2002, mostly in quirks mode, plus 20
+     current templates.
+     - Body heights against Chromium at 800px: mean deviation 0.51% over 89
+       mails, counting the template corpus.
+     - Capture 7 SSIM (375/600/800/1280): 0.689 / 0.739 / 0.788 / 0.846, up
+       from 0.584 / 0.590 / 0.658 / 0.744 (capture 3).
+     - Agent review average: 9.06 (capture 7), up from 8.78 (capture 6) and
+       about 7.3 before the round.
+     - Fixed:
+       - broken-image rendering (alt text keeping the image's font, frames
+         only from 18px, floats, spacing, width-only blocks);
+       - the quirks-mode line height rule (strut, nested spans, `&nbsp;`,
+         lone `<br>`);
+       - quirky margins, quirks.css and quirks-mode parsing (`<p><table>`);
+       - the rowspan column cursor;
+       - spanning cells (fixed columns first, widths not given to their
+         first column), short fixed columns, table width/height as
+         minimums, capped padded percentage columns, collapsed tables
+         without padding;
+       - collapsed borders painted per cell;
+       - Chromium's inset/outset shading and plain `<hr>` bevel;
+       - inline width ignored around blocks;
+       - cell `vertical-align` growing lines;
+       - empty-inline blocks collapsing margins;
+       - `valign`, image `align`/`hspace`, `<body link>`, `<hr>` attributes;
+       - inline borders drawn as rings;
+       - `<select>` (closed drop-down with its option and ▾) and
+         `<input size>` with Chromium's metrics;
+       - Windows-1252 C1 characters;
+       - `align=justify`;
+       - the reader keeping the message's doctype.
+     - Next:
+       - recapture and re-review;
+       - ✅ ham-17: rowspan cells spread their extra height like Chromium
+         (rows starting other rowspans first) and colspans overlapping
+         rowspan cells keep their HTML column;
+       - remaining drift in ham-01, ham-16 and ham-05 (fonts missing here,
+         iframe ads, listbox `<select size>`);
+       - alt-text boxes: clipping and wrapping match Chromium; only in
+         cramped table rows Chromium keeps the alt box atomic (MasterClass
+         social icons) where html_view flows it as text;
+       - ~~fonts registered under another family~~ decided: keep the
+         system's family names; "<Family> Black" is drawn as the family at
+         weight 900 (Arial Black filed under Arial gets its black face);
+       - CJK/RTL checked with synthetic Chinese, Japanese, Korean, Arabic
+         and Hebrew mails: box geometry within 3px of Chromium, shaping
+         and bidi order identical. Multi-MB mail timed in milestone 4.
+  5. ✅ Zoom, print, animated GIF.
+     - ✅ Zoom: page zoom as Blitz's scale factor (text reflows and stays
+       sharp); Ctrl/Cmd `+`/`-`/`0` and Ctrl/Cmd + wheel over the reader,
+       Chromium's levels (25%–500%), kept across messages; the status bar
+       shows it when it isn't 100%. Not persisted between runs yet.
+     - ✅ Print (Cmd/Ctrl+P, Message menu, palette): decided with two
+       opposing reviews to print through the system browser (native
+       dialog, pagination, "Save as PDF"): a light print page with a header
+       and the sanitized body, locked down by a CSP (only `data:` images
+       and its own nonce'd `print()` script), written to a private temp
+       file (0600 in a 0700 dir; stale pages removed on the next print).
+       Later: a native "Save as PDF" from the display list if needed.
+     - ✅ Animated GIF: Blitz keeps the frames (capped), replay draws the
+       current one and the view repaints only when a painted animation's
+       next frame is due (GIF `background-image` too). Loop counts are not
+       honoured (always loops, like most mail GIFs); APNG/WebP stay still.
+- ✅ Remote images on request (user decision, ahead of Stage 3): `html_view`
+      fetches `http(s)` only for documents that allow it (4 lazy threads,
+      15s timeout, 15 MB cap, no cookies/referrer, 64 MB cache) and
+      re-lays out as images arrive; the reader's shield loads them for one
+      message, Settings ▸ Privacy ▸ "Always load remote images" everywhere.
+      Later: per-image unblock, an optional privacy proxy, a disk cache.
+- ✅ Bigger text: reader base font 16px (Chromium's default; was 14px);
+      UI text scale from one `ui::UI_FONT_SIZE` (15px, was 14px), all UI
+      sizes derived from it. Reader CSS no longer forces `img` to block.
+- ✅ Reader review fixes: plain-text fallback no longer panics on multi-byte
+      text at entity/tag cuts and skips blocks in linear time; the crash
+      guard is set before parsing; protocol-relative (`//host/…`) images load
+      as `https:` when remote content is allowed; the reader's paint cache
+      drops the previous message's images.
+- ✅ Ctrl/Cmd+P prints; the command palette moved to Ctrl/Cmd+Shift+P (as
+      in Zed), so the two no longer share a chord.
+- ✅ CSS `url(...)` is blanked only in `style` attributes and `<style>`
+      contents (lol_html handlers), never in the message's text.
+- ⬜ GPUI's sprite atlas still keeps textures of past messages (needs
+      `window.drop_image` when the paint cache forgets them); `HtmlDocument::
+      layout` re-resolves and walks the tree for overflow on every frame.
+- ⬜ Upstream the `vendor/blitz` and `vendor/taffy` fixes (each is marked
+      `BGMail`), then drop the vendored copies. Either way: behind a `crates/html_view` API, with
+      "Open in browser" as the escape hatch.
 - Reassess GPUI crates.io `0.2.2` vs `main` if some API is missing.
 - ~~Define the local storage format (SQLite vs files) in Stage 2.~~ **SQLite**
       (`crates/storage`, `mail.db` under `~/.config/BGMail/`).

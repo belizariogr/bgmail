@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Builds BGMail from this checkout and installs it into ~/.local, available as
+# ~/.local/bin/bgmail. Build dependencies are listed in the README.
+
+set -euo pipefail
+
+if [[ $# -gt 0 ]]; then
+    echo "Usage: ${0##*/}"
+    exit 1
+fi
+
+cd "$(dirname "$0")/.."
+
+script/bundle-linux
+BGMAIL_BUNDLE_PATH="${CARGO_TARGET_DIR:-target}/release/bgmail-linux-$(uname -m).tar.gz" \
+    script/install.sh

@@ -1,0 +1,124 @@
+{
+  "ham-20-fuckedcompany-com": {
+    "score": 8.3,
+    "issues": [
+      "[médio] Altura de linha menor que a do Chromium em todo o texto <font size=2> dentro de bloco de 16px: Chromium ~18px por linha, html_view ~16px; as quebras <br><br> também ficam mais curtas. O documento fica ~4,5% mais baixo (1726 vs 1808px) e o texto à esquerda do box amarelo quebra em pontos diferentes.",
+      "[baixo] Dentro do box amarelo 'InternalMemos.com', o espaço antes de 'More internal memos...' é menor que no Chromium.",
+      "[baixo] O <hr> sai como linha sólida escura, sem o relevo 3D cinza-claro (inset) do Chromium."
+    ],
+    "css_suspect": "line box sem strut do bloco pai (line-height normal da fonte do bloco, 16px) quando o texto inline vem de <font size>; estilo UA do <hr> (border inset)"
+  },
+  "ham-21-mail3-globalscape-co": {
+    "score": 6.0,
+    "issues": [
+      "[alto] Altura de linha muito comprimida no corpo e na coluna lateral (<font size=1> em td de 16px): Chromium ~18px por linha, html_view ~12px. O documento fica 19% mais baixo (1053 vs 1297px), com todo o ritmo vertical alterado.",
+      "[médio] <hr noshade color=\"#cc0033\"> sai cinza-escuro em vez de vermelho, porque o atributo color do <hr> é ignorado.",
+      "[médio] O parágrafo 'New Release!' (align=\"justify\") sai alinhado à esquerda, não justificado.",
+      "[baixo] O spacer trans.gif (250x10) ganha moldura prateada visível no topo, onde o Chromium mostra área vazia; imagens sem dimensões colapsam para 0 em vez de ocupar o espaço do ícone."
+    ],
+    "css_suspect": "strut/line-height do bloco em quirks mode; atributo legado hr[color]; atributo align=justify (text-align: justify); moldura de imagem quebrada com width/height"
+  },
+  "ham-22-lindows-com": {
+    "score": 9.0,
+    "issues": [
+      "[baixo] Os 4 <hr> saem como linha sólida cinza-escura de ~2px, enquanto no Chromium são um relevo inset cinza-claro quase imperceptível.",
+      "[baixo] A borda externa da tabela (border=1) aparece dupla e mais escura; no Chromium é outset claro e fino."
+    ],
+    "css_suspect": "estilo UA de hr (border-style inset, cor gray) e table[border] (outset/inset)"
+  },
+  "ham-23-optusnet-com-au": {
+    "score": 5.5,
+    "issues": [
+      "[alto] Cabeçalho do Cisco quebrado: os spacers e as imagens do topo viram molduras prateadas empilhadas e sobrepostas, e uma moldura invade a faixa verde e a área do título 'Cisco Aironet 1200 Series'. As células do cabeçalho não seguem as larguras/posições do Chromium.",
+      "[alto] A linha final 'All contents are Copyright (c) 1992--2002 Cisco Systems...' (TR/TD height=20 após o rodapé verde) some: o render termina no rodapé.",
+      "[médio] Altura de linha maior que no Chromium (texto Arial 11–13px: ~18px vs ~15px por linha). O corpo fica ~8% mais alto (1076 vs 997px) mesmo com o copyright faltando.",
+      "[baixo] O alt do bloco '802.11a and 802.11g ready' sai sem o recorte e a posição do Chromium."
+    ],
+    "css_suspect": "quirks mode (DOCTYPE HTML 4.0 Transitional sem URL): cálculo do line box; layout de tabela com imagens sem dimensões/spacers; última linha da tabela perdida (altura do documento/overflow)"
+  },
+  "ham-24-allthingsnewengland": {
+    "score": 9.0,
+    "issues": [
+      "[baixo] Os <hr> saem sólidos e escuros, em vez do relevo cinza-claro do Chromium.",
+      "[baixo] Deriva vertical acumulada de ~15–20px até o fim (blocos de <br> e <hr> um pouco mais altos)."
+    ],
+    "css_suspect": "estilo UA do hr; margens/altura de <br> vazios"
+  },
+  "rge-airops-aiops-ai-search-newsletter": {
+    "score": 9.6,
+    "issues": [
+      "[baixo] O alt text dos ícones sociais (LinkedIn/YouTube/X/Instagram) e dos banners sai sem o sublinhado do link, que o Chromium mostra."
+    ],
+    "css_suspect": "text-decoration do <a> não propagada ao alt text da imagem"
+  },
+  "rge-banfield-pet-hospital-halloween-safety-newsletter": {
+    "score": 7.5,
+    "issues": [
+      "[médio] A faixa ciano (#02b5df) abaixo do cabeçalho some: a <img width=640 style=\"background-color:#02b5df\"> sem alt e sem height colapsa para altura 0, enquanto no Chromium ocupa ~16px com o fundo ciano.",
+      "[médio] O alt do logo ('Banfield - Pet Hospital', width=60, font-size 20px) sai numa linha só com a largura do texto, ignorando width=60; no Chromium o alt fica numa caixa de 60px, quebrado e recortado em 3 linhas. O cabeçalho fica ~50px mais baixo.",
+      "[médio] A linha de ícones sociais e o logo do rodapé (imagens sem alt e com width) colapsam; o rodapé perde ~60px e o layout do bloco de endereço muda. O documento fica 9% mais baixo (895 vs 987px)."
+    ],
+    "css_suspect": "imagem quebrada sem alt com atributo width colapsa para 0x0 (Chromium mantém a largura e a altura do ícone); caixa de alt ignora width/height do <img>"
+  },
+  "rge-bloobloom-halloween-competition": {
+    "score": 7.5,
+    "issues": [
+      "[alto] As bordas pretas laterais (border-left/right 1px) da 2ª seção e as laterais e inferior da 3ª seção (td com border-*: solid 1px #000) não aparecem; o contorno da caixa termina logo abaixo do botão 'ENTER COMPETITION'. O fundo #F6F6F4 dos divs internos cobre a área da borda.",
+      "[médio] Ícone central do rodapé e a linha de 5 ícones sociais (imagens sem alt) colapsam; o rodapé fica ~50px mais curto e os espaçamentos entre 'CUSTOMER SERVICE' e o texto legal mudam."
+    ],
+    "css_suspect": "borda de td não subtraída da largura de conteúdo ou fundo do filho pintado por cima da borda (max-width:600px dentro de td com border); imagens quebradas sem alt com altura 0"
+  },
+  "rge-den-halloween-black-furniture": {
+    "score": 7.0,
+    "issues": [
+      "[médio] Somem as faixas claras (#f2efea) acima do texto introdutório e acima de 'Schedule An Appointment': são <img width=600 style=\"width:100%;height:auto\"> sem alt, que no Chromium ocupam ~20px e em html_view colapsam para 0.",
+      "[médio] Nas 8 células da grade de produtos, a linha da imagem (alt 'Image of ...', width=176) colapsa; as células ficam ~20px mais baixas, alterando a proporção da grade.",
+      "[médio] O logo do topo e os ícones sociais do rodapé colapsam; o documento fica ~15% mais baixo (901 vs 1059px)."
+    ],
+    "css_suspect": "imagem quebrada com width (atributo/CSS 100%) e height:auto resolve para altura 0 em vez da caixa de ícone/alt"
+  },
+  "rge-liquid-death-halloween-trick-kids": {
+    "score": 9.0,
+    "issues": [
+      "[baixo] A linha de 5 ícones sociais (imagens sem alt) colapsa: o espaço entre as duas linhas brancas fica vazio e ~15px menor.",
+      "[baixo] Os alts 'Liquid Death' aparecem sem o espaço reservado do ícone; o deslocamento é pequeno."
+    ],
+    "css_suspect": "imagens quebradas sem alt com altura 0"
+  },
+  "rge-logitech-mx-master-4-developer-edition-launch": {
+    "score": 7.5,
+    "issues": [
+      "[médio] O alt text das imagens de produto dentro de links ('MX Keypad Images', 'MX Mechanical', 'MX Brio', 'MX Keys S') sai em azul-escuro padrão, quase ilegível no fundo #1a1a1a; o Chromium usa branco por causa de <body link=\"#ffffff\" vlink=\"#ffffff\">.",
+      "[baixo] Os alts dos ícones sociais (facebook/twitter/...) saem por extenso e inline, ignorando width; no Chromium ficam recortados em caixas estreitas acima do rótulo.",
+      "[baixo] O alt 'logi' no topo e no rodapé sai centralizado em azul; no Chromium fica à esquerda (só o ícone). Os ícones de 'Free shipping' etc. (com width/height) colapsam, e as caixas de benefícios ficam ~30px mais baixas.",
+      "[baixo] Os ícones de pagamento ('Pay', 'G Pay'...) perdem o espaço do ícone."
+    ],
+    "css_suspect": "atributo legado body[link]/[vlink] não mapeado para cor de :link/:visited; caixa de alt ignora width do <img>"
+  },
+  "rge-lush-halloween-seasonal-promotion": {
+    "score": 9.0,
+    "issues": [
+      "[baixo] Imagens decorativas sem alt (ícones à esquerda de 'Massage bars', 'Show Off Your Medal' etc.) colapsam; pequenas reduções de espaço vertical (~30px no total).",
+      "[baixo] Os alts dos ícones de rodapé (LUSH REWARDS / DOWNLOAD THE APP e redes sociais) saem como texto azul-escuro sem recorte, pouco legível no fundo preto; no Chromium ficam recortados nas caixas dos ícones."
+    ],
+    "css_suspect": "caixa de alt ignora width do <img>; imagens quebradas sem alt com altura 0"
+  },
+  "rge-masterclass-uber-growth-course": {
+    "score": 9.5,
+    "issues": [
+      "[baixo] Os alts dos ícones sociais no rodapé escuro saem inline em uma linha, sem o recorte em caixa estreita do Chromium.",
+      "[baixo] O alt do logo 'MasterClass Certificates' no rodapé fica sem o deslocamento do ícone; diferença mínima."
+    ],
+    "css_suspect": "caixa de alt ignora width do <img>"
+  },
+  "rge-netflix-continue-watching-nobody-wants": {
+    "score": 7.0,
+    "issues": [
+      "[alto] O card 'Continue Watching' encolhe para a largura do texto (~160px, pill centralizado) em vez de ocupar a largura total (~428px). O alt 'Nobody Wants This' (img width=426) transborda para fora do card arredondado.",
+      "[médio] A barra de progresso do episódio (img alt 'Valentine's Day' width=428 + barra vermelha/cinza) encolhe para ~100px centralizados, em vez de ocupar toda a largura.",
+      "[baixo] O alt do logo 'Netflix' (width=24) sai por extenso em vez de recortado em 24px. Os alts das miniaturas nas listas ficam centralizados e sem o ícone, mas legíveis.",
+      "[baixo] O documento fica ~3% mais baixo; o restante (botões, cards, rodapé) é fiel."
+    ],
+    "css_suspect": "imagem quebrada com alt: largura intrínseca vem do texto alt em vez do atributo width (shrink-to-fit da tabela/célula encolhe junto)"
+  }
+}

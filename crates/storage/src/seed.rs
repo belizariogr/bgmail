@@ -1,6 +1,6 @@
 //! Imports the visual mock into an empty database.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
 use crate::folder::{self, system};
 use crate::search::build_search_text;
@@ -60,7 +60,7 @@ pub fn seed(
     accounts: &[SeedAccount],
     messages: &[SeedMessage],
 ) -> rusqlite::Result<()> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
     let mut account_ids = Vec::new();
     for account in accounts {

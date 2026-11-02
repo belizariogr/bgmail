@@ -74,20 +74,30 @@ BGMail/
 ├── TODO.md ← living progress
 ├── docs/
 │ └── PLANEJAMENTO.md ← vision, architecture and scope
-├── assets/ ← shared icons, fonts, app icon
+├── .github/ ← CI and release workflows (GitHub Actions)
+├── assets/ ← shared icons, fonts, app icon (+ generated PNG/ICO/ICNS)
+├── script/ ← Linux bundle, install and uninstall scripts (Zed's layout)
+├── spikes/ ← throwaway evaluations (own workspaces, not shipped)
+├── vendor/ ← patched third-party crates (serde_fmt, Blitz, Taffy)
 └── crates/
     ├── theme/ ← themes and colors (light/dark)
     ├── ui/ ← reusable visual components
     ├── storage/ ← SQLite persistence (mail.db)
-    └── bgmail/ ← binary (window + layout + state + localization)
+    ├── mail_core/ ← mail domain: addresses, MIME, reply/forward, remote traits
+    ├── protocols/ ← IMAP/SMTP clients, Gmail OAuth2, presets/autoconfig
+    ├── mail_sync/ ← sync engine (worker/IDLE threads, op queue, outbox)
+    ├── html_view/ ← native GPUI HTML (mail body) rendering on Blitz
+    └── bgmail/ ← binary (window + layout + state + localization; packaging config)
 ```
 
 ## Scope limits (current)
 
-- **Stage 1 (visual mock)** is largely done; **Stage 2 (domain/storage)** is in
-  progress — see `TODO.md`.
-- Do **not** implement networking, OAuth, IMAP/POP3/SMTP, or Gmail API yet
-  (Stage 3). Keep protocol code out until Stage 2 sync/storage is stable.
+- **Stage 1 (visual mock)** and **Stage 2 (domain/storage/sync)** are done;
+  **Stage 3 (connectivity)** is in progress — see `TODO.md`.
+- Networking is allowed (user decision): IMAP/SMTP and Gmail (OAuth2 +
+  XOAUTH2) live in `crates/protocols`, driven by `crates/mail_sync`; remote
+  images are fetched by `html_view` only when the user allows them. All
+  network IO runs off the UI thread. POP3 is postponed.
 - Sample / seed data stays isolated (`crates/bgmail/src/data.rs`,
   `crates/bgmail/src/db_seed.rs`, `storage::seed`) so it can be replaced by the
   real mail layer later.
@@ -215,3 +225,7 @@ When the user requests a durable behavior change, record it here or in the relev
 | `docs/` | [`.dox/docs/AGENTS.md`](.dox/docs/AGENTS.md) | Planning and durable human/agent guidance docs |
 | `assets/` | [`.dox/assets/AGENTS.md`](.dox/assets/AGENTS.md) | Shared binary assets (icons, fonts, app icon) |
 | `.cargo/` | [`.dox/.cargo/AGENTS.md`](.dox/.cargo/AGENTS.md) | Workspace Cargo/build environment overrides |
+| `.github/` | [`.dox/.github/AGENTS.md`](.dox/.github/AGENTS.md) | CI checks and release packaging workflows (cargo-packager), their secrets |
+| `script/` | [`.dox/script/AGENTS.md`](.dox/script/AGENTS.md) | Linux bundle, install and uninstall scripts |
+| `spikes/` | [`.dox/spikes/AGENTS.md`](.dox/spikes/AGENTS.md) | Throwaway technical evaluations (self-contained, never built with the workspace) |
+| `vendor/` | [`.dox/vendor/AGENTS.md`](.dox/vendor/AGENTS.md) | Patched third-party crates (serde_fmt, Blitz subset, Taffy) and their BGMail fixes |

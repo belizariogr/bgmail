@@ -47,6 +47,8 @@ pub struct Config {
     /// (tracking pixels reveal when/where a message was opened), so the user opts
     /// in. Inline `data:` images are unaffected and always render.
     pub load_remote_images: bool,
+    /// Desktop notifications when new mail arrives in an Inbox. On by default.
+    pub notifications_enabled: bool,
     /// Whether the e-mail reader always uses a white background (with dark text),
     /// regardless of the app theme. Most e-mails are authored for a light page,
     /// so this keeps them legible in dark mode. Off by default.
@@ -83,6 +85,7 @@ impl Default for Config {
             sidebar_width: 200.0,
             list_width: 360.0,
             load_remote_images: false,
+            notifications_enabled: true,
             reader_white_background: false,
             compose_white_background: false,
             collapsed_accounts: Vec::new(),
@@ -166,6 +169,7 @@ mod tests {
             sidebar_width: 200.0,
             list_width: 420.0,
             load_remote_images: true,
+            notifications_enabled: false,
             reader_white_background: true,
             compose_white_background: true,
             collapsed_accounts: vec![0, 2, 4],
@@ -184,6 +188,7 @@ mod tests {
         // Privacy: a fresh install (and any config predating the field) must not
         // load tracking pixels until the user opts in.
         assert!(!Config::default().load_remote_images);
+        assert!(Config::default().notifications_enabled);
         let parsed: Config = serde_json::from_str(r#"{ "sidebar_width": 175.0 }"#).unwrap();
         assert!(!parsed.load_remote_images);
     }
@@ -257,6 +262,7 @@ mod tests {
             sidebar_width: 160.0,
             list_width: 400.0,
             load_remote_images: false,
+            notifications_enabled: true,
             reader_white_background: true,
             compose_white_background: true,
             collapsed_accounts: vec![1, 3],

@@ -1,0 +1,56 @@
+[
+  {
+    "email": "mjml-black-friday",
+    "summary_pt": "Promoção MJML em fundo preto com logo, menu, imagem hero, título, botão branco e texto legal.",
+    "blitz": { "score": 9, "issues": ["[baixo] Leve aumento de espaçamento vertical entre blocos (botão e rodapé ligeiramente mais abaixo)"], "css_suspect": "" },
+    "litehtml": { "score": 7, "issues": ["[médio] Botão \"Shop Now\" alinhado à esquerda em vez de centralizado", "[baixo] Logo ALLURA levemente deslocado para a esquerda"], "css_suspect": "align/text-align em td de botão MJML (margin auto em tabela)" }
+  },
+  {
+    "email": "mjml-racoon",
+    "summary_pt": "Newsletter MJML de e-commerce com hero laranja, grade de produtos em 3 e 2 colunas, blocos lado a lado e rodapé escuro/laranja.",
+    "blitz": { "score": 8, "issues": ["[baixo] Seções de produtos e rodapé de ícones mais altas (espaçamento extra), aumentando a altura total", "[baixo] Títulos do rodapé (\"PAYMENT METHODS\") quebram em duas linhas"], "css_suspect": "line-height/padding em colunas mj-column" },
+    "litehtml": { "score": 9, "issues": ["[baixo] Grade de produtos ligeiramente mais compacta; nomes não quebram como no Chromium"], "css_suspect": "" }
+  },
+  {
+    "email": "postmark-invoice",
+    "summary_pt": "Fatura transacional Postmark com caixa de valor, botão verde, tabela de itens e rodapé cinza.",
+    "blitz": { "score": 8, "issues": ["[baixo] Corpo branco com margem/borda cinza lateral visível em vez de ocupar a largura toda", "[baixo] Espaçamento vertical maior na tabela de itens e entre blocos"], "css_suspect": "width:100% em tabela body com padding/margin" },
+    "litehtml": { "score": 9, "issues": ["[baixo] Espaçamentos verticais um pouco maiores na tabela de itens"], "css_suspect": "" }
+  },
+  {
+    "email": "re-03-protocol-product-update",
+    "summary_pt": "Atualização de produto em tema escuro (React Email) com imagens, títulos grandes, seção de blog em 2 colunas e rodapé.",
+    "blitz": { "score": 9, "issues": ["[baixo] Espaçamentos verticais ligeiramente maiores, altura total um pouco maior"], "css_suspect": "" },
+    "litehtml": { "score": 5, "issues": ["[alto] max-width do container ignorado: conteúdo ocupa os 800px inteiros em vez da coluna central estreita", "[médio] Imagens não acompanham a largura do container (ficam menores que a coluna, sobra espaço à direita)", "[baixo] Links \"Explore Smart Tasks\"/\"Read more\" renderizados em fonte monoespaçada"], "css_suspect": "max-width em tabela/div container; width:100% em img" }
+  },
+  {
+    "email": "re-amazon-review",
+    "summary_pt": "Pedido de avaliação da Amazon com capa de livro, estrelas, faixa CTA azul e rodapé com ícones sociais.",
+    "blitz": { "score": 6, "issues": ["[médio] Borda laranja desenhada em volta de todo o container em vez de apenas no topo", "[baixo] Coluna de texto ao lado da capa mais estreita, quebrando mais linhas; altura total maior"], "css_suspect": "border-top / border shorthand com border-width zero" },
+    "litehtml": { "score": 6, "issues": ["[médio] max-width do container ignorado: conteúdo se expande até ~800px", "[baixo] Link \"View more\" sem sublinhado"], "css_suspect": "max-width em tabela container" }
+  },
+  {
+    "email": "re-google-play-policy-update",
+    "summary_pt": "Comunicado de política do Google Play em cartão branco com faixas gráficas azuis, texto e rodapé \"Connect with us\".",
+    "blitz": { "score": 7, "issues": ["[médio] Bloco \"Connect with us\" deslocado para a esquerda e mais largo, desalinhado com o conteúdo do cartão", "[baixo] Parágrafos encostam na borda direita do cartão (padding direito parcialmente ignorado)"], "css_suspect": "padding/width em td aninhada; margin negativa" },
+    "litehtml": { "score": 6, "issues": ["[médio] Cartão ocupa quase todos os 800px: largura máxima do container ignorada", "[baixo] Faixa decorativa do rodapé sobreposta aos ícones de forma diferente"], "css_suspect": "max-width em tabela container" }
+  },
+  {
+    "email": "re-papermark-year-in-review",
+    "summary_pt": "Retrospectiva anual Papermark com cartões arredondados com gradientes, estatísticas em 3 colunas, pílulas de países e botões escuros.",
+    "blitz": { "score": 9, "issues": ["[baixo] Espaçamento vertical ligeiramente maior nos cartões"], "css_suspect": "" },
+    "litehtml": { "score": 5, "issues": ["[alto] max-width do container ignorado: cartões ocupam os 800px inteiros", "[médio] Gradientes de fundo dos cartões perdidos ou muito atenuados (cinza e verde ficam chapados)", "[baixo] Pílulas de países alinhadas à esquerda em vez de centralizadas"], "css_suspect": "max-width; linear-gradient em background" }
+  },
+  {
+    "email": "re-plaid-verify-identity",
+    "summary_pt": "E-mail de código de verificação Plaid com cartão estreito centralizado, ícone, código grande e rodapé.",
+    "blitz": { "score": 9, "issues": ["[baixo] Cartão um pouco mais alto que no Chromium"], "css_suspect": "" },
+    "litehtml": { "score": 5, "issues": ["[alto] Cartão estreito (~360px) ignorado: ocupa os 800px inteiros", "[médio] Título \"Enter the following code...\" alinhado à esquerda em vez de centralizado"], "css_suspect": "max-width/width em tabela; text-align herdado" }
+  },
+  {
+    "email": "re-twitch-reset-password",
+    "summary_pt": "Aviso de troca de senha da Twitch em cartão branco sobre fundo cinza com logo, texto e rodapé com ícones.",
+    "blitz": { "score": 7, "issues": ["[médio] Texto do corpo ultrapassa a borda direita do cartão branco (padding/largura incorretos)", "[baixo] Espaçamento vertical maior entre cabeçalho e corpo"], "css_suspect": "padding em td com width fixa (box-sizing)" },
+    "litehtml": { "score": 5, "issues": ["[alto] Cartão de 600px ignorado: conteúdo ocupa os 800px inteiros", "[médio] Ícones sociais do rodapé separados (Twitter à esquerda, Facebook ao centro) em vez de agrupados e centralizados"], "css_suspect": "max-width em tabela; display:inline-block/width em td de ícones" }
+  }
+]

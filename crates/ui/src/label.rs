@@ -2,28 +2,28 @@ use gpui::FontWeight;
 
 use crate::prelude::*;
 
-/// Text sizes available for [`Label`].
+/// Text sizes available for [`Label`], relative to [`crate::UI_FONT_SIZE`].
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LabelSize {
-    /// 11px — very subtle metadata.
+    /// Base − 3px — very subtle metadata.
     XSmall,
-    /// 12px — message preview, timestamp.
+    /// Base − 2px — message preview, timestamp.
     Small,
-    /// 14px — default text.
+    /// The base size — default text.
     #[default]
     Default,
-    /// 16px — section titles.
+    /// Base + 2px — section titles.
     Large,
 }
 
 impl LabelSize {
     fn px(self) -> Pixels {
-        match self {
-            LabelSize::XSmall => px(11.0),
-            LabelSize::Small => px(12.0),
-            LabelSize::Default => px(14.0),
-            LabelSize::Large => px(16.0),
-        }
+        crate::ui_text_size(match self {
+            LabelSize::XSmall => -3.0,
+            LabelSize::Small => -2.0,
+            LabelSize::Default => 0.0,
+            LabelSize::Large => 2.0,
+        })
     }
 }
 
