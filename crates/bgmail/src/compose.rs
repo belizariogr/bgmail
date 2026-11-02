@@ -30,8 +30,8 @@ use crate::recipients::{RecipientInput, RecipientsChanged};
 use ui::prelude::*;
 use ui::{
     font_for_family, Align, Button, ButtonStyle, Color, ContextMenu, FontFamily, Icon, IconButton,
-    IconName, IconSize, Label, LabelSize, ListKind, TextArea, TextAreaEvent, TextInput,
-    TextInputEvent, TextSize, Tooltip, MAX_INDENT,
+    IconName, IconSize, Label, LabelSize, ListKind, Scrollbar, ScrollbarState, TextArea,
+    TextAreaEvent, TextInput, TextInputEvent, TextSize, Tooltip, MAX_INDENT,
 };
 
 use crate::actions::{ComposeAttach, ComposeClose, ComposeDiscard, ComposeSend};
@@ -261,6 +261,7 @@ pub struct ComposeView {
     body: Entity<TextArea>,
     /// Scroll container of the body; the text area keeps its caret visible in it.
     body_scroll: ScrollHandle,
+    body_scrollbar: Entity<ScrollbarState>,
     attachments: Vec<OutgoingAttachment>,
     /// Background reads still running (Send is disabled meanwhile).
     pending_attachment_loads: usize,
@@ -364,6 +365,7 @@ impl ComposeView {
             subject,
             body,
             body_scroll,
+            body_scrollbar: cx.new(|_| ScrollbarState::new()),
             attachments: Vec::new(),
             pending_attachment_loads: 0,
             reply: ReplyHeaders::default(),
@@ -1562,24 +1564,36 @@ impl ComposeView {
     fn render_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (bg, text) = compose_body_colors(self.white_background);
         let body = self.body.clone();
+        let (thumb, thumb_dragged) = body_scrollbar_colors(self.white_background, cx);
         div()
-            .id("compose-body")
+            .relative()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.body_scroll)
-            .p_3()
-            .cursor_text()
-            .when_some(bg, |el, bg| el.bg(bg))
-            .when_some(text, |el, text| el.text_color(text))
-            // Clicks around the text still place the caret and can start a selection.
-            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                body.update(cx, |body, cx| body.press_outside(event, window, cx));
-            })
-            .child(self.body.clone())
-            .when(self.reply.quoted.is_some(), |el| {
-                el.child(self.render_quote(cx))
-            })
+            .child(
+                div()
+                    .id("compose-body")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.body_scroll)
+                    .p_3()
+                    .cursor_text()
+                    .when_some(bg, |el, bg| el.bg(bg))
+                    .when_some(text, |el, text| el.text_color(text))
+                    // Clicks around the text still place the caret and can start a
+                    // selection.
+                    .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                        body.update(cx, |body, cx| body.press_outside(event, window, cx));
+                    })
+                    .child(self.body.clone())
+                    .when(self.reply.quoted.is_some(), |el| {
+                        el.child(self.render_quote(cx))
+                    }),
+            )
+            .child(
+                Scrollbar::vertical(self.body_scrollbar.clone(), self.body_scroll.clone())
+                    .always_visible()
+                    .thumb_colors(thumb, thumb_dragged),
+            )
     }
 
     /// Below the editor, as in Gmail: a button that reveals the attribution line
@@ -1651,6 +1665,18 @@ impl ComposeView {
 /// dark text readable. Otherwise the theme's.
 fn body_selection_color(white_background: bool, cx: &App) -> Option<Hsla> {
     white_background.then(|| white().blend(cx.theme().colors().accent.opacity(0.35)))
+}
+
+/// Thumb of the body's scrollbar (resting, dragged): it must show on the page's
+/// color, not the app's.
+fn body_scrollbar_colors(white_background: bool, cx: &App) -> (Hsla, Hsla) {
+    let light = Theme::light();
+    let colors = if white_background {
+        light.colors()
+    } else {
+        cx.theme().colors()
+    };
+    (colors.scrollbar_thumb, colors.scrollbar_thumb_hover)
 }
 
 /// Colors of the button that reveals the quote.
