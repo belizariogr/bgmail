@@ -167,7 +167,7 @@ fn describe(index: usize, part: &MessagePart<'_>, html: &str) -> AttachmentInfo 
 
 /// Whether the HTML refers to exactly this Content-ID, in any case and percent-encoded
 /// or not: `cid:part1` isn't `cid:part10`.
-fn html_references_cid(html: &str, cid: &str) -> bool {
+pub fn html_references_cid(html: &str, cid: &str) -> bool {
     let html = html.to_ascii_lowercase();
     let cid = cid.to_ascii_lowercase();
     html.match_indices("cid:").any(|(start, _)| {

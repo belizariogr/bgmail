@@ -1,6 +1,6 @@
 //! Downloaded raw message → what `storage::Database::store_body` keeps.
 
-use mail_core::{inline_images, parse_message, readable_text};
+use mail_core::{html_references_cid, inline_images, parse_message, readable_text};
 use storage::{Database, NewAttachment};
 
 /// Upper bound of image bytes inlined as `data:` URIs into one stored HTML
@@ -55,7 +55,13 @@ pub fn body_content(raw: &[u8]) -> BodyContent {
                 mime_type: a.mime_type.clone(),
                 size: a.size as u64,
                 content_id: a.content_id.clone(),
-                inline: a.inline,
+                // An image left out of the stored body (over the budget for embedding)
+                // can't be seen there: it has to stay reachable as an attachment.
+                inline: a.inline
+                    && !a
+                        .content_id
+                        .as_deref()
+                        .is_some_and(|cid| html_references_cid(&content, cid)),
             })
             .collect(),
         content,
@@ -189,6 +195,31 @@ fn base64_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_too_big_to_embed_stays_reachable_as_an_attachment() {
+        let image = "A".repeat((MAX_INLINE_BYTES + 3) * 4 / 3);
+        let raw = format!(
+            "From: a@b.c\r\nContent-Type: multipart/related; boundary=X\r\n\r\n--X\r\n\
+             Content-Type: text/html\r\n\r\n<img src=\"cid:big@x\"><img src=\"cid:small@x\">\r\n\
+             --X\r\nContent-Type: image/png\r\nContent-ID: <big@x>\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\n{image}\r\n\
+             --X\r\nContent-Type: image/png\r\nContent-ID: <small@x>\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\nAQID\r\n--X--\r\n"
+        );
+        let body = body_content(raw.as_bytes());
+        assert!(body.content.contains("cid:big@x"));
+        assert!(!body.content.contains("cid:small@x"));
+        let inline = |cid: &str| {
+            body.attachments
+                .iter()
+                .find(|a| a.content_id.as_deref() == Some(cid))
+                .unwrap()
+                .inline
+        };
+        assert!(!inline("big@x"));
+        assert!(inline("small@x"));
+    }
 
     const ALTERNATIVE: &[u8] = b"From: a@x\r\n\
 Subject: Hi\r\n\
