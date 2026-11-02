@@ -21,9 +21,9 @@ Continuous integration on the three desktop platforms and release packaging
     x11-xcb/xcb, wayland, fontconfig/freetype, Vulkan loader, clang,
     pkg-config), then `cargo fmt --all --check`,
     `cargo clippy --workspace --all-targets -- -D warnings`,
-    `cargo test --workspace`.
+    `cargo test --workspace --no-fail-fast` (one failing crate must not hide the others on platforms nobody runs locally).
   - `macos` (macos-15) and `windows` (windows-latest): `cargo build -p bgmail`
-    + `cargo test --workspace`.
+    + `cargo test --workspace --no-fail-fast`.
   - `greenmail` (ubuntu-22.04): GreenMail `greenmail/standalone:2.1.15`
     service container with the users/ports of
     `crates/protocols/tests/greenmail.sh`; waits for the IMAP greeting, then
