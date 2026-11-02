@@ -976,11 +976,21 @@ fn parsed_from_detail(detail: &MessageDetail) -> ParsedMessage {
 }
 
 /// The original's real attachments, carried over when forwarding.
-fn forwarded_attachments(raw: &[u8], parsed: &ParsedMessage) -> Vec<mail_core::OutgoingAttachment> {
+fn forwarded_attachments(
+    raw: &[u8],
+    parsed: &ParsedMessage,
+    shown: &[AttachmentRow],
+) -> Vec<mail_core::OutgoingAttachment> {
+    // What the reader lists goes too: an image too big to embed is inline to the parser.
+    let listed = |index: usize| {
+        shown
+            .iter()
+            .any(|row| usize::try_from(row.part_index) == Ok(index))
+    };
     parsed
         .attachments
         .iter()
-        .filter(|info| !info.inline)
+        .filter(|info| !info.inline || listed(info.index))
         .filter_map(|info| {
             Some(mail_core::OutgoingAttachment {
                 filename: info.filename.clone(),
@@ -1098,7 +1108,7 @@ fn compose_init_from_outgoing(row: &OutgoingRow, parsed: &ParsedMessage) -> Comp
             html: None,
             in_reply_to: parsed.in_reply_to.clone(),
             references: parsed.references.clone(),
-            attachments: forwarded_attachments(&row.raw, parsed),
+            attachments: forwarded_attachments(&row.raw, parsed, &[]),
         },
         replaces_outgoing: Some(row.id),
         quoted_original: None,
@@ -4008,7 +4018,8 @@ impl RootView {
         });
         if kind == ReplyKind::Forward {
             if let Some(raw) = raw.as_deref() {
-                draft.attachments = forwarded_attachments(raw, &parsed);
+                let shown = visible_attachments(&self.db, Some(&detail));
+                draft.attachments = forwarded_attachments(raw, &parsed, &shown);
             }
         }
         let init = ComposeInit {
@@ -8163,6 +8174,27 @@ mod tests {
                 Some(Key::StatusForwardNeedsBody.tr(Language::default()))
             );
         });
+    }
+
+    #[test]
+    fn a_forward_carries_what_the_reader_lists() {
+        let raw = b"From: a@b.c\r\nContent-Type: multipart/related; boundary=X\r\n\r\n--X\r\n\
+            Content-Type: text/html\r\n\r\n<img src=\"cid:big@x\">\r\n--X\r\n\
+            Content-Type: image/png\r\nContent-ID: <big@x>\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nAQID\r\n--X--\r\n";
+        let parsed = mail_core::parse_message(raw).unwrap();
+        assert!(forwarded_attachments(raw, &parsed, &[]).is_empty());
+        let row = AttachmentRow {
+            id: 1,
+            message_id: 1,
+            part_index: parsed.attachments[0].index as u32,
+            filename: "a.png".into(),
+            mime_type: "image/png".into(),
+            size: 3,
+            content_id: Some("big@x".into()),
+            inline: false,
+        };
+        assert_eq!(forwarded_attachments(raw, &parsed, &[row]).len(), 1);
     }
 
     #[test]
