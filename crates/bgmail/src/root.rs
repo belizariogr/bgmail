@@ -46,6 +46,7 @@ use crate::mail_html::{
     DocumentColors, PrintHeader,
 };
 use crate::mail_service::{self, MailService, OverallStatus, StartError};
+use crate::recipients::address_card;
 use crate::settings::SettingsView;
 use crate::shortcuts;
 use html_view::{
@@ -5204,12 +5205,12 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         let language = cx.language();
-        let lines: Vec<(Key, &str)> = [
-            (Key::ReaderTo, message.to_addrs.as_str()),
-            (Key::ReaderCc, message.cc_addrs.as_str()),
+        let lines: Vec<(&'static str, Key, &str)> = [
+            ("reader-to", Key::ReaderTo, message.to_addrs.as_str()),
+            ("reader-cc", Key::ReaderCc, message.cc_addrs.as_str()),
         ]
         .into_iter()
-        .filter(|(_, value)| !value.trim().is_empty())
+        .filter(|(_, _, value)| !value.trim().is_empty())
         .collect();
         if lines.is_empty() {
             return None;
@@ -5217,22 +5218,31 @@ impl RootView {
         Some(
             v_flex()
                 .pl(px(40.0))
-                .children(lines.into_iter().map(|(key, value)| {
+                .gap_1()
+                .children(lines.into_iter().map(|(field, key, value)| {
+                    let cards: Vec<_> = mail_core::parse_address_list(value)
+                        .unwrap_or_default()
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, address)| address_card((field, ix), address, cx).pr_2())
+                        .collect();
+                    // A header that doesn't parse is still shown as it came.
+                    let raw = cards.is_empty().then(|| {
+                        Label::new(value.to_string())
+                            .size(LabelSize::Small)
+                            .single_line()
+                    });
                     h_flex()
                         .gap_1()
                         .min_w_0()
+                        .flex_wrap()
                         .child(
                             Label::new(format!("{}:", key.tr(language)))
                                 .size(LabelSize::Small)
                                 .color(Color::Muted),
                         )
-                        .child(
-                            div().flex_1().min_w_0().child(
-                                Label::new(value.to_string())
-                                    .size(LabelSize::Small)
-                                    .single_line(),
-                            ),
-                        )
+                        .children(cards)
+                        .children(raw)
                 })),
         )
     }
@@ -6827,6 +6837,17 @@ mod tests {
 
         mail_actions::restore_from_trash(&view.db, id).unwrap();
         assert!(listed(&view));
+    }
+
+    #[test]
+    fn reader_recipients_keep_quoted_names_apart_from_addresses() {
+        let list = mail_core::parse_address_list(
+            "Boa Gestão <contato@boagestao.com.br>, \"contact brascomcorp.com\" <contact@brascomcorp.com>",
+        )
+        .unwrap();
+        assert_eq!(list[0].name.as_deref(), Some("Boa Gestão"));
+        assert_eq!(list[1].name.as_deref(), Some("contact brascomcorp.com"));
+        assert_eq!(list[1].email, "contact@brascomcorp.com");
     }
 
     #[test]

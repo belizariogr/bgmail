@@ -4,8 +4,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    deferred, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, Render, SharedString, Subscription, Window,
+    deferred, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, KeyDownEvent, MouseButton, Render, SharedString, Stateful, Subscription, Window,
 };
 use mail_core::{format_address_list, parse_address_list, same_email, Address};
 use storage::{fold_for_search, Contact};
@@ -110,6 +110,28 @@ fn card_label(address: &Address) -> String {
         .name
         .clone()
         .unwrap_or_else(|| address.email.clone())
+}
+
+/// An address as a card, with all of it on hover. Also shown when reading mail.
+pub fn address_card(id: impl Into<ElementId>, address: &Address, cx: &App) -> Stateful<Div> {
+    let colors = cx.theme().colors();
+    h_flex()
+        .id(id)
+        .flex_shrink_0()
+        .h(px(22.0))
+        .pl_2()
+        .gap_1()
+        .rounded_full()
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.element_background)
+        .cursor_pointer()
+        .tooltip(Tooltip::text(address.display()))
+        .child(
+            Label::new(card_label(address))
+                .size(LabelSize::Small)
+                .single_line(),
+        )
 }
 
 /// One recipient field.
@@ -296,24 +318,8 @@ impl RecipientInput {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let language = cx.language();
-        let colors = cx.theme().colors();
-        h_flex()
-            .id(("recipient", index))
-            .flex_shrink_0()
-            .h(px(22.0))
-            .pl_2()
+        address_card(("recipient", index), address, cx)
             .pr_1()
-            .gap_1()
-            .rounded_full()
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.element_background)
-            .tooltip(Tooltip::text(address.display()))
-            .child(
-                Label::new(card_label(address))
-                    .size(LabelSize::Small)
-                    .single_line(),
-            )
             .child(
                 div()
                     .id(("recipient-remove", index))
