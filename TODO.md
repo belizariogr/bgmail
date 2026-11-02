@@ -363,7 +363,9 @@
       prompt cancellation; GreenMail + Dovecot integration tests
       (`tests/greenmail.sh`, env-gated)
 - ✅ Gmail via OAuth2 (PKCE loopback, refresh, id_token e-mail) + XOAUTH2 on
-      IMAP/SMTP; client id from `BGMAIL_GOOGLE_CLIENT_ID`/`_SECRET`
+      IMAP/SMTP; client id from `BGMAIL_GOOGLE_CLIENT_ID`/`_SECRET` (GitHub secrets
+      in release builds, gitignored `.env` locally)
+- 🔄 Validate Google sign-in with a real account (client configured)
 - ✅ Provider presets (Gmail, Outlook, Yahoo, iCloud, Fastmail, UOL, …) +
       Mozilla autoconfig/ISPDB + guess
 - ✅ ~~`accounts` crate~~ dropped (decision above); keychain via GPUI

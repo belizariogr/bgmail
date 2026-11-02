@@ -61,6 +61,9 @@ Continuous integration on the three desktop platforms and release packaging
   Xcode bundles Metal; overrides `.cargo/config.toml`). Release macOS builds
   use `MACOSX_DEPLOYMENT_TARGET=10.15.7` (= packager `minimum-system-version`).
 - Never commit secrets or certificate files; never print secret values.
+- `BGMAIL_GOOGLE_CLIENT_ID` / `_SECRET` (repository secrets) go only to the steps
+  that compile the app (binary, packager, Linux bundle), and are blank on pull
+  requests, so PR artifacts have no Google sign-in. Release binaries embed them.
 
 ## Work Guidance
 
