@@ -146,19 +146,23 @@ impl Database {
         folder_path: &str,
     ) -> rusqlite::Result<usize> {
         let pattern = folder_like_pattern(folder_path);
+        let hidden = hidden_from_folder(folder_path);
         let sql = if account_id.is_some() {
-            "SELECT COUNT(*) FROM messages
-             WHERE account_id = ?1 AND unread = 1 AND folders_csv LIKE ?2"
+            format!(
+                "SELECT COUNT(*) FROM messages
+                 WHERE account_id = ?1 AND unread = 1 AND folders_csv LIKE ?2{hidden}"
+            )
         } else {
-            "SELECT COUNT(*) FROM messages
-             WHERE unread = 1 AND folders_csv LIKE ?1"
+            format!(
+                "SELECT COUNT(*) FROM messages WHERE unread = 1 AND folders_csv LIKE ?1{hidden}"
+            )
         };
         let count: i64 = if let Some(account_id) = account_id {
             self.conn
-                .query_row(sql, params![account_id, pattern], |row| row.get(0))?
+                .query_row(&sql, params![account_id, pattern], |row| row.get(0))?
         } else {
             self.conn
-                .query_row(sql, params![pattern], |row| row.get(0))?
+                .query_row(&sql, params![pattern], |row| row.get(0))?
         };
         Ok(count as usize)
     }
@@ -248,11 +252,25 @@ impl Database {
     }
 }
 
+/// Extra condition of a folder's listing: deleted mail keeps its star, for when
+/// it is restored, but no longer belongs to Starred.
+fn hidden_from_folder(folder_path: &str) -> &'static str {
+    if folder_path == system::FLAGGED {
+        " AND folders_csv NOT LIKE '%,sys:trash,%'"
+    } else {
+        ""
+    }
+}
+
 /// SQL `WHERE` clause + parameters for a list query; `None` means "no rows"
 /// (blank search).
 fn query_filter(query: &MailListQuery) -> Option<(&'static str, Vec<Value>)> {
     match query {
         MailListQuery::Search(text) => search_filter(text),
+        MailListQuery::GlobalSystemFolder(path) if path == system::FLAGGED => Some((
+            "folders_csv LIKE ?1 AND folders_csv NOT LIKE '%,sys:trash,%'",
+            vec![Value::Text(folder_like_pattern(path))],
+        )),
         MailListQuery::GlobalSystemFolder(path) => Some((
             "folders_csv LIKE ?1",
             vec![Value::Text(folder_like_pattern(path))],

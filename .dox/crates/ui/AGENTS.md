@@ -35,6 +35,7 @@ an e-mail client, without Zed-scale bloat.
   emit a `Changed` event (`TextInputEvent` / `TextAreaEvent`) on user edits
   only; programmatic `set_content` / `clear` stay silent. Both own IME via
   `EntityInputHandler` and call `set_native_text_focus` on click.
+- Only the focused text field paints its selection. `TextArea::set_selection_color` overrides the highlight for text on a page of another color.
 - Repeated clicks: double click selects the word (a masked `TextInput` selects
   everything), triple click the field (`TextInput`) or line (`TextArea`).
 - `IconButton::hover_color`: hover feedback through the icon color and no

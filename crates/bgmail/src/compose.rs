@@ -284,6 +284,7 @@ impl ComposeView {
             let mut area = TextArea::new(Key::ComposeBodyPlaceholder.tr(language), cx)
                 .min_lines(BODY_MIN_LINES);
             area.track_scroll(&body_scroll);
+            area.set_selection_color(body_selection_color(white_background, cx), cx);
             area
         });
 
@@ -383,6 +384,9 @@ impl ComposeView {
     pub(crate) fn set_white_background(&mut self, value: bool, cx: &mut Context<Self>) {
         if self.white_background != value {
             self.white_background = value;
+            let selection = body_selection_color(value, cx);
+            self.body
+                .update(cx, |area, cx| area.set_selection_color(selection, cx));
             self.quote_view = None;
             self._quote_task = None;
             if self.quote_expanded {
@@ -1129,6 +1133,13 @@ impl ComposeView {
                 })
             })
     }
+}
+
+/// Selection highlight of the body on a white page: opaque (a translucent fill
+/// lets the desktop show through a translucent window) and light, to keep its
+/// dark text readable. Otherwise the theme's.
+fn body_selection_color(white_background: bool, cx: &App) -> Option<Hsla> {
+    white_background.then(|| white().blend(cx.theme().colors().accent.opacity(0.35)))
 }
 
 /// Colors of the button that reveals the quote.

@@ -267,14 +267,13 @@ fn selection_range(list: &[i64], from: i64, to: i64) -> Vec<i64> {
     list[from.min(to)..=from.max(to)].to_vec()
 }
 
-/// Width the subject of a list row gives up for its action buttons: Reply and
-/// Delete while hovered, Reply alone in the Trash.
-fn row_actions_room(hovered: bool, in_trash: bool) -> Pixels {
-    if !hovered {
-        return px(0.0);
+/// Width the subject of a list row gives up for its action buttons, while hovered.
+fn row_actions_room(hovered: bool) -> Pixels {
+    if hovered {
+        px(2.0 * (ROW_ACTION_WIDTH + ROW_ACTION_GAP))
+    } else {
+        px(0.0)
     }
-    let buttons = if in_trash { 1.0 } else { 2.0 };
-    px(buttons * (ROW_ACTION_WIDTH + ROW_ACTION_GAP))
 }
 
 /// Star button of the toolbar: filled and in the list's star color when set.
@@ -2257,10 +2256,9 @@ impl RootView {
                 cx.notify();
             }
             CommandId::MessageDelete => self.delete_message_to_trash(cx),
-            CommandId::MessageDeletePermanent if !self.multi_selection.is_empty() => {
-                self.confirm_delete_selection(window, cx)
+            CommandId::MessageDeletePermanent => {
+                self.confirm_delete_forever(self.selected_ids(), window, cx)
             }
-            CommandId::MessageDeletePermanent => self.delete_message_permanently(cx),
             CommandId::MessageRestore => self.restore_message(cx),
             CommandId::MessageArchive => self.archive_message(cx),
             CommandId::MessageMarkJunk => self.mark_message_junk(cx),
@@ -2468,10 +2466,12 @@ impl RootView {
     }
 
     /// Delete button of a list row: acts on that row, leaving the selection
-    /// alone. Never deletes for good, as trashing a trashed message would.
-    fn delete_row_message(&mut self, id: i64, cx: &mut Context<Self>) {
+    /// alone. What is already in the Trash goes for good, once confirmed.
+    fn delete_row_message(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         if self.row_can_be_trashed(id) {
             self.run_action_on_message(id, cx, mail_actions::trash);
+        } else {
+            self.confirm_delete_forever(vec![id], window, cx);
         }
     }
 
@@ -2487,11 +2487,18 @@ impl RootView {
         )
     }
 
-    /// Asks before deleting a multiple selection for good, and then deletes only
-    /// the rows the question was about, as long as they are still in the Trash.
-    fn confirm_delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Asks before deleting `ids` for good, then deletes the ones still in the
+    /// Trash.
+    fn confirm_delete_forever(
+        &mut self,
+        ids: Vec<i64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
         let language = cx.language();
-        let ids = self.multi_selection.clone();
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
             &locale::delete_forever_confirm(language, ids.len()),
@@ -2507,22 +2514,31 @@ impl RootView {
                 return;
             }
             this.update(cx, |this, cx| {
-                this.multi_selection = ids
+                let mut in_trash: Vec<i64> = ids
                     .into_iter()
                     .filter(|id| this.db.message_is_in_trash(*id) == Ok(true))
                     .collect();
-                this.run_message_action(cx, mail_actions::delete_permanently);
+                if let [id] = in_trash[..] {
+                    this.run_action_on_message(id, cx, mail_actions::delete_permanently);
+                } else if in_trash.len() > 1 {
+                    this.multi_selection = std::mem::take(&mut in_trash);
+                    this.run_message_action(cx, mail_actions::delete_permanently);
+                }
             })
             .ok();
         })
         .detach();
     }
 
-    pub(crate) fn delete_message_permanently(&mut self, cx: &mut Context<Self>) {
-        if !self.command_context().message_in_trash() {
-            return;
+    /// The Delete command wherever it comes from (toolbar, key, menu): to the
+    /// Trash, or for good, with confirmation, for what is already there.
+    pub(crate) fn request_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ctx = self.command_context();
+        if commands::command_enabled(&CommandId::MessageDelete, &ctx) {
+            self.delete_message_to_trash(cx);
+        } else if commands::command_enabled(&CommandId::MessageDeletePermanent, &ctx) {
+            self.confirm_delete_forever(self.selected_ids(), window, cx);
         }
-        self.run_message_action(cx, mail_actions::delete_permanently);
     }
 
     pub(crate) fn restore_message(&mut self, cx: &mut Context<Self>) {
@@ -4078,16 +4094,27 @@ impl RootView {
                                             .gap_1()
                                             .child(Self::icon_button_with_tooltip(
                                                 "trash",
-                                                Key::CommandDelete.tr(language),
+                                                if enabled(CommandId::MessageDelete) {
+                                                    Key::CommandDelete.tr(language)
+                                                } else {
+                                                    Key::CommandDeletePermanent.tr(language)
+                                                },
                                                 Some((
                                                     shortcuts::DELETE_MESSAGE_MAC,
                                                     shortcuts::DELETE_MESSAGE_OTHER,
                                                 )),
                                                 IconButton::new("trash", IconName::Trash)
-                                                    .disabled(!enabled(CommandId::MessageDelete))
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.delete_message_to_trash(cx);
-                                                    })),
+                                                    .disabled(
+                                                        !enabled(CommandId::MessageDelete)
+                                                            && !enabled(
+                                                                CommandId::MessageDeletePermanent,
+                                                            ),
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.request_delete(window, cx);
+                                                        },
+                                                    )),
                                             ))
                                             .child(Self::icon_button_with_tooltip(
                                                 "archive",
@@ -4816,8 +4843,7 @@ impl RootView {
         let message_id = message.id;
         // The subject, on the line the action buttons sit on, gives way to them.
         // The sender/date line above and the preview below never move.
-        let room_for_actions =
-            row_actions_room(self.hovered_row == Some(message_id), self.showing_trash());
+        let room_for_actions = row_actions_room(self.hovered_row == Some(message_id));
         h_flex()
             .id(("message", message_id as u64))
             .group(MESSAGE_ROW_GROUP)
@@ -4928,21 +4954,23 @@ impl RootView {
                         this.reply_to_selected(ReplyKind::Reply, window, cx);
                     })),
             ))
-            .when(!self.showing_trash(), |el| {
-                el.child(Self::icon_button_with_tooltip(
-                    "row-delete",
-                    Key::CommandDelete.tr(language),
-                    None,
-                    IconButton::new("row-delete-button", IconName::Trash)
-                        .compact()
-                        .size(IconSize::Small)
-                        .color(Color::Muted)
-                        .hover_color(Color::Default)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.delete_row_message(message_id, cx)
-                        })),
-                ))
-            })
+            .child(Self::icon_button_with_tooltip(
+                "row-delete",
+                if self.showing_trash() {
+                    Key::CommandDeletePermanent.tr(language)
+                } else {
+                    Key::CommandDelete.tr(language)
+                },
+                None,
+                IconButton::new("row-delete-button", IconName::Trash)
+                    .compact()
+                    .size(IconSize::Small)
+                    .color(Color::Muted)
+                    .hover_color(Color::Default)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.delete_row_message(message_id, window, cx)
+                    })),
+            ))
     }
 
     // ----- Reading pane ---------------------------------------------------
@@ -5836,7 +5864,7 @@ impl RootView {
                     IconButton::new("bulk-delete-forever", IconName::Trash)
                         .size(IconSize::Small)
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.confirm_delete_selection(window, cx);
+                            this.confirm_delete_forever(this.selected_ids(), window, cx);
                         })),
                 ))
             })
@@ -6719,9 +6747,8 @@ mod tests {
 
     #[test]
     fn only_a_hovered_row_makes_room_for_its_buttons() {
-        assert_eq!(row_actions_room(false, false), px(0.0));
-        assert_eq!(row_actions_room(true, false), px(40.0));
-        assert_eq!(row_actions_room(true, true), px(20.0));
+        assert_eq!(row_actions_room(false), px(0.0));
+        assert_eq!(row_actions_room(true), px(40.0));
     }
 
     #[test]
@@ -6730,6 +6757,40 @@ mod tests {
         assert_eq!(star_color(true), Color::Warning);
         assert_eq!(star_icon(false), IconName::Star);
         assert_eq!(star_color(false), Color::Default);
+    }
+
+    #[test]
+    fn trashed_mail_leaves_starred_and_comes_back_when_restored() {
+        let (_dir, view) = test_view();
+        let flagged = storage::system::FLAGGED;
+        let query = MailListQuery::GlobalSystemFolder(flagged.to_string());
+        let id = view
+            .list_messages
+            .iter()
+            .find(|message| message.unread)
+            .map(|message| message.id)
+            .expect("an unread message");
+        mail_actions::set_starred(&view.db, id, true).unwrap();
+        let unread = view.db.global_unread(flagged).unwrap();
+        let listed = |view: &RootView| {
+            view.db
+                .list_messages(&query)
+                .unwrap()
+                .iter()
+                .any(|message| message.id == id)
+        };
+        assert!(listed(&view));
+
+        mail_actions::trash(&view.db, id).unwrap();
+        assert!(!listed(&view));
+        assert_eq!(view.db.global_unread(flagged).unwrap(), unread - 1);
+        assert_eq!(
+            view.db.message_count_for_query(&query).unwrap(),
+            view.db.list_messages(&query).unwrap().len()
+        );
+
+        mail_actions::restore_from_trash(&view.db, id).unwrap();
+        assert!(listed(&view));
     }
 
     #[test]

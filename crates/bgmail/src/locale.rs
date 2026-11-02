@@ -703,9 +703,11 @@ pub fn messages_selected(language: Language, count: usize) -> String {
 
 /// Question before deleting a multiple selection for good.
 pub fn delete_forever_confirm(language: Language, count: usize) -> String {
-    match language {
-        Language::English => format!("Delete {count} messages permanently?"),
-        Language::Portuguese => format!("Excluir {count} mensagens permanentemente?"),
+    match (language, count) {
+        (Language::English, 1) => "Delete this message permanently?".to_string(),
+        (Language::Portuguese, 1) => "Excluir esta mensagem permanentemente?".to_string(),
+        (Language::English, _) => format!("Delete {count} messages permanently?"),
+        (Language::Portuguese, _) => format!("Excluir {count} mensagens permanentemente?"),
     }
 }
 

@@ -359,6 +359,9 @@ pub struct TextArea {
     /// its column after crossing shorter lines.
     goal_x: Option<Pixels>,
     scroll_handle: Option<ScrollHandle>,
+    /// Selection highlight when it isn't the theme's: the text may sit on a page
+    /// of another color.
+    selection_color: Option<Hsla>,
     /// Set by keyboard moves/edits; consumed by the next paint to scroll the
     /// tracked container so the caret stays visible.
     autoscroll_requested: bool,
@@ -379,6 +382,7 @@ impl TextArea {
             is_selecting: false,
             goal_x: None,
             scroll_handle: None,
+            selection_color: None,
             autoscroll_requested: false,
         }
     }
@@ -400,6 +404,12 @@ impl TextArea {
     /// to keep the caret visible after keyboard moves and edits.
     pub fn track_scroll(&mut self, handle: &ScrollHandle) {
         self.scroll_handle = Some(handle.clone());
+    }
+
+    /// Sets the selection highlight; `None` follows the theme.
+    pub fn set_selection_color(&mut self, color: Option<Hsla>, cx: &mut Context<Self>) {
+        self.selection_color = color;
+        cx.notify();
     }
 
     /// Current text (always `\n` line endings).
@@ -1033,7 +1043,7 @@ impl Element for TextAreaElement {
                         origin + point(start_x, Pixels::ZERO),
                         origin + point(end_x, line_height),
                     ),
-                    colors.element_selected,
+                    area.selection_color.unwrap_or(colors.element_selected),
                 )
             })
             .collect();
@@ -1075,8 +1085,11 @@ impl Element for TextAreaElement {
             ElementInputHandler::new(bounds, self.area.clone()),
             cx,
         );
-        for selection in prepaint.selections.drain(..) {
-            window.paint_quad(selection);
+        // Only the focused field shows its selection, as there is one at a time.
+        if focus_handle.is_focused(window) {
+            for selection in prepaint.selections.drain(..) {
+                window.paint_quad(selection);
+            }
         }
 
         // Only paint lines inside the visible clip: long quoted replies can

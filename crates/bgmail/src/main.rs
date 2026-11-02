@@ -127,7 +127,12 @@ fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &ComposeNew, cx| schedule_menu_command(CommandId::ComposeNew, cx));
     cx.on_action(|_: &OpenSettings, cx| schedule_menu_command(CommandId::OpenSettings, cx));
     cx.on_action(|_: &ToggleSidebar, cx| schedule_menu_command(CommandId::ToggleSidebar, cx));
-    cx.on_action(|_: &MessageDelete, cx| schedule_menu_command(CommandId::MessageDelete, cx));
+    cx.on_action(|_: &MessageDelete, cx| {
+        let main = cx.global::<MainWindow>().0;
+        cx.defer(move |cx| {
+            let _ = main.update(cx, |view, window, cx| view.request_delete(window, cx));
+        });
+    });
     cx.on_action(|_: &MessageDeletePermanent, cx| {
         schedule_menu_command(CommandId::MessageDeletePermanent, cx);
     });

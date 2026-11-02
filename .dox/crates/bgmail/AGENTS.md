@@ -195,7 +195,8 @@ wiring to `storage`.
   Mail, the row picked last (`multi_preview`, not marked read) on a sheet, with
   tilted sheets behind it and a floating bar: Delete, Archive, Junk, star,
   read/unread and Move, or Restore and Delete forever (confirmed) in the Trash.
-  Bulk star and read keep the selection and follow the whole selection (any
+  In the Trash, the toolbar's delete button, a row's Delete button and the Delete
+  key delete for good, after a confirmation. Bulk star and read keep the selection and follow the whole selection (any
   unread: mark all read; not all starred: star all). Any other bulk action never deletes for
   good and leaves nothing selected. On hover Reply / Delete appear centered at
   the right, icon-sized and with no background (their icons brighten on hover);

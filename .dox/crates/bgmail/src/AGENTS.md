@@ -1924,6 +1924,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`bulk_selection`** / **`apply_action_keeping_selection`** / **`finish_bulk_toggle`** / **`confirm_delete_selection`** (private): summary of a multiple selection for the commands, bulk star/read keeping the selection, and the confirmed permanent deletion.
 - **`ReaderJob`** (`runs_in_background`, `build`) / **`BuiltReader`** / **`install_reader`** (private): a reader document's inputs, buildable on any thread, its result, and handing it to the view.
 - **`open_mailto`** (`pub(crate)`): prefilled compose from a `mailto:` link; refuses to replace a message with edits.
+- **`request_delete`** (`pub(crate)`) / **`confirm_delete_forever`** / **`delete_row_message`** (private): Delete from anywhere: to the Trash, or for good, confirmed, for what is already there.
 - **`render_dropdown`** / **`render_filter_menu`** / **`render_move_menu`** (private): reader card stack for a multiple selection and the toolbar dropdowns.
 - **`select_message_row`** (private)
   - Signature: `fn select_message_row(&mut self, id: i64, window, cx)`

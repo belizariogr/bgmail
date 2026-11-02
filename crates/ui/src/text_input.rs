@@ -863,8 +863,11 @@ impl Element for TextInputElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
+        // Only the focused field shows its selection, as there is one at a time.
+        if focus_handle.is_focused(window) {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection);
+            }
         }
         let line = prepaint.line.take().unwrap();
         line.paint(bounds.origin, window.line_height(), window, cx)
