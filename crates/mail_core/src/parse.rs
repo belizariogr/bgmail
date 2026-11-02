@@ -165,18 +165,40 @@ fn describe(index: usize, part: &MessagePart<'_>, html: &str) -> AttachmentInfo 
     }
 }
 
-/// Whether the HTML refers to this Content-ID, in any case and percent-encoded or not.
+/// Whether the HTML refers to exactly this Content-ID, in any case and percent-encoded
+/// or not: `cid:part1` isn't `cid:part10`.
 fn html_references_cid(html: &str, cid: &str) -> bool {
     let html = html.to_ascii_lowercase();
     let cid = cid.to_ascii_lowercase();
-    let encoded: String = cid
-        .bytes()
-        .map(|byte| match byte {
-            b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (byte as char).to_string(),
-            _ => format!("%{byte:02x}"),
-        })
-        .collect();
-    html.contains(&format!("cid:{cid}")) || html.contains(&format!("cid:{encoded}"))
+    html.match_indices("cid:").any(|(start, _)| {
+        let rest = &html[start + "cid:".len()..];
+        let end = rest
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | '&' | ';')
+            })
+            .unwrap_or(rest.len());
+        percent_decoded(&rest[..end]) == cid
+    })
+}
+
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = (bytes[i] == b'%')
+            .then(|| text.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        if let Some(byte) = escaped {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn mime_type(part: &MessagePart<'_>) -> String {
@@ -245,6 +267,16 @@ mod tests {
             "From: a@b.c\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\n{body}\r\n--X\r\n{part_headers}\r\nContent-Transfer-Encoding: base64\r\n\r\nAAAA\r\n--X--\r\n"
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn a_content_id_is_matched_whole() {
+        let html = "<img src=\"cid:part10\"><img src='CID:Pic%40x'><p>cid:spaced end";
+        assert!(html_references_cid(html, "part10"));
+        assert!(html_references_cid(html, "pic@x"));
+        assert!(html_references_cid(html, "spaced"));
+        assert!(!html_references_cid(html, "part1"));
+        assert!(!html_references_cid(html, "pic"));
     }
 
     #[test]
