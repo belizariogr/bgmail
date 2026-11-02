@@ -912,6 +912,8 @@ _300 functions/methods documented._
     masked). Used by caret/selection painting, mouse hit-testing and the IME
     `bounds_for_range` / `character_index_for_point`.
 
+- **`placeholder`** (pub) — `pub fn placeholder(&self) -> &SharedString`: the current placeholder.
+
 - **`set_placeholder`** (pub, L235)
   - Signature: `pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>)`
   - Purpose: Updates empty-state hint text.
@@ -1380,6 +1382,8 @@ core lives in `text_area/buffer.rs` and `text_area/rows.rs` (below).
   - Signature: `pub fn set_cursor_offset(&mut self, offset: usize, cx: &mut Context<Self>)`
   - Purpose: Places the caret (UTF-8 bytes) programmatically.
   - Behavior: Clamped to text/char boundary, collapses selection, autoscrolls, notifies.
+
+- **`placeholder`** (pub) — `pub fn placeholder(&self) -> &SharedString`: the current placeholder.
 
 - **`set_placeholder`** (pub, L430)
   - Signature: `pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>)`

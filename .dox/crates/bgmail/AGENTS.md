@@ -57,6 +57,10 @@ wiring to `storage`.
 - The UI language persists as `Config::language` (`Language::code`, a string so an
   unknown value loses only the language). Change it through `RootView::set_language`,
   from Settings or the first-run welcome step (`settings::language_picker`).
+- A message being written is never lost silently: Close (shortcut, X, menu), quitting
+  and closing the main window ask through `ComposeView::discard_draft`, and a reply,
+  forward or `mailto:` doesn't replace it (`Key::StatusComposeBusy`). Drafts stay a
+  TODO item.
 - Zoom of the whole app (user decision): Ctrl/Cmd `+`/`-`/`0` (global actions
   `AppZoomIn`/`AppZoomOut`/`AppZoomReset`, also in the View menu) step
   `app_zoom`'s levels (75%–200%) through `RootView::zoom_app`, applied to every open
@@ -131,8 +135,8 @@ wiring to `storage`.
   - `mail_html` — e-mail HTML sanitizing (`lol_html`), remote image policy,
     the themed document handed to `html_view`, and the plain-text fallback.
   - `crash_guard` — marker of the message being rendered (crash loops).
-  - `print` — private print pages in the temp dir (Unix 0700/0600, stale
-    pages removed on the next print).
+  - `print` — private print pages (`handoff_dir`: user cache on Linux, temp dir
+    elsewhere; Unix 0700/0600, stale pages removed on the next print).
   - `attachments` — attachment chip presentation (family icon, human size)
     and file writing: sanitized names, never-overwrite ` (n)` dedupe,
     private temp copies for Open (Unix 0700/0600, stale after a day).

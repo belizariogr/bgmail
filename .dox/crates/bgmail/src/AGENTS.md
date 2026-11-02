@@ -287,7 +287,7 @@ _(No functions — only action types.)_
 
 ##### Context: `module`
 
-- **`message_has_folder`** (private, L85)
+- **`message_has_folder`** (`storage`, imported)
   - Signature: `fn message_has_folder(csv: &str, folder_path: &str) -> bool`
   - Purpose: Checks whether a comma-separated folder list contains a path.
   - Behavior: Splits on commas, ignores empty segments, compares paths exactly.
@@ -612,11 +612,6 @@ window.
   - Purpose: Loads settings from disk with safe fallback.
   - Behavior: Reads via `config_path` and `load_from`; returns `Config::default()` when path or parse fails.
 
-- **`save`** (pub, L118)
-  - Signature: `pub fn save(config: &Config)`
-  - Purpose: Persists settings best-effort.
-  - Behavior: Writes through `save_to` when `config_path` exists; silently ignores errors.
-
 - **`load_from`** (private, L125)
   - Signature: `fn load_from(path: PathBuf) -> Config`
   - Purpose: Parses one config file path.
@@ -710,7 +705,7 @@ window.
 
 #### Functions / methods
 
-- **`print_dir()`** (pub): `<temp dir>/bgmail-print`.
+- **`print_dir()`** (pub): `handoff_dir("print")`. **`handoff_dir(name)`** (pub(crate)): where files for other programs go: on Linux/BSD `$XDG_CACHE_HOME` or `~/.cache` + `BGMail/<name>` (the shared temp directory could hold another user's directory of that name), elsewhere and without a home `<temp dir>/bgmail-<name>`. **`user_cache_dir(xdg, home)`** (private): the pure choice, testable.
 - **`nonce()`** (pub): 16 hex digits from the process's random hasher keys, the clock, a counter and the pid (CSP nonce and file name).
 - **`write_print_page(dir, html, nonce)`** (pub): Creates the private directory, removes stale pages, writes `message-<nonce>.html` as a new private file; returns its path.
 - **`remove_stale_pages(dir, now, age)`** (pub): Deletes `message-*.html` older than `age`; returns how many.
@@ -741,10 +736,10 @@ overwrite (a ` (n)` suffix is added while a name is taken).
 - **`split_extension(name)`** (private): `(stem, ext)`; a leading dot or an "extension" over 16 chars is not an extension.
 - **`numbered_name(name, n)`** (private): `name` for 0, else `stem (n).ext`.
 - **`extract(raw, part_index)`** (pub): decoded bytes via `mail_core::attachment_content`; `NotFound` error when the part is missing.
-- **`open_dir()`** (pub): `<temp dir>/bgmail-attachments`.
+- **`open_dir()`** (pub): `print::handoff_dir("attachments")`.
 - **`downloads_dir()`** (pub) / **`downloads_dir_in(home)`** (private): `~/Downloads` when it exists, else home (`HOME`/`USERPROFILE`), else the temp dir.
 - **`write_unique(dir, filename, data, private)`** (pub): creates `dir` (private → 0700 via `print::create_private_dir`), then create-new files `sanitize_filename(filename)`, `… (1)`, … until one is free (private → 0600); writes `data`, returns the path. Races are safe (create-new, `AlreadyExists` → next name).
-- **`write_for_open(filename, data)`** (pub): removes stale files in `open_dir()`, then private `write_unique` there.
+- **`write_for_open(filename, data)`** (pub): creates the private `open_dir()` (failing if it isn't ours), removes stale files in it, then private `write_unique` there.
 - **`remove_stale_files(dir, now, age)`** (pub): deletes regular files older than `age`; returns how many (best effort).
 - Tests: families, sizes (EN/PT), sanitizing (traversal, Windows paths, control/reserved chars, dotfiles, device names, long names), numbering, unique/private writes (Unix modes), stale removal, Downloads fallback, part extraction from a raw MIME message, `write_for_open`.
 
@@ -1442,7 +1437,12 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`close_focused_auxiliary_window`** (pub(crate), L657)
   - Signature: `pub(crate) fn close_focused_auxiliary_window(&mut self, cx: &mut Context<Self>)`
   - Purpose: Closes focused compose or settings window.
-  - Behavior: Removes and closes whichever auxiliary window has focus.
+  - Behavior: Closes the settings window; a compose window goes through `discard_draft`, so edits are asked about.
+
+- **`may_quit`** (pub(crate))
+  - Signature: `pub(crate) fn may_quit(&mut self, cx: &mut Context<Self>) -> bool`
+  - Purpose: Whether the app may quit now.
+  - Behavior: With edits in compose, activates it, asks through `discard_draft` and returns `false`; the user quits again after answering. Called from `on_window_should_close` of the main window and `schedule_quit` (`main.rs`: Quit action, caption close button; deferred because the dispatching window is busy).
 
 - **`close_settings_window`** (pub(crate), L672)
   - Signature: `pub(crate) fn close_settings_window(&mut self, cx: &mut Context<Self>)`
@@ -1588,7 +1588,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`persist_now`** (pub(crate), L953)
   - Signature: `pub(crate) fn persist_now(&self)`
   - Purpose: Immediate synchronous settings save.
-  - Behavior: No-op until persist_ready; writes current_config via config::save.
+  - Behavior: No-op until persist_ready; writes current_config via save_config (to the `config_file` field, the profile's `config_path` outside tests).
 
 - **`enable_persistence`** (pub(crate), L960)
   - Signature: `pub(crate) fn enable_persistence(&mut self)`
@@ -1769,6 +1769,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 
 - **`open_compose_with`** (pub(crate))
   - Signature: `pub(crate) fn open_compose_with(&mut self, init: Option<ComposeInit>, _window, cx: &mut Context<Self>)`
+  - Guard: a message being written (`has_edits`) is never replaced by `init`: the window is activated and `Key::StatusComposeBusy` shown instead.
   - Purpose: Opens the compose window, optionally prefilled (reply / reply all / forward).
   - Behavior: New windows carry `app_id: COMPOSE_WINDOW_APP_ID`. When a compose window is open, hands a `Some(init)` to it via `ComposeView::apply_init` and activates it. Otherwise opens a window with persisted bounds, the localized title and `ComposeView::new(self.compose_accounts(), root, compose_white_background, init, window, cx)`; `on_window_should_close` notifies `on_compose_window_closed`.
 
@@ -1838,6 +1839,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Behavior: Mailbox title, optional count, filter/more buttons; used in toolbar or list header.
 
 - **`sync_layout`** (private, L2007)
+  - Widths: effective `sidebar_width`/`list_width` are derived from `preferred_*` each time, which only a divider drag (`resize`) changes and `current_config` saves; a smaller window or a zoom never costs the chosen width.
   - Signature: `fn sync_layout(&mut self, total: Pixels)`
   - Purpose: Reconciles column widths to window size.
   - Behavior: Tracks narrow breakpoint, auto sidebar collapse/restore, clamps columns to minimums preserving reader floor.
@@ -1921,7 +1923,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_selection_stack`** / **`reader_detail`** / **`reload_multi_preview`** / **`fetch_multi_preview_body`** / **`sheet_corners`** (private): reader for a multiple selection: the previewed message (never marked read) on a sheet, tilted sheets behind it, floating actions.
 - **`bulk_selection`** / **`apply_action_keeping_selection`** / **`finish_bulk_toggle`** / **`confirm_delete_selection`** (private): summary of a multiple selection for the commands, bulk star/read keeping the selection, and the confirmed permanent deletion.
 - **`ReaderJob`** (`runs_in_background`, `build`) / **`BuiltReader`** / **`install_reader`** (private): a reader document's inputs, buildable on any thread, its result, and handing it to the view.
-- **`open_mailto`** (`pub(crate)`): prefilled compose from a `mailto:` link; refuses to replace a message with edits.
+- **`open_mailto`** (`pub(crate)`): prefilled compose from a `mailto:` link, through `open_compose_with`.
 - **`request_delete`** (`pub(crate)`) / **`confirm_delete_forever`** / **`delete_row_message`** (private): Delete from anywhere: to the Trash, or for good, confirmed, for what is already there.
 - **`short_recipient`** / **`unique_recipients`** (private, `root`): the reader's recipients line, as in Gmail.
 - **`set_account_names`** (`pub(crate)`) / **`begin_names_edit`** / **`save_names`** (`settings`, private): editing an account's names.
@@ -2231,7 +2233,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_recipients(message, cx)`** (private): "To:"/"Cc:" lines under the sender (hidden when empty).
 - **`sync_status_text(language)`** (private): status bar sync text: a recent note, else start errors, else `OverallStatus` (Updating… / Updated at HH:MM / Offline / Sign-in failed: email / Sync error).
 - **`render_welcome(cx)`** (private): shown instead of list + reader while no account exists; "Add account…" opens Settings ▸ Accounts.
-- Module helpers: **`parsed_from_detail(detail)`** (stored detail → minimal `ParsedMessage` for reply/forward of local/demo mail), **`forwarded_attachments(raw, parsed)`** (non-inline parts as `OutgoingAttachment`s), **`unique_token()`** (random-seeded hash of a counter + time for Message-IDs), **struct `UnsentItem { id, account_id, subject, recipients, error, maybe_sent }`**, **`unsent_item(row, subject)`** (outbox row → panel summary: recipients comma-joined, blank `last_error` → `None`, `maybe_sent` from `OutgoingState::MaybeSent`), **`load_unsent(db, removing, previous)`** (`failed_outgoing` minus removing accounts; subjects reused from `previous` by id, else parsed from one `outgoing` read (the listing has no raw); read error logged and `previous` kept), **`compose_init_from_outgoing(row, parsed)`** (`ComposeInit` for Edit: from/to/cc/subject/text/threading headers/attachments from the parsed raw, envelope recipients missing from To/Cc restored as Bcc, `replaces_outgoing = row.id`).
+- Module helpers: **`parsed_from_detail(detail)`** (stored detail → minimal `ParsedMessage` for reply/forward of local/demo mail or a message whose body wasn't downloaded: From, Reply-To, To, Cc with invalid tokens skipped), **`forwarded_attachments(raw, parsed)`** (non-inline parts as `OutgoingAttachment`s), **`unique_token()`** (random-seeded hash of a counter + time for Message-IDs), **struct `UnsentItem { id, account_id, subject, recipients, error, maybe_sent }`**, **`unsent_item(row, subject)`** (outbox row → panel summary: recipients comma-joined, blank `last_error` → `None`, `maybe_sent` from `OutgoingState::MaybeSent`), **`load_unsent(db, removing, previous)`** (`failed_outgoing` minus removing accounts; subjects reused from `previous` by id, else parsed from one `outgoing` read (the listing has no raw); read error logged and `previous` kept), **`compose_init_from_outgoing(row, parsed)`** (`ComposeInit` for Edit: from/to/cc/subject/text/threading headers/attachments from the parsed raw, envelope recipients missing from To/Cc restored as Bcc, `replaces_outgoing = row.id`).
 - Tests: `unsent_item_summarizes_the_row`, `compose_init_from_outgoing_restores_the_draft`, `removing_an_account_hides_it_until_reload_clears_it` (see the tests module).
 - Tests (existing, still contracts): `find_steps_wrap_around`, `reader_selection_is_opaque_on_light_pages_only`, plus the layout/selection/action tests listed above.
 

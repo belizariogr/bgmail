@@ -384,6 +384,12 @@
 - ✅ Each mailbox remembers its selected messages for the session.
 - ✅ Removing the open message leaves nothing open, as in Gmail.
 - ✅ The UI language persists, with a picker on the first-run welcome step.
+- ✅ Whole-project adversarial review, round 1: folder membership by exact match
+      (`instr`, commas encoded, schema v6), literal short searches, Reply-To and
+      partial To/Cc without a body, `//host` links, emptied multiple selection,
+      guarded compose (replace, close, quit), chosen column widths kept across
+      zoom, escaped notification bodies on markup servers, live placeholders and
+      settings title, handoff files out of Linux's shared temp directory.
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
 - ✅ Read / mark read-unread (opening marks read on the server; toggle via

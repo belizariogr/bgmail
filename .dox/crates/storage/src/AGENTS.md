@@ -234,7 +234,7 @@ _(No functions.)_
 #### Functions / methods (module)
 
 - **`parse_folders_csv`** (pub) — `pub fn parse_folders_csv(csv: &str) -> Vec<String>`: split on commas, drop empties.
-- **`message_has_folder`** (pub) — `pub fn message_has_folder(csv: &str, folder_path: &str) -> bool`: exact segment match.
+- **`message_has_folder`** (pub, re-exported) — `pub fn message_has_folder(csv: &str, folder_path: &str) -> bool`: exact match over decoded segments.
 - **`is_virtual_flagged_folder`** (pub) — `pub fn is_virtual_flagged_folder(path: &str) -> bool`: `path == sys:flagged`.
 - **`replace_primary_folder`** (pub) — `pub fn replace_primary_folder(paths: &[String], primary: &str) -> Vec<String>`: keeps only flagged, adds `primary`, sorted/deduped.
 - **`folders_csv_from_paths`** (pub) — `pub fn folders_csv_from_paths(paths: &[String]) -> String`.
@@ -279,12 +279,12 @@ These edit `folders_csv` directly and work for every message. For a remote messa
 - **`folders_csv`** (pub, L24)
   - Signature: `pub fn folders_csv<'a>(paths: impl IntoIterator<Item = &'a str>) -> String`
   - Purpose: Serializes folder paths into the comma-wrapped DB format.
-  - Behavior: Joins paths with commas and wraps as `,{path1},{path2},` so SQL `LIKE '%,path,%'` matches unambiguously. Empty iterator yields `,,`.
+  - Behavior: Joins paths with commas and wraps as `,{path1},{path2},` with a `,` inside a path written as U+001F (`encode_csv_path`/`decode_csv_path`, crate-private), so a path never spans segments. Empty iterator yields `,,`.
 
-- **`folder_like_pattern`** (pub, L30)
-  - Signature: `pub fn folder_like_pattern(folder_path: &str) -> String`
-  - Purpose: Builds a SQL LIKE pattern for membership in `folders_csv`.
-  - Behavior: Returns `format!("%,{folder_path},%")`. No escaping beyond the stored path string.
+- **`folder_csv_needle`** (pub)
+  - Signature: `pub fn folder_csv_needle(folder_path: &str) -> String`
+  - Purpose: What `instr(folders_csv, ?)` looks for to test membership.
+  - Behavior: Returns `,{encoded path},`. Used with `instr`, not `LIKE`: exact and case-sensitive, so `My_Work`, `MyXWork`, `work` and `WORK` stay distinct.
 
 - **`user_folder_path`** (pub, L35)
   - Signature: `pub fn user_folder_path(display_name: &str) -> String`
@@ -308,8 +308,8 @@ These edit `folders_csv` directly and work for every message. For a remote messa
   - Purpose: Verifies CSV wrapping format.
   - Behavior: Asserts inbox+flagged paths serialize to `,sys:inbox,sys:flagged,`.
 
-- **`folder_like_pattern_matches_inside_csv`** (private, L62)
-  - Signature: `fn folder_like_pattern_matches_inside_csv()`
+- **`folder_csv_needle_matches_inside_csv`** (private)
+  - Signature: `fn folder_csv_needle_matches_inside_csv()`
   - Purpose: Verifies LIKE pattern shape and substring containment.
   - Behavior: Asserts pattern for inbox is `%,sys:inbox,%` and sample CSV contains `sys:inbox,`.
 

@@ -22,7 +22,8 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
 
 - DB path: `~/.config/BGMail/mail.db` via `database_path` (portable home
   resolution; no GPUI).
-- **Schema v3** (`schema.rs`, `SCHEMA_VERSION = 3`). `migration.rs` applies
+- **Schema v6** (`schema.rs`, `SCHEMA_VERSION = 6`; v4 = contacts, v5 = columns, v6 =
+  commas of folder paths encoded in `folders_csv`). `migration.rs` applies
   steps by `meta.schema_version` inside one `BEGIN IMMEDIATE` transaction:
   base v1 DDL (`CREATE … IF NOT EXISTS`), then v1→v2 = `ALTER TABLE ADD COLUMN`
   (skipped when the column exists) + new tables/indexes/FTS + FTS `rebuild`,
