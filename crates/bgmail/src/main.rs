@@ -227,11 +227,19 @@ fn main() {
     startup::mark_start();
     startup::log_milestone("main entered");
 
-    // A launch for a `mailto:` link only hands it to the running instance, if any.
+    // A later launch only hands over what it came for; this binding keeps the profile
+    // for as long as the process runs.
     let launch_link = instance::mailto_argument(std::env::args().skip(1));
-    if launch_link.as_deref().is_some_and(instance::forward) {
-        return;
-    }
+    let _profile = match instance::lock_profile() {
+        instance::ProfileLock::Busy => {
+            let message = launch_link.as_deref().unwrap_or(instance::ACTIVATE);
+            if !instance::hand_over(message) {
+                eprintln!("BGMail is already running but did not answer");
+            }
+            return;
+        }
+        lock => lock,
+    };
     let (links, incoming_links) = async_channel::unbounded::<String>();
     if let Some(link) = launch_link {
         links.send_blocking(link).ok();
@@ -441,7 +449,14 @@ fn main() {
         cx.spawn(async move |cx| {
             while let Ok(link) = incoming_links.recv().await {
                 main_window
-                    .update(cx, |view, window, cx| view.open_mailto(&link, window, cx))
+                    .update(cx, |view, window, cx| {
+                        if link == instance::ACTIVATE {
+                            window.activate_window();
+                            cx.activate(true);
+                        } else {
+                            view.open_mailto(&link, window, cx);
+                        }
+                    })
                     .ok();
             }
         })
