@@ -372,6 +372,13 @@
 - ⬜ POP3 (postponed, see decision)
 - ⬜ Microsoft OAuth (Outlook.com requires it; presets flag it)
 - ⬜ Persist rotated OAuth refresh tokens (kept in memory today)
+- ✅ First-run setup in the main window (`onboarding`): welcome, theme cards with
+      a mini preview, account (the Settings form embedded), conclusion with an
+      opt-in "default mail app" switch. Shown only to a profile with no account
+      that never finished it. The theme choice is now persisted
+      (`Config::light_theme`, also from Settings).
+- ⬜ Persist the UI language (`locale` always starts in English, so the setup does
+      too); consider a language picker on the welcome step.
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
 - ✅ Read / mark read-unread (opening marks read on the server; toggle via

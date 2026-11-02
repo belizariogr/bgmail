@@ -886,6 +886,13 @@ pub struct RootView {
     /// Whether the compose message body uses a white background. Persisted; off
     /// by default.
     pub(crate) compose_white_background: bool,
+    /// Persisted copy of the theme choice (the theme itself is an app global,
+    /// which the settings snapshot can't read).
+    light_theme: bool,
+    /// Whether the first-run setup is over; see `onboarding::needs_onboarding`.
+    onboarding_completed: bool,
+    /// The running first-run setup, created on first render (needs a context).
+    onboarding: Option<Entity<crate::onboarding::OnboardingView>>,
     /// How many remote images were blocked in the current message (the privacy
     /// shield shows while non-zero). Recomputed when the document rebuilds.
     content_blocked_count: usize,
@@ -1212,6 +1219,8 @@ impl RootView {
             );
         }
 
+        let onboarding_completed =
+            !crate::onboarding::needs_onboarding(settings.onboarding_completed, accounts.len());
         let selected_mailbox = Selection::Global(GlobalMailbox::Inbox);
         let list_messages = db
             .list_messages(&mail_list_query(&selected_mailbox, ""))
@@ -1307,6 +1316,9 @@ impl RootView {
             remote_allowed: HashSet::new(),
             reader_white_background: settings.reader_white_background,
             compose_white_background: settings.compose_white_background,
+            light_theme: settings.light_theme,
+            onboarding_completed,
+            onboarding: None,
             content_blocked_count: 0,
             search_input: None,
             search_force_expanded: false,
@@ -2450,6 +2462,10 @@ impl RootView {
     }
 
     pub(crate) fn toggle_command_palette(&mut self, window: &Window, cx: &mut Context<Self>) {
+        // The setup replaces the screen that shows the palette.
+        if self.onboarding_active() {
+            return;
+        }
         self.toggle_command_palette_internal(window, cx);
     }
 
@@ -2950,6 +2966,8 @@ impl RootView {
             notifications_enabled: self.notifications_enabled,
             reader_white_background: self.reader_white_background,
             compose_white_background: self.compose_white_background,
+            light_theme: self.light_theme,
+            onboarding_completed: self.onboarding_completed,
             collapsed_accounts: {
                 let mut groups: Vec<usize> = self.collapsed_accounts.iter().copied().collect();
                 groups.sort_unstable();
@@ -3506,6 +3524,56 @@ impl RootView {
 
     /// Toggles whether the compose body forces a white background, persisting
     /// the preference and updating an open compose window.
+    /// Switches the app theme and remembers it for the next launch.
+    pub(crate) fn set_appearance(&mut self, appearance: theme::Appearance, cx: &mut Context<Self>) {
+        self.light_theme = appearance.is_light();
+        theme::set_theme(theme::Theme::for_appearance(appearance), cx);
+        self.request_save(cx);
+        cx.notify();
+    }
+
+    /// Whether the first-run setup is on screen.
+    pub(crate) fn onboarding_active(&self) -> bool {
+        !self.onboarding_completed
+    }
+
+    /// Leaves the first-run setup for good and shows the mail.
+    pub(crate) fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.onboarding_completed = true;
+        self.onboarding = None;
+        self.persist_now();
+        cx.notify();
+    }
+
+    /// The first-run setup, under a title bar that keeps the window movable and
+    /// its controls reachable (the toolbar that normally does this isn't shown).
+    fn render_onboarding(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let root = cx.entity();
+        let view = self
+            .onboarding
+            .get_or_insert_with(|| cx.new(|cx| crate::onboarding::OnboardingView::new(root, cx)))
+            .clone();
+        let colors = *cx.theme().colors();
+        let title_bar = Self::window_drag_bar(h_flex().h(px(52.0)).w_full().flex_shrink_0(), cx)
+            .pl(crate::window_frame::toolbar_left_padding())
+            .children(crate::window_frame::render_left_window_controls(window))
+            .child(div().flex_1())
+            .children(crate::window_frame::render_right_window_controls(window));
+        let content = v_flex()
+            .size_full()
+            .bg(crate::onboarding::page_background(&colors))
+            .text_color(colors.text)
+            .font_family("Helvetica")
+            .child(title_bar)
+            .child(view)
+            .into_any_element();
+        crate::window_frame::wrap_client_decorations(content, window, colors.border)
+    }
+
     pub(crate) fn set_compose_white_background(&mut self, value: bool, cx: &mut Context<Self>) {
         if self.compose_white_background != value {
             self.compose_white_background = value;
@@ -4151,46 +4219,10 @@ impl RootView {
 
     // ----- Top toolbar (unified title bar) --------------------------------
 
-    fn render_toolbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors();
-        let bg = colors.title_bar_background;
-        let border = colors.border;
-        let search_bg = colors.element_background;
-        let language = cx.language();
-        // Keep the toolbar segments aligned with the resizable columns below. When
-        // the sidebar is docked its segment matches the sidebar width; otherwise it
-        // only reserves room for the traffic lights + toggle controls.
-        let sidebar_docked = self.sidebar_docked();
-        let sidebar_segment_width = if sidebar_docked {
-            self.sidebar_width
-        } else {
-            px(240.0)
-        };
-
-        // The list controls live in the toolbar only while the sidebar is docked;
-        // otherwise they move into the list's own header (see `render_message_list`).
-        let list_segment = sidebar_docked.then(|| {
-            h_flex()
-                .w(self.list_width)
-                .flex_shrink_0()
-                .items_center()
-                .px_3()
-                .child(self.render_list_controls(true, cx))
-        });
-
-        // When the reader's toolbar segment gets too tight the full search field
-        // would be clipped, so we collapse it into a single icon button unless
-        // the user explicitly expanded it.
-        let compact_search = !self.show_search_expanded();
-
-        h_flex()
-            .h(px(52.0))
-            .w_full()
-            .flex_shrink_0()
-            .bg(bg)
-            .border_b_1()
-            .border_color(border)
-            // The whole toolbar acts as a draggable title bar. We arm the drag on
+    /// Makes `bar` act as the window's title bar.
+    fn window_drag_bar(bar: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        bar
+            // We arm the drag on
             // mouse-down and only begin moving on the first mouse-move, so clicks
             // on the toolbar's own buttons keep working. A double-click performs
             // the platform's default title-bar action (zoom/minimize on macOS).
@@ -4233,6 +4265,48 @@ impl RootView {
                     crate::window_drag::start_window_drag(window, this.maximized, this.window_size);
                 }
             }))
+    }
+
+    fn render_toolbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let bg = colors.title_bar_background;
+        let border = colors.border;
+        let search_bg = colors.element_background;
+        let language = cx.language();
+        // Keep the toolbar segments aligned with the resizable columns below. When
+        // the sidebar is docked its segment matches the sidebar width; otherwise it
+        // only reserves room for the traffic lights + toggle controls.
+        let sidebar_docked = self.sidebar_docked();
+        let sidebar_segment_width = if sidebar_docked {
+            self.sidebar_width
+        } else {
+            px(240.0)
+        };
+
+        // The list controls live in the toolbar only while the sidebar is docked;
+        // otherwise they move into the list's own header (see `render_message_list`).
+        let list_segment = sidebar_docked.then(|| {
+            h_flex()
+                .w(self.list_width)
+                .flex_shrink_0()
+                .items_center()
+                .px_3()
+                .child(self.render_list_controls(true, cx))
+        });
+
+        // When the reader's toolbar segment gets too tight the full search field
+        // would be clipped, so we collapse it into a single icon button unless
+        // the user explicitly expanded it.
+        let compact_search = !self.show_search_expanded();
+
+        let bar = h_flex()
+            .h(px(52.0))
+            .w_full()
+            .flex_shrink_0()
+            .bg(bg)
+            .border_b_1()
+            .border_color(border);
+        Self::window_drag_bar(bar, cx)
             // Segment 1: over the sidebar — titlebar spacing + sidebar toggle
             // and app settings (theme switching lives in Settings ▸ Appearance).
             .child(
@@ -6505,6 +6579,10 @@ impl Render for RootView {
             self.sync_app_menus(cx);
         }
 
+        if self.onboarding_active() {
+            return self.render_onboarding(window, cx);
+        }
+
         // Make sure the scrollbar state entities exist before the panels render.
         self.ensure_scrollbar_states(cx);
         // Keyboard navigation lives on the message list: give it focus
@@ -6717,6 +6795,32 @@ pub(crate) fn can_open_command_palette(main_window_active: bool) -> bool {
 }
 
 #[cfg(test)]
+impl RootView {
+    /// A view on an empty database, as on a first launch.
+    pub(crate) fn for_tests(path: &std::path::Path) -> Self {
+        Self::new_with_database(Config::default(), path, false)
+    }
+
+    pub(crate) fn onboarding_view(&self) -> Option<Entity<crate::onboarding::OnboardingView>> {
+        self.onboarding.clone()
+    }
+
+    pub(crate) fn command_palette_is_open(&self) -> bool {
+        self.command_palette
+            .as_ref()
+            .is_some_and(|palette| palette.open)
+    }
+
+    pub(crate) fn persisted_onboarding_completed(&self) -> bool {
+        self.current_config().onboarding_completed
+    }
+
+    pub(crate) fn persisted_light_theme(&self) -> bool {
+        self.current_config().light_theme
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::{self, CommandId};
@@ -6727,6 +6831,31 @@ mod tests {
         let path = dir.path().join("mail.db");
         let view = RootView::new_with_database(Config::default(), &path, true);
         (dir, view)
+    }
+
+    #[test]
+    fn a_profile_with_mail_skips_the_setup_and_records_it() {
+        let (_dir, view) = test_view();
+        assert!(!view.onboarding_active());
+        assert!(view.current_config().onboarding_completed);
+    }
+
+    #[test]
+    fn an_empty_profile_starts_in_the_setup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let view = RootView::for_tests(&dir.path().join("mail.db"));
+        assert!(view.onboarding_active());
+    }
+
+    #[test]
+    fn a_finished_setup_stays_finished_without_accounts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            onboarding_completed: true,
+            ..Config::default()
+        };
+        let view = RootView::new_with_database(config, dir.path().join("mail.db"), false);
+        assert!(!view.onboarding_active());
     }
 
     #[test]

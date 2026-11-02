@@ -24,6 +24,7 @@ mod locale;
 mod mail_html;
 mod mail_service;
 mod notifications;
+mod onboarding;
 mod print;
 mod recipients;
 mod root;
@@ -220,8 +221,8 @@ fn main() {
     });
     application.run(move |cx: &mut App| {
         startup::log_milestone("application run callback");
-        // Initialize the theme system starting in dark mode.
-        theme::init(theme::Appearance::Dark, cx);
+        let settings = config::load();
+        theme::init(settings.appearance(), cx);
         // Initialize localization (English by default).
         locale::init(locale::Language::default(), cx);
         ui::bind_keys(cx);
@@ -233,7 +234,6 @@ fn main() {
 
         // Restore the persisted layout (window/column sizes), clamped to the
         // window's minimum so a stale or tiny config can't open an unusable window.
-        let settings = config::load();
         let win_width = settings.window_width.max(WINDOW_MIN_WIDTH);
         let win_height = settings.window_height.max(WINDOW_MIN_HEIGHT);
         let bounds = Bounds::new(

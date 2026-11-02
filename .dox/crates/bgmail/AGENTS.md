@@ -48,6 +48,16 @@ wiring to `storage`.
     exists; unpackaged runs keep notify-rust's PowerShell id (Windows drops
     toasts from an unregistered id). WiX shortcuts are assumed to carry the
     same id.
+- First-run setup (`onboarding::OnboardingView`, rendered by `RootView` instead
+  of the toolbar and columns, under a title bar with the window controls): welcome
+  → theme → account → conclusion. Shown only while `needs_onboarding` holds (setup
+  never finished and no account), so existing profiles skip it; finishing or
+  skipping persists `onboarding_completed`. The account step embeds
+  `SettingsView::form_only` (one form implementation). The default-mail-app switch
+  is opt-in (user decision: a switch on the last step), applied on finish, asked
+  once; a system message keeps the screen open until the next click.
+- The theme choice persists as `Config::light_theme`; change it through
+  `RootView::set_appearance`, never `theme::set_theme` directly from a view.
 - The reader shows bodies with `html_view::HtmlView` (sanitized + themed by
   `mail_html`). Remote images are blocked unless the user loads them:
   clicking the privacy shield next to the subject loads them for that

@@ -34,7 +34,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ## API Catalog
 
-_688 functions/methods documented._
+_720 functions/methods documented._
 
 ### `src/account_setup.rs`
 
@@ -2832,3 +2832,45 @@ in `account_setup`.
   - Purpose: Draws one caption button with hover and native control area.
   - Behavior: Close button hovers error color; others use element hover. GTK style uses circular compact target; Windows style uses full-height rectangular strip. Registers `window_control_area` and click handler calling `activate`.
 
+### `src/onboarding.rs`
+
+First-run setup view; see the crate doc for its contract.
+
+#### Types / constants
+
+- **enum `OnboardingStep`** (pub(crate)): `Welcome`, `Theme`, `Account`, `Done`; `ALL` in order.
+- **enum `FinishAction`** (private): `Close`, `ApplyDefaultApp`.
+- **struct `OnboardingView`** (pub(crate)): current step, embedded form, whether an account exists, default-app state.
+
+#### Functions / methods
+
+- **`OnboardingStep::index()` / `next()` / `previous()`**: position and neighbors; `None` past either end.
+- **`needs_onboarding(completed, account_count)`**: not finished and no account.
+- **`finish_action(wants_default, status, attempted)`**: `ApplyDefaultApp` only when asked, not already default and not yet attempted.
+- **`overshoot(t)`**: back-easing for the final check mark (passes 1.0, ends at 1.0).
+- **`logo()`**: the app icon as a cached image.
+- **`page_background(colors)`**: accent-tinted gradient fading into the page color.
+- **`OnboardingView::new(root, cx)`**: starts on Welcome; observes `root` for accounts without reading it (runs during its render).
+- **`on_accounts_changed(has_account, cx)`**: the first account moves the Account step to Done; other steps stay.
+- **`go_to(step, cx)`**: changes step; entering Done requests the default-app status once.
+- **`request_default_status(cx)`**: queries the system off the UI thread.
+- **`finish(cx)`**: follows `finish_action`; ignored while applying.
+- **`close(cx)`**: `RootView::finish_onboarding`.
+- **`apply_default_app(cx)`**: sets the default off the UI thread; closes unless the system returned a message, which stays on screen.
+- **`render_welcome` / `render_theme` / `render_theme_card` / `render_account` / `render_done` / `render_footer`**: each screen and the Back/dots/primary footer; a theme card applies its theme on click.
+- **`step_heading(title, body, title_size)`**: centered title and sentence.
+- **`feature_card(icon, title, body, cx)`**: one welcome highlight.
+- **`step_dots(current, cx)`**: progress indicator.
+- **`theme_preview(colors)`**: miniature main window in the given theme's colors.
+
+#### Additions in other modules
+
+- **`SettingsView::form_only(root)`**: the "Add account" form alone; `Render` then shows only the form, without its title.
+- **`default_app_message(outcome, language)`** is pub(crate): shared with `onboarding`.
+- **`Config::appearance()`**: the theme to start with, from `light_theme`.
+- **`RootView::set_appearance(appearance, cx)`**: applies the theme and schedules saving it.
+- **`RootView::onboarding_active()`**: whether the setup is on screen.
+- **`RootView::finish_onboarding(cx)`**: ends the setup, drops its view and saves at once.
+- **`RootView::render_onboarding(window, cx)`**: the setup under a draggable title bar with the window controls.
+- **`RootView::window_drag_bar(bar, cx)`**: makes an element act as the title bar (shared with the toolbar).
+- **`RootView::toggle_command_palette`**: does nothing during the setup.

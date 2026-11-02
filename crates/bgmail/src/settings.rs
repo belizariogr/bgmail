@@ -271,6 +271,8 @@ pub(crate) struct SettingsView {
     oauth: Option<OAuthFlow>,
     /// Last failure of a per-account action (re-sign-in), shown under its row.
     account_messages: HashMap<i64, FailureMessage>,
+    /// Shows only the "Add account" form, embedded in the first-run setup.
+    form_only: bool,
 }
 
 impl SettingsView {
@@ -290,7 +292,15 @@ impl SettingsView {
             names_edit: None,
             oauth: None,
             account_messages: HashMap::new(),
+            form_only: false,
         }
+    }
+
+    /// The "Add account" form alone, for the first-run setup to embed.
+    pub(crate) fn form_only(root: WeakEntity<RootView>) -> Self {
+        let mut view = Self::new(Vec::new(), root);
+        view.form_only = true;
+        view
     }
 
     /// Switches to `section` (e.g. "Add account" from the welcome screen,
@@ -1003,8 +1013,10 @@ impl SettingsView {
                                     } else {
                                         ButtonStyle::Subtle
                                     })
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        theme::set_theme(theme::Theme::light(), cx);
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let _ = this.root.update(cx, |root, cx| {
+                                            root.set_appearance(Appearance::Light, cx);
+                                        });
                                         cx.notify();
                                     })),
                             )
@@ -1015,8 +1027,10 @@ impl SettingsView {
                                     } else {
                                         ButtonStyle::Subtle
                                     })
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        theme::set_theme(theme::Theme::dark(), cx);
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let _ = this.root.update(cx, |root, cx| {
+                                            root.set_appearance(Appearance::Dark, cx);
+                                        });
                                         cx.notify();
                                     })),
                             ),
@@ -1384,7 +1398,11 @@ impl SettingsView {
             .border_1()
             .border_color(colors.border)
             .bg(colors.surface_background)
-            .child(Label::new(Key::AccountAddTitle.tr(language)).weight(FontWeight::SEMIBOLD))
+            .when(!self.form_only, |card| {
+                card.child(
+                    Label::new(Key::AccountAddTitle.tr(language)).weight(FontWeight::SEMIBOLD),
+                )
+            })
             .child(labeled_field(
                 Key::AccountFieldName.tr(language),
                 &form.name,
@@ -1679,6 +1697,12 @@ impl Render for SettingsView {
                 self.root_observation = Some(cx.observe(&root, |_, _, cx| cx.notify()));
             }
         }
+        if self.form_only {
+            if self.form.is_none() {
+                self.form = Some(AccountForm::new(cx.language(), cx));
+            }
+            return self.render_form(false, window, cx).into_any_element();
+        }
         let colors = cx.theme().colors();
 
         h_flex()
@@ -1698,6 +1722,7 @@ impl Render for SettingsView {
                     .overflow_y_scroll()
                     .child(self.render_content(window, cx)),
             )
+            .into_any_element()
     }
 }
 
@@ -1715,7 +1740,7 @@ fn settings_row(
 }
 
 /// What to tell the user after asking to become the default mail app.
-fn default_app_message(
+pub(crate) fn default_app_message(
     outcome: &Result<default_mail_app::Outcome, default_mail_app::Error>,
     language: Language,
 ) -> Option<SharedString> {
