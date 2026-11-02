@@ -112,17 +112,14 @@ fn card_label(address: &Address) -> String {
         .unwrap_or_else(|| address.email.clone())
 }
 
-/// An address as a card, with all of it on hover. Also shown when reading mail,
-/// where it does nothing else: its look as a card and pointer are the editable
-/// fields'.
-pub fn address_card(id: impl Into<ElementId>, address: &Address) -> Stateful<Div> {
+/// An address as a card, with all of it on hover.
+fn address_card(id: impl Into<ElementId>, address: &Address) -> Stateful<Div> {
     h_flex()
         .id(id)
         .flex_shrink_0()
         .h(px(22.0))
         .pl_2()
         .gap_1()
-        .cursor_default()
         .tooltip(Tooltip::text(address.display()))
         .child(
             Label::new(card_label(address))

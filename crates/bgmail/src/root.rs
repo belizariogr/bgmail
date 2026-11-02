@@ -46,7 +46,6 @@ use crate::mail_html::{
     DocumentColors, PrintHeader,
 };
 use crate::mail_service::{self, MailService, OverallStatus, StartError};
-use crate::recipients::address_card;
 use crate::settings::SettingsView;
 use crate::shortcuts;
 use html_view::{
@@ -292,6 +291,34 @@ fn star_color(starred: bool) -> Color {
     } else {
         Color::Default
     }
+}
+
+/// How someone is named in a message's recipients line: `me` for the account's own
+/// address, the first name, or the address when there is no name.
+fn short_recipient(address: &Address, own_email: &str, me: &'static str) -> String {
+    if mail_core::same_email(&address.email, own_email) {
+        return me.to_string();
+    }
+    address
+        .name
+        .as_deref()
+        .and_then(|name| name.split_whitespace().next())
+        .unwrap_or(&address.email)
+        .to_string()
+}
+
+/// Recipients in order, each address once (someone can be in both To and Cc).
+fn unique_recipients<'a>(list: impl Iterator<Item = &'a Address>) -> Vec<&'a Address> {
+    let mut seen: Vec<&Address> = Vec::new();
+    for address in list {
+        if !seen
+            .iter()
+            .any(|other| mail_core::same_email(&other.email, &address.email))
+        {
+            seen.push(address);
+        }
+    }
+    seen
 }
 
 /// Whether a folder's row counts unread mail: what is in the Trash is done with.
@@ -639,6 +666,8 @@ pub struct RootView {
     /// Fixed end of a Shift selection and the end that moves.
     selection_anchor: Option<i64>,
     selection_focus: Option<i64>,
+    /// Message whose recipients show in full.
+    expanded_recipients: Option<i64>,
     /// Row under the mouse, whose text makes room for its action buttons.
     hovered_row: Option<i64>,
     /// Focus of the message list (key context `MessageList`: arrows/j/k move
@@ -1088,6 +1117,7 @@ impl RootView {
             multi_preview: None,
             selection_anchor: None,
             selection_focus: None,
+            expanded_recipients: None,
             hovered_row: None,
             list_focus: None,
             attachments,
@@ -5199,51 +5229,115 @@ impl RootView {
     }
 
     /// "To" / "Cc" lines under the sender (stored display-formatted).
+    /// Who a message went to, as in Gmail: first names on one line, with everything
+    /// on hover and all the details behind a chevron.
     fn render_recipients(
         &self,
         message: &MessageDetail,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         let language = cx.language();
-        let lines: Vec<(&'static str, Key, &str)> = [
-            ("reader-to", Key::ReaderTo, message.to_addrs.as_str()),
-            ("reader-cc", Key::ReaderCc, message.cc_addrs.as_str()),
-        ]
-        .into_iter()
-        .filter(|(_, _, value)| !value.trim().is_empty())
-        .collect();
-        if lines.is_empty() {
+        let to = mail_core::parse_address_list(&message.to_addrs).unwrap_or_default();
+        let cc = mail_core::parse_address_list(&message.cc_addrs).unwrap_or_default();
+        let own_email = self
+            .accounts
+            .iter()
+            .find(|account| account.id == message.account_id)
+            .map_or("", |account| account.email.as_str());
+        let me = Key::ReaderMe.tr(language);
+        let everyone = unique_recipients(to.iter().chain(&cc));
+        let count = everyone.len();
+        let names = everyone.into_iter().enumerate().map(|(ix, address)| {
+            let separator = if ix + 1 < count { "," } else { "" };
+            let label = format!("{}{separator}", short_recipient(address, own_email, me));
+            div()
+                .id(("reader-recipient", ix))
+                .cursor_default()
+                .tooltip(Tooltip::text(address.display()))
+                .child(
+                    Label::new(label)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .single_line(),
+                )
+        });
+        let id = message.id;
+        let expanded = self.expanded_recipients == Some(id);
+        // A header that doesn't parse is still shown as it came.
+        let raw = (count == 0)
+            .then(|| {
+                [message.to_addrs.as_str(), message.cc_addrs.as_str()]
+                    .into_iter()
+                    .filter(|value| !value.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|raw| !raw.is_empty());
+        if count == 0 && raw.is_none() {
             return None;
         }
+        let detail = |key: Key, list: &[Address]| {
+            (!list.is_empty()).then(|| {
+                Label::new(format!(
+                    "{}: {}",
+                    key.tr(language),
+                    mail_core::format_address_list(list)
+                ))
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+            })
+        };
         Some(
             v_flex()
                 .pl(px(40.0))
                 .gap_1()
-                .children(lines.into_iter().map(|(field, key, value)| {
-                    let cards: Vec<_> = mail_core::parse_address_list(value)
-                        .unwrap_or_default()
-                        .iter()
-                        .enumerate()
-                        .map(|(ix, address)| address_card((field, ix), address).pr_2())
-                        .collect();
-                    // A header that doesn't parse is still shown as it came.
-                    let raw = cards.is_empty().then(|| {
-                        Label::new(value.to_string())
-                            .size(LabelSize::Small)
-                            .single_line()
-                    });
+                .child(
                     h_flex()
-                        .gap_1()
                         .min_w_0()
                         .flex_wrap()
+                        .gap_1()
                         .child(
-                            Label::new(format!("{}:", key.tr(language)))
+                            Label::new(Key::ReaderSentTo.tr(language))
                                 .size(LabelSize::Small)
                                 .color(Color::Muted),
                         )
-                        .children(cards)
-                        .children(raw)
-                })),
+                        .children(names.collect::<Vec<_>>())
+                        .children(raw.map(|raw| {
+                            Label::new(raw)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .single_line()
+                        }))
+                        .when(count > 0, |el| {
+                            el.child(
+                                h_flex()
+                                    .id("reader-recipients-toggle")
+                                    .cursor_pointer()
+                                    .tooltip(Tooltip::text(Key::ReaderShowDetails.tr(language)))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.expanded_recipients =
+                                            (this.expanded_recipients != Some(id)).then_some(id);
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        Icon::new(if expanded {
+                                            IconName::ChevronUp
+                                        } else {
+                                            IconName::ChevronDown
+                                        })
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Muted),
+                                    ),
+                            )
+                        }),
+                )
+                .when(expanded, |el| {
+                    el.children(detail(Key::ReaderTo, &to))
+                        .children(detail(Key::ReaderCc, &cc))
+                }),
         )
     }
 
@@ -6840,14 +6934,28 @@ mod tests {
     }
 
     #[test]
-    fn reader_recipients_keep_quoted_names_apart_from_addresses() {
-        let list = mail_core::parse_address_list(
-            "Boa Gestão <contato@boagestao.com.br>, \"contact brascomcorp.com\" <contact@brascomcorp.com>",
-        )
-        .unwrap();
-        assert_eq!(list[0].name.as_deref(), Some("Boa Gestão"));
-        assert_eq!(list[1].name.as_deref(), Some("contact brascomcorp.com"));
-        assert_eq!(list[1].email, "contact@brascomcorp.com");
+    fn recipients_go_by_first_name_address_or_me() {
+        let named = Address::new(Some("Paulo Mello"), "paulo@x.test");
+        assert_eq!(short_recipient(&named, "me@x.test", "mim"), "Paulo");
+        let nameless = Address::new(None::<String>, "fabio@x.test");
+        assert_eq!(
+            short_recipient(&nameless, "me@x.test", "mim"),
+            "fabio@x.test"
+        );
+        let own = Address::new(Some("Belizário Ribeiro"), "ME@x.test");
+        assert_eq!(short_recipient(&own, "me@x.test", "mim"), "mim");
+    }
+
+    #[test]
+    fn recipients_in_both_to_and_cc_show_once() {
+        let to = [Address::new(Some("Ann"), "a@x.test")];
+        let cc = [
+            Address::new(None::<String>, "A@X.test"),
+            Address::new(Some("Bob"), "b@x.test"),
+        ];
+        let everyone = unique_recipients(to.iter().chain(&cc));
+        assert_eq!(everyone.len(), 2);
+        assert_eq!(everyone[0].name.as_deref(), Some("Ann"));
     }
 
     #[test]

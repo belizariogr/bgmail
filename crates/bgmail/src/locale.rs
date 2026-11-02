@@ -173,6 +173,9 @@ pub enum Key {
     ReaderPreparingBody,
     ComposeToggleQuote,
     ReaderTo,
+    ReaderSentTo,
+    ReaderMe,
+    ReaderShowDetails,
     ReaderCc,
     WelcomeTitle,
     WelcomeBody,
@@ -545,6 +548,12 @@ impl Key {
             (FormatIndentMore, P) => "Aumentar recuo",
             (ReaderLoadingBody, E) => "Downloading message…",
             (ReaderLoadingBody, P) => "Baixando mensagem…",
+            (ReaderSentTo, E) => "to",
+            (ReaderSentTo, P) => "para",
+            (ReaderMe, E) => "me",
+            (ReaderMe, P) => "mim",
+            (ReaderShowDetails, E) => "Show details",
+            (ReaderShowDetails, P) => "Mostrar detalhes",
             (ReaderTo, E) => "To",
             (ReaderTo, P) => "Para",
             (ReaderCc, E) => "Cc",
@@ -899,7 +908,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 214] = [
+    const ALL_KEYS: [Key; 217] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -1017,6 +1026,9 @@ mod tests {
         Key::ReaderPreparingBody,
         Key::ComposeToggleQuote,
         Key::ReaderTo,
+        Key::ReaderSentTo,
+        Key::ReaderMe,
+        Key::ReaderShowDetails,
         Key::ReaderCc,
         Key::WelcomeTitle,
         Key::WelcomeBody,
