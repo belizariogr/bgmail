@@ -45,6 +45,7 @@ pub enum IconName {
     FormatListNumbered,
     FormatIndentMore,
     FormatIndentLess,
+    DragHand,
     Inbox,
     Sent,
     Drafts,
@@ -115,6 +116,7 @@ impl IconName {
             IconName::FormatListNumbered => crate::FORMAT_LIST_NUMBERED,
             IconName::FormatIndentMore => crate::FORMAT_INDENT_MORE,
             IconName::FormatIndentLess => crate::FORMAT_INDENT_LESS,
+            IconName::DragHand => crate::DRAG_HAND,
             IconName::Inbox => crate::INBOX,
             IconName::Sent => crate::SEND,
             IconName::Drafts => crate::FILE_PEN,
@@ -224,7 +226,8 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 51] = [
+    const ALL: [IconName; 52] = [
+        IconName::DragHand,
         IconName::FormatUndo,
         IconName::FormatRedo,
         IconName::FormatAlignLeft,

@@ -13,10 +13,10 @@ use std::f32::consts::FRAC_PI_2;
 
 use gpui::{
     anchored, canvas, deferred, ease_in_out, point, radians, size, svg, uniform_list, Animation,
-    AnimationExt as _, App, AppContext as _, Bounds, ClipboardItem, Context, Corner, DragMoveEvent,
-    Empty, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, PathBuilder, Point, ScrollHandle, ScrollStrategy, Size,
-    Subscription, Svg, TitlebarOptions, Transformation, UniformListScrollHandle, Window,
+    AnimationExt as _, App, AppContext as _, Bounds, ClipboardItem, Context, Corner, CursorStyle,
+    DragMoveEvent, Empty, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder, Point, ScrollHandle, ScrollStrategy,
+    Size, Subscription, Svg, TitlebarOptions, Transformation, UniformListScrollHandle, Window,
     WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
 };
 
@@ -388,12 +388,32 @@ impl DraggedMessages {
     }
 }
 
+/// Whether a drag draws its own closed hand: Windows has no such cursor (GPUI gives
+/// it the arrow), so the system's is hidden and the hand painted in its place, as
+/// browsers do.
+const DRAG_DRAWS_HAND: bool = cfg!(target_os = "windows");
+/// Size of the painted closed hand and of its outline, in pixels.
+const DRAG_HAND_SIZE: f32 = 18.0;
+const DRAG_HAND_OUTLINE_SIZE: f32 = 22.0;
+
+/// The system cursor during a drag that counts.
+fn drag_cursor(draws_hand: bool) -> CursorStyle {
+    if draws_hand {
+        CursorStyle::None
+    } else {
+        CursorStyle::ClosedHand
+    }
+}
+
 /// The row that follows the pointer: nothing until the drag counts.
 struct DragPreview {
     progress: Rc<DragProgress>,
+    /// Where the pointer holds the row, from its top left corner.
+    grab: Point<Pixels>,
     width: Pixels,
     title: SharedString,
     subtitle: SharedString,
+    draws_hand: bool,
 }
 
 impl Render for DragPreview {
@@ -401,27 +421,50 @@ impl Render for DragPreview {
         if !self.progress.counts_at(window.mouse_position()) {
             return div().into_any_element();
         }
+        let cursor = drag_cursor(self.draws_hand);
+        if cx.active_drag_cursor_style() != Some(cursor) {
+            cx.set_active_drag_cursor_style(cursor, window);
+        }
         let colors = cx.theme().colors();
-        v_flex()
+        let hand = |size: f32, color: Hsla| {
+            svg()
+                .absolute()
+                .left(self.grab.x - px(size / 2.0))
+                .top(self.grab.y - px(size / 2.0))
+                .size(px(size))
+                .path(IconName::DragHand.path())
+                .text_color(color)
+        };
+        div()
+            .relative()
             .w(self.width)
-            .px_3()
-            .py_2()
-            .gap_0p5()
-            .rounded_md()
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.elevated_surface_background)
-            .opacity(MESSAGE_DRAG_OPACITY)
             .child(
-                Label::new(self.title.clone())
-                    .weight(FontWeight::SEMIBOLD)
-                    .single_line(),
+                v_flex()
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .gap_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(colors.border)
+                    .bg(colors.elevated_surface_background)
+                    .opacity(MESSAGE_DRAG_OPACITY)
+                    .child(
+                        Label::new(self.title.clone())
+                            .weight(FontWeight::SEMIBOLD)
+                            .single_line(),
+                    )
+                    .child(
+                        Label::new(self.subtitle.clone())
+                            .size(LabelSize::Small)
+                            .single_line(),
+                    ),
             )
-            .child(
-                Label::new(self.subtitle.clone())
-                    .size(LabelSize::Small)
-                    .single_line(),
-            )
+            // As a system cursor: light with a dark outline, visible on anything.
+            .when(self.draws_hand, |el| {
+                el.child(hand(DRAG_HAND_OUTLINE_SIZE, gpui::black()))
+                    .child(hand(DRAG_HAND_SIZE, gpui::white()))
+            })
             .into_any_element()
     }
 }
@@ -5114,7 +5157,7 @@ impl RootView {
                 let title: SharedString = message.sender.clone().into();
                 let subject: SharedString = message.subject.clone().into();
                 let language = cx.language();
-                move |dragged: &DraggedMessages, _, window, cx| {
+                move |dragged: &DraggedMessages, grab, window, cx| {
                     dragged.progress.start(window.mouse_position());
                     let (title, subtitle) = if dragged.ids.len() > 1 {
                         (
@@ -5127,6 +5170,8 @@ impl RootView {
                     let progress = dragged.progress.clone();
                     cx.new(|_| DragPreview {
                         progress,
+                        grab,
+                        draws_hand: DRAG_DRAWS_HAND,
                         width,
                         title,
                         subtitle,
@@ -7178,6 +7223,12 @@ mod tests {
         let everyone = unique_recipients(to.iter().chain(&cc));
         assert_eq!(everyone.len(), 2);
         assert_eq!(everyone[0].name.as_deref(), Some("Ann"));
+    }
+
+    #[test]
+    fn the_drag_cursor_is_the_closed_hand_or_hidden_for_a_painted_one() {
+        assert_eq!(drag_cursor(false), CursorStyle::ClosedHand);
+        assert_eq!(drag_cursor(true), CursorStyle::None);
     }
 
     #[test]

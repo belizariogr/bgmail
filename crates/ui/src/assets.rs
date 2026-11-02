@@ -34,6 +34,7 @@ icon_assets! {
     (CHEVRON_RIGHT, "icons/chevron-right.svg"),
     (CHEVRON_DOWN, "icons/chevron-down.svg"),
     (CHEVRON_UP, "icons/chevron-up.svg"),
+    (DRAG_HAND, "icons/drag-hand.svg"),
     (FORMAT_UNDO, "icons/format-undo.svg"),
     (FORMAT_REDO, "icons/format-redo.svg"),
     (FORMAT_ALIGN_LEFT, "icons/format-align-left.svg"),

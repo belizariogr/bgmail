@@ -205,7 +205,8 @@ wiring to `storage`.
   account's address), the whole address on hover, To and Cc in full behind a chevron.
 - Dragging a list row (its whole selection when it is part of one) onto a folder of
   the same account moves it. It counts once past 100 px, for good: until then nothing
-  follows the pointer and folders refuse the drop. A selection across accounts can't be dropped,
+  follows the pointer and folders refuse the drop. While it counts the cursor is the closed hand; Windows has none, so
+  the system's is hidden and one painted in its place. A selection across accounts can't be dropped,
   nor can Sent, Drafts or Starred take mail.
 - Message rows: Ctrl/Cmd+click toggles, Shift+click and Shift+arrows take a
   range, Ctrl/Cmd+A selects all (list focus only). Two or more selected rows
