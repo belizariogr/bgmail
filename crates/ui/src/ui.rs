@@ -38,7 +38,7 @@ pub use switch::*;
 pub use text_area::rich::{
     Align, CharStyle, FontFamily, Format, ListKind, ParaStyle, TextSize, MAX_INDENT,
 };
-pub use text_area::{TextArea, TextAreaEvent};
+pub use text_area::{font_for_family, TextArea, TextAreaEvent};
 pub use text_input::*;
 pub use text_size::*;
 pub use tooltip::*;

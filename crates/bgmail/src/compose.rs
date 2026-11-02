@@ -25,9 +25,9 @@ use crate::data::MessageBody;
 use crate::mail_html::{email_document, DocumentColors};
 use ui::prelude::*;
 use ui::{
-    Align, Button, ButtonStyle, Color, ContextMenu, FontFamily, Icon, IconButton, IconName,
-    IconSize, Label, LabelSize, ListKind, TextArea, TextAreaEvent, TextInput, TextInputEvent,
-    TextSize, Tooltip, MAX_INDENT,
+    font_for_family, Align, Button, ButtonStyle, Color, ContextMenu, FontFamily, Icon, IconButton,
+    IconName, IconSize, Label, LabelSize, ListKind, TextArea, TextAreaEvent, TextInput,
+    TextInputEvent, TextSize, Tooltip, MAX_INDENT,
 };
 
 use crate::actions::{ComposeAttach, ComposeClose, ComposeDiscard, ComposeSend};
@@ -115,6 +115,23 @@ pub struct ComposeInit {
     pub replaces_outgoing: Option<i64>,
     /// What a reply quotes, to send it with its formatting.
     pub quoted_original: Option<QuotedOriginal>,
+}
+
+/// Name of a font in the menu; the fonts' own names aren't translated.
+fn family_label(family: FontFamily, language: Language) -> &'static str {
+    match family {
+        FontFamily::Sans => Key::FormatSansSerif.tr(language),
+        FontFamily::Serif => Key::FormatSerif.tr(language),
+        FontFamily::Mono => Key::FormatFixedWidth.tr(language),
+        FontFamily::Wide => Key::FormatWide.tr(language),
+        FontFamily::Narrow => Key::FormatNarrow.tr(language),
+        FontFamily::ComicSans => "Comic Sans MS",
+        FontFamily::Garamond => "Garamond",
+        FontFamily::Georgia => "Georgia",
+        FontFamily::Tahoma => "Tahoma",
+        FontFamily::Trebuchet => "Trebuchet MS",
+        FontFamily::Verdana => "Verdana",
+    }
 }
 
 /// A dropdown of the formatting toolbar.
@@ -735,7 +752,12 @@ impl ComposeView {
     }
 
     /// The formatting tools, on the send button's row, as in Gmail.
-    fn render_format_bar(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_format_bar(
+        &self,
+        language: Language,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let colors = cx.theme().colors();
         let border = colors.border;
         let area = self.body.read(cx);
@@ -796,7 +818,7 @@ impl ComposeView {
                 TextArea::redo_step,
             ))
             .child(separator())
-            .child(self.render_font_picker(chars.family, language, cx))
+            .child(self.render_font_picker(chars.family, language, window, cx))
             .child(separator())
             .child(self.render_size_picker(para.size, language, cx))
             .child(separator())
@@ -934,6 +956,7 @@ impl ComposeView {
         let hover = cx.theme().colors().element_hover;
         h_flex()
             .id(id)
+            .relative()
             .h(px(28.0))
             .px_1p5()
             .gap_1()
@@ -952,16 +975,12 @@ impl ComposeView {
             .children(dropdown.filter(|_| self.format_menu == Some(menu)))
     }
 
-    /// Opens upward: the toolbar is at the bottom of the window.
+    /// Right above its button, which is its positioning parent: the toolbar is at
+    /// the bottom of the window.
     fn format_dropdown(content: impl IntoElement) -> AnyElement {
-        deferred(
-            anchored()
-                .anchor(Corner::BottomLeft)
-                .snap_to_window_with_margin(px(8.0))
-                .child(div().mb_1().child(content)),
-        )
-        .with_priority(1)
-        .into_any_element()
+        deferred(div().absolute().left_0().bottom(px(30.0)).child(content))
+            .with_priority(1)
+            .into_any_element()
     }
 
     /// A menu whose entries run `apply` on the body with their value, the
@@ -996,25 +1015,36 @@ impl ComposeView {
         &self,
         current: FontFamily,
         language: Language,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        const OPTIONS: [(FontFamily, Key); 3] = [
-            (FontFamily::Sans, Key::FormatSansSerif),
-            (FontFamily::Serif, Key::FormatSerif),
-            (FontFamily::Mono, Key::FormatFixedWidth),
-        ];
-        let dropdown =
-            self.format_menu_of(&OPTIONS, current, language, cx, TextArea::set_font_family);
-        let label = OPTIONS
-            .iter()
-            .find(|(family, _)| *family == current)
-            .map_or(Key::FormatSansSerif, |(_, key)| *key);
+        let dropdown = (self.format_menu == Some(FormatMenu::Font)).then(|| {
+            let inherited = window.text_style().font().family;
+            let view = cx.weak_entity();
+            let mut menu = ContextMenu::new();
+            for family in FontFamily::ALL {
+                let view = view.clone();
+                let handler = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = view.update(cx, |this, cx| {
+                        this.format_body(window, cx, |area, cx| area.set_font_family(family, cx));
+                    });
+                };
+                let label = family_label(family, language);
+                menu = if family == current {
+                    menu.entry_with_key_hint(label, "✓", handler)
+                } else {
+                    menu.entry(label, handler)
+                }
+                .in_font(font_for_family(family, &inherited, window));
+            }
+            Self::format_dropdown(menu)
+        });
         self.render_menu_button(
             "format-font",
             FormatMenu::Font,
             Key::FormatFont,
-            Label::new(label.tr(language)).size(LabelSize::Small),
-            Some(dropdown),
+            Label::new(family_label(current, language)).size(LabelSize::Small),
+            dropdown,
             language,
             cx,
         )
@@ -1145,7 +1175,12 @@ impl ComposeView {
         )
     }
 
-    fn render_toolbar(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(
+        &self,
+        language: Language,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let can_send = self.can_send_now();
         h_flex()
             .items_center()
@@ -1167,7 +1202,7 @@ impl ComposeView {
                     ),
             )
             .child(div().w(px(1.0)).h(px(18.0)).bg(cx.theme().colors().border))
-            .child(self.render_format_bar(language, cx))
+            .child(self.render_format_bar(language, window, cx))
             .when(self.pending_attachment_loads > 0, |el| {
                 el.child(
                     Label::new(Key::ComposeAttachLoading.tr(language))
@@ -1680,7 +1715,7 @@ impl Render for ComposeView {
             })
             .child(self.render_body(cx))
             .children(self.render_error_banner(cx))
-            .child(self.render_toolbar(language, cx))
+            .child(self.render_toolbar(language, window, cx))
             // Outside clicks close the From picker (the picker itself is
             // deferred, so it paints above this catcher).
             .when(self.from_menu_open || self.format_menu.is_some(), |el| {
@@ -2132,6 +2167,15 @@ mod tests {
         assert!(on_white.icon.l < 0.5, "{:?}", on_white.icon);
         let on_dark = quote_toggle_colors(false, dark.colors());
         assert_eq!(on_dark.background, dark.colors().element_active);
+    }
+
+    #[test]
+    fn every_font_has_a_distinct_label() {
+        let labels: std::collections::HashSet<_> = FontFamily::ALL
+            .into_iter()
+            .map(|family| family_label(family, Language::Portuguese))
+            .collect();
+        assert_eq!(labels.len(), FontFamily::ALL.len());
     }
 
     #[test]

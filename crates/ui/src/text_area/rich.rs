@@ -7,13 +7,96 @@
 
 use std::ops::Range;
 
-/// Font of a piece of text.
+/// Font of a piece of text: the set Gmail offers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum FontFamily {
     #[default]
     Sans,
     Serif,
     Mono,
+    Wide,
+    Narrow,
+    ComicSans,
+    Garamond,
+    Georgia,
+    Tahoma,
+    Trebuchet,
+    Verdana,
+}
+
+impl FontFamily {
+    /// Every family, in menu order.
+    pub const ALL: [FontFamily; 11] = [
+        FontFamily::Sans,
+        FontFamily::Serif,
+        FontFamily::Mono,
+        FontFamily::Wide,
+        FontFamily::Narrow,
+        FontFamily::ComicSans,
+        FontFamily::Garamond,
+        FontFamily::Georgia,
+        FontFamily::Tahoma,
+        FontFamily::Trebuchet,
+        FontFamily::Verdana,
+    ];
+
+    /// Installed fonts that show it in the editor, by preference: the fonts
+    /// themselves come with Windows and macOS, the rest are their usual stand-ins.
+    pub(crate) fn candidates(self) -> &'static [&'static str] {
+        match self {
+            FontFamily::Sans => &[
+                "Helvetica",
+                "Arial",
+                "Liberation Sans",
+                "Noto Sans",
+                "DejaVu Sans",
+                "Ubuntu",
+            ],
+            FontFamily::Serif => &[
+                "Times New Roman",
+                "Liberation Serif",
+                "Noto Serif",
+                "DejaVu Serif",
+            ],
+            FontFamily::Mono => &[
+                "Courier New",
+                "Menlo",
+                "Consolas",
+                "Liberation Mono",
+                "Noto Sans Mono",
+                "DejaVu Sans Mono",
+            ],
+            FontFamily::Wide => &["Arial Black", "Noto Sans Black", "DejaVu Sans"],
+            FontFamily::Narrow => &[
+                "Arial Narrow",
+                "Liberation Sans Narrow",
+                "Nimbus Sans Narrow",
+            ],
+            FontFamily::ComicSans => &["Comic Sans MS", "Comic Neue", "Comic Relief"],
+            FontFamily::Garamond => &["Garamond", "EB Garamond", "Liberation Serif"],
+            FontFamily::Georgia => &["Georgia", "Gelasio", "Liberation Serif", "DejaVu Serif"],
+            FontFamily::Tahoma => &["Tahoma", "Noto Sans", "DejaVu Sans"],
+            FontFamily::Trebuchet => &["Trebuchet MS", "Fira Sans", "Noto Sans"],
+            FontFamily::Verdana => &["Verdana", "DejaVu Sans", "Noto Sans"],
+        }
+    }
+
+    /// CSS `font-family` in the sent mail; `None` leaves the reader's default.
+    fn css(self) -> Option<&'static str> {
+        match self {
+            FontFamily::Sans => None,
+            FontFamily::Serif => Some("'Times New Roman',serif"),
+            FontFamily::Mono => Some("'Courier New',monospace"),
+            FontFamily::Wide => Some("'Arial Black',sans-serif"),
+            FontFamily::Narrow => Some("'Arial Narrow',sans-serif"),
+            FontFamily::ComicSans => Some("'Comic Sans MS',sans-serif"),
+            FontFamily::Garamond => Some("Garamond,'Times New Roman',serif"),
+            FontFamily::Georgia => Some("Georgia,serif"),
+            FontFamily::Tahoma => Some("Tahoma,sans-serif"),
+            FontFamily::Trebuchet => Some("'Trebuchet MS',sans-serif"),
+            FontFamily::Verdana => Some("Verdana,sans-serif"),
+        }
+    }
 }
 
 /// Size of a paragraph.
@@ -384,10 +467,8 @@ fn para_style_attribute(para: &ParaStyle) -> String {
 
 fn push_styled(out: &mut String, text: &str, style: &CharStyle) {
     let mut css = String::new();
-    match style.family {
-        FontFamily::Sans => {}
-        FontFamily::Serif => css.push_str("font-family:Georgia,'Times New Roman',serif;"),
-        FontFamily::Mono => css.push_str("font-family:'Courier New',monospace;"),
+    if let Some(family) = style.family.css() {
+        css.push_str(&format!("font-family:{family};"));
     }
     if let Some(color) = style.color {
         css.push_str(&format!("color:#{color:06x};"));
@@ -585,6 +666,19 @@ mod tests {
              <div><br></div>\
              <ul style=\"margin:0 0 0 0px;padding-left:24px\"><li>item</li></ul></div>"
         );
+    }
+
+    #[test]
+    fn every_family_but_the_default_is_named_in_the_mail() {
+        for family in FontFamily::ALL {
+            assert!(!family.candidates().is_empty(), "{family:?}");
+            assert_eq!(family.css().is_none(), family == FontFamily::Sans);
+        }
+        let mut rich = RichText::new("x");
+        rich.update_chars(0..1, |style| style.family = FontFamily::ComicSans);
+        assert!(rich
+            .to_html("x")
+            .contains("font-family:'Comic Sans MS',sans-serif;"));
     }
 
     #[test]

@@ -63,8 +63,10 @@ an e-mail client, without Zed-scale bloat.
   size) over the buffer's text, followed by diffing each edit; undo keeps a
   `RichText` per buffer step. Size is per paragraph because GPUI shapes a line at
   one font size, so lines are shaped one by one, each with its own height and left
-  edge. A family counts only if its bold resolves to a different face: GPUI
-  fallbacks have no weights, even for families it lists as installed. Export:
+  edge. The default family needs a bold that is a different face, the others not to
+  be GPUI's fallback, which has no weights, even for families it lists as
+  installed. `FontFamily` is Gmail's set; the editor shows the closest installed
+  font and the sent mail names the font itself with a CSS fallback. Export:
   `formatted_html` (`None` when plain) and `plain_export`.
 - `TextArea` keeps GPUI-free editing logic (text/selection/undo in
   `text_area/buffer.rs`, soft-wrap row math in `text_area/rows.rs`) separate

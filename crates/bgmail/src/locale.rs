@@ -143,6 +143,8 @@ pub enum Key {
     FormatSansSerif,
     FormatSerif,
     FormatFixedWidth,
+    FormatWide,
+    FormatNarrow,
     FormatSize,
     FormatSmall,
     FormatNormal,
@@ -498,6 +500,10 @@ impl Key {
             (FormatSansSerif, P) => "Sans Serif",
             (FormatSerif, E) => "Serif",
             (FormatSerif, P) => "Serif",
+            (FormatWide, E) => "Wide",
+            (FormatWide, P) => "Larga",
+            (FormatNarrow, E) => "Narrow",
+            (FormatNarrow, P) => "Estreita",
             (FormatFixedWidth, E) => "Fixed width",
             (FormatFixedWidth, P) => "Largura fixa",
             (FormatSize, E) => "Text size",
@@ -884,7 +890,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 209] = [
+    const ALL_KEYS: [Key; 211] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -972,6 +978,8 @@ mod tests {
         Key::FormatSansSerif,
         Key::FormatSerif,
         Key::FormatFixedWidth,
+        Key::FormatWide,
+        Key::FormatNarrow,
         Key::FormatSize,
         Key::FormatSmall,
         Key::FormatNormal,

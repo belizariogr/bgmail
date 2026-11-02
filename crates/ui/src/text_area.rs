@@ -28,6 +28,7 @@ pub mod rich;
 mod rows;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -106,30 +107,6 @@ const LIST_GUTTER: f32 = 24.0;
 const MIN_WRAP_WIDTH: f32 = 40.0;
 /// Steps of formatting history kept, as the text's.
 const MAX_RICH_UNDO: usize = 1000;
-/// Installed fonts tried for the serif and fixed-width families, by preference.
-const SANS_FONTS: [&str; 6] = [
-    "Helvetica",
-    "Arial",
-    "Liberation Sans",
-    "Noto Sans",
-    "DejaVu Sans",
-    "Ubuntu",
-];
-const SERIF_FONTS: [&str; 5] = [
-    "Georgia",
-    "Times New Roman",
-    "Liberation Serif",
-    "Noto Serif",
-    "DejaVu Serif",
-];
-const MONO_FONTS: [&str; 6] = [
-    "Courier New",
-    "Menlo",
-    "Consolas",
-    "Liberation Mono",
-    "Noto Sans Mono",
-    "DejaVu Sans Mono",
-];
 
 /// Registers the key bindings consumed by [`TextArea`] (key context
 /// `"TextArea"`). Called by [`crate::bind_keys`]; Tab moves focus between fields
@@ -336,56 +313,69 @@ fn line_runs(
     runs
 }
 
-/// Families used for text, by [`FontFamily`].
+/// Fonts used for text, by [`FontFamily`].
 #[derive(Clone, Debug)]
-struct Families {
-    sans: SharedString,
-    serif: SharedString,
-    mono: SharedString,
-}
+pub(crate) struct Families(HashMap<FontFamily, SharedString>);
 
 impl Families {
-    /// An inherited or listed family can resolve to a fallback font without
-    /// weights and styles, even while being listed as installed, which would lose
-    /// bold and italic. A family counts only if its bold is a different face.
+    /// A family can resolve to a fallback font without weights and styles, even
+    /// while being listed as installed, which would lose bold and italic. So the
+    /// default family needs a bold that is a different face, and the others just
+    /// not to be that fallback, as some only come in one weight (Arial Black).
     fn resolve(inherited: &SharedString, window: &Window) -> Self {
-        let has_bold = |family: &SharedString| {
-            let regular = gpui::Font {
-                family: family.clone(),
-                ..gpui::font(family.clone())
-            };
-            let bold = gpui::Font {
-                weight: gpui::FontWeight::BOLD,
-                ..regular.clone()
-            };
-            let system = window.text_system();
-            system.resolve_font(&regular) != system.resolve_font(&bold)
+        let system = window.text_system();
+        let face = |family: &SharedString, weight: gpui::FontWeight| {
+            let mut font = gpui::font(family.clone());
+            font.weight = weight;
+            system.resolve_font(&font)
         };
-        let pick = |wanted: &[&'static str]| {
-            wanted
+        let has_bold = |family: &SharedString| {
+            face(family, gpui::FontWeight::NORMAL) != face(family, gpui::FontWeight::BOLD)
+        };
+        let fallback = face(
+            &SharedString::from("BGMail No Such Font"),
+            gpui::FontWeight::NORMAL,
+        );
+        let exists = |family: &SharedString| {
+            has_bold(family) || face(family, gpui::FontWeight::NORMAL) != fallback
+        };
+        let pick = |family: FontFamily| {
+            family
+                .candidates()
                 .iter()
-                .map(|family| SharedString::from(*family))
-                .find(|family| has_bold(family))
+                .map(|name| SharedString::from(*name))
+                .find(|name| exists(name))
         };
         let sans = if has_bold(inherited) {
             inherited.clone()
         } else {
-            pick(&SANS_FONTS).unwrap_or_else(|| inherited.clone())
+            FontFamily::Sans
+                .candidates()
+                .iter()
+                .map(|name| SharedString::from(*name))
+                .find(|name| has_bold(name))
+                .unwrap_or_else(|| inherited.clone())
         };
-        Self {
-            serif: pick(&SERIF_FONTS).unwrap_or_else(|| sans.clone()),
-            mono: pick(&MONO_FONTS).unwrap_or_else(|| sans.clone()),
-            sans,
-        }
+        let mut families: HashMap<_, _> = FontFamily::ALL
+            .into_iter()
+            .map(|family| (family, pick(family).unwrap_or_else(|| sans.clone())))
+            .collect();
+        families.insert(FontFamily::Sans, sans);
+        Self(families)
     }
 
     fn get(&self, family: FontFamily) -> SharedString {
-        match family {
-            FontFamily::Sans => self.sans.clone(),
-            FontFamily::Serif => self.serif.clone(),
-            FontFamily::Mono => self.mono.clone(),
-        }
+        self.0.get(&family).cloned().unwrap_or_default()
     }
+}
+
+/// The installed font that shows `family`, for previews outside the editor.
+pub fn font_for_family(
+    family: FontFamily,
+    inherited: &SharedString,
+    window: &Window,
+) -> SharedString {
+    Families::resolve(inherited, window).get(family)
 }
 
 fn styled_run(key: &LayoutKey, style: &CharStyle, families: &Families) -> TextRun {
