@@ -12,6 +12,8 @@
 
 pub mod autoconfig;
 pub mod connector;
+#[cfg(test)]
+mod dotenv;
 mod http;
 pub mod imap_remote;
 pub mod oauth;

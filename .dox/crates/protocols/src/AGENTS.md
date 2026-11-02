@@ -124,6 +124,13 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **struct `Request { method, target, body }`**.
 - **`serve`** — `fn serve(handler: impl Fn(&Request) -> (u16, String) + Send + 'static) -> (String, Arc<Mutex<Vec<Request>>>)`: one-thread HTTP/1.1 server on `127.0.0.1:0`; reads request line, headers, `Content-Length` body; answers `handler`'s status/body with `Connection: close`; returns base URL and request log.
 
+### `build.rs` + `src/dotenv.rs`
+
+- **`main`** (`build.rs`): for each Google key without a real environment variable, emits `cargo:rustc-env` from `../../.env`; watches the file only when present.
+- **`lookup`** (`dotenv.rs`, shared via `#[path]`, a test-only module in the lib) — `pub fn lookup(text: &str, key: &str) -> Option<String>`: `KEY=value`, `export`, quotes; comments and blanks skipped; last assignment wins.
+- **`unquote`** (private) — strips one pair of matching `"` or `'`.
+- Tests: `lookup_reads_plain_exported_and_quoted_values`, `lookup_skips_missing_and_blank_values`.
+
 ### `src/imap_remote.rs`
 
 - Windows: `tls::shutdown` doesn't wake a blocked local read; it returns when the peer closes in response, or at the read timeout. Cancelling is bounded there, not instant; `Engine::stop_account` still returns after `STOP_TIMEOUT`, detaching the worker.

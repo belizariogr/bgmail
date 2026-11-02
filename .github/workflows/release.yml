@@ -95,9 +95,14 @@ jobs:
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
 
-      # Built before any secret is in the environment; the packager's own
-      # before-packaging build is then a no-op.
+      # Built before any signing secret is in the environment; the packager's
+      # own before-packaging build is then a no-op, so it and the Linux bundle
+      # need the same Google values. The client is left out on pull requests:
+      # their artifacts don't need sign-in and shouldn't carry it.
       - name: Build release binary
+        env:
+          BGMAIL_GOOGLE_CLIENT_ID: ${{ github.event_name != 'pull_request' && secrets.BGMAIL_GOOGLE_CLIENT_ID || '' }}
+          BGMAIL_GOOGLE_CLIENT_SECRET: ${{ github.event_name != 'pull_request' && secrets.BGMAIL_GOOGLE_CLIENT_SECRET || '' }}
         run: cargo build --release -p bgmail --bin BGMail
 
       - name: Configure macOS signing identity
@@ -124,6 +129,8 @@ jobs:
 
       - name: Package
         env:
+          BGMAIL_GOOGLE_CLIENT_ID: ${{ github.event_name != 'pull_request' && secrets.BGMAIL_GOOGLE_CLIENT_ID || '' }}
+          BGMAIL_GOOGLE_CLIENT_SECRET: ${{ github.event_name != 'pull_request' && secrets.BGMAIL_GOOGLE_CLIENT_SECRET || '' }}
           # macOS: cargo-packager imports the certificate into a temporary
           # keychain, signs, then notarizes when the notarization vars exist
           # (Apple ID + app-specific password + team, or App Store Connect API key).
@@ -139,11 +146,22 @@ jobs:
           done
           args=(--release --formats "${{ matrix.formats }}")
           if [ -n "${{ matrix.target }}" ]; then args+=(--target "${{ matrix.target }}"); fi
-          cargo packager "${args[@]}"
+          # hdiutil fails now and then on macOS runners ("Resource busy").
+          attempts=1
+          if [ "$RUNNER_OS" = "macOS" ]; then attempts=3; fi
+          for attempt in $(seq 1 "$attempts"); do
+            cargo packager "${args[@]}" && exit 0
+            echo "Packaging failed (attempt $attempt of $attempts)"
+            if [ "$attempt" -lt "$attempts" ]; then sleep 30; fi
+          done
+          exit 1
 
       # The tarball script/install.sh downloads from the release.
       - name: Bundle the Linux tarball
         if: runner.os == 'Linux'
+        env:
+          BGMAIL_GOOGLE_CLIENT_ID: ${{ github.event_name != 'pull_request' && secrets.BGMAIL_GOOGLE_CLIENT_ID || '' }}
+          BGMAIL_GOOGLE_CLIENT_SECRET: ${{ github.event_name != 'pull_request' && secrets.BGMAIL_GOOGLE_CLIENT_SECRET || '' }}
         run: script/bundle-linux
 
       - uses: actions/upload-artifact@v4
