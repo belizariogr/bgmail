@@ -934,9 +934,14 @@ pub(crate) mod test_server {
     //! line (APPEND literal; `=*` matches any line) and replies using the
     //! previous tag.
 
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, ErrorKind, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    /// Longest wait for the client's next line; well under `tls::IO_TIMEOUT`,
+    /// so the server reports the stuck step first.
+    const CLIENT_WAIT: Duration = Duration::from_secs(30);
 
     pub type Step = (&'static str, &'static str);
 
@@ -966,6 +971,10 @@ pub(crate) mod test_server {
     }
 
     fn serve(stream: TcpStream, greeting: &str, steps: &[Step]) -> Result<(), String> {
+        // A client stuck in a test fails it instead of hanging the whole run.
+        stream
+            .set_read_timeout(Some(CLIENT_WAIT))
+            .map_err(|e| e.to_string())?;
         let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(stream);
         writer
@@ -974,7 +983,10 @@ pub(crate) mod test_server {
         let mut last_tag = String::new();
         for (expect, reply) in steps {
             let mut line = String::new();
-            if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|e| format!("{e} while waiting for {expect:?}"))?;
+            if read == 0 {
                 return Err(format!("client hung up, expected {expect:?}"));
             }
             let line = line.trim_end_matches("\r\n");
@@ -998,10 +1010,14 @@ pub(crate) mod test_server {
         }
         // Drain until the client hangs up so it never sees a reset.
         let mut rest = String::new();
-        while reader.read_line(&mut rest).unwrap_or(0) > 0 {
-            rest.clear();
+        loop {
+            match reader.read_line(&mut rest) {
+                Ok(0) => return Ok(()),
+                Ok(_) => rest.clear(),
+                Err(e) if e.kind() == ErrorKind::ConnectionReset => return Ok(()),
+                Err(e) => return Err(format!("{e} while waiting for the client to hang up")),
+            }
         }
-        Ok(())
     }
 }
 

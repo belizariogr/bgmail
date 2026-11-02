@@ -22,6 +22,7 @@ env:
 jobs:
   linux:
     name: Linux (fmt, clippy, test)
+    timeout-minutes: 90
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +43,7 @@ jobs:
 
   macos:
     name: macOS (build, test)
+    timeout-minutes: 90
     runs-on: macos-15
     env:
       # The repo's .cargo/config.toml selects Xcode 26's separate Metal
@@ -57,6 +59,7 @@ jobs:
 
   windows:
     name: Windows (build, test)
+    timeout-minutes: 90
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
