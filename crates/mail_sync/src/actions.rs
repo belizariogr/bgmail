@@ -11,7 +11,8 @@
 
 use mail_core::MessageFlags;
 use storage::{
-    is_manual_move_destination_forbidden, system, Account, Database, MessageDetail, PROVIDER_LOCAL,
+    is_manual_move_destination_forbidden, parse_folders_csv, system, Account, Database,
+    MessageDetail, PROVIDER_LOCAL,
 };
 
 use crate::plan::PendingAction;
@@ -97,7 +98,7 @@ fn unresolved_folder(
     Ok(primary_folders(message).into_iter().find_map(|path| {
         folders
             .iter()
-            .find(|folder| folder.path == path)
+            .find(|folder| folder.path == *path)
             .and_then(|folder| folder.remote_name.clone())
     }))
 }
@@ -228,11 +229,10 @@ pub fn set_starred(
 }
 
 /// Non-flagged folders the message is shown in.
-fn primary_folders(message: &MessageDetail) -> Vec<&str> {
-    message
-        .folders_csv
-        .split(',')
-        .filter(|path| !path.is_empty() && *path != system::FLAGGED)
+fn primary_folders(message: &MessageDetail) -> Vec<String> {
+    parse_folders_csv(&message.folders_csv)
+        .into_iter()
+        .filter(|path| path != system::FLAGGED)
         .collect()
 }
 

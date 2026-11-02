@@ -3,7 +3,7 @@
 use rusqlite::params;
 
 use crate::folder::{
-    folder_like_pattern, folders_csv, is_manual_move_destination_forbidden, system,
+    decode_csv_path, folder_csv_needle, folders_csv, is_manual_move_destination_forbidden, system,
 };
 use crate::membership::refresh_membership_in;
 use crate::Database;
@@ -12,7 +12,7 @@ use crate::Database;
 pub fn parse_folders_csv(csv: &str) -> Vec<String> {
     csv.split(',')
         .filter(|segment| !segment.is_empty())
-        .map(str::to_string)
+        .map(decode_csv_path)
         .collect()
 }
 
@@ -189,10 +189,10 @@ impl Database {
 
     /// Returns whether the message currently lives in Trash.
     pub fn message_is_in_trash(&self, id: i64) -> rusqlite::Result<bool> {
-        let pattern = folder_like_pattern(system::TRASH);
+        let needle = folder_csv_needle(system::TRASH);
         let count: i64 = self.conn().query_row(
-            "SELECT COUNT(*) FROM messages WHERE id = ?1 AND folders_csv LIKE ?2",
-            params![id, pattern],
+            "SELECT COUNT(*) FROM messages WHERE id = ?1 AND instr(folders_csv, ?2) > 0",
+            params![id, needle],
             |row| row.get(0),
         )?;
         Ok(count > 0)

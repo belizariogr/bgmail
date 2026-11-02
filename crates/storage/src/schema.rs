@@ -3,7 +3,7 @@
 //! The v1 DDL below is the base every database starts from; later versions are
 //! applied as in-place steps by `migration.rs` so existing user data survives.
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub const CREATE_ACCOUNTS: &str = "
 CREATE TABLE IF NOT EXISTS accounts (

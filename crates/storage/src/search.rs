@@ -10,13 +10,18 @@ pub fn fold_for_search(text: &str) -> String {
         .to_lowercase()
 }
 
-/// Builds a `LIKE` pattern for a folded query string.
+/// Builds a `LIKE` pattern for a folded query string, for use with `ESCAPE '\\'`:
+/// what the user typed is matched literally, even `%` and `_`.
 pub fn search_like_pattern(query: &str) -> Option<String> {
     let folded = fold_for_search(query.trim());
     if folded.is_empty() {
         None
     } else {
-        Some(format!("%{folded}%"))
+        let escaped = folded
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        Some(format!("%{escaped}%"))
     }
 }
 
@@ -44,5 +49,9 @@ mod tests {
     fn search_pattern_is_partial() {
         assert_eq!(search_like_pattern("  Git  "), Some("%git%".to_string()));
         assert!(search_like_pattern("   ").is_none());
+        assert_eq!(
+            search_like_pattern("a_%\\").as_deref(),
+            Some("%a\\_\\%\\\\%")
+        );
     }
 }

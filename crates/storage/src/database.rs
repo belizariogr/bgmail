@@ -8,8 +8,8 @@ use rusqlite::{
     params, params_from_iter, Connection, OptionalExtension, Transaction, TransactionBehavior,
 };
 
-use crate::folder::{folder_like_pattern, system};
-use crate::search::fold_for_search;
+use crate::folder::{folder_csv_needle, system};
+use crate::search::{fold_for_search, search_like_pattern};
 use crate::types::{MailListQuery, MessageDetail, MessageListItem};
 
 /// Default database path: `~/.config/BGMail/mail.db`.
@@ -106,22 +106,18 @@ impl Database {
     fn repair_starred_folder_membership(&self) -> rusqlite::Result<()> {
         use crate::folder::folders_csv;
 
-        let pattern = folder_like_pattern(system::FLAGGED);
+        let needle = folder_csv_needle(system::FLAGGED);
         let mut stmt = self.conn.prepare(
             "SELECT id, folders_csv FROM messages
-             WHERE starred = 1 AND folders_csv NOT LIKE ?1",
+             WHERE starred = 1 AND instr(folders_csv, ?1) = 0",
         )?;
-        let rows = stmt.query_map(params![pattern], |row| {
+        let rows = stmt.query_map(params![needle], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?;
         let updates: Vec<(String, i64)> = rows
             .filter_map(|row| row.ok())
             .map(|(id, csv)| {
-                let mut paths: Vec<String> = csv
-                    .split(',')
-                    .filter(|segment| !segment.is_empty())
-                    .map(str::to_string)
-                    .collect();
+                let mut paths = crate::message_ops::parse_folders_csv(&csv);
                 if !paths.iter().any(|path| path == system::FLAGGED) {
                     paths.push(system::FLAGGED.to_string());
                     paths.sort();
@@ -145,24 +141,24 @@ impl Database {
         account_id: Option<i64>,
         folder_path: &str,
     ) -> rusqlite::Result<usize> {
-        let pattern = folder_like_pattern(folder_path);
+        let needle = folder_csv_needle(folder_path);
         let hidden = hidden_from_folder(folder_path);
         let sql = if account_id.is_some() {
             format!(
                 "SELECT COUNT(*) FROM messages
-                 WHERE account_id = ?1 AND unread = 1 AND folders_csv LIKE ?2{hidden}"
+                 WHERE account_id = ?1 AND unread = 1 AND instr(folders_csv, ?2) > 0{hidden}"
             )
         } else {
             format!(
-                "SELECT COUNT(*) FROM messages WHERE unread = 1 AND folders_csv LIKE ?1{hidden}"
+                "SELECT COUNT(*) FROM messages WHERE unread = 1 AND instr(folders_csv, ?1) > 0{hidden}"
             )
         };
         let count: i64 = if let Some(account_id) = account_id {
             self.conn
-                .query_row(&sql, params![account_id, pattern], |row| row.get(0))?
+                .query_row(&sql, params![account_id, needle], |row| row.get(0))?
         } else {
             self.conn
-                .query_row(&sql, params![pattern], |row| row.get(0))?
+                .query_row(&sql, params![needle], |row| row.get(0))?
         };
         Ok(count as usize)
     }
@@ -268,21 +264,21 @@ fn query_filter(query: &MailListQuery) -> Option<(&'static str, Vec<Value>)> {
     match query {
         MailListQuery::Search(text) => search_filter(text),
         MailListQuery::GlobalSystemFolder(path) if path == system::FLAGGED => Some((
-            "folders_csv LIKE ?1 AND folders_csv NOT LIKE '%,sys:trash,%'",
-            vec![Value::Text(folder_like_pattern(path))],
+            "instr(folders_csv, ?1) > 0 AND folders_csv NOT LIKE '%,sys:trash,%'",
+            vec![Value::Text(folder_csv_needle(path))],
         )),
         MailListQuery::GlobalSystemFolder(path) => Some((
-            "folders_csv LIKE ?1",
-            vec![Value::Text(folder_like_pattern(path))],
+            "instr(folders_csv, ?1) > 0",
+            vec![Value::Text(folder_csv_needle(path))],
         )),
         MailListQuery::AccountFolder {
             account_id,
             folder_path,
         } => Some((
-            "account_id = ?1 AND folders_csv LIKE ?2",
+            "account_id = ?1 AND instr(folders_csv, ?2) > 0",
             vec![
                 Value::Integer(*account_id),
-                Value::Text(folder_like_pattern(folder_path)),
+                Value::Text(folder_csv_needle(folder_path)),
             ],
         )),
     }
@@ -305,8 +301,8 @@ fn search_filter(query: &str) -> Option<(&'static str, Vec<Value>)> {
         ))
     } else {
         Some((
-            "search_text LIKE ?1",
-            vec![Value::Text(format!("%{folded}%"))],
+            "search_text LIKE ?1 ESCAPE '\\'",
+            vec![Value::Text(search_like_pattern(&folded)?)],
         ))
     }
 }
@@ -458,7 +454,7 @@ mod tests {
         };
         let mut stmt = db
             .conn()
-            .prepare("SELECT id FROM messages WHERE search_text LIKE ?1 ORDER BY id")
+            .prepare("SELECT id FROM messages WHERE search_text LIKE ?1 ESCAPE '\\' ORDER BY id")
             .unwrap();
         stmt.query_map(params![pattern], |row| row.get(0))
             .unwrap()
@@ -518,6 +514,110 @@ mod tests {
         assert_eq!(search_ids(&db, "relatorio"), vec![ids[0]]);
         assert_eq!(search_ids(&db, "ão"), vec![ids[0], ids[2]]);
         assert!(search_ids(&db, "  ").is_empty());
+    }
+
+    /// One message in each of `paths`, of the fixture's remote account.
+    fn messages_in_folders(paths: &[&str]) -> (tempfile::NamedTempFile, Database, i64) {
+        let (file, db, fx) = crate::test_support::remote_db();
+        for (ix, path) in paths.iter().enumerate() {
+            let folder = db
+                .upsert_remote_folder(fx.account, path, "", path, None)
+                .unwrap();
+            let message = crate::types::NewRemoteMessage {
+                unread: true,
+                ..crate::test_support::remote_message(&format!("m{ix}"), None)
+            };
+            db.insert_remote_message(fx.account, folder, 1, &message)
+                .unwrap();
+        }
+        (file, db, fx.account)
+    }
+
+    fn folder_subjects(db: &Database, account_id: i64, folder_path: &str) -> Vec<String> {
+        let query = MailListQuery::AccountFolder {
+            account_id,
+            folder_path: folder_path.into(),
+        };
+        db.list_messages(&query)
+            .unwrap()
+            .into_iter()
+            .map(|message| message.subject)
+            .collect()
+    }
+
+    #[test]
+    fn a_folder_lists_only_its_own_messages_whatever_its_name() {
+        // Wildcards of `LIKE`, its case folding, and the separator of `folders_csv`.
+        let (_file, db, account) = messages_in_folders(&[
+            "user:My_Work",
+            "user:MyXWork",
+            "user:100%",
+            "user:1000",
+            "user:work",
+            "user:WORK",
+            "user:Clients",
+            "user:Clients, VIP",
+        ]);
+        for (ix, path) in [
+            "user:My_Work",
+            "user:MyXWork",
+            "user:100%",
+            "user:1000",
+            "user:work",
+            "user:WORK",
+            "user:Clients",
+            "user:Clients, VIP",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(folder_subjects(&db, account, path), [format!("m{ix}")]);
+            assert_eq!(db.unread_in_folder(Some(account), path).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn a_folder_named_after_the_trash_does_not_make_a_message_trash() {
+        let (_file, db, account) = messages_in_folders(&["user:x,sys:trash"]);
+        let query = MailListQuery::AccountFolder {
+            account_id: account,
+            folder_path: "user:x,sys:trash".into(),
+        };
+        let id = db.list_messages(&query).unwrap()[0].id;
+        assert!(!db.message_is_in_trash(id).unwrap());
+        let message = db.get_message(id).unwrap().unwrap();
+        assert_eq!(
+            crate::parse_folders_csv(&message.folders_csv),
+            ["user:x,sys:trash"]
+        );
+        assert!(crate::message_has_folder(
+            &message.folders_csv,
+            "user:x,sys:trash"
+        ));
+        assert!(!crate::message_has_folder(&message.folders_csv, "user:x"));
+    }
+
+    #[test]
+    fn a_short_search_takes_its_wildcards_literally() {
+        let (_file, db, fx) = crate::test_support::remote_db();
+        for (uid, subject) in [(1, "a_b"), (2, "axb"), (3, "100%")] {
+            db.insert_remote_message(
+                fx.account,
+                fx.inbox,
+                uid,
+                &crate::test_support::remote_message(subject, None),
+            )
+            .unwrap();
+        }
+        let subjects = |query: &str| -> Vec<String> {
+            db.list_messages(&MailListQuery::Search(query.into()))
+                .unwrap()
+                .into_iter()
+                .map(|message| message.subject)
+                .collect()
+        };
+        assert_eq!(subjects("a_"), ["a_b"]);
+        assert_eq!(subjects("%"), ["100%"]);
     }
 
     #[test]
