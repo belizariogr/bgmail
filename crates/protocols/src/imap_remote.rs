@@ -1073,6 +1073,9 @@ mod tests {
 
     fn finish(mut remote: ImapRemote, handle: thread::JoinHandle<Result<(), String>>) {
         remote.logout();
+        // Close before waiting: only closing reliably ends the server's read
+        // on Windows, where `shutdown` was seen not to reach it.
+        drop(remote);
         handle.join().unwrap().unwrap();
     }
 

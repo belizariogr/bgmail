@@ -126,6 +126,8 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ### `src/imap_remote.rs`
 
+- Windows: `tls::shutdown` doesn't wake a blocked local read; it returns when the peer closes in response, or at the read timeout. Cancelling is bounded there, not instant; `Engine::stop_account` still returns after `STOP_TIMEOUT`, detaching the worker.
+
 - **`Debug::fmt`** — hides the session.
 
 #### Types / constants

@@ -414,6 +414,9 @@
       the copy could lose mail another client flagged `\Deleted`
 - ✅ Linux install scripts as in Zed (`script/`): tarball into `~/.local`
       (from a release or this checkout), or system-wide into `/usr`
+- ⬜ Known limitation (Windows): cancelling a network read waits for the peer
+      to close or for the read timeout, since `shutdown` doesn't wake it. Stopping
+      an account still returns at once and detaches the worker
 - ⬜ Threads/conversations view (thread ids are stored; list is flat)
 
 ## Stage 5 — Polish

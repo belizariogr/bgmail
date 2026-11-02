@@ -196,7 +196,10 @@ fn network(message: String) -> RemoteError {
     RemoteError::new(RemoteErrorKind::Network, message)
 }
 
-/// Best-effort hard close; unblocks a thread stuck reading this socket.
+/// Best-effort hard close. Unblocks a thread stuck reading this socket on
+/// Linux and macOS. On Windows that read only returns once the peer reacts to
+/// our FIN by closing, or at [`IO_TIMEOUT`] (or IDLE's own timeout) if it never
+/// does, e.g. a dead network: cancelling is bounded there, not instant.
 pub fn shutdown(socket: &TcpStream) {
     let _ = socket.shutdown(Shutdown::Both);
 }
@@ -452,7 +455,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut client = connect_tcp("127.0.0.1", port).unwrap();
-        let _server = listener.accept().unwrap();
+        let server = listener.accept().unwrap();
         let clone = client.try_clone().unwrap();
         let reader = thread::spawn(move || {
             let mut buf = [0u8; 1];
@@ -460,6 +463,9 @@ mod tests {
         });
         thread::sleep(Duration::from_millis(50));
         shutdown(&clone);
+        // See `shutdown`: on Windows the read also needs the peer to close.
+        #[cfg(windows)]
+        drop(server);
         // Either EOF (Ok(0)) or an error; what matters is that it returns.
         let result = reader.join().unwrap();
         assert!(matches!(result, Ok(0) | Err(_)));
