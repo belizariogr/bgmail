@@ -382,6 +382,8 @@ impl DragProgress {
 /// pixels, so its progress is kept to tell when it counts.
 #[derive(Clone)]
 struct DraggedMessages {
+    /// The row it started on.
+    row_id: i64,
     ids: Vec<i64>,
     /// The account they belong to: `None` for a selection across accounts, which
     /// has no folder in common.
@@ -405,6 +407,13 @@ impl DraggedMessages {
         if self.progress.counts_at(position) && cx.active_drag_cursor_style() != Some(cursor) {
             cx.set_active_drag_cursor_style(cursor, window);
         }
+    }
+
+    /// Whether letting go at `position` on row `id` is really a click on it: the press
+    /// moved enough for GPUI to call it a drag, which eats the click, but not enough to
+    /// count as one.
+    fn is_click_on(&self, id: i64, position: Point<Pixels>) -> bool {
+        self.row_id == id && !self.progress.counts_at(position)
     }
 
     /// Whether they can be dropped on `folder_path` of `account_id` right now.
@@ -1946,6 +1955,7 @@ impl RootView {
             ),
         };
         movable.then(|| DraggedMessages {
+            row_id: message.id,
             ids,
             account_id,
             progress: Rc::default(),
@@ -5646,6 +5656,13 @@ impl RootView {
                     }
                 })
             })
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedMessages, window, cx| {
+                    if dragged.is_click_on(message_id, window.mouse_position()) {
+                        this.click_message_row(message_id, window.modifiers(), window, cx);
+                    }
+                }),
+            )
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 let row = hovered.then_some(message_id);
                 if *hovered || this.hovered_row == Some(message_id) {
@@ -7846,6 +7863,7 @@ mod tests {
     ) {
         cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
         let dragged = DraggedMessages {
+            row_id: 1,
             ids: vec![1],
             account_id: Some(1),
             progress: Rc::default(),
@@ -7919,6 +7937,7 @@ mod tests {
             let progress = DragProgress::default();
             progress.start(point(px(0.0), px(0.0)));
             DraggedMessages {
+                row_id: 1,
                 ids: vec![1],
                 account_id: Some(7),
                 progress: Rc::new(progress),
@@ -7953,6 +7972,20 @@ mod tests {
         // A new drag starts over.
         progress.start(point(px(0.0), px(0.0)));
         assert!(!progress.counts_at(point(px(10.0), px(0.0))));
+    }
+
+    #[test]
+    fn letting_go_before_a_drag_counts_is_a_click_on_that_row() {
+        let (_dir, view) = test_view();
+        let ids = view.list_ids();
+        let dragged = view.dragged_messages_of(ids[0]).unwrap();
+        dragged.progress.start(point(px(10.0), px(10.0)));
+        let near = point(px(14.0), px(10.0));
+        assert!(dragged.is_click_on(ids[0], near));
+        assert!(!dragged.is_click_on(ids[1], near));
+        assert!(!dragged.is_click_on(ids[0], point(px(300.0), px(10.0))));
+        // Once it counted, coming back doesn't make it a click.
+        assert!(!dragged.is_click_on(ids[0], near));
     }
 
     #[test]
