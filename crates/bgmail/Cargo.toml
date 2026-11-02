@@ -3,6 +3,7 @@ name = "bgmail"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "A fast, simple and elegant desktop e-mail client."
 default-run = "BGMail"
 
 # The binary is intentionally named "BGMail" (mixed case): on macOS, when running
@@ -69,3 +70,85 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 
 [dev-dependencies]
 tempfile = "3"
+
+# Windows: the app icon is compiled into the executable (Explorer, taskbar,
+# Alt+Tab) by `build.rs`. GPUI already pulls `embed-resource` for its manifest.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
+# Installable packages (`cargo packager --release`, see README "Install / Build
+# packages" and `.github/workflows/release.yml`). Paths are relative to this
+# crate; version, binary and description come from this manifest. Formats are
+# the per-OS defaults (macOS app+dmg, Linux deb+appimage+pacman, Windows nsis);
+# CI adds `--formats nsis,wix` on Windows.
+[package.metadata.packager]
+product-name = "BGMail"
+identifier = "io.github.belizariogr.bgmail"
+publisher = "Belizário Ribeiro"
+authors = ["Belizário Ribeiro"]
+copyright = "Copyright © 2026 Belizário Ribeiro"
+homepage = "https://github.com/belizariogr/bgmail"
+category = "Productivity"
+long-description = """
+BGMail is a native desktop e-mail client built on GPUI, the GPU-accelerated UI
+framework from Zed. IMAP/SMTP and Gmail accounts, a macOS Mail-style layout,
+light and dark themes, and a native, sanitized HTML reader."""
+before-packaging-command = "cargo build --release -p bgmail --bin BGMail"
+icons = [
+    "../../assets/appIcon/BGMail-16.png",
+    "../../assets/appIcon/BGMail-32.png",
+    "../../assets/appIcon/BGMail-48.png",
+    "../../assets/appIcon/BGMail-64.png",
+    "../../assets/appIcon/BGMail-128.png",
+    "../../assets/appIcon/BGMail-256.png",
+    "../../assets/appIcon/BGMail-512.png",
+    "../../assets/appIcon/BGMail.icns",
+    "../../assets/appIcon/BGMail.ico",
+]
+
+[package.metadata.packager.macos]
+# Same floor as Zed's bundle (GPUI's Metal renderer).
+minimum-system-version = "10.15.7"
+
+[package.metadata.packager.deb]
+package-name = "bgmail"
+section = "mail"
+# Shared by deb, AppImage and pacman: Email categories, mailto handler and a
+# StartupWMClass matching the GPUI `app_id` set in `main.rs`.
+desktop-template = "packaging/linux/BGMail.desktop"
+# Linked: xcb + xkbcommon. dlopen'ed by GPUI: wayland, Vulkan, fontconfig.
+# Secrets use the Secret Service over D-Bus (pure Rust), no libdbus/libsecret.
+depends = [
+    "libc6",
+    "libxcb1",
+    "libxkbcommon0",
+    "libxkbcommon-x11-0",
+    "libwayland-client0",
+    "libwayland-cursor0",
+    "libvulkan1",
+    "mesa-vulkan-drivers | vulkan-icd",
+    "libfontconfig1",
+]
+
+[package.metadata.packager.pacman]
+# The pkgname is derived from product-name (`bg-mail`); not configurable.
+depends = [
+    "libxcb",
+    "libxkbcommon",
+    "libxkbcommon-x11",
+    "wayland",
+    "vulkan-icd-loader",
+    "fontconfig",
+]
+
+[package.metadata.packager.nsis]
+installer-icon = "../../assets/appIcon/BGMail.ico"
+# Per-user install (no UAC prompt); shortcuts get the AppUserModelID
+# `identifier`, which toast notifications must use to show up as BGMail.
+# BGMail keeps config + mail.db under ~/.config/BGMail on every OS; the
+# uninstaller offers (unchecked) to remove it.
+appdata-paths = ["$PROFILE/.config/BGMail"]
+
+[package.metadata.packager.windows]
+digest-algorithm = "sha256"
+timestamp-url = "http://timestamp.digicert.com"

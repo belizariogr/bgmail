@@ -240,6 +240,7 @@ fn main() {
                         window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
                         titlebar: Some(window_frame::main_titlebar_options()),
                         window_decorations: window_frame::main_window_decorations(),
+                        app_id: Some(root::WINDOW_APP_ID.into()),
                         // Windows opens hidden so we can cloak it and run the
                         // (asynchronous) maximize + first layout off-screen, then reveal
                         // the finished window — see the spawn below. Elsewhere GPUI shows

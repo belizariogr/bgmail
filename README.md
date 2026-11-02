@@ -56,6 +56,45 @@ xcodebuild -downloadComponent MetalToolchain
 The project's `.cargo/config.toml` sets `TOOLCHAINS = "com.apple.dt.toolchain.Metal"`
 so GPUI's `xcrun -sdk macosx metal` build step finds the installed toolchain.
 
+## Install / Build packages
+
+Tagged releases (`v*`) build installable packages in GitHub Actions
+(`.github/workflows/release.yml`) and attach them to a draft GitHub Release:
+
+| OS | Packages |
+|---|---|
+| macOS (Apple silicon, Intel) | `BGMail.app` inside a `.dmg` (min. macOS 10.15.7) |
+| Linux x86_64 | `.deb`, `.AppImage`, pacman `.tar.gz` + `PKGBUILD` |
+| Windows x86_64 | NSIS `-setup.exe` (per-user, no admin) and WiX `.msi` |
+
+Until signing secrets are configured the builds are **unsigned**: on macOS
+right-click ▸ Open the first time (Gatekeeper), on Windows SmartScreen asks
+for confirmation. On Linux, account passwords are stored through the Secret
+Service, so a keyring (GNOME Keyring, KWallet ≥ 5.97, KeePassXC…) must be
+running.
+
+To build packages locally, use [cargo-packager](https://github.com/crabnebula-dev/cargo-packager)
+(configured in `[package.metadata.packager]` of `crates/bgmail/Cargo.toml`):
+
+```bash
+cargo install cargo-packager --locked
+cargo packager --release                     # this OS's default formats
+cargo packager --release --formats deb       # just one format
+```
+
+Packages are written to `target/release/` (or `target/<triple>/release/` with
+`--target`). Linux defaults are deb + AppImage + pacman, macOS app + dmg,
+Windows NSIS (`--formats nsis,wix` for the MSI too). On rolling distros whose
+libraries use `.relr.dyn` (e.g. Arch), the AppImage step needs `NO_STRIP=1`
+(linuxdeploy's bundled `strip` is too old); release AppImages are built on
+Ubuntu 22.04 for wider glibc compatibility. Building on Linux needs the GPUI
+development packages, e.g. on Debian/Ubuntu:
+
+```bash
+sudo apt install pkg-config clang libxkbcommon-dev libxkbcommon-x11-dev \
+  libx11-xcb-dev libxcb1-dev libwayland-dev libvulkan1 libfontconfig-dev libfreetype-dev
+```
+
 ## Structure
 
 ```
