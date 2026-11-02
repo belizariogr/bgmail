@@ -435,8 +435,15 @@ fn archive_keeping_labels(
     };
     let inbox = folders.iter().find(|folder| folder.path == system::INBOX);
     let locations = db.message_locations(message_id)?;
+    // Spam and Trash are where a message is, not labels: it is archived out of them.
     let has_label = locations.iter().any(|location| {
-        location.folder_id != all_mail.id && inbox.is_none_or(|i| i.id != location.folder_id)
+        folders.iter().any(|folder| {
+            folder.id == location.folder_id
+                && !matches!(
+                    folder.path.as_str(),
+                    system::INBOX | system::ARCHIVE | system::JUNK | system::TRASH
+                )
+        })
     });
     if !has_label {
         return Ok(None);
@@ -913,6 +920,21 @@ mod tests {
         fx.db.complete_op(queued.id).unwrap();
         assert_eq!(archive(&fx.db, id).unwrap(), ActionOutcome::default());
         assert_eq!(csv(&fx, id), ",sys:archive,user:Work,");
+    }
+
+    #[test]
+    fn spam_is_not_a_label_to_keep_when_archiving() {
+        let fx = fixture(PROVIDER_GMAIL);
+        let junk = fx
+            .db
+            .list_folders(fx.account)
+            .unwrap()
+            .into_iter()
+            .find(|folder| folder.path == system::JUNK)
+            .unwrap();
+        let id = message(&fx, junk.id, 5, "a");
+        assert_eq!(archive(&fx.db, id).unwrap(), QUEUED);
+        assert_eq!(csv(&fx, id), ",sys:archive,");
     }
 
     #[test]
