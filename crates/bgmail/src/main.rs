@@ -132,6 +132,22 @@ fn schedule_app_zoom(steps: i32, cx: &mut App) {
     });
 }
 
+/// Quits unless a message is being written. Deferred because the window the action
+/// came from is busy dispatching it, and the compose window may be the one to ask.
+pub(crate) fn schedule_quit(cx: &mut App) {
+    // The first-run window comes before the main one.
+    let Some(main) = cx.try_global::<MainWindow>().map(|main| main.0) else {
+        cx.quit();
+        return;
+    };
+    cx.defer(move |cx| {
+        let may_quit = main.update(cx, |root, _, cx| root.may_quit(cx));
+        if may_quit.unwrap_or(true) {
+            cx.quit();
+        }
+    });
+}
+
 /// Global handlers keep macOS menu items enabled when focus is outside the main
 /// view tree (compose/settings windows).
 fn register_global_menu_actions(cx: &mut App) {
@@ -241,7 +257,7 @@ fn main() {
         ui::bind_keys(cx);
         ui::prompt::init(cx);
         html_view::init(cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Quit, cx| schedule_quit(cx));
         shortcuts::bind_app_shortcuts(cx);
         cx.set_menus(app_menus());
 
@@ -330,11 +346,16 @@ fn main() {
                     // too — not just on app quit.
                     let weak = view.downgrade();
                     window.on_window_should_close(cx, move |_window, cx| {
-                        if let Some(view) = weak.upgrade() {
-                            view.update(cx, |view, _| view.persist_now());
+                        let may_quit = weak.upgrade().is_none_or(|view| {
+                            view.update(cx, |view, cx| {
+                                view.persist_now();
+                                view.may_quit(cx)
+                            })
+                        });
+                        if may_quit {
+                            cx.quit();
                         }
-                        cx.quit();
-                        true
+                        may_quit
                     });
                     // Windows: keep the window cloaked (invisible to the compositor)
                     // while it maximizes and lays out, then reveal it once finished —

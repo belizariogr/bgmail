@@ -1763,7 +1763,7 @@ impl Render for ComposeView {
                 this.discard_draft(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ComposeClose, window, cx| {
-                this.close_window(window, cx);
+                this.discard_draft(window, cx);
             }))
             .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -2035,7 +2035,7 @@ fn attachment_error_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::point;
+    use gpui::{point, WindowHandle};
 
     fn account(id: i64, can_send: bool) -> ComposeAccount {
         ComposeAccount {

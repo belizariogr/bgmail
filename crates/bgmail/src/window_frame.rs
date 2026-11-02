@@ -573,7 +573,7 @@ impl CaptionButton {
         match self.action() {
             CaptionAction::Minimize => window.minimize_window(),
             CaptionAction::Zoom => window.zoom_window(),
-            CaptionAction::Close => cx.quit(),
+            CaptionAction::Close => crate::schedule_quit(cx),
         }
     }
 }

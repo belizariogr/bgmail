@@ -2456,8 +2456,23 @@ impl RootView {
             return;
         }
         let _ = self.with_compose_window(cx, |view, window, cx| {
-            view.close_window(window, cx);
+            view.discard_draft(window, cx);
         });
+    }
+
+    /// Whether the app may quit now: a message being written is asked about first,
+    /// in its window, and the user quits again after answering.
+    pub(crate) fn may_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        !self
+            .with_compose_window(cx, |view, window, cx| {
+                let busy = view.has_edits();
+                if busy {
+                    window.activate_window();
+                    view.discard_draft(window, cx);
+                }
+                busy
+            })
+            .unwrap_or(false)
     }
 
     /// Closes the settings window when it is open (global shortcut / menu fallback).
@@ -3954,16 +3969,6 @@ impl RootView {
         let Some(draft) = mail_core::draft_from_mailto(uri) else {
             return;
         };
-        let busy = self
-            .with_compose_window(cx, |view, window, _| {
-                window.activate_window();
-                view.has_edits()
-            })
-            .unwrap_or(false);
-        if busy {
-            self.set_status_note(Key::StatusComposeBusy.tr(cx.language()), cx);
-            return;
-        }
         let init = ComposeInit {
             draft,
             ..Default::default()
@@ -3981,19 +3986,23 @@ impl RootView {
         if let Some(handle) = self.compose_window {
             let init_for_open = init.clone();
             let contacts_for_open = contacts.clone();
-            if handle
-                .update(cx, |view, window, cx| {
-                    view.set_contacts(contacts_for_open, cx);
-                    if init_for_open.is_some() {
-                        view.apply_init(init_for_open, window, cx);
-                    }
-                    window.activate_window();
-                })
-                .is_ok()
-            {
-                return;
+            match handle.update(cx, |view, window, cx| {
+                view.set_contacts(contacts_for_open, cx);
+                window.activate_window();
+                // A message being written is never replaced by another.
+                let busy = init_for_open.is_some() && view.has_edits();
+                if !busy && init_for_open.is_some() {
+                    view.apply_init(init_for_open, window, cx);
+                }
+                busy
+            }) {
+                Ok(true) => {
+                    self.set_status_note(Key::StatusComposeBusy.tr(cx.language()), cx);
+                    return;
+                }
+                Ok(false) => return,
+                Err(_) => self.compose_window = None,
             }
-            self.compose_window = None;
         }
 
         let accounts = self.compose_accounts();
@@ -4023,7 +4032,12 @@ impl RootView {
             let view = cx.new(|cx| {
                 ComposeView::new(accounts, contacts, root, compose_white, init, window, cx)
             });
-            window.on_window_should_close(cx, move |_, cx| {
+            let compose = view.downgrade();
+            window.on_window_should_close(cx, move |window, cx| {
+                if let Some(compose) = compose.upgrade().filter(|c| c.read(cx).has_edits()) {
+                    compose.update(cx, |view, cx| view.discard_draft(window, cx));
+                    return false;
+                }
                 if let Some(root) = root_for_close.upgrade() {
                     root.update(cx, |root, cx| {
                         root.on_compose_window_closed(cx);
@@ -6987,6 +7001,14 @@ pub(crate) fn can_open_command_palette(main_window_active: bool) -> bool {
 #[cfg(test)]
 impl RootView {
     /// A view on an empty database, as on a first launch.
+    pub(crate) fn status_note_for_tests(&self) -> Option<&SharedString> {
+        self.status_note.as_ref()
+    }
+
+    pub(crate) fn compose_window_for_tests(&self) -> Option<WindowHandle<ComposeView>> {
+        self.compose_window
+    }
+
     pub(crate) fn for_tests(path: &std::path::Path) -> Self {
         Self::new_with_database(Config::default(), path, false)
     }
