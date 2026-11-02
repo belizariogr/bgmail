@@ -36,6 +36,9 @@ an e-mail client, without Zed-scale bloat.
   only; programmatic `set_content` / `clear` stay silent. Both own IME via
   `EntityInputHandler` and call `set_native_text_focus` on click.
 - Only the focused text field paints its selection. `TextArea::set_selection_color` overrides the highlight for text on a page of another color.
+- `prompt::init` (once at startup): confirmation dialogs in the theme where the
+  platform has no native ones (Linux; GPUI's fallback is always white). Enter
+  answers with the first non-cancel action, Escape with the cancel one or the last.
 - Repeated clicks: double click selects the word (a masked `TextInput` selects
   everything), triple click the field (`TextInput`) or line (`TextArea`).
 - `IconButton::hover_color`: hover feedback through the icon color and no

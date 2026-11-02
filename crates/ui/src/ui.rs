@@ -18,6 +18,7 @@ mod context_menu;
 mod icon;
 mod label;
 mod list_item;
+pub mod prompt;
 mod scrollbar;
 mod switch;
 pub mod text_area;

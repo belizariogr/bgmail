@@ -734,10 +734,10 @@ impl ComposeView {
         cx.notify();
     }
 
-    /// The formatting bar above the send button, laid out as Gmail's.
+    /// The formatting tools, on the send button's row, as in Gmail.
     fn render_format_bar(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let (bar_bg, border) = (colors.element_background, colors.border);
+        let border = colors.border;
         let area = self.body.read(cx);
         let format = area.format();
         let (can_undo, can_redo) = (area.can_undo(), area.can_redo());
@@ -770,115 +770,106 @@ impl ComposeView {
         let separator = || div().w(px(1.0)).h(px(18.0)).mx_1().bg(border);
         let chars = format.chars;
         let para = format.para;
+        // Takes the room left of the send button, and wraps in a narrow window.
         h_flex()
-            .flex_shrink_0()
-            .justify_center()
-            .px_3()
-            .pt_2()
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .justify_center()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_lg()
-                    .bg(bar_bg)
-                    .child(icon(
-                        "format-undo",
-                        Key::FormatUndo,
-                        Some(("cmd-z", "ctrl-z")),
-                        IconName::FormatUndo,
-                        false,
-                        can_undo,
-                        cx,
-                        TextArea::undo_step,
-                    ))
-                    .child(icon(
-                        "format-redo",
-                        Key::FormatRedo,
-                        Some(("cmd-shift-z", "ctrl-y")),
-                        IconName::FormatRedo,
-                        false,
-                        can_redo,
-                        cx,
-                        TextArea::redo_step,
-                    ))
-                    .child(separator())
-                    .child(self.render_font_picker(chars.family, language, cx))
-                    .child(separator())
-                    .child(self.render_size_picker(para.size, language, cx))
-                    .child(separator())
-                    .child(self.render_style_button(
-                        "format-bold",
-                        Key::FormatBold,
-                        ("cmd-b", "ctrl-b"),
-                        chars.bold,
-                        language,
-                        cx,
-                        TextArea::toggle_bold,
-                    ))
-                    .child(self.render_style_button(
-                        "format-italic",
-                        Key::FormatItalic,
-                        ("cmd-i", "ctrl-i"),
-                        chars.italic,
-                        language,
-                        cx,
-                        TextArea::toggle_italic,
-                    ))
-                    .child(self.render_style_button(
-                        "format-underline",
-                        Key::FormatUnderline,
-                        ("cmd-u", "ctrl-u"),
-                        chars.underline,
-                        language,
-                        cx,
-                        TextArea::toggle_underline,
-                    ))
-                    .child(self.render_color_picker(chars.color, language, cx))
-                    .child(separator())
-                    .child(self.render_align_picker(para.align, language, cx))
-                    .child(icon(
-                        "format-numbered",
-                        Key::FormatNumbered,
-                        None,
-                        IconName::FormatListNumbered,
-                        para.list == Some(ListKind::Numbered),
-                        true,
-                        cx,
-                        |area, cx| area.toggle_list(ListKind::Numbered, cx),
-                    ))
-                    .child(icon(
-                        "format-bullets",
-                        Key::FormatBullets,
-                        None,
-                        IconName::FormatListBullet,
-                        para.list == Some(ListKind::Bullet),
-                        true,
-                        cx,
-                        |area, cx| area.toggle_list(ListKind::Bullet, cx),
-                    ))
-                    .child(icon(
-                        "format-indent-less",
-                        Key::FormatIndentLess,
-                        None,
-                        IconName::FormatIndentLess,
-                        false,
-                        para.indent > 0,
-                        cx,
-                        |area, cx| area.indent(-1, cx),
-                    ))
-                    .child(icon(
-                        "format-indent-more",
-                        Key::FormatIndentMore,
-                        None,
-                        IconName::FormatIndentMore,
-                        false,
-                        para.indent < MAX_INDENT,
-                        cx,
-                        |area, cx| area.indent(1, cx),
-                    )),
-            )
+            .flex_1()
+            .min_w_0()
+            .flex_wrap()
+            .child(icon(
+                "format-undo",
+                Key::FormatUndo,
+                Some(("cmd-z", "ctrl-z")),
+                IconName::FormatUndo,
+                false,
+                can_undo,
+                cx,
+                TextArea::undo_step,
+            ))
+            .child(icon(
+                "format-redo",
+                Key::FormatRedo,
+                Some(("cmd-shift-z", "ctrl-y")),
+                IconName::FormatRedo,
+                false,
+                can_redo,
+                cx,
+                TextArea::redo_step,
+            ))
+            .child(separator())
+            .child(self.render_font_picker(chars.family, language, cx))
+            .child(separator())
+            .child(self.render_size_picker(para.size, language, cx))
+            .child(separator())
+            .child(self.render_style_button(
+                "format-bold",
+                Key::FormatBold,
+                ("cmd-b", "ctrl-b"),
+                chars.bold,
+                language,
+                cx,
+                TextArea::toggle_bold,
+            ))
+            .child(self.render_style_button(
+                "format-italic",
+                Key::FormatItalic,
+                ("cmd-i", "ctrl-i"),
+                chars.italic,
+                language,
+                cx,
+                TextArea::toggle_italic,
+            ))
+            .child(self.render_style_button(
+                "format-underline",
+                Key::FormatUnderline,
+                ("cmd-u", "ctrl-u"),
+                chars.underline,
+                language,
+                cx,
+                TextArea::toggle_underline,
+            ))
+            .child(self.render_color_picker(chars.color, language, cx))
+            .child(separator())
+            .child(self.render_align_picker(para.align, language, cx))
+            .child(icon(
+                "format-numbered",
+                Key::FormatNumbered,
+                None,
+                IconName::FormatListNumbered,
+                para.list == Some(ListKind::Numbered),
+                true,
+                cx,
+                |area, cx| area.toggle_list(ListKind::Numbered, cx),
+            ))
+            .child(icon(
+                "format-bullets",
+                Key::FormatBullets,
+                None,
+                IconName::FormatListBullet,
+                para.list == Some(ListKind::Bullet),
+                true,
+                cx,
+                |area, cx| area.toggle_list(ListKind::Bullet, cx),
+            ))
+            .child(icon(
+                "format-indent-less",
+                Key::FormatIndentLess,
+                None,
+                IconName::FormatIndentLess,
+                false,
+                para.indent > 0,
+                cx,
+                |area, cx| area.indent(-1, cx),
+            ))
+            .child(icon(
+                "format-indent-more",
+                Key::FormatIndentMore,
+                None,
+                IconName::FormatIndentMore,
+                false,
+                para.indent < MAX_INDENT,
+                cx,
+                |area, cx| area.indent(1, cx),
+            ))
     }
 
     /// B, I or U: a letter showing the style it applies.
@@ -1175,7 +1166,8 @@ impl ComposeView {
                             })),
                     ),
             )
-            .child(div().flex_1())
+            .child(div().w(px(1.0)).h(px(18.0)).bg(cx.theme().colors().border))
+            .child(self.render_format_bar(language, cx))
             .when(self.pending_attachment_loads > 0, |el| {
                 el.child(
                     Label::new(Key::ComposeAttachLoading.tr(language))
@@ -1688,7 +1680,6 @@ impl Render for ComposeView {
             })
             .child(self.render_body(cx))
             .children(self.render_error_banner(cx))
-            .child(self.render_format_bar(language, cx))
             .child(self.render_toolbar(language, cx))
             // Outside clicks close the From picker (the picker itself is
             // deferred, so it paints above this catcher).

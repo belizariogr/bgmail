@@ -224,6 +224,7 @@ fn main() {
         // Initialize localization (English by default).
         locale::init(locale::Language::default(), cx);
         ui::bind_keys(cx);
+        ui::prompt::init(cx);
         html_view::init(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         shortcuts::bind_app_shortcuts(cx);
