@@ -389,6 +389,14 @@ struct DraggedMessages {
     progress: Rc<DragProgress>,
 }
 
+/// See [`RootView::selection_drag`].
+struct SelectionDrag {
+    /// No row is sent mail, which can't be moved.
+    movable: bool,
+    /// The account of every row; `None` when they differ.
+    account_id: Option<i64>,
+}
+
 impl DraggedMessages {
     /// Sets the cursor once the drag counts. GPUI takes the drag out of the app while
     /// drawing its view, so this can't happen there.
@@ -1889,30 +1897,53 @@ impl RootView {
         }
     }
 
-    /// What dragging row `id` takes along: the whole selection when the row is
-    /// part of it. `None` when that includes sent mail, which can't be moved.
-    fn dragged_messages(&self, id: i64) -> Option<DraggedMessages> {
-        let ids = if self.multi_selection.contains(&id) {
-            self.multi_selection.clone()
-        } else {
-            vec![id]
-        };
-        let chosen: HashSet<i64> = ids.iter().copied().collect();
-        let sent_only = self.list_messages.iter().any(|message| {
-            chosen.contains(&message.id) && commands::message_only_in_sent(&message.folders_csv)
-        });
-        if sent_only || self.showing_sent() {
+    /// What dragging a row of a multiple selection means, worked out once per list render:
+    /// it takes reading every row.
+    fn selection_drag(&self) -> Option<SelectionDrag> {
+        if self.multi_selection.is_empty() {
             return None;
         }
-        let mut accounts = self
+        let chosen: HashSet<i64> = self.multi_selection.iter().copied().collect();
+        let mut rows = self
             .list_messages
             .iter()
-            .filter(|message| chosen.contains(&message.id))
-            .map(|message| message.account_id);
-        let first = accounts.next();
-        Some(DraggedMessages {
-            account_id: first.filter(|first| accounts.all(|other| other == *first)),
+            .filter(|message| chosen.contains(&message.id));
+        let mut movable = true;
+        let mut first_account = None;
+        let mut one_account = true;
+        for message in &mut rows {
+            movable &= !commands::message_only_in_sent(&message.folders_csv);
+            one_account &= *first_account.get_or_insert(message.account_id) == message.account_id;
+        }
+        Some(SelectionDrag {
+            movable,
+            account_id: first_account.filter(|_| one_account),
+        })
+    }
+
+    /// What dragging `message` takes along: the whole selection when the row is part of
+    /// it. `None` when that includes sent mail, which can't be moved.
+    fn dragged_messages(
+        &self,
+        message: &MessageListItem,
+        selection: Option<&SelectionDrag>,
+    ) -> Option<DraggedMessages> {
+        if self.showing_sent() {
+            return None;
+        }
+        let (ids, account_id, movable) = match selection {
+            Some(drag) if self.multi_selection.contains(&message.id) => {
+                (self.multi_selection.clone(), drag.account_id, drag.movable)
+            }
+            _ => (
+                vec![message.id],
+                Some(message.account_id),
+                !commands::message_only_in_sent(&message.folders_csv),
+            ),
+        };
+        movable.then(|| DraggedMessages {
             ids,
+            account_id,
             progress: Rc::default(),
         })
     }
@@ -5421,9 +5452,10 @@ impl RootView {
                     let end = range.end.min(this.list_messages.len());
                     let start = range.start.min(end);
                     let this = &*this;
+                    let selection = this.selection_drag();
                     this.list_messages[start..end]
                         .iter()
-                        .map(|message| this.render_message_row(message, cx))
+                        .map(|message| this.render_message_row(message, selection.as_ref(), cx))
                         .collect::<Vec<_>>()
                 }),
             )
@@ -5511,6 +5543,7 @@ impl RootView {
     fn render_message_row(
         &self,
         message: &MessageListItem,
+        selection: Option<&SelectionDrag>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = cx.theme().colors();
@@ -5581,7 +5614,7 @@ impl RootView {
             .when(!selected, |el| el.hover(move |el| el.bg(hover)))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .when_some(self.dragged_messages(message_id), |row, dragged| {
+            .when_some(self.dragged_messages(message, selection), |row, dragged| {
                 row.on_drag(dragged, {
                     let width = self.list_width;
                     let title: SharedString = message.sender.clone().into();
@@ -7146,6 +7179,11 @@ pub(crate) fn can_open_command_palette(main_window_active: bool) -> bool {
 #[cfg(test)]
 impl RootView {
     /// A view on an empty database, as on a first launch.
+    fn dragged_messages_of(&self, id: i64) -> Option<DraggedMessages> {
+        let message = self.list_messages.iter().find(|message| message.id == id)?;
+        self.dragged_messages(message, self.selection_drag().as_ref())
+    }
+
     pub(crate) fn status_note_for_tests(&self) -> Option<&SharedString> {
         self.status_note.as_ref()
     }
@@ -7918,9 +7956,13 @@ mod tests {
         let (_dir, mut view) = test_view();
         let ids = view.list_ids();
         view.apply_selection(ids[..2].to_vec());
-        assert_eq!(view.dragged_messages(ids[0]).unwrap().ids, ids[..2]);
-        assert_eq!(view.dragged_messages(ids[2]).unwrap().ids, [ids[2]]);
-        assert!(view.dragged_messages(ids[2]).unwrap().account_id.is_some());
+        assert_eq!(view.dragged_messages_of(ids[0]).unwrap().ids, ids[..2]);
+        assert_eq!(view.dragged_messages_of(ids[2]).unwrap().ids, [ids[2]]);
+        assert!(view
+            .dragged_messages_of(ids[2])
+            .unwrap()
+            .account_id
+            .is_some());
     }
 
     #[test]
@@ -8479,9 +8521,9 @@ mod tests {
     fn nothing_listed_in_sent_can_be_dragged() {
         let (_dir, mut view) = test_view();
         let id = view.selected_message_id.unwrap();
-        assert!(view.dragged_messages(id).is_some());
+        assert!(view.dragged_messages_of(id).is_some());
         view.apply_mailbox_selection(Selection::Global(GlobalMailbox::Sent));
-        assert!(view.dragged_messages(id).is_none());
+        assert!(view.dragged_messages_of(id).is_none());
     }
 
     #[test]
@@ -8489,9 +8531,9 @@ mod tests {
         let (_dir, mut view) = test_view();
         let ids: Vec<i64> = view.list_messages.iter().take(2).map(|m| m.id).collect();
         view.multi_selection = ids.clone();
-        assert!(view.dragged_messages(ids[0]).is_some());
+        assert!(view.dragged_messages_of(ids[0]).is_some());
         view.list_messages[1].folders_csv = ",sys:sent,".into();
-        assert!(view.dragged_messages(ids[0]).is_none());
+        assert!(view.dragged_messages_of(ids[0]).is_none());
         assert!(view
             .command_context()
             .bulk
