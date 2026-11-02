@@ -316,6 +316,9 @@ pub fn runs_code(filename: &str) -> bool {
         "wsf",
         "wsh",
         "xbap",
+        "diagcab",
+        "msu",
+        "xll",
         // macOS
         "action",
         "app",
@@ -328,6 +331,7 @@ pub fn runs_code(filename: &str) -> bool {
         "terminal",
         "tool",
         "workflow",
+        "mpkg",
         // Linux and scripts anywhere
         "appimage",
         "bash",
@@ -570,6 +574,10 @@ JVBERi0xLjQ=\r\n\
             "e.desktop",
             "f.sh",
             "g.ex\u{200b}e",
+            "h.msu",
+            "i.diagcab",
+            "j.xll",
+            "k.mpkg",
         ] {
             assert!(runs_code(name), "{name}");
         }
