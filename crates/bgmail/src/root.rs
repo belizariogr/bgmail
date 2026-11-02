@@ -1895,7 +1895,7 @@ impl RootView {
         let mut accounts = self
             .list_messages
             .iter()
-            .filter(|message| ids.contains(&message.id))
+            .filter(|message| chosen.contains(&message.id))
             .map(|message| message.account_id);
         let first = accounts.next();
         Some(DraggedMessages {
