@@ -258,7 +258,8 @@ wiring to `storage`.
 
 ## Verification
 
-- `cargo test -p bgmail` (sanitize, config, locale, layout helpers, …).
+- `cargo test -p bgmail` (sanitize, config, locale, layout helpers, …; drags run in
+  simulated windows through GPUI's `test-support`).
 - `cargo run -p bgmail`.
 - Packaging: `cargo packager --release` (on Linux add `NO_STRIP=1` when the
   host libs use `.relr.dyn`, which linuxdeploy's bundled `strip` rejects);

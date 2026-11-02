@@ -72,6 +72,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 
 [dev-dependencies]
 tempfile = "3"
+# Simulated windows, to test what only happens with real input (drags).
+gpui = { workspace = true, features = ["test-support"] }
 
 # Windows: the app icon is compiled into the executable (Explorer, taskbar,
 # Alt+Tab) by `build.rs`. GPUI already pulls `embed-resource` for its manifest.

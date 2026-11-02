@@ -454,6 +454,7 @@ impl Render for DragPreview {
             .relative()
             .child(
                 v_flex()
+                    .debug_selector(|| "drag-card".to_string())
                     .absolute()
                     .left(card.x)
                     .top(card.y)
@@ -7251,6 +7252,87 @@ mod tests {
     fn the_drag_cursor_is_the_closed_hand_or_hidden_for_a_painted_one() {
         assert_eq!(drag_cursor(false), CursorStyle::ClosedHand);
         assert_eq!(drag_cursor(true), CursorStyle::None);
+    }
+
+    /// A row and the app's root listener, as they are wired in the real views.
+    struct DragHost {
+        dragged: DraggedMessages,
+    }
+
+    impl Render for DragHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .on_drag_move(|event: &DragMoveEvent<DraggedMessages>, window, cx| {
+                    let dragged = event.drag(cx).clone();
+                    dragged.update_cursor(event.event.position, window, cx);
+                })
+                .child(div().id("row").w(px(300.0)).h(px(60.0)).on_drag(
+                    self.dragged.clone(),
+                    |dragged, grab, window, cx| {
+                        dragged.progress.start(window.mouse_position());
+                        let progress = dragged.progress.clone();
+                        cx.new(|_| DragPreview {
+                            progress,
+                            grab,
+                            width: px(200.0),
+                            title: "Ann".into(),
+                            subtitle: "Hello".into(),
+                            draws_hand: false,
+                        })
+                    },
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn dragging_past_the_threshold_sets_the_cursor_and_centers_the_card(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
+        let dragged = DraggedMessages {
+            ids: vec![1],
+            account_id: Some(1),
+            progress: Rc::default(),
+        };
+        let (_, cx) = cx.add_window_view(|_, _| DragHost { dragged });
+        cx.run_until_parked();
+        let held = Some(MouseButton::Left);
+        cx.simulate_mouse_down(
+            point(px(50.0), px(30.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+
+        // A short drag: GPUI has started it, but it doesn't count yet.
+        cx.simulate_mouse_move(point(px(60.0), px(30.0)), held, Default::default());
+        cx.run_until_parked();
+        assert!(cx.update(|_, cx| cx.has_active_drag()));
+        assert_eq!(cx.update(|_, cx| cx.active_drag_cursor_style()), None);
+        assert_eq!(cx.debug_bounds("drag-card"), None);
+
+        // Past the threshold, and back: it keeps counting.
+        let far = point(px(400.0), px(300.0));
+        cx.simulate_mouse_move(far, held, Default::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.active_drag_cursor_style()),
+            Some(CursorStyle::ClosedHand)
+        );
+        let card = cx.debug_bounds("drag-card").expect("the card shows");
+        assert_eq!(card.center(), far);
+
+        let back = point(px(70.0), px(40.0));
+        cx.simulate_mouse_move(back, held, Default::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.active_drag_cursor_style()),
+            Some(CursorStyle::ClosedHand)
+        );
+        assert_eq!(
+            cx.debug_bounds("drag-card").expect("still shows").center(),
+            back
+        );
     }
 
     #[test]
