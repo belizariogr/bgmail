@@ -109,6 +109,8 @@ that edit the database and queue those server ops.
   concurrently with its successor.
 - **NewMail:** only unread rows *created* (not merged) in the `sys:inbox`
   folder after its first sync, never after a UIDVALIDITY reset.
+- **Sent copy** (user decision): the APPENDed copy carries `Bcc:`
+  (`mail_core::sent_copy`); what goes to SMTP doesn't.
 - **Backoff** resets after a completed cycle (or a good IDLE result), not when a
   connection opens, so a server failing right after login is retried with growing
   delays. A send through the queue syncs Sent before going idle (`sent_is_stale`).

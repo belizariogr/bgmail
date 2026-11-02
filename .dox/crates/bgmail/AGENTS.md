@@ -53,10 +53,15 @@ wiring to `storage`.
   decision). The arrow keys open the row that took its place.
 - Each mailbox remembers its selection for the session (`remembered_selections`,
   user decision): switching away and back selects the same rows again if still
-  listed, without marking them read. Not persisted; searches don't record one.
+  listed, without marking them read. Not persisted. A search records none of its own:
+  it remembers the mailbox's when it starts and gives it back when it ends, unless a
+  result the user opened is listed there too (user decision).
 - The UI language persists as `Config::language` (`Language::code`, a string so an
   unknown value loses only the language). Change it through `RootView::set_language`,
   from Settings or the first-run welcome step (`settings::language_picker`).
+- Recipients (user decision): Enter and Tab take a complete typed address (with a dot
+  in the domain) over the highlighted suggestion; picking one with the arrows still
+  wins.
 - One process per profile (user decision): a later launch activates the running window
   and exits; a build from another worktree needs its own `HOME` to run alongside one.
 - "Open" on an attachment refuses types that can run code (`attachments::runs_code`,

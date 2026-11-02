@@ -3392,17 +3392,28 @@ impl RootView {
         let now_active = !query.trim().is_empty();
         if now_active && !was_active {
             self.pre_search_mailbox = Some(self.selected_mailbox.clone());
+            self.remember_selection();
             self.clear_message_selection();
         }
         if !now_active && was_active {
             if let Some(prev) = self.pre_search_mailbox.take() {
                 self.selected_mailbox = prev;
             }
-            self.clear_message_selection();
         }
         self.last_search_query = query;
         self.reload_message_list();
         self.sync_search_selection();
+        if !now_active && was_active {
+            self.restore_selection_after_search();
+        }
+    }
+
+    /// Back from a search, the mailbox shows what it did before, unless a result the
+    /// user opened is listed there too: that one stays open.
+    fn restore_selection_after_search(&mut self) {
+        if self.selected_ids().is_empty() {
+            self.restore_selection();
+        }
     }
 
     fn next_search_debounce_token(&mut self) -> u64 {
@@ -3488,6 +3499,7 @@ impl RootView {
             self.last_search_query.clear();
             self.reload_message_list();
             self.sync_search_selection();
+            self.restore_selection_after_search();
         }
 
         if collapse {
@@ -8933,6 +8945,24 @@ mod tests {
             assert_eq!(window.content_scale(), 1.0);
             assert_eq!(view.current_config().ui_scale, 1.0);
         });
+    }
+
+    #[test]
+    fn a_search_gives_the_selection_back() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.apply_selection(vec![ids[0]]);
+        view.remember_selection();
+        view.clear_message_selection();
+
+        // Nothing was opened meanwhile: what the mailbox showed comes back.
+        view.restore_selection_after_search();
+        assert_eq!(view.selected_message_id, Some(ids[0]));
+
+        // A result the user opened stays.
+        view.apply_selection(vec![ids[1]]);
+        view.restore_selection_after_search();
+        assert_eq!(view.selected_message_id, Some(ids[1]));
     }
 
     #[test]

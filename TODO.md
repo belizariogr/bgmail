@@ -419,6 +419,8 @@
       still clicks its row; a quoted name with a comma stays one recipient, and the
       exact address comes first among suggestions; a secret shared with another
       account survives a removal; a search can't return to a removed account's folder.
+- ✅ A search gives the mailbox's selection back; a complete typed address beats the
+      suggestion on Enter and Tab; the Sent copy records the Bcc (user decisions).
 - ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user
       decision), which closes the mXSS through foreign content.
 - ✅ Remote images can't reach this machine or link-local addresses, resolved by IP;
