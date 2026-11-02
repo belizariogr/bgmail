@@ -95,6 +95,15 @@ fn add_unique(addresses: &mut Vec<Address>, new: Address) {
     }
 }
 
+/// Hint of the typing area: none once there are cards.
+fn placeholder_for(placeholder: &SharedString, addresses: &[Address]) -> SharedString {
+    if addresses.is_empty() {
+        placeholder.clone()
+    } else {
+        SharedString::default()
+    }
+}
+
 /// What a card shows: the name when there is one, as in Gmail.
 fn card_label(address: &Address) -> String {
     address
@@ -107,6 +116,7 @@ fn card_label(address: &Address) -> String {
 pub struct RecipientInput {
     addresses: Vec<Address>,
     input: Entity<TextInput>,
+    placeholder: SharedString,
     contacts: Rc<[Contact]>,
     suggestions: Vec<Contact>,
     highlighted: usize,
@@ -128,7 +138,8 @@ impl RecipientInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| TextInput::new(placeholder, cx));
+        let placeholder = placeholder.into();
+        let input = cx.new(|cx| TextInput::new(placeholder.clone(), cx));
         let focus = input.read(cx).focus_handle(cx);
         let subscriptions = vec![
             cx.subscribe(&input, |this, _, _: &TextInputEvent, cx| {
@@ -143,11 +154,21 @@ impl RecipientInput {
         Self {
             addresses: Vec::new(),
             input,
+            placeholder,
             contacts,
             suggestions: Vec::new(),
             highlighted: 0,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The hint only makes sense while there are no cards.
+    fn sync_placeholder(&mut self, cx: &mut Context<Self>) {
+        let placeholder = placeholder_for(&self.placeholder, &self.addresses);
+        self.input.update(cx, |input, cx| {
+            input.set_placeholder(placeholder);
+            cx.notify();
+        });
     }
 
     /// Replaces the catalog, which may have grown since the window opened.
@@ -164,6 +185,7 @@ impl RecipientInput {
             .collect();
         self.suggestions.clear();
         self.input.update(cx, |input, cx| input.clear(cx));
+        self.sync_placeholder(cx);
         cx.notify();
     }
 
@@ -212,6 +234,7 @@ impl RecipientInput {
         self.input
             .update(cx, |input, cx| input.set_content(rest, cx));
         self.suggestions.clear();
+        self.sync_placeholder(cx);
         cx.emit(RecipientsChanged);
         cx.notify();
     }
@@ -226,6 +249,7 @@ impl RecipientInput {
         );
         self.input.update(cx, |input, cx| input.clear(cx));
         self.suggestions.clear();
+        self.sync_placeholder(cx);
         window.focus(&self.input.read(cx).focus_handle(cx));
         cx.emit(RecipientsChanged);
         cx.notify();
@@ -234,6 +258,7 @@ impl RecipientInput {
     fn remove(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.addresses.len() {
             self.addresses.remove(index);
+            self.sync_placeholder(cx);
             cx.emit(RecipientsChanged);
             cx.notify();
         }
@@ -485,6 +510,14 @@ mod tests {
         assert_eq!(addresses.len(), 1);
         add_unique(&mut addresses, Address::new(None::<String>, "b@x.test"));
         assert_eq!(addresses.len(), 2);
+    }
+
+    #[test]
+    fn the_hint_shows_only_without_cards() {
+        let hint = SharedString::from("Type here");
+        assert_eq!(placeholder_for(&hint, &[]), hint);
+        let cards = [Address::new(None::<String>, "a@x.test")];
+        assert_eq!(placeholder_for(&hint, &cards), "");
     }
 
     #[test]
