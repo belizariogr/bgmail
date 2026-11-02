@@ -112,8 +112,8 @@ fn card_label(address: &Address) -> String {
         .unwrap_or_else(|| address.email.clone())
 }
 
-/// An address as a card, with all of it on hover; without a background, which only
-/// the editable fields add. Also shown when reading mail.
+/// An address as a card, with all of it on hover. Also shown when reading mail,
+/// where it does nothing else: the background and pointer are the editable fields'.
 pub fn address_card(id: impl Into<ElementId>, address: &Address, cx: &App) -> Stateful<Div> {
     let colors = cx.theme().colors();
     h_flex()
@@ -125,7 +125,7 @@ pub fn address_card(id: impl Into<ElementId>, address: &Address, cx: &App) -> St
         .rounded_full()
         .border_1()
         .border_color(colors.border)
-        .cursor_pointer()
+        .cursor_default()
         .tooltip(Tooltip::text(address.display()))
         .child(
             Label::new(card_label(address))
@@ -321,6 +321,7 @@ impl RecipientInput {
         let background = cx.theme().colors().element_background;
         address_card(("recipient", index), address, cx)
             .bg(background)
+            .cursor_pointer()
             .pr_1()
             .child(
                 div()
