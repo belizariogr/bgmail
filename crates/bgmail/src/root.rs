@@ -762,8 +762,13 @@ pub struct RootView {
     show_sidebar: bool,
     /// User-adjustable width of the accounts/folders sidebar.
     sidebar_width: Pixels,
+    /// The width the user chose; [`Self::sync_layout`] narrows `sidebar_width` from
+    /// it for the moment only, so a smaller window or a zoom doesn't cost it.
+    preferred_sidebar_width: Pixels,
     /// User-adjustable width of the message list.
     list_width: Pixels,
+    /// As [`Self::preferred_sidebar_width`], for `list_width`.
+    preferred_list_width: Pixels,
     /// Whether the window is currently below `NARROW_BREAKPOINT`. When narrow the
     /// sidebar is collapsed and, if reopened, floats over the content.
     narrow: bool,
@@ -1282,7 +1287,9 @@ impl RootView {
             selected_message_id,
             show_sidebar: true,
             sidebar_width,
+            preferred_sidebar_width: sidebar_width,
             list_width,
+            preferred_list_width: list_width,
             narrow: false,
             window_width: px(settings.window_width),
             window_origin,
@@ -3031,8 +3038,8 @@ impl RootView {
             max_y: f32::from(self.max_origin.y),
             max_width: f32::from(self.max_size.width),
             max_height: f32::from(self.max_size.height),
-            sidebar_width: f32::from(self.sidebar_width),
-            list_width: f32::from(self.list_width),
+            sidebar_width: f32::from(self.preferred_sidebar_width),
+            list_width: f32::from(self.preferred_list_width),
             load_remote_images: self.load_remote_images,
             notifications_enabled: self.notifications_enabled,
             reader_white_background: self.reader_white_background,
@@ -4335,7 +4342,14 @@ impl RootView {
         }
         self.narrow = now_narrow;
 
+        // The sidebar yields only what the list's minimum can't: a window or zoom that
+        // has room again gets the widths the user chose back.
         let sidebar = if self.show_sidebar && !self.narrow {
+            let sidebar_max =
+                (total - px(LIST_MIN_WIDTH) - px(READER_MIN_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
+            self.sidebar_width = self
+                .preferred_sidebar_width
+                .clamp(px(SIDEBAR_MIN_WIDTH), sidebar_max);
             self.sidebar_width
         } else {
             px(0.0)
@@ -4343,14 +4357,9 @@ impl RootView {
 
         // Keep the list within [min, available-for-reader].
         let list_max = (total - sidebar - px(READER_MIN_WIDTH)).max(px(LIST_MIN_WIDTH));
-        self.list_width = self.list_width.clamp(px(LIST_MIN_WIDTH), list_max);
-
-        // Keep the sidebar within [min, available-for-list-and-reader].
-        if self.show_sidebar && !self.narrow {
-            let sidebar_max =
-                (total - self.list_width - px(READER_MIN_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
-            self.sidebar_width = self.sidebar_width.clamp(px(SIDEBAR_MIN_WIDTH), sidebar_max);
-        }
+        self.list_width = self
+            .preferred_list_width
+            .clamp(px(LIST_MIN_WIDTH), list_max);
     }
 
     /// Applies a divider drag: `x` is the cursor position relative to the row's
@@ -4362,6 +4371,7 @@ impl RootView {
                 let max =
                     (total - self.list_width - px(READER_MIN_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
                 self.sidebar_width = x.clamp(px(SIDEBAR_MIN_WIDTH), max);
+                self.preferred_sidebar_width = self.sidebar_width;
             }
             ResizeHandle::List => {
                 let left = if self.show_sidebar && !self.narrow {
@@ -4371,6 +4381,7 @@ impl RootView {
                 };
                 let max = (total - left - px(READER_MIN_WIDTH)).max(px(LIST_MIN_WIDTH));
                 self.list_width = (x - left).clamp(px(LIST_MIN_WIDTH), max);
+                self.preferred_list_width = self.list_width;
             }
         }
     }
@@ -7406,11 +7417,37 @@ mod tests {
         let (_dir, mut view) = test_view();
         // Wide (docked) window so the sidebar keeps its column; an oversized list
         // must shrink to preserve the reader's minimum width.
-        view.list_width = px(900.0);
+        view.preferred_list_width = px(900.0);
         view.sync_layout(px(1400.0));
         let reader = px(1400.0) - view.sidebar_width - view.list_width;
         assert!(reader >= px(READER_MIN_WIDTH));
         assert!(view.list_width >= px(LIST_MIN_WIDTH));
+        assert!(view.list_width < px(900.0));
+    }
+
+    #[test]
+    fn a_smaller_window_or_zoom_does_not_cost_the_chosen_widths() {
+        let (_dir, mut view) = test_view();
+        view.preferred_sidebar_width = px(300.0);
+        view.preferred_list_width = px(900.0);
+        view.sync_layout(px(1536.0));
+        assert_eq!(view.list_width, px(1536.0 - 300.0 - READER_MIN_WIDTH));
+        assert_eq!(view.current_config().list_width, 900.0);
+
+        view.sync_layout(px(1920.0));
+        assert_eq!(view.sidebar_width, px(300.0));
+        assert_eq!(view.list_width, px(900.0));
+    }
+
+    #[test]
+    fn dragging_a_divider_chooses_the_width() {
+        let (_dir, mut view) = test_view();
+        view.narrow = false;
+        view.show_sidebar = true;
+        view.resize(ResizeHandle::Sidebar, px(300.0), px(1920.0));
+        view.resize(ResizeHandle::List, px(800.0), px(1920.0));
+        assert_eq!(view.preferred_sidebar_width, px(300.0));
+        assert_eq!(view.preferred_list_width, px(500.0));
     }
 
     #[test]
