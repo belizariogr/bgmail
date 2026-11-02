@@ -39,6 +39,7 @@ an e-mail client, without Zed-scale bloat.
   everything), triple click the field (`TextInput`) or line (`TextArea`).
 - `IconButton::hover_color`: hover feedback through the icon color and no
   background, for buttons over surfaces of varying color.
+- `IconButton::compact`: the button is exactly its icon's size.
 - `Scrollbar::always_visible` / `thumb_colors`: for content that doesn't follow
   the theme (the reader's page).
 - `TextArea` (compose body): plain text with `\n` line endings only (`\r\n`

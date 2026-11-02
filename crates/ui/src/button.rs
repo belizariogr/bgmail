@@ -120,6 +120,7 @@ pub struct IconButton {
     selected: bool,
     disabled: bool,
     hover_color: Option<Color>,
+    compact: bool,
     on_click: Option<ClickHandler>,
 }
 
@@ -137,6 +138,7 @@ impl IconButton {
             selected: false,
             disabled: false,
             hover_color: None,
+            compact: false,
             on_click: None,
         }
     }
@@ -173,6 +175,21 @@ impl IconButton {
         self
     }
 
+    /// Makes the button exactly as big as its icon, for tight spots.
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
+    /// Side of the button's square.
+    fn side(&self) -> Pixels {
+        if self.compact {
+            self.size.px()
+        } else {
+            px(28.0)
+        }
+    }
+
     /// Registers the click handler.
     pub fn on_click(
         mut self,
@@ -200,6 +217,7 @@ impl RenderOnce for IconButton {
         let hover_bg = colors.element_hover;
         let selected_bg = colors.element_active;
         let color = self.effective_color();
+        let side = self.side();
         let disabled = self.disabled;
         let hover_color = self.hover_color.filter(|_| !disabled);
         let on_click = self.on_click.filter(|_| !disabled);
@@ -212,7 +230,7 @@ impl RenderOnce for IconButton {
             .id(self.id)
             .group(ICON_BUTTON_GROUP)
             .justify_center()
-            .size(px(28.0))
+            .size(side)
             .rounded_md()
             .when(self.selected && !disabled, |el| el.bg(selected_bg))
             .when(!disabled && hover_color.is_none(), |el| {
@@ -235,6 +253,13 @@ impl RenderOnce for IconButton {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_icon_button_is_the_size_of_its_icon() {
+        let button = IconButton::new("b", IconName::Reply).size(IconSize::Small);
+        assert_eq!(button.side(), px(28.0));
+        assert_eq!(button.compact().side(), IconSize::Small.px());
+    }
 
     #[test]
     fn icon_button_color_follows_disabled_then_selected() {

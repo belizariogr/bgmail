@@ -17,7 +17,7 @@ pub enum IconSize {
 
 impl IconSize {
     /// Square footprint of the rendered icon.
-    fn px(self) -> Pixels {
+    pub(crate) fn px(self) -> Pixels {
         match self {
             IconSize::XXSmall => px(10.0),
             IconSize::XSmall => px(12.0),

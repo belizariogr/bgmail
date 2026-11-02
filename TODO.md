@@ -384,7 +384,7 @@
       `com.bgmail.main|settings|newmail` window classes; word/field selection on
       repeated clicks in `TextInput`; multiple selection (Ctrl/Cmd/Shift, Shift+
       arrows, Ctrl/Cmd+A) with card stack and bulk Delete/Archive/Junk; row
-      actions centered at the right without covering text, icon-only hover;
+      actions centered at the right, icon-sized, only the subject giving way;
       working Archive on Gmail, Move menu and list filter; Get mail moved above
       the list; star icon and "Starred"/"Com estrela"; no badge on Trash; always
       formatted; always-visible reader scrollbars; `[Gmail]/Rascunhos` as Drafts;

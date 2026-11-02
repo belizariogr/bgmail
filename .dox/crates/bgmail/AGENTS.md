@@ -173,9 +173,9 @@ wiring to `storage`.
   range, Ctrl/Cmd+A selects all (list focus only). Two or more selected rows
   (`multi_selection`, with `selected_message_id` = `None`) show a card stack
   in the reader with Delete / Archive / Junk; a bulk action never deletes for
-  good and leaves nothing selected. On hover a row's text shrinks to make room
-  for Reply / Delete, centered at the right with no background (their icons
-  brighten on hover). Trash shows no unread badge.
+  good and leaves nothing selected. On hover Reply / Delete appear centered at
+  the right, icon-sized and with no background (their icons brighten on hover);
+  only the subject shrinks for them, so the date and star stay in place. Trash shows no unread badge.
 - Replies carry Gmail's structure: `In-Reply-To`/`References`, a `Re:`
   subject, Gmail's attribution line and an HTML alternative from
   `mail_core::reply_html`, built from the edited text.

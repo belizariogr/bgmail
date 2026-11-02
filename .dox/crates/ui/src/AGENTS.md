@@ -443,6 +443,7 @@ _300 functions/methods documented._
   - Behavior: Render uses `Color::Disabled`, no hover/selected background, drops the click handler, but still swallows left mouse-down (no title-bar drag).
 
 - **`IconButton::hover_color`** (pub): brightens the icon on hover instead of showing a background.
+- **`IconButton::compact`** (pub) / **`side`** (private): makes the button its icon's size / side of the button's square.
 - **`Icon::group_hover_color`** (pub): icon color while the named group is hovered.
 - **`click_selection`** (private, `text_input`): range selected by a repeated click (word, or the whole field when masked or on a triple click).
 - **`Scrollbar::always_visible`** / **`Scrollbar::thumb_colors`** (pub): keep the thumb on screen whenever content overflows / override its theme colors.

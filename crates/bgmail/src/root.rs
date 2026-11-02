@@ -89,8 +89,10 @@ const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 const FOLD_ANIM_MS: u64 = 90;
 /// Tallest a dropdown gets before it scrolls, in pixels.
 const MENU_MAX_HEIGHT: f32 = 420.0;
-/// Width a list row's text gives up per action button, in pixels.
-const ROW_ACTION_WIDTH: f32 = 30.0;
+/// Width of a list row's compact action button (`IconSize::Small`) and the gap
+/// around it, in pixels.
+const ROW_ACTION_WIDTH: f32 = 14.0;
+const ROW_ACTION_GAP: f32 = 6.0;
 /// Fixed height of a sidebar row (account header and mailbox rows alike), in
 /// pixels. Pinning it keeps the fold (accordion) animation's height math exact,
 /// so the list never snaps at the end of the transition.
@@ -239,6 +241,16 @@ fn selection_range(list: &[i64], from: i64, to: i64) -> Vec<i64> {
         return vec![to];
     };
     list[from.min(to)..=from.max(to)].to_vec()
+}
+
+/// Width the subject of a list row gives up for its action buttons: Reply and
+/// Delete while hovered, Reply alone in the Trash.
+fn row_actions_room(hovered: bool, in_trash: bool) -> Pixels {
+    if !hovered {
+        return px(0.0);
+    }
+    let buttons = if in_trash { 1.0 } else { 2.0 };
+    px(buttons * (ROW_ACTION_WIDTH + ROW_ACTION_GAP))
 }
 
 /// Whether a folder's row counts unread mail: what is in the Trash is done with.
@@ -4489,15 +4501,10 @@ impl RootView {
         );
 
         let message_id = message.id;
-        // The text gives way to the action buttons, so they cover nothing. The
-        // row's own padding already accounts for part of their width.
-        let room_for_actions = if self.hovered_row != Some(message_id) {
-            px(0.0)
-        } else if self.showing_trash() {
-            px(ROW_ACTION_WIDTH - 8.0)
-        } else {
-            px(ROW_ACTION_WIDTH * 2.0 - 8.0)
-        };
+        // The subject, on the line the action buttons sit on, gives way to them.
+        // The sender/date line above and the preview below never move.
+        let room_for_actions =
+            row_actions_room(self.hovered_row == Some(message_id), self.showing_trash());
         h_flex()
             .id(("message", message_id as u64))
             .group(MESSAGE_ROW_GROUP)
@@ -4525,7 +4532,6 @@ impl RootView {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .mr(room_for_actions)
                     .gap_0p5()
                     .child(
                         h_flex()
@@ -4539,9 +4545,13 @@ impl RootView {
                             .child(meta),
                     )
                     .child(
-                        Label::new(message.subject.clone())
-                            .size(LabelSize::Small)
-                            .single_line(),
+                        h_flex().mr(room_for_actions).child(
+                            div().flex_1().min_w_0().child(
+                                Label::new(message.subject.clone())
+                                    .size(LabelSize::Small)
+                                    .single_line(),
+                            ),
+                        ),
                     )
                     .child(
                         Label::new(message.preview.clone())
@@ -4583,7 +4593,9 @@ impl RootView {
             .top_0()
             .bottom_0()
             .right_0()
-            .pr_1()
+            // Lined up with the date's right edge (the row's padding).
+            .pr_3()
+            .gap(px(ROW_ACTION_GAP))
             .items_center()
             .invisible()
             .group_hover(MESSAGE_ROW_GROUP, |style| style.visible())
@@ -4592,6 +4604,7 @@ impl RootView {
                 Key::ToolbarReply.tr(language),
                 None,
                 IconButton::new("row-reply-button", IconName::Reply)
+                    .compact()
                     .size(IconSize::Small)
                     .color(Color::Muted)
                     .hover_color(Color::Default)
@@ -4608,6 +4621,7 @@ impl RootView {
                     Key::CommandDelete.tr(language),
                     None,
                     IconButton::new("row-delete-button", IconName::Trash)
+                        .compact()
                         .size(IconSize::Small)
                         .color(Color::Muted)
                         .hover_color(Color::Default)
@@ -6250,6 +6264,13 @@ mod tests {
         assert!(!folder_shows_unread(storage::system::TRASH));
         assert!(folder_shows_unread(storage::system::INBOX));
         assert!(folder_shows_unread(storage::system::JUNK));
+    }
+
+    #[test]
+    fn only_a_hovered_row_makes_room_for_its_buttons() {
+        assert_eq!(row_actions_room(false, false), px(0.0));
+        assert_eq!(row_actions_room(true, false), px(40.0));
+        assert_eq!(row_actions_room(true, true), px(20.0));
     }
 
     #[test]
