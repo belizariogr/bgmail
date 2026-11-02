@@ -464,10 +464,15 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
         shutdown(&clone);
         // See `shutdown`: on Windows the read also needs the peer to close.
-        #[cfg(windows)]
-        drop(server);
+        if cfg!(windows) {
+            drop(server);
+            let result = reader.join().unwrap();
+            assert!(matches!(result, Ok(0) | Err(_)));
+            return;
+        }
         // Either EOF (Ok(0)) or an error; what matters is that it returns.
         let result = reader.join().unwrap();
         assert!(matches!(result, Ok(0) | Err(_)));
+        drop(server);
     }
 }
