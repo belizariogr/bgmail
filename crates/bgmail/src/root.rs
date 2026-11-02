@@ -1382,11 +1382,8 @@ impl RootView {
         if self.list_filter != ListFilter::All {
             // A message being read stays until the selection moves, even if it
             // no longer matches: opening an unread one marks it read.
-            let (filter, selected, multi) = (
-                self.list_filter,
-                self.selected_message_id,
-                &self.multi_selection,
-            );
+            let (filter, selected) = (self.list_filter, self.selected_message_id);
+            let multi: HashSet<i64> = self.multi_selection.iter().copied().collect();
             self.list_messages.retain(|message| {
                 filter.matches(message)
                     || selected == Some(message.id)
@@ -1698,14 +1695,7 @@ impl RootView {
         action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
     ) {
         if !self.multi_selection.is_empty() {
-            if let Err(error) = self.apply_action_to_selection(action) {
-                self.set_status_note(
-                    format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
-                    cx,
-                );
-            }
-            self.sync_app_menus(cx);
-            cx.notify();
+            self.apply_action_to_selection(action, cx);
             return;
         }
         let Some(id) = self.selected_message_id else {
@@ -1719,15 +1709,14 @@ impl RootView {
     /// next message would mark it read without it being asked for.
     fn apply_action_to_selection(
         &mut self,
-        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
-    ) -> rusqlite::Result<()> {
-        let mut result = Ok(());
-        for id in std::mem::take(&mut self.multi_selection) {
-            let outcome = self.act_on_message(id, &action);
-            if result.is_ok() {
-                result = outcome;
-            }
-        }
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = std::mem::take(&mut self.multi_selection);
+        self.run_bulk_action(ids.clone(), action, cx);
+        let ids: HashSet<i64> = ids.into_iter().collect();
+        self.list_messages
+            .retain(|message| !ids.contains(&message.id));
         self.clear_message_selection();
         self.reload_message_list();
         result
@@ -1737,30 +1726,73 @@ impl RootView {
     /// afterwards, because the rows stay listed (read state, star).
     fn apply_action_keeping_selection(
         &mut self,
-        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
-    ) -> rusqlite::Result<()> {
-        let mut result = Ok(());
-        for id in self.multi_selection.clone() {
-            let outcome = self.act_on_message(id, &action);
-            if result.is_ok() {
-                result = outcome;
-            }
-        }
-        self.reload_message_list();
-        self.last_reader_sig = None;
-        result
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_bulk_action(self.multi_selection.clone(), action, cx);
     }
 
-    /// Reports the outcome of a bulk toggle and redraws.
-    fn finish_bulk_toggle(&mut self, result: rusqlite::Result<()>, cx: &mut Context<Self>) {
-        if let Err(error) = result {
-            self.set_status_note(
-                format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
-                cx,
-            );
-        }
-        self.sync_app_menus(cx);
-        cx.notify();
+    /// Runs `action` on `ids` off the UI thread, on a connection of its own: each
+    /// message takes several disk writes, and a selection can hold every message of
+    /// a folder. Then reloads, reports the first error and wakes the workers.
+    fn run_bulk_action(
+        &self,
+        ids: Vec<i64>,
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let accounts: HashMap<i64, i64> = self
+            .list_messages
+            .iter()
+            .map(|message| (message.id, message.account_id))
+            .collect();
+        let path = self.db_path.clone();
+        let work = cx.background_spawn(async move {
+            let mut to_wake = HashSet::new();
+            let db = match storage::Database::open(&path) {
+                Ok(db) => db,
+                Err(error) => return (to_wake, Some(error)),
+            };
+            let mut first_error = None;
+            for id in ids {
+                match action(&db, id) {
+                    Ok(outcome) if outcome.needs_sync => {
+                        to_wake.extend(accounts.get(&id).copied());
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+            (to_wake, first_error)
+        });
+        cx.spawn(async move |this, cx| {
+            let (to_wake, error) = work.await;
+            this.update(cx, |this, cx| {
+                for account_id in to_wake {
+                    this.after_action(
+                        account_id,
+                        ActionOutcome {
+                            changed: true,
+                            needs_sync: true,
+                        },
+                    );
+                }
+                this.reload_message_list();
+                this.last_reader_sig = None;
+                if let Some(error) = error {
+                    this.set_status_note(
+                        format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
+                        cx,
+                    );
+                }
+                this.sync_app_menus(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Runs `action` on message `id` and hands its server work to the worker.
@@ -1850,8 +1882,9 @@ impl RootView {
         } else {
             vec![id]
         };
+        let chosen: HashSet<i64> = ids.iter().copied().collect();
         let sent_only = self.list_messages.iter().any(|message| {
-            ids.contains(&message.id) && commands::message_only_in_sent(&message.folders_csv)
+            chosen.contains(&message.id) && commands::message_only_in_sent(&message.folders_csv)
         });
         if sent_only || self.showing_sent() {
             return None;
@@ -1873,9 +1906,10 @@ impl RootView {
     pub(crate) fn toggle_message_read(&mut self, cx: &mut Context<Self>) {
         if let Some(bulk) = self.bulk_selection() {
             let read = bulk.has_unread;
-            let result =
-                self.apply_action_keeping_selection(|db, id| mail_actions::set_read(db, id, read));
-            self.finish_bulk_toggle(result, cx);
+            self.apply_action_keeping_selection(
+                move |db, id| mail_actions::set_read(db, id, read),
+                cx,
+            );
             return;
         }
         let Some(detail) = self.selected_detail.as_ref() else {
@@ -2939,10 +2973,10 @@ impl RootView {
     pub(crate) fn toggle_message_flag(&mut self, cx: &mut Context<Self>) {
         if let Some(bulk) = self.bulk_selection() {
             let starred = !bulk.all_starred;
-            let result = self.apply_action_keeping_selection(|db, id| {
-                mail_actions::set_starred(db, id, starred)
-            });
-            self.finish_bulk_toggle(result, cx);
+            self.apply_action_keeping_selection(
+                move |db, id| mail_actions::set_starred(db, id, starred),
+                cx,
+            );
             return;
         }
         let Some(detail) = self.selected_detail.as_ref() else {
@@ -7911,40 +7945,70 @@ mod tests {
         assert!(view.reader_detail().is_none());
     }
 
-    #[test]
-    fn bulk_toggles_keep_the_selection_and_cover_every_row() {
-        let (_dir, mut view) = test_view();
-        let ids: Vec<i64> = view.list_ids()[..2].to_vec();
-        view.apply_selection(ids.clone());
-
-        let starred = !view.bulk_selection().unwrap().all_starred;
-        assert!(starred);
-        view.apply_action_keeping_selection(|db, id| mail_actions::set_starred(db, id, starred))
-            .unwrap();
-        assert_eq!(view.multi_selection, ids);
-        assert!(view.bulk_selection().unwrap().all_starred);
-
-        view.apply_action_keeping_selection(|db, id| mail_actions::set_read(db, id, true))
-            .unwrap();
-        assert!(!view.bulk_selection().unwrap().has_unread);
-        for id in ids {
-            let detail = view.db.get_message(id).unwrap().unwrap();
-            assert!(detail.starred && !detail.unread);
-        }
+    fn bulk_view(
+        dir: &TempDir,
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<RootView>, Vec<i64>) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        let ids = view.read_with(cx, |view, _| view.list_ids()[..2].to_vec());
+        view.update(cx, |view, _| view.apply_selection(ids.clone()));
+        (view, ids)
     }
 
-    #[test]
-    fn bulk_restore_brings_trashed_rows_back() {
-        let (_dir, mut view) = test_view();
-        let ids: Vec<i64> = view.list_ids()[..2].to_vec();
-        view.apply_selection(ids.clone());
-        view.apply_action_to_selection(mail_actions::trash).unwrap();
-        view.apply_selection(ids.clone());
-        view.apply_action_to_selection(mail_actions::restore_from_trash)
-            .unwrap();
-        for id in ids {
-            assert_eq!(view.db.message_is_in_trash(id), Ok(false));
-        }
+    #[gpui::test]
+    fn bulk_toggles_keep_the_selection_and_cover_every_row(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = bulk_view(&dir, cx);
+        let starred = view.read_with(cx, |view, _| !view.bulk_selection().unwrap().all_starred);
+        assert!(starred);
+        view.update(cx, |view, cx| {
+            view.apply_action_keeping_selection(
+                move |db, id| mail_actions::set_starred(db, id, starred),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.multi_selection, ids);
+            assert!(view.bulk_selection().unwrap().all_starred);
+        });
+
+        view.update(cx, |view, cx| {
+            view.apply_action_keeping_selection(|db, id| mail_actions::set_read(db, id, true), cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(!view.bulk_selection().unwrap().has_unread);
+            for id in &ids {
+                let detail = view.db.get_message(*id).unwrap().unwrap();
+                assert!(detail.starred && !detail.unread);
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn bulk_restore_brings_trashed_rows_back(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = bulk_view(&dir, cx);
+        view.update(cx, |view, cx| {
+            view.apply_action_to_selection(mail_actions::trash, cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.apply_selection(ids.clone());
+            view.apply_action_to_selection(mail_actions::restore_from_trash, cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            for id in &ids {
+                assert_eq!(view.db.message_is_in_trash(*id), Ok(false));
+            }
+        });
     }
 
     #[test]
@@ -7967,8 +8031,28 @@ mod tests {
         assert_eq!(view.extended_selection(-1), Some(ids[0..=1].to_vec()));
     }
 
+    #[gpui::test]
+    fn bulk_action_reaches_every_row_and_clears_the_selection(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, chosen) = bulk_view(&dir, cx);
+        view.update(cx, |view, cx| {
+            view.apply_action_to_selection(mail_actions::trash, cx);
+            // Gone at once, even with the disk work still ahead.
+            assert!(view.multi_selection.is_empty());
+            assert_eq!(view.selected_message_id, None);
+            assert!(!view.list_messages.iter().any(|m| chosen.contains(&m.id)));
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            for id in &chosen {
+                assert_eq!(view.db.message_is_in_trash(*id), Ok(true));
+                assert!(!view.list_messages.iter().any(|m| m.id == *id));
+            }
+        });
+    }
+
     #[test]
-    fn bulk_action_reaches_every_row_and_clears_the_selection() {
+    fn an_arrow_out_of_a_multiple_selection_survives_the_next_reload() {
         let (_dir, mut view) = test_view();
         let ids = view.list_ids();
         view.apply_selection(vec![ids[0], ids[1]]);
