@@ -524,7 +524,7 @@ impl ComposeView {
 
     /// Whether the user typed something that replacing the content would lose.
     pub(crate) fn has_edits(&self) -> bool {
-        self.edited
+        self.edited || self.pending_attachment_loads > 0
     }
 
     fn mark_edited(&mut self, cx: &mut Context<Self>) {
@@ -2112,6 +2112,19 @@ mod tests {
                 view.subject.read(cx).content().to_string()
             })
             .expect("open")
+    }
+
+    #[gpui::test]
+    fn an_attachment_being_read_counts_as_an_edit(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (root, compose, cx) = composing("First", &dir.path().join("mail.db"), cx);
+        compose
+            .update(cx, |view, _, _| view.pending_attachment_loads = 1)
+            .expect("open");
+        root.update_in(cx, |root, window, cx| {
+            root.open_compose_with(Some(subject_init("Second")), window, cx);
+        });
+        assert_eq!(subject_of(compose, cx), "First");
     }
 
     #[gpui::test]
