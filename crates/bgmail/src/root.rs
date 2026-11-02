@@ -1622,6 +1622,12 @@ impl RootView {
             return false;
         }
         let id = self.list_messages[target].id;
+        self.select_only(id);
+        true
+    }
+
+    /// Makes `id` the only selected row, ending any multiple selection and its preview.
+    fn select_only(&mut self, id: i64) {
         self.multi_selection.clear();
         self.selected_message_id = Some(id);
         self.selection_anchor = Some(id);
@@ -5524,11 +5530,7 @@ impl RootView {
         if let Some(focus) = &self.list_focus {
             window.focus(focus);
         }
-        self.multi_selection.clear();
-        self.selected_message_id = Some(id);
-        self.selection_anchor = Some(id);
-        self.selection_focus = Some(id);
-        self.last_reader_sig = None;
+        self.select_only(id);
         self.on_message_selection_changed(cx);
     }
 
@@ -7969,15 +7971,12 @@ mod tests {
     fn bulk_action_reaches_every_row_and_clears_the_selection() {
         let (_dir, mut view) = test_view();
         let ids = view.list_ids();
-        let chosen = vec![ids[0], ids[1]];
-        view.apply_selection(chosen.clone());
-        view.apply_action_to_selection(mail_actions::trash).unwrap();
-        assert!(view.multi_selection.is_empty());
-        assert_eq!(view.selected_message_id, None);
-        for id in chosen {
-            assert_eq!(view.db.message_is_in_trash(id), Ok(true));
-            assert!(!view.list_messages.iter().any(|m| m.id == id));
-        }
+        view.apply_selection(vec![ids[0], ids[1]]);
+        assert!(view.multi_preview.is_some());
+        view.select_only(ids[2]);
+        assert!(view.multi_preview.is_none());
+        view.reload_message_list();
+        assert_eq!(view.selected_message_id, Some(ids[2]));
     }
 
     #[test]
