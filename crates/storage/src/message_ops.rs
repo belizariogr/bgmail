@@ -80,6 +80,18 @@ impl Database {
         self.set_message_folders(id, &updated)
     }
 
+    /// Takes the message out of `left` and into `joined`, keeping its other folders.
+    pub fn swap_message_folder(&self, id: i64, left: &str, joined: &str) -> rusqlite::Result<()> {
+        let Some((mut paths, _starred)) = self.load_message_folders(id)? else {
+            return Ok(());
+        };
+        paths.retain(|path| path != left);
+        paths.push(joined.to_string());
+        paths.sort();
+        paths.dedup();
+        self.set_message_folders(id, &paths)
+    }
+
     /// Moves the message to the Trash folder (keeps flagged membership when starred).
     pub fn move_message_to_trash(&self, id: i64) -> rusqlite::Result<()> {
         self.set_primary_folder(id, system::TRASH)

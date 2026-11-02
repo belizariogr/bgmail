@@ -404,9 +404,82 @@ fn move_to_folder_round(
     }))
 }
 
-/// Moves to the Archive folder (Gmail: All Mail, which sync maps there).
+/// Moves to the Archive folder (Gmail: All Mail, which sync maps there). A message
+/// with labels only leaves the Inbox and keeps them, as in Gmail (user decision).
 pub fn archive(db: &Database, message_id: i64) -> rusqlite::Result<ActionOutcome> {
+    if let Some(outcome) = archive_keeping_labels(db, message_id)? {
+        return Ok(outcome);
+    }
     move_to_folder(db, message_id, system::ARCHIVE)
+}
+
+/// [`archive`] for a message of an All Mail account that also has labels; `None`
+/// for any other, or with moves queued elsewhere, which [`move_to_folder`] re-points.
+fn archive_keeping_labels(
+    db: &Database,
+    message_id: i64,
+) -> rusqlite::Result<Option<ActionOutcome>> {
+    let Some((message, account)) = context(db, message_id)? else {
+        return Ok(None);
+    };
+    if is_local(&account) {
+        return Ok(None);
+    }
+    let folders = db.list_folders(account.id)?;
+    let Some(all_mail) = folders.iter().find(|folder| {
+        folder.path == system::ARCHIVE
+            && folder.role.as_deref() == Some("all")
+            && folder.remote_name.is_some()
+    }) else {
+        return Ok(None);
+    };
+    let inbox = folders.iter().find(|folder| folder.path == system::INBOX);
+    let locations = db.message_locations(message_id)?;
+    let has_label = locations.iter().any(|location| {
+        location.folder_id != all_mail.id && inbox.is_none_or(|i| i.id != location.folder_id)
+    });
+    if !has_label {
+        return Ok(None);
+    }
+    let queued = pending_moves(db, account.id, message_id)?;
+    if !queued.is_empty() {
+        // Already on its way out of the Inbox: going on would take the labels too.
+        let archiving = queued.iter().all(|queued| {
+            matches!(&queued.action, PendingAction::Move { to, .. }
+                if Some(to) == all_mail.remote_name.as_ref())
+        });
+        return Ok(archiving.then(ActionOutcome::default));
+    }
+    let Some(location) = locations
+        .iter()
+        .find(|location| inbox.is_some_and(|i| i.id == location.folder_id))
+    else {
+        // Out of the Inbox already: archived, as far as labels go.
+        return Ok(Some(ActionOutcome::default()));
+    };
+    let Some(from) = location.remote_name.clone() else {
+        return Ok(None);
+    };
+    let action = PendingAction::Move {
+        from,
+        uid: location.uid,
+        to: all_mail.remote_name.clone().unwrap_or_default(),
+        to_folder_id: all_mail.id,
+        uid_validity: db.folder_sync_state(location.folder_id)?.uid_validity,
+        message_id_hdr: message.message_id_hdr.clone(),
+    };
+    db.enqueue_op(
+        account.id,
+        action.kind(),
+        Some(message_id),
+        &action.encode(),
+    )?;
+    db.detach_location(message_id, location.folder_id)?;
+    db.swap_message_folder(message_id, system::INBOX, system::ARCHIVE)?;
+    Ok(Some(ActionOutcome {
+        changed: true,
+        needs_sync: true,
+    }))
 }
 
 /// Moves to Trash; a message already in Trash is deleted permanently.
@@ -808,6 +881,46 @@ mod tests {
             .all(|(_, action)| matches!(action, PendingAction::Move { to, .. } if to == "Trash")));
         assert!(fx.db.message_locations(id).unwrap().is_empty());
         assert_eq!(csv(&fx, id), ",sys:trash,");
+    }
+
+    /// A Gmail message in the Inbox and the `work` label.
+    fn labeled(fx: &Fx) -> i64 {
+        let id = message(fx, fx.inbox, 5, "a");
+        fx.db.attach_location(id, fx.work, 6).unwrap();
+        id
+    }
+
+    #[test]
+    fn archiving_only_takes_a_labeled_message_out_of_the_inbox() {
+        let fx = fixture(PROVIDER_GMAIL);
+        let id = labeled(&fx);
+        assert_eq!(archive(&fx.db, id).unwrap(), QUEUED);
+        let queued = ops(&fx);
+        assert_eq!(queued.len(), 1);
+        assert!(
+            matches!(&queued[0].1, PendingAction::Move { from, to, .. } if from == "INBOX" && to == "[Gmail]/All Mail")
+        );
+        assert_eq!(csv(&fx, id), ",sys:archive,user:Work,");
+        let locations = fx.db.message_locations(id).unwrap();
+        assert!(locations.iter().any(|l| l.folder_id == fx.work));
+        assert!(!locations.iter().any(|l| l.folder_id == fx.inbox));
+
+        // Already out of the Inbox: nothing left to do, and the label stays.
+        assert_eq!(archive(&fx.db, id).unwrap(), ActionOutcome::default());
+        assert_eq!(ops(&fx).len(), 1, "the queued move is enough");
+
+        let queued = ops(&fx).remove(0).0;
+        fx.db.complete_op(queued.id).unwrap();
+        assert_eq!(archive(&fx.db, id).unwrap(), ActionOutcome::default());
+        assert_eq!(csv(&fx, id), ",sys:archive,user:Work,");
+    }
+
+    #[test]
+    fn moving_and_trashing_still_leave_every_label() {
+        let fx = fixture(PROVIDER_GMAIL);
+        let id = labeled(&fx);
+        assert_eq!(trash(&fx.db, id).unwrap(), QUEUED);
+        assert_eq!(ops(&fx).len(), 2);
     }
 
     #[test]
