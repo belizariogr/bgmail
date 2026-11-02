@@ -1626,11 +1626,11 @@ impl RootView {
     /// Makes `id` the only selected row, ending any multiple selection and its preview.
     fn select_only(&mut self, id: i64) {
         self.multi_selection.clear();
+        self.multi_preview = None;
         self.selected_message_id = Some(id);
         self.selection_anchor = Some(id);
         self.selection_focus = Some(id);
         self.last_reader_sig = None;
-        true
     }
 
     /// Scrolls the message list so the selected row is visible.
@@ -1692,7 +1692,7 @@ impl RootView {
     fn run_message_action(
         &mut self,
         cx: &mut Context<Self>,
-        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome> + Send + 'static,
     ) {
         if !self.multi_selection.is_empty() {
             self.apply_action_to_selection(action, cx);
@@ -1704,9 +1704,9 @@ impl RootView {
         self.run_action_on_message(id, cx, action);
     }
 
-    /// Runs `action` on every row of a multiple selection, even if one fails
-    /// (the first error is returned), and leaves nothing selected: opening the
-    /// next message would mark it read without it being asked for.
+    /// Runs `action` on every row of a multiple selection, even if one fails (the
+    /// first error is reported), and leaves nothing selected: opening the next message
+    /// would mark it read without it being asked for. The rows leave the list now.
     fn apply_action_to_selection(
         &mut self,
         action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome> + Send + 'static,
@@ -1718,8 +1718,8 @@ impl RootView {
         self.list_messages
             .retain(|message| !ids.contains(&message.id));
         self.clear_message_selection();
-        self.reload_message_list();
-        result
+        self.sync_app_menus(cx);
+        cx.notify();
     }
 
     /// Runs `action` on every row of a multiple selection that stays selected
@@ -3876,6 +3876,15 @@ impl RootView {
         let Some(detail) = self.selected_detail.clone() else {
             return;
         };
+        // A reply can go without the body, but a forward would carry nothing at all.
+        if kind == ReplyKind::Forward && detail.body_state == storage::BODY_STATE_HEADERS {
+            if let Some(mail) = &self.mail {
+                mail.engine()
+                    .send(detail.account_id, Command::FetchBody(detail.id));
+            }
+            self.set_status_note(Key::StatusForwardNeedsBody.tr(cx.language()), cx);
+            return;
+        }
         let raw = self.db.message_raw(detail.id).ok().flatten();
         let parsed = raw
             .as_deref()
@@ -7911,6 +7920,31 @@ mod tests {
         view.list_messages.retain(|message| message.id == ids[1]);
         assert!(view.prune_multi_selection());
         assert_eq!(view.selected_message_id, Some(ids[1]));
+    }
+
+    #[gpui::test]
+    fn forwarding_waits_for_the_body(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        view.update_in(cx, |view, window, cx| {
+            let id = view.list_ids()[0];
+            let mut detail = view.db.get_message(id).unwrap().unwrap();
+            detail.body_state = storage::BODY_STATE_HEADERS;
+            view.selected_message_id = Some(id);
+            view.selected_detail = Some(detail);
+            view.reply_to_selected(ReplyKind::Forward, window, cx);
+            assert!(view.compose_window.is_none());
+            assert_eq!(
+                view.status_note.as_ref().map(|note| note.as_ref()),
+                Some(Key::StatusForwardNeedsBody.tr(Language::default()))
+            );
+        });
     }
 
     #[test]

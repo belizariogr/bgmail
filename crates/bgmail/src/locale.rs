@@ -170,6 +170,7 @@ pub enum Key {
     NoticeTooDeep,
     NoticeCrashed,
     StatusBodyFailed,
+    StatusForwardNeedsBody,
     StatusMessageSent,
     StatusSendFailed,
     StatusSentCopyFailed,
@@ -551,6 +552,8 @@ impl Key {
             (NoticeCrashed, P) => "O BGMail fechou ao exibir esta mensagem, por isso ela é exibida como texto simples.",
             (StatusBodyFailed, E) => "Could not download the message",
             (StatusBodyFailed, P) => "Não foi possível baixar a mensagem",
+            (StatusForwardNeedsBody, E) => "The message is still downloading. Try forwarding it again in a moment.",
+            (StatusForwardNeedsBody, P) => "A mensagem ainda está sendo baixada. Tente encaminhar de novo em instantes.",
             (StatusMessageSent, E) => "Message sent",
             (StatusMessageSent, P) => "Mensagem enviada",
             (StatusSentCopyFailed, E) => "Sent, but no copy could be saved in Sent",
@@ -1026,7 +1029,7 @@ mod tests {
         assert_eq!(Language::from_code(""), Language::default());
     }
 
-    const ALL_KEYS: [Key; 245] = [
+    const ALL_KEYS: [Key; 246] = [
         Key::ViewZoomIn,
         Key::ViewZoomOut,
         Key::ViewZoomReset,
@@ -1124,6 +1127,7 @@ mod tests {
         Key::PrintFrom,
         Key::PrintDate,
         Key::StatusBodyFailed,
+        Key::StatusForwardNeedsBody,
         Key::StatusMessageSent,
         Key::StatusSendFailed,
         Key::StatusSentCopyFailed,
