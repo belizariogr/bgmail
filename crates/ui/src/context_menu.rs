@@ -108,7 +108,9 @@ impl RenderOnce for ContextMenu {
                         handler,
                     } => h_flex()
                         .id(("context-menu-entry", ix))
-                        .w_full()
+                        .debug_selector(|| format!("context-menu-entry-{ix}"))
+                        // Stretched by the column, not `w_full`: a percentage has
+                        // nothing to resolve against in a menu sized by its content.
                         .gap_4()
                         .justify_between()
                         .px_2()
@@ -134,6 +136,38 @@ impl RenderOnce for ContextMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
+
+    struct Host;
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            // As the hosts use it: anchored, in a box that scrolls long menus.
+            div().child(gpui::deferred(
+                gpui::anchored().child(
+                    div().id("menu").max_h(px(400.0)).overflow_y_scroll().child(
+                        ContextMenu::new()
+                            .entry("A", |_, _, _| {})
+                            .entry_with_key_hint("Much longer entry", "Ctrl+A", |_, _, _| {}),
+                    ),
+                ),
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn entries_fill_the_width_of_the_menu(cx: &mut TestAppContext) {
+        cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
+        let (_, cx) = cx.add_window_view(|_, _| Host);
+        cx.run_until_parked();
+        let short = cx
+            .debug_bounds("context-menu-entry-0")
+            .expect("short entry");
+        let long = cx.debug_bounds("context-menu-entry-1").expect("long entry");
+        assert_eq!(short.size.width, long.size.width);
+        // At least the menu's minimum, less its padding (4px) and border (1px).
+        assert!(short.size.width >= px(190.0), "{:?}", short.size.width);
+    }
 
     #[test]
     fn separators_only_follow_entries() {
