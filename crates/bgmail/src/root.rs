@@ -2357,6 +2357,14 @@ impl RootView {
 
     /// Puts an unsent message back in the queue and wakes its worker.
     pub(crate) fn retry_unsent(&mut self, id: i64, cx: &mut Context<Self>) {
+        // The original would go out, and then the edited copy too.
+        let being_edited = self
+            .with_compose_window(cx, |view, _, _| view.replaces_outgoing() == Some(id))
+            .unwrap_or(false);
+        if being_edited {
+            self.set_status_note(Key::UnsentBeingEdited.tr(cx.language()), cx);
+            return;
+        }
         let account_id = self
             .unsent
             .iter()
@@ -2382,6 +2390,17 @@ impl RootView {
     /// closing compose loses nothing. A row still being retried stops first: the
     /// unedited message mustn't go out while it is being edited.
     pub(crate) fn edit_unsent(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        // Checked first: refused here, the message must go on being retried.
+        let busy = self
+            .with_compose_window(cx, |view, window, _| {
+                window.activate_window();
+                view.has_edits()
+            })
+            .unwrap_or(false);
+        if busy {
+            self.set_status_note(Key::StatusComposeBusy.tr(cx.language()), cx);
+            return;
+        }
         if let Err(error) = self.db.stop_outgoing(id) {
             self.report_unsent_error(error, cx);
             return;

@@ -317,6 +317,7 @@ pub enum Key {
     UnsentMaybeSent,
     UnsentRetrying,
     UnsentBusy,
+    UnsentBeingEdited,
     UnsentRetry,
     UnsentEdit,
     UnsentDiscardDetail,
@@ -857,6 +858,8 @@ impl Key {
             (UnsentRetrying, P) => "Ainda tentando enviar",
             (UnsentBusy, E) => "This message is being sent right now",
             (UnsentBusy, P) => "Esta mensagem está sendo enviada agora",
+            (UnsentBeingEdited, E) => "This message is open for editing: send or close it first",
+            (UnsentBeingEdited, P) => "Esta mensagem está aberta para edição: envie ou feche antes",
             (UnsentRetry, E) => "Retry",
             (UnsentRetry, P) => "Tentar novamente",
             (UnsentEdit, E) => "Edit",
@@ -1035,7 +1038,7 @@ mod tests {
         assert_eq!(Language::from_code(""), Language::default());
     }
 
-    const ALL_KEYS: [Key; 248] = [
+    const ALL_KEYS: [Key; 249] = [
         Key::ViewZoomIn,
         Key::ViewZoomOut,
         Key::ViewZoomReset,
@@ -1280,6 +1283,7 @@ mod tests {
         Key::UnsentMaybeSent,
         Key::UnsentRetrying,
         Key::UnsentBusy,
+        Key::UnsentBeingEdited,
         Key::UnsentRetry,
         Key::UnsentEdit,
         Key::UnsentDiscardDetail,

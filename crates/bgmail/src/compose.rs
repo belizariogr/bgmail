@@ -512,6 +512,16 @@ impl ComposeView {
         }
     }
 
+    /// The unsent message this one was opened to edit.
+    pub(crate) fn replaces_outgoing(&self) -> Option<i64> {
+        self.replaces_outgoing
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_edited_for_tests(&mut self, cx: &mut Context<Self>) {
+        self.mark_edited(cx);
+    }
+
     /// Whether the user typed something that replacing the content would lose.
     pub(crate) fn has_edits(&self) -> bool {
         self.edited
