@@ -720,7 +720,7 @@ impl ComposeView {
     /// Discards the message: closes right away when nothing was edited,
     /// otherwise after the user confirms.
     pub(crate) fn discard_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.edited {
+        if !self.has_edits() {
             self.close_window(window, cx);
             return;
         }
@@ -2125,6 +2125,12 @@ mod tests {
             root.open_compose_with(Some(subject_init("Second")), window, cx);
         });
         assert_eq!(subject_of(compose, cx), "First");
+
+        // Closing and quitting ask too, rather than dropping it.
+        assert!(!root.update(cx, |root, cx| root.may_quit(cx)));
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        assert!(root.read_with(cx, |root, _| root.compose_window_for_tests().is_some()));
     }
 
     #[gpui::test]
