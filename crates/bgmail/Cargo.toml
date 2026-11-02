@@ -42,6 +42,7 @@ serde_json.workspace = true
 # (not regex) so malformed markup can't smuggle through the elements a reader
 # must never render (scripts, frames, media, editable controls).
 lol_html = "3.0.0"
+html-escape = "0.2"
 
 # macOS-only: GPUI 0.2 doesn't implement `start_window_move` on macOS, so we
 # drag the window via AppKit's `performWindowDragWithEvent:` using the native

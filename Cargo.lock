@@ -583,6 +583,7 @@ dependencies = [
  "core-foundation 0.10.0",
  "embed-resource",
  "gpui",
+ "html-escape",
  "html_view",
  "lol_html",
  "mail_core",

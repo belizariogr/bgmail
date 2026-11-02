@@ -72,7 +72,11 @@ pub fn email_document(
     // Keep the message's own doctype: a legacy one selects the (quirks)
     // rendering mode its layout was written for.
     let doctype = match body {
-        MessageBody::Html(html) => leading_doctype(html),
+        // A doctype holding a `<` is no doctype but markup, which could displace the
+        // tags this page relies on (its Content-Security-Policy, for one).
+        MessageBody::Html(html) => {
+            leading_doctype(html).filter(|doctype| !doctype[1..].contains('<'))
+        }
         MessageBody::Text(_) => None,
     }
     .unwrap_or("<!DOCTYPE html>");
@@ -328,7 +332,8 @@ const DISALLOWED_ELEMENTS: &str = "script, object, embed, applet, \
      video, audio, source, track, \
      input, textarea, select, button, form, \
      base, meta, link, canvas, dialog, portal, \
-     foreignobject, animate, animatetransform, animatemotion, set";
+     foreignobject, animate, animatetransform, animatemotion, set, \
+     math, template";
 
 /// URL-bearing attributes whose value we vet against dangerous schemes.
 const URL_ATTRIBUTES: &[&str] = &[
@@ -392,6 +397,9 @@ fn sanitize_html_inner(
     use lol_html::{element, rewrite_str, text, RewriteStrSettings};
     use std::cell::{Cell, RefCell};
 
+    // The parser takes what is inside a CDATA section as text when it thinks it is in an
+    // SVG, and a browser that thinks otherwise reads tags there, which nothing checked.
+    let without_cdata = html.replace("<![CDATA[", "").replace("]]>", "");
     let has_remote = Cell::new(false);
     let blocked = Cell::new(0usize);
     // `<style>` text arrives in chunks (a `url(` may straddle two): buffer it
@@ -436,7 +444,7 @@ fn sanitize_html_inner(
             Ok(())
         }));
 
-    let html = rewrite_str(html, settings).unwrap_or_default();
+    let html = rewrite_str(&without_cdata, settings).unwrap_or_default();
     (html, has_remote.get(), blocked.get())
 }
 
@@ -506,6 +514,7 @@ fn neutralize_attributes(
     shown: &HashSet<String>,
 ) -> Option<bool> {
     let is_img = el.tag_name() == "img";
+    let is_svg_image = matches!(el.tag_name().as_str(), "image" | "feimage");
     // `attributes()` borrows the element, so collect everything we need first and
     // only mutate (`remove_attribute`/`set_attribute`) once the borrow is released.
     let mut blocked_img_src = None;
@@ -515,17 +524,20 @@ fn neutralize_attributes(
         .iter()
         .filter_map(|attr| {
             let name = attr.name(); // lower-cased by the parser
-            let value = attr.value();
+            let raw_value = attr.value();
+            // As a browser will read it: `&#106;avascript:` is `javascript:`.
+            let value = decoded_attribute(&raw_value);
             let is_url_attr = URL_ATTRIBUTES.contains(&name.as_str());
             // A remote `<img src>` is what the reader surfaces and lets the user
             // unblock one at a time, so track it (and honor the `shown` allowlist).
             let img_src_remote = is_img && name == "src" && is_url_attr && is_remote_url(&value);
-            let shown_here = img_src_remote && shown.contains(value.as_str());
+            let shown_here =
+                img_src_remote && (shown.contains(&raw_value) || shown.contains(value.as_str()));
             if img_src_remote {
                 let blocked = !load_remote && !shown_here;
                 img_state = Some(blocked);
                 if blocked {
-                    blocked_img_src = Some(value.clone());
+                    blocked_img_src = Some(raw_value.clone());
                 }
             }
             // Only resource-loading attributes are blocked for remoteness;
@@ -533,8 +545,13 @@ fn neutralize_attributes(
             let is_remote = (RESOURCE_ATTRIBUTES.contains(&name.as_str()) && is_remote_url(&value))
                 || (name == "srcset" && !value.trim().is_empty());
             let remote_blocked = is_remote && !load_remote && !shown_here;
+            // Nothing in an SVG reads outside the message: its images come inline.
+            let svg_file = is_svg_image
+                && matches!(name.as_str(), "href" | "xlink:href")
+                && !is_inline_raster(&value);
             let drop = name.starts_with("on")
                 || name == "contenteditable"
+                || svg_file
                 || (is_url_attr && is_dangerous_url(&value))
                 || (name == "style" && style_has_script_vector(&value))
                 || remote_blocked;
@@ -549,6 +566,52 @@ fn neutralize_attributes(
         let _ = el.set_attribute("data-rm-blocked-src", &src);
     }
     img_state
+}
+
+/// An attribute value with its character references decoded, which the parser leaves
+/// as written. Numeric ones count without their `;`, as in browsers.
+fn decoded_attribute(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(amp) = rest.find("&#") {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 2..];
+        let (radix, digits) = match after.strip_prefix(['x', 'X']) {
+            Some(hex) => (16, hex),
+            None => (10, after),
+        };
+        let end = digits
+            .find(|c: char| !c.is_digit(radix))
+            .unwrap_or(digits.len());
+        match u32::from_str_radix(&digits[..end], radix)
+            .ok()
+            .and_then(char::from_u32)
+        {
+            Some(decoded) => {
+                out.push(decoded);
+                let tail = &digits[end..];
+                rest = tail.strip_prefix(';').unwrap_or(tail);
+            }
+            None => {
+                out.push_str("&#");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    html_escape::decode_html_entities(&out).into_owned()
+}
+
+/// Whether `value` is a `data:` raster image.
+fn is_inline_raster(value: &str) -> bool {
+    value
+        .trim_start()
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+        && !is_dangerous_url(value)
 }
 
 /// Whether a URL value uses a scheme that can execute or load active content.
@@ -810,6 +873,84 @@ fn escape_html(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_doctype_holding_markup_cannot_move_the_print_policy() {
+        let body = MessageBody::Html(
+            "<!DOCTYPE <body><math><mtext><mglyph><style><img src=x onerror=alert(1)>".into(),
+        );
+        let header = PrintHeader {
+            subject: "s",
+            from_label: "f",
+            from: "a",
+            date_label: "d",
+            date: "t",
+        };
+        let page = print_document(&header, &body, "nonce", false);
+        assert!(!page.to_ascii_lowercase().starts_with("<!doctype <"));
+        let policy = page.find("Content-Security-Policy").expect("policy");
+        assert!(policy < page.find("</head>").expect("head"));
+        assert!(page.find("</head>") < page.find("<body>"));
+        assert!(!page.contains("onerror"));
+    }
+
+    #[test]
+    fn markup_that_parses_differently_in_a_browser_is_dropped() {
+        for payload in [
+            "<math><mtext><mglyph><style><img src=x onerror=alert(1)>",
+            "<math><mi><malignmark><style><img src=x onerror=alert(1)>",
+            "<template><svg></template><![CDATA[><img src=x onerror=alert(1)>]]>",
+        ] {
+            let clean = sanitize_html(payload, false);
+            assert!(!clean.contains("onerror"), "{payload}: {clean}");
+        }
+    }
+
+    #[test]
+    fn attribute_values_are_judged_with_their_references_decoded() {
+        for href in [
+            "&#106;avascript:alert(1)",
+            "&#106avascript:alert(1)",
+            "&#x6A;avascript:alert(1)",
+            "javascript&colon;alert(1)",
+            "java&Tab;script:alert(1)",
+        ] {
+            let clean = sanitize_html(&format!("<a href=\"{href}\">x</a>"), false);
+            assert!(!clean.contains("href"), "{href}: {clean}");
+        }
+        let clean = sanitize_html("<img src=\"&#104;ttps://tracker.test/p.png\">", false);
+        assert!(!clean.contains(" src="), "{clean}");
+        assert!(clean.contains("data-rm-blocked-src"), "{clean}");
+
+        assert_eq!(
+            decoded_attribute("https://a.test/?x=1"),
+            "https://a.test/?x=1"
+        );
+        assert_eq!(decoded_attribute("&#bad"), "&#bad");
+        let kept = sanitize_html("<a href=\"https://a.test/?a=1&amp;b=2\">x</a>", false);
+        assert!(
+            kept.contains("href=\"https://a.test/?a=1&amp;b=2\""),
+            "{kept}"
+        );
+    }
+
+    #[test]
+    fn an_svg_image_only_comes_inline() {
+        for href in [
+            "/dev/zero",
+            "https://tracker.test/p.png",
+            "\\\\host\\share\\x.png",
+        ] {
+            let clean = sanitize_html(&format!("<svg><image href=\"{href}\"/></svg>"), true);
+            assert!(!clean.contains("href"), "{href}: {clean}");
+        }
+        let inline = "data:image/png;base64,AAAA";
+        let clean = sanitize_html(&format!("<svg><image href=\"{inline}\"/></svg>"), false);
+        assert!(clean.contains(inline), "{clean}");
+        // A reference inside the SVG itself isn't an image.
+        let clean = sanitize_html("<svg><use href=\"#a\"/></svg>", false);
+        assert!(clean.contains("href=\"#a\""), "{clean}");
+    }
 
     #[test]
     fn only_dark_pages_adapt_text() {
