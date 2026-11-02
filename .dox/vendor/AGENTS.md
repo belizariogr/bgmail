@@ -37,6 +37,9 @@ repository instead of living in someone's checkout.
   menu position, client inset) is multiplied again. `Window::content_scale`,
   `Window::platform_viewport_size` expose it. `window_bounds`/`bounds` stay in
   platform coordinates.
+  `platform/test/window.rs`: `TestWindow`'s window handle is an error instead of a
+  panic, which took down any test reaching native code on Windows
+  (`set_native_text_focus`).
 - `blitz` (HTML e-mail fidelity, measured in `spikes/html_render`):
   - `layout/table.rs`: non-cell children of a row become anonymous cells
     (`<td style="display:block">`); browser automatic table layout

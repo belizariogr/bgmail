@@ -38,7 +38,9 @@ impl HasWindowHandle for TestWindow {
     fn window_handle(
         &self,
     ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-        unimplemented!("Test Windows are not backed by a real platform window")
+        // BGMail: an error instead of a panic, so native code behind `#[cfg(windows)]`
+        // runs its "no handle" path under test, as it would without a window.
+        Err(raw_window_handle::HandleError::Unavailable)
     }
 }
 
