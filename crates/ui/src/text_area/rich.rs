@@ -227,6 +227,13 @@ impl RichText {
         inserted: &str,
         typed: CharStyle,
     ) {
+        // A line break on both sides isn't an edit of the line after it.
+        let (removed, inserted) = match inserted.strip_suffix('\n') {
+            Some(shorter) if old[removed.clone()].ends_with('\n') => {
+                (removed.start..removed.end - 1, shorter)
+            }
+            _ => (removed, inserted),
+        };
         let start = removed.start;
         let line = old[..start].matches('\n').count();
         let removed_lines = old[removed.clone()].matches('\n').count();
@@ -544,6 +551,18 @@ mod tests {
             .into_iter()
             .map(|(range, style)| (text[range].to_string(), style.bold))
             .collect()
+    }
+
+    #[test]
+    fn replacing_a_whole_line_leaves_the_next_one_alone() {
+        let text = "AAA\nBBB\nCCC";
+        for inserted in ["\n", "X\n"] {
+            let mut rich = RichText::new(text);
+            rich.update_paras(1..2, |para| para.align = Align::Center);
+            rich.update_paras(2..3, |para| para.align = Align::Right);
+            rich.apply_edit_at(text, 4..8, inserted, CharStyle::default());
+            assert_eq!(rich.para(2).align, Align::Right, "{inserted:?}");
+        }
     }
 
     #[test]
