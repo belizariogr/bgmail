@@ -2899,6 +2899,10 @@ impl RootView {
 
     /// Whether the list shows a Trash folder, whose rows offer no delete button.
     fn showing_sent(&self) -> bool {
+        // Results come from every folder, whichever one the search started from.
+        if self.searching() {
+            return false;
+        }
         match &self.selected_mailbox {
             Selection::Global(mailbox) => *mailbox == GlobalMailbox::Sent,
             Selection::Mailbox { folder_path, .. } => folder_path == storage::system::SENT,
@@ -2906,10 +2910,30 @@ impl RootView {
     }
 
     fn showing_trash(&self) -> bool {
+        if self.searching() {
+            return self.selection_all_in_trash();
+        }
         matches!(
             &self.selected_mailbox,
             Selection::Mailbox { folder_path, .. } if folder_path == storage::system::TRASH
         )
+    }
+
+    fn searching(&self) -> bool {
+        !self.last_search_query.trim().is_empty()
+    }
+
+    /// Whether every row of a multiple selection is in the Trash.
+    fn selection_all_in_trash(&self) -> bool {
+        let selected: HashSet<i64> = self.multi_selection.iter().copied().collect();
+        !selected.is_empty()
+            && self
+                .list_messages
+                .iter()
+                .filter(|message| selected.contains(&message.id))
+                .all(|message| {
+                    storage::message_has_folder(&message.folders_csv, storage::system::TRASH)
+                })
     }
 
     /// Asks before deleting `ids` for good, then deletes the ones still in the
@@ -7976,6 +8000,73 @@ mod tests {
             assert_eq!(row.state, OutgoingState::Failed);
             assert!(view.compose_window.is_some());
         });
+    }
+
+    #[gpui::test]
+    fn an_unsent_message_being_edited_is_left_alone(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        let raw: &[u8] = b"Subject: s\r\n\r\nb";
+        let ids = view.update_in(cx, |view, window, cx| {
+            let account = view.accounts[0].id;
+            let queue = || {
+                let id = view
+                    .db
+                    .enqueue_outgoing(account, "a@x.com", &["b@x.com".into()], raw, None)
+                    .unwrap();
+                view.db
+                    .defer_outgoing(id, "connect", 9_999_999_999)
+                    .unwrap();
+                id
+            };
+            let ids = (queue(), queue());
+            view.edit_unsent(ids.0, window, cx);
+            ids
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            // Retrying what compose holds would send both versions.
+            view.retry_unsent(ids.0, cx);
+            let row = view.db.outgoing(ids.0).unwrap().unwrap();
+            assert_eq!(row.state, OutgoingState::Failed);
+            assert_eq!(
+                view.status_note.as_ref().map(|note| note.as_ref()),
+                Some(Key::UnsentBeingEdited.tr(Language::default()))
+            );
+
+            // Compose busy with edits: the other message keeps being retried.
+            view.compose_window
+                .unwrap()
+                .update(cx, |compose, _, cx| compose.mark_edited_for_tests(cx))
+                .unwrap();
+            view.edit_unsent(ids.1, window, cx);
+            let row = view.db.outgoing(ids.1).unwrap().unwrap();
+            assert_eq!(row.state, OutgoingState::Queued);
+        });
+    }
+
+    #[test]
+    fn a_search_is_not_held_to_the_rules_of_the_folder_it_started_from() {
+        let (_dir, mut view) = test_view();
+        view.apply_mailbox_selection(Selection::Global(GlobalMailbox::Sent));
+        assert!(view.showing_sent());
+        view.last_search_query = "x".into();
+        assert!(!view.showing_sent());
+        assert!(!view.showing_trash());
+
+        let ids = view.list_ids();
+        view.multi_selection = vec![ids[0], ids[1]];
+        view.list_messages[0].folders_csv = ",sys:trash,".into();
+        view.list_messages[1].folders_csv = ",sys:inbox,".into();
+        assert!(!view.showing_trash());
+        view.list_messages[1].folders_csv = ",sys:trash,".into();
+        assert!(view.showing_trash());
     }
 
     #[gpui::test]
