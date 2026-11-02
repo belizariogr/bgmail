@@ -3732,7 +3732,7 @@ impl RootView {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(520.0), px(420.0))),
             titlebar: Some(TitlebarOptions {
-                title: Some("BGMail Settings".into()),
+                title: Some(Key::SettingsTitle.tr(cx.language()).into()),
                 appears_transparent: false,
                 traffic_light_position: None,
             }),
@@ -5595,8 +5595,12 @@ impl RootView {
         let Some(bar) = &self.find_bar else {
             return div().into_any_element();
         };
-        let colors = cx.theme().colors();
         let language = cx.language();
+        // The bar can stay open across a change of language.
+        bar.input.update(cx, |input, _| {
+            input.set_placeholder(Key::FindPlaceholder.tr(language));
+        });
+        let colors = cx.theme().colors();
         let status = if bar.input.read(cx).content().is_empty() {
             String::new()
         } else if bar.count == 0 {

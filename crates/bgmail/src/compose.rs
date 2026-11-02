@@ -1716,6 +1716,13 @@ fn compose_body_colors(white_background: bool) -> (Option<Hsla>, Option<Hsla>) {
 
 impl Render for ComposeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = cx.language();
+        self.to.update(cx, |to, cx| {
+            to.set_placeholder(Key::ComposeFieldPlaceholder.tr(language), cx);
+        });
+        self.body.update(cx, |body, _| {
+            body.set_placeholder(Key::ComposeBodyPlaceholder.tr(language));
+        });
         if let WindowBounds::Windowed(bounds) = window.window_bounds() {
             let origin = bounds.origin;
             let size = bounds.size;
@@ -2054,6 +2061,128 @@ mod tests {
             mime_type: mail_core::guess_mime_type(name).into(),
             data: vec![0; len],
         }
+    }
+
+    fn subject_init(subject: &str) -> ComposeInit {
+        ComposeInit {
+            draft: mail_core::Draft {
+                subject: subject.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A main window with the compose window open on `subject`.
+    fn composing<'a>(
+        subject: &str,
+        path: &std::path::Path,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (
+        Entity<RootView>,
+        WindowHandle<ComposeView>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            crate::locale::init(Language::default(), cx);
+        });
+        let (root, cx) = cx.add_window_view(|_, _| RootView::for_tests(path));
+        root.update_in(cx, |root, window, cx| {
+            root.open_compose_with(Some(subject_init(subject)), window, cx);
+        });
+        cx.run_until_parked();
+        let compose = root.read_with(cx, |root, _| root.compose_window_for_tests());
+        (root, compose.expect("the compose window opened"), cx)
+    }
+
+    fn subject_of(compose: WindowHandle<ComposeView>, cx: &mut gpui::VisualTestContext) -> String {
+        compose
+            .update(cx, |view, _, cx| {
+                view.subject.read(cx).content().to_string()
+            })
+            .expect("open")
+    }
+
+    #[gpui::test]
+    fn a_reply_replaces_only_an_untouched_message(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (root, compose, cx) = composing("First", &dir.path().join("mail.db"), cx);
+        root.update_in(cx, |root, window, cx| {
+            root.open_compose_with(Some(subject_init("Second")), window, cx);
+        });
+        assert_eq!(subject_of(compose, cx), "Second");
+
+        compose
+            .update(cx, |view, _, cx| view.mark_edited(cx))
+            .expect("open");
+        root.update_in(cx, |root, window, cx| {
+            root.open_compose_with(Some(subject_init("Third")), window, cx);
+            assert!(root.status_note_for_tests().is_some());
+        });
+        assert_eq!(subject_of(compose, cx), "Second");
+        compose
+            .update(cx, |view, _, _| assert!(view.has_edits()))
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn closing_a_message_being_written_asks_first(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let (root, compose, cx) = composing("First", &path, cx);
+        compose
+            .update(cx, |view, _, cx| view.mark_edited(cx))
+            .expect("open");
+        compose
+            .update(cx, |_, window, cx| {
+                window.dispatch_action(Box::new(ComposeClose), cx);
+            })
+            .expect("open");
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer(Key::ComposeCancelButton.tr(Language::default()));
+        cx.run_until_parked();
+        assert!(root.read_with(cx, |root, _| root.compose_window_for_tests().is_some()));
+
+        // Quitting asks too, and doesn't go ahead by itself.
+        let may_quit = root.update(cx, |root, cx| root.may_quit(cx));
+        assert!(!may_quit);
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer(Key::ComposeDiscardButton.tr(Language::default()));
+        cx.run_until_parked();
+        assert!(root.read_with(cx, |root, _| root.compose_window_for_tests().is_none()));
+        assert!(root.update(cx, |root, cx| root.may_quit(cx)));
+    }
+
+    #[gpui::test]
+    fn an_untouched_message_closes_and_quits_without_asking(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let (root, _compose, cx) = composing("First", &path, cx);
+        assert!(root.update(cx, |root, cx| root.may_quit(cx)));
+        assert!(!cx.has_pending_prompt());
+    }
+
+    #[gpui::test]
+    fn the_placeholders_follow_the_language(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_root, compose, cx) = composing("First", &dir.path().join("mail.db"), cx);
+        cx.update(|_, cx| crate::locale::set_language(Language::Portuguese, cx));
+        cx.run_until_parked();
+        compose
+            .update(cx, |view, _, cx| {
+                assert_eq!(
+                    view.body.read(cx).placeholder().as_ref(),
+                    Key::ComposeBodyPlaceholder.tr(Language::Portuguese)
+                );
+                assert_eq!(
+                    view.to.read(cx).placeholder().as_ref(),
+                    Key::ComposeFieldPlaceholder.tr(Language::Portuguese)
+                );
+            })
+            .expect("open");
     }
 
     #[test]

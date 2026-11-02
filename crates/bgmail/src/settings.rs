@@ -113,6 +113,17 @@ struct AccountForm {
 }
 
 impl AccountForm {
+    /// Translates the placeholders; the fields' values stay as typed.
+    fn apply_language(&self, language: Language, cx: &mut App) {
+        for (field, key) in [
+            (&self.name, Key::AccountNamePlaceholder),
+            (&self.sender_name, Key::AccountSenderPlaceholder),
+            (&self.email, Key::AccountEmailPlaceholder),
+        ] {
+            field.update(cx, |field, _| field.set_placeholder(key.tr(language)));
+        }
+    }
+
     fn new(language: Language, cx: &mut Context<SettingsView>) -> Self {
         let mut input = |placeholder: &str| {
             let placeholder = placeholder.to_string();
@@ -258,6 +269,8 @@ pub(crate) struct SettingsView {
     /// Re-renders this window when the main view changes (account list, sync
     /// status, preferences toggled elsewhere).
     root_observation: Option<Subscription>,
+    /// The language the window title is in.
+    title_language: Option<Language>,
     /// Created on first use of the Accounts section (needs a context).
     form: Option<AccountForm>,
     /// Whether the user opened the form ("Add account…"). With no remote
@@ -286,6 +299,7 @@ impl SettingsView {
             section: SettingsSection::General,
             root,
             root_observation: None,
+            title_language: None,
             form: None,
             form_open: false,
             password_edit: None,
@@ -1670,6 +1684,11 @@ impl Drop for SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The form can outlive a change of language: the first-run setup offers one
+        // a step before it.
+        if let Some(form) = &self.form {
+            form.apply_language(cx.language(), cx);
+        }
         if self.root_observation.is_none() {
             if let Some(root) = self.root.upgrade() {
                 self.root_observation = Some(cx.observe(&root, |_, _, cx| cx.notify()));
@@ -1680,6 +1699,11 @@ impl Render for SettingsView {
                 self.form = Some(AccountForm::new(cx.language(), cx));
             }
             return self.render_form(false, window, cx).into_any_element();
+        }
+        let language = cx.language();
+        if self.title_language != Some(language) {
+            self.title_language = Some(language);
+            window.set_window_title(Key::SettingsTitle.tr(language));
         }
         let colors = cx.theme().colors();
 
@@ -1869,6 +1893,14 @@ fn message_element(message: &FailureMessage, language: Language) -> impl IntoEle
                     .color(Color::Muted),
             )
         })
+}
+
+#[cfg(test)]
+impl SettingsView {
+    pub(crate) fn form_email_placeholder(&self, cx: &App) -> Option<String> {
+        let form = self.form.as_ref()?;
+        Some(form.email.read(cx).placeholder().to_string())
+    }
 }
 
 #[cfg(test)]

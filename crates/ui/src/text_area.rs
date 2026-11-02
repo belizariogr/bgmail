@@ -716,6 +716,11 @@ impl TextArea {
         self.move_to(offset, cx);
     }
 
+    /// The placeholder shown while the area is empty.
+    pub fn placeholder(&self) -> &SharedString {
+        &self.placeholder
+    }
+
     /// Updates the placeholder shown while the area is empty.
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>) {
         self.placeholder = placeholder.into();

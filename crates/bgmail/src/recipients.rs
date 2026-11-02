@@ -179,6 +179,22 @@ impl RecipientInput {
     }
 
     /// The hint only makes sense while there are no cards.
+    /// The hint shown while the field has no cards.
+    #[cfg(test)]
+    pub fn placeholder(&self) -> &SharedString {
+        &self.placeholder
+    }
+
+    /// Changes the hint shown while the field has no cards.
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder = placeholder.into();
+        self.sync_placeholder(cx);
+    }
+
     fn sync_placeholder(&mut self, cx: &mut Context<Self>) {
         let placeholder = placeholder_for(&self.placeholder, &self.addresses);
         self.input.update(cx, |input, cx| {

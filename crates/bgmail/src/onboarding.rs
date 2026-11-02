@@ -896,6 +896,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_account_form_follows_a_language_chosen_after_it_was_created(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init(cx);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let root = cx.new(|_| RootView::for_tests(&path));
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            let mut view = OnboardingView::new(root, cx);
+            view.step = OnboardingStep::Account;
+            view
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            crate::locale::set_language(crate::locale::Language::Portuguese, cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            assert_eq!(
+                view.account_form.read(cx).form_email_placeholder(cx),
+                Some(
+                    crate::locale::Key::AccountEmailPlaceholder
+                        .tr(crate::locale::Language::Portuguese)
+                        .to_string()
+                )
+            );
+        });
+    }
+
+    #[gpui::test]
     fn every_step_renders(cx: &mut gpui::TestAppContext) {
         init(cx);
         let dir = tempfile::tempdir().expect("tempdir");

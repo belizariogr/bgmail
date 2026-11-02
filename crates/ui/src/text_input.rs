@@ -336,6 +336,11 @@ impl TextInput {
         cx.notify();
     }
 
+    /// The placeholder shown when the field is empty.
+    pub fn placeholder(&self) -> &SharedString {
+        &self.placeholder
+    }
+
     /// Updates the placeholder shown when the field is empty.
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>) {
         self.placeholder = placeholder.into();
