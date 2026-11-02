@@ -22,6 +22,7 @@ Continuous integration on the three desktop platforms and release packaging
     pkg-config), then `cargo fmt --all --check`,
     `cargo clippy --workspace --all-targets -- -D warnings`,
     `cargo test --workspace --no-fail-fast` (one failing crate must not hide the others on platforms nobody runs locally).
+  - The Linux job also runs `script/test-install`.
   - `macos` (macos-15) and `windows` (windows-latest): `cargo build -p bgmail`
     + `cargo test --workspace --no-fail-fast`.
   - `greenmail` (ubuntu-22.04): GreenMail `greenmail/standalone:2.1.15`

@@ -412,6 +412,8 @@
 - ⬜ Known limitation: on servers without MOVE, if COPY works and the expunge
       fails, each replay leaves another copy in the target. Accepted: skipping
       the copy could lose mail another client flagged `\Deleted`
+- ✅ Linux install scripts as in Zed (`script/`): tarball into `~/.local`
+      (from a release or this checkout), or system-wide into `/usr`
 - ⬜ Threads/conversations view (thread ids are stored; list is flat)
 
 ## Stage 5 — Polish

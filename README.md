@@ -73,6 +73,17 @@ for confirmation. On Linux, account passwords are stored through the Secret
 Service, so a keyring (GNOME Keyring, KWallet ≥ 5.97, KeePassXC…) must be
 running.
 
+On Linux, these scripts install without a package manager (same layout as
+Zed's). Only the system-wide one needs root:
+
+```bash
+curl -fL https://github.com/belizariogr/bgmail/releases/latest/download/install.sh | sh  # latest release, into ~/.local
+script/install-linux            # build this checkout, into ~/.local
+script/install-linux-system     # build this checkout, into /usr (asks for sudo)
+script/uninstall.sh             # remove the ~/.local install; asks before deleting mail
+script/install-linux-system --uninstall
+```
+
 To build packages locally, use [cargo-packager](https://github.com/crabnebula-dev/cargo-packager)
 (configured in `[package.metadata.packager]` of `crates/bgmail/Cargo.toml`):
 

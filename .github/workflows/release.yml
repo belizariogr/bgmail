@@ -130,11 +130,17 @@ jobs:
           if [ -n "${{ matrix.target }}" ]; then args+=(--target "${{ matrix.target }}"); fi
           cargo packager "${args[@]}"
 
+      # The tarball script/install.sh downloads from the release.
+      - name: Bundle the Linux tarball
+        if: runner.os == 'Linux'
+        run: script/bundle-linux
+
       - uses: actions/upload-artifact@v4
         with:
           name: BGMail-${{ matrix.name }}
           if-no-files-found: error
           path: |
+            target/**/release/bgmail-linux-*.tar.gz
             target/**/release/*.deb
             target/**/release/*.AppImage
             target/**/release/BGMail_*.tar.gz
@@ -142,6 +148,7 @@ jobs:
             target/**/release/*.dmg
             target/**/release/*-setup.exe
             target/**/release/*.msi
+            script/install.sh
 
   release:
     name: Draft GitHub Release
