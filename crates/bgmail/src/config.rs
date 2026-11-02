@@ -130,7 +130,7 @@ impl Config {
 /// Best-effort home directory. We avoid an extra dependency: `HOME` covers
 /// Linux/macOS and `USERPROFILE` covers Windows, which is all we need since the
 /// rest of the path is fixed.
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)

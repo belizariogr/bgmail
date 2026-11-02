@@ -20,7 +20,30 @@ const STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// Directory holding the print pages.
 pub fn print_dir() -> PathBuf {
-    std::env::temp_dir().join("bgmail-print")
+    handoff_dir("print")
+}
+
+/// Where files for other programs to open go. Linux's temporary directory is shared,
+/// so another user could already own a name there, keeping these from being written
+/// or, with symlink protection off, redirecting them. macOS and Windows have one per
+/// user.
+pub(crate) fn handoff_dir(name: &str) -> PathBuf {
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    if let Some(cache) = user_cache_dir(
+        std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from),
+        crate::config::home_dir(),
+    ) {
+        return cache.join("BGMail").join(name);
+    }
+    std::env::temp_dir().join(format!("bgmail-{name}"))
+}
+
+/// The XDG cache directory; a relative `XDG_CACHE_HOME` is invalid per the spec.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn user_cache_dir(xdg_cache_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    xdg_cache_home
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| home.map(|home| home.join(".cache")))
 }
 
 /// A fresh value for the page's CSP nonce and file name: 64 bits from the
@@ -107,6 +130,25 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn files_for_other_programs_stay_out_of_the_shared_temp_directory() {
+        let home = Some(PathBuf::from("/home/me"));
+        assert_eq!(
+            user_cache_dir(Some(PathBuf::from("/fast/cache")), home.clone()),
+            Some(PathBuf::from("/fast/cache"))
+        );
+        assert_eq!(
+            user_cache_dir(Some(PathBuf::from("relative")), home.clone()),
+            Some(PathBuf::from("/home/me/.cache"))
+        );
+        assert_eq!(
+            user_cache_dir(None, home),
+            Some(PathBuf::from("/home/me/.cache"))
+        );
+        assert_eq!(user_cache_dir(None, None), None);
+    }
 
     #[test]
     fn nonces_differ() {

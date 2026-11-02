@@ -196,7 +196,7 @@ pub fn extract(raw: &[u8], part_index: u32) -> io::Result<Vec<u8>> {
 
 /// Directory holding attachments opened from the reader.
 pub fn open_dir() -> PathBuf {
-    std::env::temp_dir().join("bgmail-attachments")
+    crate::print::handoff_dir("attachments")
 }
 
 /// Where "Save" dialogs start and "Save to Downloads" writes: the user's
@@ -256,6 +256,8 @@ pub fn write_unique(dir: &Path, filename: &str, data: &[u8], private: bool) -> i
 /// (after removing stale ones); returns the file to hand to the system.
 pub fn write_for_open(filename: &str, data: &[u8]) -> io::Result<PathBuf> {
     let dir = open_dir();
+    // First: cleaning up must not run in a directory that turns out not to be ours.
+    crate::print::create_private_dir(&dir)?;
     remove_stale_files(&dir, SystemTime::now(), STALE_AFTER);
     write_unique(&dir, filename, data, true)
 }
@@ -449,7 +451,7 @@ JVBERi0xLjQ=\r\n\
     }
 
     #[test]
-    fn open_dir_lives_in_the_temp_dir() {
-        assert!(open_dir().starts_with(std::env::temp_dir()));
+    fn open_dir_is_named_for_attachments() {
+        assert!(open_dir().ends_with("attachments") || open_dir().ends_with("bgmail-attachments"));
     }
 }
