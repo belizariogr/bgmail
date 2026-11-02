@@ -1909,7 +1909,8 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Behavior: Sender, subject preview, date, unread/flag/attachment indicators; click calls `select_message_row`. Hover group `MESSAGE_ROW_GROUP` reveals `render_message_row_actions`.
 - **`click_message_row`** / **`set_selection`** / **`apply_selection`** / **`prune_multi_selection`** / **`selected_ids`** / **`row_is_selected`** / **`list_ids`** / **`extended_selection`** / **`extend_selection`** / **`set_list_filter`** (private): multiple selection and filter state. `apply_selection` returns whether a single message resulted, which `set_selection` then opens.
 - **`apply_action_to_selection`** / **`act_on_message`** (private): runs an action on every selected row (first error returned, nothing left selected) / on one message plus its worker notification.
-- **`render_multi_selection`** / **`render_dropdown`** / **`render_filter_menu`** / **`render_move_menu`** (private): reader card stack for a multiple selection and the toolbar dropdowns.
+- **`render_selection_stack`** / **`reader_detail`** / **`reload_multi_preview`** / **`fetch_multi_preview_body`** / **`sheet_corners`** (private): reader for a multiple selection: the previewed message (never marked read) on a sheet, tilted sheets behind it, floating actions.
+- **`render_dropdown`** / **`render_filter_menu`** / **`render_move_menu`** (private): reader card stack for a multiple selection and the toolbar dropdowns.
 - **`select_message_row`** (private)
   - Signature: `fn select_message_row(&mut self, id: i64, window, cx)`
   - Purpose: Selects and opens a list row (focuses the list first).

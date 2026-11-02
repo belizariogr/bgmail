@@ -383,7 +383,7 @@
 - ✅ Mail list and reader round (user list, 2026-11-02): Ctrl/Cmd+K palette;
       `com.bgmail.main|settings|newmail` window classes; word/field selection on
       repeated clicks in `TextInput`; multiple selection (Ctrl/Cmd/Shift, Shift+
-      arrows, Ctrl/Cmd+A) with card stack and bulk Delete/Archive/Junk; row
+      arrows, Ctrl/Cmd+A) with the message on a stack of sheets, as in macOS Mail, and bulk Delete/Archive/Junk; row
       actions centered at the right, icon-sized, only the subject giving way;
       working Archive on Gmail, Move menu and list filter; Get mail moved above
       the list; star icon and "Starred"/"Com estrela"; no badge on Trash; always

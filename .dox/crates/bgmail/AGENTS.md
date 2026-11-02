@@ -171,8 +171,10 @@ wiring to `storage`.
   a dropdown of `CommandContext::move_targets`.
 - Message rows: Ctrl/Cmd+click toggles, Shift+click and Shift+arrows take a
   range, Ctrl/Cmd+A selects all (list focus only). Two or more selected rows
-  (`multi_selection`, with `selected_message_id` = `None`) show a card stack
-  in the reader with Delete / Archive / Junk; a bulk action never deletes for
+  (`multi_selection`, with `selected_message_id` = `None`) show, as in macOS
+  Mail, the row picked last (`multi_preview`, not marked read) on a sheet, with
+  tilted sheets behind it and a floating Delete / Archive / Junk bar; a bulk
+  action never deletes for
   good and leaves nothing selected. On hover Reply / Delete appear centered at
   the right, icon-sized and with no background (their icons brighten on hover);
   only the subject shrinks for them, so the date and star stay in place. Trash shows no unread badge.

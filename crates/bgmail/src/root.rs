@@ -10,12 +10,12 @@ use std::time::Duration;
 use std::f32::consts::FRAC_PI_2;
 
 use gpui::{
-    anchored, deferred, ease_in_out, point, radians, size, svg, uniform_list, Animation,
+    anchored, canvas, deferred, ease_in_out, point, radians, size, svg, uniform_list, Animation,
     AnimationExt as _, App, AppContext as _, Bounds, ClipboardItem, Context, Corner, DragMoveEvent,
     Empty, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Point, ScrollHandle, ScrollStrategy, Size, Subscription, Svg,
-    TitlebarOptions, Transformation, UniformListScrollHandle, Window, WindowBounds,
-    WindowControlArea, WindowHandle, WindowOptions,
+    MouseDownEvent, MouseMoveEvent, PathBuilder, Point, ScrollHandle, ScrollStrategy, Size,
+    Subscription, Svg, TitlebarOptions, Transformation, UniformListScrollHandle, Window,
+    WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
 };
 
 use crate::command_palette_overlay;
@@ -87,6 +87,8 @@ const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 /// It is fixed (not proportional to the number of rows), so a long list folds in
 /// the same time as a short one.
 const FOLD_ANIM_MS: u64 = 90;
+/// Tilt of the sheets behind a multiple selection's message, in degrees.
+const SHEET_TILTS: [f32; 4] = [0.9, -0.7, 1.3, -1.1];
 /// Tallest a dropdown gets before it scrolls, in pixels.
 const MENU_MAX_HEIGHT: f32 = 420.0;
 /// Width of a list row's compact action button (`IconSize::Small`) and the gap
@@ -232,6 +234,27 @@ fn clicked_selection(
             .collect();
     }
     vec![clicked]
+}
+
+/// Corners of `bounds` rotated by `degrees` around its center, clockwise from
+/// the top left.
+fn sheet_corners(bounds: Bounds<Pixels>, degrees: f32) -> [Point<Pixels>; 4] {
+    let center = bounds.center();
+    let (sin, cos) = degrees.to_radians().sin_cos();
+    let rotate = |corner: Point<Pixels>| {
+        let x = f32::from(corner.x - center.x);
+        let y = f32::from(corner.y - center.y);
+        point(
+            center.x + px(x * cos - y * sin),
+            center.y + px(x * sin + y * cos),
+        )
+    };
+    [
+        rotate(bounds.origin),
+        rotate(bounds.top_right()),
+        rotate(bounds.bottom_right()),
+        rotate(bounds.bottom_left()),
+    ]
 }
 
 /// Rows between `from` and `to`, inclusive, in the list's order.
@@ -517,6 +540,10 @@ pub struct RootView {
     /// Rows of a selection of two or more, in list order. While it is set,
     /// `selected_message_id` is `None`: the reader has no single message.
     multi_selection: Vec<i64>,
+    /// Message the reader shows for a multiple selection (the row picked last).
+    /// Apart from `selected_detail`, so single-message commands stay off and
+    /// looking at it doesn't mark it read.
+    multi_preview: Option<MessageDetail>,
     /// Fixed end of a Shift selection and the end that moves.
     selection_anchor: Option<i64>,
     selection_focus: Option<i64>,
@@ -961,6 +988,7 @@ impl RootView {
             filter_menu: None,
             move_menu: None,
             multi_selection: Vec::new(),
+            multi_preview: None,
             selection_anchor: None,
             selection_focus: None,
             hovered_row: None,
@@ -1041,7 +1069,27 @@ impl RootView {
         if let [only] = self.multi_selection[..] {
             self.selected_message_id = Some(only);
             self.multi_selection.clear();
+            self.multi_preview = None;
+        } else if !self.multi_selection.is_empty() {
+            self.reload_multi_preview();
         }
+    }
+
+    /// Re-reads the message shown for a multiple selection and its chips.
+    fn reload_multi_preview(&mut self) {
+        let id = self
+            .selection_focus
+            .filter(|id| self.multi_selection.contains(id))
+            .or(self.multi_selection.first().copied());
+        self.multi_preview = id.and_then(|id| self.db.get_message(id).ok().flatten());
+        self.attachments = visible_attachments(&self.db, self.multi_preview.as_ref());
+    }
+
+    /// The message in the reader: the selected one or a multiple selection's.
+    fn reader_detail(&self) -> Option<&MessageDetail> {
+        self.selected_detail
+            .as_ref()
+            .or(self.multi_preview.as_ref())
     }
 
     /// Every selected row, however many.
@@ -1072,6 +1120,7 @@ impl RootView {
             }
             _ => {
                 self.multi_selection = ids;
+                self.reload_multi_preview();
                 false
             }
         }
@@ -1081,8 +1130,19 @@ impl RootView {
         if self.apply_selection(ids) {
             self.on_message_selection_changed(cx);
         } else {
+            self.fetch_multi_preview_body();
             self.sync_app_menus(cx);
             cx.notify();
+        }
+    }
+
+    /// Downloads the body of a previewed message that only has its headers.
+    fn fetch_multi_preview_body(&self) {
+        if let (Some(detail), Some(mail)) = (&self.multi_preview, &self.mail) {
+            if detail.body_state == storage::BODY_STATE_HEADERS {
+                mail.engine()
+                    .send(detail.account_id, Command::FetchBody(detail.id));
+            }
         }
     }
 
@@ -1147,6 +1207,7 @@ impl RootView {
 
     fn clear_message_selection(&mut self) {
         self.multi_selection.clear();
+        self.multi_preview = None;
         self.selected_message_id = None;
         self.selected_detail = None;
         self.attachments.clear();
@@ -1490,6 +1551,14 @@ impl RootView {
             SyncEvent::BodyReady { message_id } => {
                 if self.selected_message_id == Some(message_id) {
                     self.reload_selected_detail();
+                    self.last_reader_sig = None;
+                }
+                if self
+                    .multi_preview
+                    .as_ref()
+                    .is_some_and(|d| d.id == message_id)
+                {
+                    self.reload_multi_preview();
                     self.last_reader_sig = None;
                 }
                 self.schedule_reload(cx);
@@ -2053,7 +2122,7 @@ impl RootView {
 
     /// Loads the remote images of the selected message (privacy shield).
     fn load_remote_for_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.selected_message_id {
+        if let Some(id) = self.reader_detail().map(|detail| detail.id) {
             self.remote_allowed.insert(id);
             cx.notify();
         }
@@ -2696,7 +2765,7 @@ impl RootView {
     /// sanitizes and themes the body, parses it with `html_view` and hands it
     /// to the reader view, which lays it out at the pane width.
     fn sync_reader(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(detail) = self.selected_detail.as_ref() else {
+        let Some(detail) = self.reader_detail() else {
             self.last_reader_sig = None;
             self.reader_notice = None;
             return;
@@ -2857,7 +2926,7 @@ impl RootView {
 
     /// Opens (or focuses) the reader's find bar.
     pub(crate) fn open_find_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_detail.is_none() {
+        if self.reader_detail().is_none() {
             return;
         }
         if self.find_bar.is_none() {
@@ -5255,10 +5324,7 @@ impl RootView {
             (colors.scrollbar_thumb, colors.scrollbar_thumb_hover)
         };
 
-        if !self.multi_selection.is_empty() {
-            return self.render_multi_selection(cx).into_any_element();
-        }
-        let Some(message) = self.selected_detail.as_ref() else {
+        let Some(message) = self.reader_detail() else {
             let language = cx.language();
             return v_flex()
                 .flex_1()
@@ -5404,7 +5470,7 @@ impl RootView {
             })
             .children(scrollbars);
 
-        v_flex()
+        let reader = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
@@ -5416,109 +5482,146 @@ impl RootView {
             .when(self.find_bar.is_some(), |el| {
                 el.child(self.render_find_bar(cx))
             })
-            .child(body_area)
-            .into_any_element()
+            .child(body_area);
+        if self.multi_selection.is_empty() {
+            return reader.into_any_element();
+        }
+        self.render_selection_stack(reader, cx).into_any_element()
     }
 
-    /// Reader pane for a multiple selection: a stack of cards, with the first
-    /// message on top, and the actions that apply to all of them.
-    fn render_multi_selection(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        const CARD_WIDTH: f32 = 300.0;
-        const CARD_HEIGHT: f32 = 150.0;
-        const CARD_STEP: f32 = 7.0;
-        const MAX_CARDS: usize = 5;
+    /// Reader pane for a multiple selection, as in macOS Mail: the message on a
+    /// sheet, the other selected messages as sheets askew behind it, and the
+    /// actions that apply to all of them floating on its top edge. GPUI can't
+    /// rotate text, so only the sheets behind are tilted.
+    fn render_selection_stack(
+        &self,
+        reader: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const MARGIN: f32 = 24.0;
+        const ACTIONS_OVERLAP: f32 = 15.0;
 
         let colors = cx.theme().colors();
-        let (border, surface, background) =
-            (colors.border, colors.surface_background, colors.background);
+        let (bg, border, surface) = (colors.background, colors.border, colors.surface_background);
+        // Stand out from the pane, which is as dark as the regular surfaces.
+        let (sheet_fill, sheet_edge) = (colors.element_active, colors.text_disabled);
         let language = cx.language();
         let count = self.multi_selection.len();
-        let cards = count.min(MAX_CARDS);
-        let spread = CARD_STEP * (cards - 1) as f32;
-        let top = self
-            .list_messages
-            .iter()
-            .find(|message| self.multi_selection.contains(&message.id));
+        let tilts: Vec<f32> = SHEET_TILTS.iter().copied().take(count - 1).collect();
+        let sheets = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let sheet = Bounds::from_corners(
+                    bounds.origin + point(px(MARGIN), px(MARGIN)),
+                    bounds.bottom_right() - point(px(MARGIN), px(MARGIN)),
+                );
+                for degrees in tilts.into_iter().rev() {
+                    let corners = sheet_corners(sheet, degrees);
+                    let outline = |mut builder: PathBuilder| {
+                        builder.move_to(corners[0]);
+                        for corner in &corners[1..] {
+                            builder.line_to(*corner);
+                        }
+                        builder.close();
+                        builder.build()
+                    };
+                    if let Ok(path) = outline(PathBuilder::fill()) {
+                        window.paint_path(path, sheet_fill);
+                    }
+                    if let Ok(path) = outline(PathBuilder::stroke(px(1.0))) {
+                        window.paint_path(path, sheet_edge);
+                    }
+                }
+            },
+        )
+        .absolute()
+        .size_full();
 
-        let card = |depth: usize| {
-            let offset = px(CARD_STEP * depth as f32);
-            v_flex()
-                .absolute()
-                .left(offset)
-                .top(offset)
-                .w(px(CARD_WIDTH))
-                .h(px(CARD_HEIGHT))
-                .p_4()
-                .gap_1()
-                .overflow_hidden()
-                .rounded_lg()
-                .border_1()
-                .border_color(border)
-                .bg(surface)
-                .shadow_md()
+        let action = |id: &'static str,
+                      icon: IconName,
+                      label: Key,
+                      run: fn(&mut Self, &mut Context<Self>),
+                      cx: &mut Context<Self>| {
+            Self::icon_button_with_tooltip(
+                id,
+                label.tr(language),
+                None,
+                IconButton::new(id, icon)
+                    .size(IconSize::Small)
+                    .on_click(cx.listener(move |this, _, _, cx| run(this, cx))),
+            )
         };
-        let mut stack = div()
-            .relative()
-            .w(px(CARD_WIDTH + spread))
-            .h(px(CARD_HEIGHT + spread));
-        for depth in (1..cards).rev() {
-            stack = stack.child(card(depth));
-        }
-        stack = stack.child(card(0).when_some(top, |el, message| {
-            el.child(
-                Label::new(message.sender.clone())
-                    .weight(FontWeight::SEMIBOLD)
-                    .single_line(),
-            )
+        let actions = h_flex()
+            .h(px(ACTIONS_OVERLAP * 2.0))
+            .px_3()
+            .gap_1()
+            .occlude()
+            .rounded_full()
+            .border_1()
+            .border_color(border)
+            .bg(surface)
+            .shadow_md()
             .child(
-                Label::new(message.subject.clone())
-                    .size(LabelSize::Small)
-                    .single_line(),
+                div().when(!self.showing_trash(), |el| el.pr_1()).child(
+                    Label::new(locale::messages_selected(language, count))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
             )
-            .child(
-                Label::new(message.preview.clone())
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-        }));
+            .when(!self.showing_trash(), |el| {
+                el.child(action(
+                    "bulk-trash",
+                    IconName::Trash,
+                    Key::CommandDelete,
+                    Self::delete_message_to_trash,
+                    cx,
+                ))
+                .child(action(
+                    "bulk-archive",
+                    IconName::Archive,
+                    Key::CommandArchive,
+                    Self::archive_message,
+                    cx,
+                ))
+                .child(action(
+                    "bulk-junk",
+                    IconName::Junk,
+                    Key::CommandMarkJunk,
+                    Self::mark_message_junk,
+                    cx,
+                ))
+            });
 
-        v_flex()
+        div()
+            .relative()
             .flex_1()
             .min_w_0()
             .h_full()
-            .bg(background)
-            .items_center()
-            .justify_center()
-            .gap_6()
-            .child(stack)
+            .bg(bg)
+            .child(sheets)
             .child(
-                Label::new(locale::messages_selected(language, count)).weight(FontWeight::SEMIBOLD),
+                v_flex()
+                    .absolute()
+                    .top(px(MARGIN))
+                    .bottom(px(MARGIN))
+                    .left(px(MARGIN))
+                    .right(px(MARGIN))
+                    .overflow_hidden()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border)
+                    .shadow_lg()
+                    .child(reader),
             )
-            .when(!self.showing_trash(), |el| {
-                el.child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("bulk-trash", Key::CommandDelete.tr(language))
-                                .icon(IconName::Trash)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.delete_message_to_trash(cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("bulk-archive", Key::CommandArchive.tr(language))
-                                .icon(IconName::Archive)
-                                .on_click(cx.listener(|this, _, _, cx| this.archive_message(cx))),
-                        )
-                        .child(
-                            Button::new("bulk-junk", Key::CommandMarkJunk.tr(language))
-                                .icon(IconName::Junk)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.mark_message_junk(cx);
-                                })),
-                        ),
-                )
-            })
+            .child(
+                h_flex()
+                    .absolute()
+                    .top(px(MARGIN - ACTIONS_OVERLAP))
+                    .left_0()
+                    .right_0()
+                    .justify_center()
+                    .child(actions),
+            )
     }
 
     // ----- Status bar -----------------------------------------------------
@@ -6322,11 +6425,46 @@ mod tests {
         assert_eq!(view.selected_message_id, None);
         assert!(view.row_is_selected(ids[1]));
         assert!(view.command_context().bulk_selection);
+        assert_eq!(view.selected_detail, None);
+        assert_eq!(view.reader_detail().map(|d| d.id), Some(ids[0]));
+        view.selection_focus = Some(ids[1]);
+        view.reload_multi_preview();
+        assert_eq!(view.reader_detail().map(|d| d.id), Some(ids[1]));
+        assert!(view.command_context().message_detail.is_none());
 
         view.multi_selection = vec![ids[0], -1];
         view.prune_multi_selection();
         assert!(view.multi_selection.is_empty());
         assert_eq!(view.selected_message_id, Some(ids[0]));
+    }
+
+    #[test]
+    fn previewing_a_multiple_selection_keeps_messages_unread() {
+        let (_dir, mut view) = test_view();
+        let unread: Vec<i64> = view
+            .list_messages
+            .iter()
+            .filter(|message| message.unread)
+            .map(|message| message.id)
+            .take(2)
+            .collect();
+        view.apply_selection(unread.clone());
+        assert!(view.reader_detail().is_some());
+        for id in unread {
+            assert!(view.db.get_message(id).unwrap().unwrap().unread);
+        }
+        view.clear_message_selection();
+        assert!(view.reader_detail().is_none());
+    }
+
+    #[test]
+    fn sheets_turn_around_their_center() {
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(50.0)));
+        assert_eq!(sheet_corners(bounds, 0.0)[2], point(px(100.0), px(50.0)));
+        let [a, _, c, _] = sheet_corners(bounds, 2.0);
+        assert!((f32::from(a.x + c.x) - 100.0).abs() < 0.01);
+        assert!((f32::from(a.y + c.y) - 50.0).abs() < 0.01);
+        assert!(f32::from(a.y) < 0.0 || f32::from(a.x) > 0.0);
     }
 
     #[test]
