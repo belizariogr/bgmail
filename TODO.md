@@ -409,6 +409,8 @@
       the app); a doctype with markup can't move the print page's CSP; `math` and
       `template` dropped and attributes judged decoded in the sanitizer; an image too
       big to embed stays an attachment; rich-text edits follow the real range.
+- ✅ Discovery ignores servers without encryption, so the login test never sends a
+      password in clear (user decision); no encryption stays a manual choice.
 - ✅ Remote images can't reach this machine or link-local addresses, resolved by IP;
       private ranges stay reachable for intranet images (user decision).
 

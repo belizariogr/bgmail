@@ -342,12 +342,11 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 #### Functions
 
-- **`prefer_encrypted`** (private) — the first encrypted server of the list, else the first (cleartext).
 - **`autoconfig_urls`** (pub) — `pub fn autoconfig_urls(email: &str) -> Vec<String>`: ISPDB `https://autoconfig.thunderbird.net/v1.1/<domain>`, `https://autoconfig.<domain>/mail/config-v1.1.xml?emailaddress=<encoded>`, `https://<domain>/.well-known/autoconfig/mail/config-v1.1.xml`; empty without a domain.
 - **`autoconfig`** (pub) — `pub fn autoconfig(email: &str, timeout: Duration) -> Option<AccountConfig>`: `autoconfig_from(autoconfig_urls(email))`.
 - **`autoconfig_from`** (private) — first URL answering 2xx whose body `parse_autoconfig` accepts; transport errors/non-2xx/unusable documents fall through.
 - **`guess_config`** (pub) — `pub fn guess_config(email: &str) -> Option<AccountConfig>`: `imap.<domain>:993` TLS, `smtp.<domain>:587` STARTTLS, username = email, password auth.
 - **`discover_config`** (pub) — `pub fn discover_config(email: &str, timeout: Duration) -> Option<AccountConfig>`: preset → autoconfig → guess (blocking; network only past the preset).
 - **`parse_autoconfig`** (pub) — `pub fn parse_autoconfig(xml: &str, email: &str) -> Option<AccountConfig>`: first usable `incomingServer type="imap"` and `outgoingServer type="smtp"` under `emailProvider`; username from the IMAP server; password auth; `None` unless both exist.
-- **`parse_server`** (private) — `socketType` SSL/TLS → `Tls`, STARTTLS → `StartTls`, plain → `None`, other → skip; hostname required (placeholders substituted); numeric port required; username substituted, default = email.
+- **`parse_server`** (private) — `socketType` SSL/TLS → `Tls`, STARTTLS → `StartTls`, anything else (cleartext too, user decision) → skip; hostname required (placeholders substituted); numeric port required; username substituted, default = email.
 - **`substitute`** (private) — expands `%EMAILADDRESS%`, `%EMAILLOCALPART%`, `%EMAILDOMAIN%` (lowercased domain).
