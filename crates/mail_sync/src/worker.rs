@@ -492,7 +492,6 @@ impl Worker {
         if self.remote.is_none() {
             self.status(AccountStatus::Connecting);
             self.remote = Some(self.connector.connect(&self.cancel)?);
-            self.backoff.reset();
             self.retry_at = None;
         }
         Ok(())
@@ -524,6 +523,9 @@ impl Worker {
     }
 
     fn idle_status(&mut self) {
+        // A connection opening proves little: a server can log in and then fail every
+        // command, and retrying at the base delay would hammer it with logins.
+        self.backoff.reset();
         self.status(AccountStatus::Idle {
             last_sync: self.last_sync,
         });
@@ -1655,10 +1657,10 @@ pub(crate) fn run_idle(mut setup: IdleSetup) {
                 continue;
             }
         };
-        setup.backoff.reset();
         loop {
             match remote.idle(&setup.folder_name, setup.timeout, &setup.cancel) {
                 Ok(IdleOutcome::Changed) => {
+                    setup.backoff.reset();
                     if setup
                         .poke
                         .send(Command::SyncFolder(setup.folder_id))
@@ -1667,7 +1669,7 @@ pub(crate) fn run_idle(mut setup: IdleSetup) {
                         return;
                     }
                 }
-                Ok(IdleOutcome::Timeout) => {}
+                Ok(IdleOutcome::Timeout) => setup.backoff.reset(),
                 Ok(IdleOutcome::Stopped) => return,
                 Err(error) if error.kind == RemoteErrorKind::Unsupported => {
                     setup.unsupported.store(true, Ordering::SeqCst);
@@ -1847,6 +1849,28 @@ mod tests {
         server.fail_next(RemoteErrorKind::Auth);
         let (setup, _commands) = idle_setup(&FakeConnector::new(server, FakeSender::new()));
         run_idle(setup);
+    }
+
+    #[test]
+    fn a_connection_that_fails_right_after_login_still_backs_off() {
+        let server = FakeRemote::new();
+        server.add_folder("INBOX", &[]);
+        for _ in 0..3 {
+            server.fail_next(RemoteErrorKind::Protocol);
+        }
+        let connector = FakeConnector::new(server.clone(), FakeSender::new());
+        let (mut setup, commands) = idle_setup(&connector);
+        setup.backoff = Backoff::new(Duration::from_millis(40), Duration::from_secs(10));
+        drop(commands);
+        let started = Instant::now();
+        let handle = std::thread::spawn(move || run_idle(setup));
+        while connector.connects() < 4 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // 40 + 80 + 160 ms: at the base delay it would take 120 ms.
+        assert!(started.elapsed() >= Duration::from_millis(280));
+        server.deliver("INBOX", b"Subject: x\r\n\r\n", MessageFlags::default());
+        handle.join().unwrap();
     }
 
     #[test]
