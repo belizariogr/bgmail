@@ -76,6 +76,22 @@ fn with_known_name(address: Address, contacts: &[Contact]) -> Address {
     Address::new(name, address.email)
 }
 
+/// Whether Enter and Tab take what was typed rather than the highlighted suggestion:
+/// a complete address is what the user means, and swapping it for a longer one in the
+/// catalog would send the message elsewhere, with only a name on the card. Picking a
+/// suggestion with the arrows still wins.
+fn typed_wins(typed: &str, highlighted: usize) -> bool {
+    highlighted == 0
+        && parse_address_list(typed.trim()).is_ok_and(|addresses| {
+            matches!(&addresses[..], [address] if address
+            .email
+            .rsplit_once('@')
+            .is_some_and(|(_, domain)| {
+                domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
+            }))
+        })
+}
+
 /// Splits typed text into the addresses that are valid and the rest, which stays
 /// in the field for the user to fix.
 fn split_typed(text: &str) -> (Vec<Address>, String) {
@@ -316,7 +332,10 @@ impl RecipientInput {
                     (self.highlighted + self.suggestions.len() - 1) % self.suggestions.len();
             }
             "escape" if open => self.suggestions.clear(),
-            "enter" if open => self.accept(self.highlighted, window, cx),
+            "enter" if open && !typed_wins(&self.typed(cx), self.highlighted) => {
+                self.accept(self.highlighted, window, cx);
+            }
+            "enter" if open => self.commit_typed(cx),
             "enter" if !self.typed(cx).trim().is_empty() => self.commit_typed(cx),
             // With Shift it is another character (`<`, `:`): a name being typed.
             "," | ";" if !keystroke.modifiers.shift => self.commit_typed(cx),
@@ -433,7 +452,11 @@ impl Render for RecipientInput {
             .on_key_down(cx.listener(Self::on_key_down))
             .capture_action(cx.listener(|this, _: &FocusNext, window, cx| {
                 if !this.suggestions.is_empty() {
-                    this.accept(this.highlighted, window, cx);
+                    if typed_wins(&this.typed(cx), this.highlighted) {
+                        this.commit_typed(cx);
+                    } else {
+                        this.accept(this.highlighted, window, cx);
+                    }
                     cx.stop_propagation();
                 }
             }))
@@ -486,6 +509,23 @@ mod tests {
         );
         assert!(matching_contacts(&contacts, &[], "  ").is_empty());
         assert!(matching_contacts(&contacts, &[], "zzz").is_empty());
+    }
+
+    #[test]
+    fn a_complete_address_beats_the_suggestion_unless_one_was_picked() {
+        assert!(typed_wins("joao@empresa.com", 0));
+        assert!(typed_wins("João <joao@empresa.com>", 0));
+        assert!(!typed_wins("joao@empresa.com", 1));
+        for partial in [
+            "joao",
+            "joao@",
+            "joao@empresa",
+            "joao@empresa.",
+            "a@b.c, d@e.f",
+            "",
+        ] {
+            assert!(!typed_wins(partial, 0), "{partial}");
+        }
     }
 
     #[test]
