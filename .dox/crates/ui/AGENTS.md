@@ -39,6 +39,9 @@ an e-mail client, without Zed-scale bloat.
 - `prompt::init` (once at startup): confirmation dialogs in the theme where the
   platform has no native ones (Linux; GPUI's fallback is always white). Enter
   answers with the first non-cancel action, Escape with the cancel one or the last.
+- Selection drags are followed from a window-level listener, so they continue
+  outside the field. `TextArea::press_outside` lets a host place the caret from
+  clicks around the text.
 - Repeated clicks: double click selects the word (a masked `TextInput` selects
   everything), triple click the field (`TextInput`) or line (`TextArea`).
 - `IconButton::hover_color`: hover feedback through the icon color and no

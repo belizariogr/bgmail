@@ -6,11 +6,11 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, fill, point, px, relative, App, Bounds, ClipboardItem, Context, CursorStyle, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, Window,
+    actions, fill, point, px, relative, App, Bounds, ClipboardItem, Context, CursorStyle,
+    DispatchPhase, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine, SharedString,
+    Style, TextRun, UTF16Selection, Window,
 };
 use theme::ActiveTheme;
 use unicode_segmentation::UnicodeSegmentation;
@@ -863,6 +863,13 @@ impl Element for TextInputElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
+        // Anywhere in the window: a selection drag may leave the field.
+        let dragged = self.input.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble {
+                dragged.update(cx, |input, cx| input.on_mouse_move(event, window, cx));
+            }
+        });
         // Only the focused field shows its selection, as there is one at a time.
         if focus_handle.is_focused(window) {
             if let Some(selection) = prepaint.selection.take() {
@@ -918,7 +925,6 @@ impl Render for TextInput {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(TextInputElement { input: cx.entity() })
     }
 }

@@ -140,6 +140,11 @@ positions Blitz computed.
   used by one thread at a time. `HtmlDocument::prepare` does the first layout and
   recording up front.
 
+- Selection by dragging starts and follows the pointer anywhere, using the nearest
+  text when it isn't over any (`HtmlDocument::follow_selection_drag`), as in a
+  browser; Blitz only reacts over text. `HtmlView` scrolls while the pointer is
+  past its edges.
+
 ## Work Guidance
 
 - Prefer fixing layout/style issues upstream in Blitz; keep local changes to the

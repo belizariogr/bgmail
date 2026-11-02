@@ -13,6 +13,7 @@ use blitz_traits::events::{
 };
 use blitz_traits::node_id::NodeId;
 use blitz_traits::shell::{ColorScheme, Viewport};
+use kurbo::Rect;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -596,6 +597,26 @@ fn inline_roots(doc: &BaseDocument, node_id: NodeId, out: &mut Vec<NodeId>) {
     }
 }
 
+/// Box closest to `point`, in reading terms: first the one on its line, then the
+/// nearest on that line, so columns and table cells pick the right neighbor.
+fn nearest_box<T: Copy>(boxes: &[(T, Rect)], point: kurbo::Point) -> Option<(T, Rect)> {
+    let gap = |low: f64, high: f64, value: f64| (low - value).max(value - high).max(0.0);
+    boxes
+        .iter()
+        .min_by(|(_, a), (_, b)| {
+            let distance = |rect: &Rect| {
+                (
+                    gap(rect.y0, rect.y1, point.y),
+                    gap(rect.x0, rect.x1, point.x),
+                )
+            };
+            distance(a)
+                .partial_cmp(&distance(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .copied()
+}
+
 /// Rightmost edge (px from the left of `node_id`'s parent at `left`) of the
 /// in-flow boxes under `node_id`, not descending into boxes that clip their
 /// horizontal overflow. Blitz's `scrollWidth` misses overflow from nested
@@ -648,6 +669,9 @@ pub struct HtmlDocument {
     depth: usize,
     /// Page zoom: CSS px are drawn this many pixels wide (see `set_zoom`).
     zoom: f32,
+    /// A selection is being dragged, over these boxes of text.
+    selection_dragging: bool,
+    selection_boxes: Vec<(NodeId, Rect)>,
 }
 
 /// A document on its way from a background thread to the thread that shows it,
@@ -732,6 +756,8 @@ impl HtmlDocument {
             find_matches: Vec::new(),
             depth: 0,
             zoom: 1.0,
+            selection_dragging: false,
+            selection_boxes: Vec::new(),
         }
         .with_depth()
     }
@@ -912,6 +938,7 @@ impl HtmlDocument {
                 }
             }
         }
+        self.follow_selection_drag(&input, pressed);
         let after = (
             self.inner.get_hover_node_id(),
             self.inner.get_text_selection_ranges(),
@@ -921,6 +948,78 @@ impl HtmlDocument {
             self.display_list = None;
         }
         changed
+    }
+
+    /// Selection by dragging, as in a browser: it starts and follows the pointer
+    /// wherever it is, using the nearest text when not over any, where Blitz would
+    /// neither start nor extend it.
+    fn follow_selection_drag(&mut self, input: &PointerInput, pressed: bool) {
+        match input.phase {
+            PointerPhase::Down { click_count } if pressed && click_count < 2 => {
+                self.selection_boxes = self.text_boxes();
+                match self.nearest_text_position(input.x, input.y) {
+                    Some((root, offset)) => {
+                        self.inner.set_text_selection(root, offset, root, offset)
+                    }
+                    None => self.inner.clear_text_selection(),
+                }
+                self.selection_dragging = true;
+            }
+            PointerPhase::Move if self.selection_dragging && input.primary_pressed => {
+                if let Some((root, offset)) = self.nearest_text_position(input.x, input.y) {
+                    self.inner.update_selection_focus(root, offset);
+                }
+            }
+            PointerPhase::Up | PointerPhase::Move => {
+                self.selection_dragging = false;
+                self.selection_boxes.clear();
+            }
+            PointerPhase::Down { .. } => {}
+        }
+    }
+
+    /// Where each block of text is in the document: (inline root, box).
+    fn text_boxes(&self) -> Vec<(NodeId, Rect)> {
+        let mut roots = Vec::new();
+        inline_roots(&self.inner, self.inner.root_element().id, &mut roots);
+        roots
+            .into_iter()
+            .filter(|root| {
+                self.root_text(*root)
+                    .is_some_and(|text| !text.trim().is_empty())
+            })
+            .filter_map(|root| {
+                let node = self.inner.get_node(root)?;
+                let origin = node.absolute_position(0.0, 0.0);
+                let size = node.final_layout().size;
+                (size.width > 0.0 && size.height > 0.0).then(|| {
+                    (
+                        root,
+                        Rect::new(
+                            f64::from(origin.x),
+                            f64::from(origin.y),
+                            f64::from(origin.x + size.width),
+                            f64::from(origin.y + size.height),
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// The text position under a point, or the closest one to it.
+    fn nearest_text_position(&self, x: f32, y: f32) -> Option<(NodeId, usize)> {
+        if let Some(position) = self.inner.find_text_position(x, y) {
+            return Some(position);
+        }
+        let point = kurbo::Point::new(f64::from(x), f64::from(y));
+        let (root, rect) = nearest_box(&self.selection_boxes, point)?;
+        let node = self.inner.get_node(root)?;
+        let offset = node.text_offset_at_point(
+            (point.x.clamp(rect.x0, rect.x1) - rect.x0) as f32,
+            (point.y.clamp(rect.y0, rect.y1) - rect.y0) as f32,
+        )?;
+        Some((root, offset))
     }
 
     /// Selects the word (or, with `paragraph`, the whole inline root) at a
@@ -1230,6 +1329,98 @@ pub fn force_html_parse(html: &str, mode: DocumentMode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn drag(document: &mut HtmlDocument, x: f32, y: f32, phase: PointerPhase) {
+        document.pointer(PointerInput {
+            x,
+            y,
+            phase,
+            button: PointerButton::Primary,
+            primary_pressed: phase != PointerPhase::Up,
+            modifiers: Default::default(),
+        });
+    }
+
+    const SPACED: &str = "<body style=\"margin:0\"><p style=\"margin:0 0 200px 100px\">First</p>\
+        <p style=\"margin:0 0 0 100px\">Second</p></body>";
+
+    #[test]
+    fn a_drag_selects_from_blank_space_to_blank_space() {
+        let mut document = HtmlDocument::parse(SPACED, DocumentOptions::default());
+        document.prepare(600.0);
+        // From the empty left margin of the first line...
+        drag(
+            &mut document,
+            10.0,
+            8.0,
+            PointerPhase::Down { click_count: 1 },
+        );
+        // ...through the gap between the paragraphs...
+        drag(&mut document, 300.0, 60.0, PointerPhase::Move);
+        assert_eq!(document.selected_text().unwrap().trim(), "First");
+        // ...to past the end of the document.
+        drag(&mut document, 590.0, 5000.0, PointerPhase::Move);
+        drag(&mut document, 590.0, 5000.0, PointerPhase::Up);
+        let text = document.selected_text().unwrap();
+        assert!(
+            text.contains("First") && text.contains("Second"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_drag_upward_selects_too() {
+        let mut document = HtmlDocument::parse(SPACED, DocumentOptions::default());
+        document.prepare(600.0);
+        drag(
+            &mut document,
+            590.0,
+            5000.0,
+            PointerPhase::Down { click_count: 1 },
+        );
+        drag(&mut document, 0.0, 0.0, PointerPhase::Move);
+        let text = document.selected_text().unwrap();
+        assert!(
+            text.contains("First") && text.contains("Second"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn moving_without_a_press_selects_nothing() {
+        let mut document = HtmlDocument::parse(SPACED, DocumentOptions::default());
+        document.prepare(600.0);
+        drag(
+            &mut document,
+            10.0,
+            8.0,
+            PointerPhase::Down { click_count: 1 },
+        );
+        drag(&mut document, 10.0, 8.0, PointerPhase::Up);
+        document.pointer(PointerInput {
+            x: 590.0,
+            y: 5000.0,
+            phase: PointerPhase::Move,
+            button: PointerButton::Primary,
+            primary_pressed: false,
+            modifiers: Default::default(),
+        });
+        assert!(!document.has_selection());
+    }
+
+    #[test]
+    fn nearest_box_prefers_the_same_line() {
+        let a = 1;
+        let b = 2;
+        let boxes = [
+            (a, Rect::new(0.0, 0.0, 100.0, 20.0)),
+            (b, Rect::new(300.0, 0.0, 400.0, 20.0)),
+        ];
+        let near = |x, y| nearest_box(&boxes, kurbo::Point::new(x, y)).unwrap().0;
+        assert_eq!(near(150.0, 10.0), a);
+        assert_eq!(near(280.0, 10.0), b);
+        assert!(nearest_box::<u8>(&[], kurbo::Point::ZERO).is_none());
+    }
 
     #[test]
     fn a_document_built_on_another_thread_works_here() {

@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     anchored, black, deferred, size, white, AnyElement, AnyWindowHandle, App, Bounds, ClickEvent,
-    Context, Corner, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Global, Hsla,
-    KeyBinding, MouseButton, PathPromptOptions, Point, PromptButton, PromptLevel, Render,
-    ScrollHandle, Size, Subscription, Task, WeakEntity, Window, WindowBounds,
+    Context, Corner, Entity, ExternalPaths, Focusable, FontWeight, Global, Hsla, KeyBinding,
+    MouseButton, PathPromptOptions, Point, PromptButton, PromptLevel, Render, ScrollHandle, Size,
+    Subscription, Task, WeakEntity, Window, WindowBounds,
 };
 use html_view::{
     Appearance as PageAppearance, DetachedDocument, DocumentOptions, HtmlDocument, HtmlView,
@@ -1500,7 +1500,7 @@ impl ComposeView {
 
     fn render_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (bg, text) = compose_body_colors(self.white_background);
-        let body_focus: FocusHandle = self.body.focus_handle(cx);
+        let body = self.body.clone();
         div()
             .id("compose-body")
             .flex_1()
@@ -1511,9 +1511,9 @@ impl ComposeView {
             .cursor_text()
             .when_some(bg, |el, bg| el.bg(bg))
             .when_some(text, |el, text| el.text_color(text))
-            // Clicks below the text still land in the body.
-            .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                window.focus(&body_focus);
+            // Clicks around the text still place the caret and can start a selection.
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                body.update(cx, |body, cx| body.press_outside(event, window, cx));
             })
             .child(self.body.clone())
             .when(self.reply.quoted.is_some(), |el| {

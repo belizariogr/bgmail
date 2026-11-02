@@ -369,6 +369,18 @@ fn paint_input_listeners(
     });
 }
 
+/// How far the pointer is above (negative) or below the view while selecting: the
+/// view scrolls by it, to reach text beyond the visible part.
+fn drag_scroll_delta(y: f32, top: f32, bottom: f32) -> f32 {
+    if y < top {
+        y - top
+    } else if y > bottom {
+        y - bottom
+    } else {
+        0.0
+    }
+}
+
 /// A scrollable, interactive view showing one HTML document.
 pub struct HtmlView {
     document: Rc<RefCell<HtmlDocument>>,
@@ -596,6 +608,17 @@ impl HtmlView {
             return;
         }
         let pressed = self.dragging && event.pressed_button == Some(MouseButton::Left);
+        if pressed {
+            let bounds = self.scroll.bounds();
+            let beyond = drag_scroll_delta(
+                f32::from(event.position.y),
+                f32::from(bounds.top()),
+                f32::from(bounds.bottom()),
+            );
+            if beyond != 0.0 {
+                self.scroll_by(beyond, cx);
+            }
+        }
         let mut document = self.document.borrow_mut();
         let mut changed = document.pointer(PointerInput {
             x,
@@ -699,6 +722,13 @@ impl Render for HtmlView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragging_past_the_view_scrolls_by_the_distance() {
+        assert_eq!(drag_scroll_delta(50.0, 100.0, 500.0), -50.0);
+        assert_eq!(drag_scroll_delta(300.0, 100.0, 500.0), 0.0);
+        assert_eq!(drag_scroll_delta(520.0, 100.0, 500.0), 20.0);
+    }
 
     #[test]
     fn zoom_steps_follow_browser_levels() {

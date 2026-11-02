@@ -33,10 +33,11 @@ use std::rc::Rc;
 
 use gpui::{
     actions, fill, point, px, relative, size, App, AvailableSpace, Bounds, ClipboardItem, Context,
-    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, Font, GlobalElementId, Hsla, KeyBinding, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, ScrollHandle, SharedString,
-    Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, GlobalElementId, Hsla,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels,
+    Point, Render, ScrollHandle, SharedString, Style, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine,
 };
 use rich::{Align, CharStyle, FontFamily, Format, ListKind, ParaStyle, RichText, TextSize};
 use theme::ActiveTheme;
@@ -1258,6 +1259,17 @@ impl TextArea {
             .offset_for_point(self.buffer.text(), position - bounds.origin)
     }
 
+    /// A press outside the text but on its page (e.g. below it): the caret goes
+    /// to the nearest position and a selection can start from there.
+    pub fn press_outside(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_mouse_down(event, window, cx);
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -1297,6 +1309,8 @@ impl TextArea {
             let offset = self.offset_for_mouse(event.position);
             self.buffer.select_to(offset);
             self.goal_x = None;
+            // Past the visible part, the container follows the selection.
+            self.autoscroll_requested = true;
             cx.notify();
         }
     }
@@ -1613,6 +1627,13 @@ impl Element for TextAreaElement {
             ElementInputHandler::new(bounds, self.area.clone()),
             cx,
         );
+        // Anywhere in the window: a selection drag may leave the text.
+        let dragged = self.area.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble {
+                dragged.update(cx, |area, cx| area.on_mouse_move(event, window, cx));
+            }
+        });
         // Only the focused field shows its selection, as there is one at a time.
         if focus_handle.is_focused(window) {
             for selection in prepaint.selections.drain(..) {
@@ -1782,7 +1803,6 @@ impl Render for TextArea {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(TextAreaElement { area: cx.entity() })
     }
 }
@@ -1813,6 +1833,42 @@ mod tests {
         let area = cx.new(|cx| TextArea::new("", cx));
         area.update(cx, |area, cx| area.set_content(text, cx));
         area
+    }
+
+    struct DragHost(Entity<TextArea>);
+
+    impl Render for DragHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn a_drag_keeps_selecting_outside_the_text(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
+        let area = area(cx, "one\ntwo");
+        let (_, cx) = cx.add_window_view(|_, _| DragHost(area.clone()));
+        cx.run_until_parked();
+        cx.simulate_mouse_down(
+            point(px(1.0), px(1.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(5000.0), px(5000.0)),
+            Some(MouseButton::Left),
+            Default::default(),
+        );
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| assert_eq!(area.selected_range(), 0..7));
+        cx.simulate_mouse_up(
+            point(px(5000.0), px(5000.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(point(px(1.0), px(1.0)), None, Default::default());
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| assert_eq!(area.selected_range(), 0..7));
     }
 
     #[gpui::test]
