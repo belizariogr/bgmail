@@ -56,6 +56,7 @@ pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
     if message.headers().is_empty() {
         return None;
     }
+    let html = own_body(message.html_part(0), true);
     Some(ParsedMessage {
         message_id: message.message_id().map(clean_id).filter(|i| !i.is_empty()),
         in_reply_to: id_list(message.in_reply_to()).into_iter().next(),
@@ -70,11 +71,11 @@ pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
         bcc: message.bcc().map(addresses).unwrap_or_default(),
         reply_to: message.reply_to().map(addresses).unwrap_or_default(),
         date: message.date().map(|d| d.to_timestamp()),
-        html: own_body(message.html_part(0), true),
-        text: own_body(message.text_part(0), false),
         attachments: attachment_parts(&message)
-            .map(|(index, part)| describe(index, part))
+            .map(|(index, part)| describe(index, part, html.as_deref().unwrap_or_default()))
             .collect(),
+        html,
+        text: own_body(message.text_part(0), false),
     })
 }
 
@@ -133,12 +134,18 @@ fn attachment_parts<'m>(
         })
 }
 
-fn describe(index: usize, part: &MessagePart<'_>) -> AttachmentInfo {
+fn describe(index: usize, part: &MessagePart<'_>, html: &str) -> AttachmentInfo {
     let mime_type = mime_type(part);
     let content_id = part.content_id().map(clean_id).filter(|c| !c.is_empty());
     let is_attachment_disposition = part
         .content_disposition()
         .is_some_and(|d| d.ctype().eq_ignore_ascii_case("attachment"));
+    // Only an image the body shows is out of the user's sight; a part that just has
+    // a Content-ID (a PDF, a photo under a text body) would otherwise vanish.
+    let shown_in_body = mime_type.starts_with("image/")
+        && content_id
+            .as_deref()
+            .is_some_and(|cid| html_references_cid(html, cid));
     let filename = part
         .attachment_name()
         .map(str::trim)
@@ -152,10 +159,24 @@ fn describe(index: usize, part: &MessagePart<'_>) -> AttachmentInfo {
         index,
         filename,
         size: part_bytes(part).map_or(0, |b| b.len()),
-        inline: content_id.is_some() && !is_attachment_disposition,
+        inline: shown_in_body && !is_attachment_disposition,
         content_id,
         mime_type,
     }
+}
+
+/// Whether the HTML refers to this Content-ID, in any case and percent-encoded or not.
+fn html_references_cid(html: &str, cid: &str) -> bool {
+    let html = html.to_ascii_lowercase();
+    let cid = cid.to_ascii_lowercase();
+    let encoded: String = cid
+        .bytes()
+        .map(|byte| match byte {
+            b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (byte as char).to_string(),
+            _ => format!("%{byte:02x}"),
+        })
+        .collect();
+    html.contains(&format!("cid:{cid}")) || html.contains(&format!("cid:{encoded}"))
 }
 
 fn mime_type(part: &MessagePart<'_>) -> String {
@@ -218,6 +239,26 @@ fn clean_id(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_part(body: &str, part_headers: &str) -> Vec<u8> {
+        format!(
+            "From: a@b.c\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\n{body}\r\n--X\r\n{part_headers}\r\nContent-Transfer-Encoding: base64\r\n\r\nAAAA\r\n--X--\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_content_id_alone_does_not_hide_an_attachment() {
+        let text = "Content-Type: text/plain\r\n\r\nHello";
+        let html = "Content-Type: text/html\r\n\r\n<img src=\"CID:Pic%40x\">";
+        let pdf = "Content-Type: application/pdf; name=r.pdf\r\nContent-Disposition: inline; filename=r.pdf\r\nContent-ID: <pic@x>";
+        let image = "Content-Type: image/jpeg; name=f.jpg\r\nContent-Disposition: inline; filename=f.jpg\r\nContent-ID: <pic@x>";
+        let inline = |raw: Vec<u8>| parse_message(&raw).unwrap().attachments[0].inline;
+        assert!(!inline(with_part(text, pdf)));
+        assert!(!inline(with_part(text, image)));
+        assert!(!inline(with_part(html, pdf)));
+        assert!(inline(with_part(html, image)));
+    }
 
     const ALTERNATIVE: &str = "From: \"Ann Example\" <ann@example.com>\r\n\
 To: bob@example.org, \"Doe, John\" <john@example.org>\r\n\
