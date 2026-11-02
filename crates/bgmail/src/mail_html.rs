@@ -36,6 +36,19 @@ impl DocumentColors {
     pub fn is_dark(&self) -> bool {
         self.background.l < 0.5
     }
+
+    /// What `html_view` needs to keep text readable, on a dark page.
+    pub fn dark_page(&self) -> Option<html_view::DarkPage> {
+        self.is_dark().then(|| html_view::DarkPage {
+            background: rgba8(self.background),
+            text: rgba8(self.text),
+        })
+    }
+}
+
+fn rgba8(color: Hsla) -> [u8; 4] {
+    let rgba: gpui::Rgba = color.into();
+    [rgba.r, rgba.g, rgba.b, rgba.a].map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
 /// Builds a self-contained HTML document for `body`, themed to match the
@@ -797,6 +810,28 @@ fn escape_html(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_dark_pages_adapt_text() {
+        let light = DocumentColors {
+            background: gpui::white(),
+            text: gpui::black(),
+            accent: gpui::black(),
+        };
+        assert_eq!(light.dark_page(), None);
+        let dark = DocumentColors {
+            background: gpui::black(),
+            text: gpui::white(),
+            accent: gpui::white(),
+        };
+        assert_eq!(
+            dark.dark_page(),
+            Some(html_view::DarkPage {
+                background: [0, 0, 0, 255],
+                text: [255, 255, 255, 255],
+            })
+        );
+    }
 
     #[test]
     fn quotable_text_is_escaped_with_line_breaks() {

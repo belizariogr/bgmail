@@ -6,6 +6,7 @@
 
 #[allow(dead_code, clippy::all, unused_imports)]
 mod blitz_paint;
+pub mod contrast;
 pub mod display_list;
 pub mod document;
 pub mod element;
@@ -17,6 +18,7 @@ pub mod remote;
 pub mod resources;
 pub mod text;
 
+pub use contrast::DarkPage;
 pub use display_list::DisplayList;
 pub use document::{
     Appearance, DetachedDocument, DocumentMode, DocumentOptions, HtmlDocument, RenderError,

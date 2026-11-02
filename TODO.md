@@ -400,6 +400,7 @@
 - ✅ Account name and sender name, both editable; contact catalog filled from mail; recipient fields with
       cards and suggestions
 - ✅ Drag messages from the list onto a folder, past 100 px
+- ✅ Text fixed for a white page stays readable on a dark page
 - ⬜ Selection on a dark page is still translucent, so a translucent window
       shows the desktop through it
 - ✅ Replies quote the original's formatted HTML (images embedded with `cid:` are

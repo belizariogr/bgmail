@@ -487,6 +487,7 @@ impl ComposeView {
                     PageAppearance::Light
                 },
                 resources: Resources::new().allow_remote(quoted.load_remote),
+                dark_page: colors.dark_page(),
                 ..Default::default()
             };
             let mut document = HtmlDocument::parse(&rendered.html, options);

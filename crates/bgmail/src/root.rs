@@ -605,6 +605,7 @@ impl ReaderJob {
                 PageAppearance::Light
             },
             selection_color: Some(self.selection_color),
+            dark_page: self.colors.dark_page(),
             resources: html_view::Resources::new().allow_remote(self.remote),
             ..Default::default()
         };

@@ -485,6 +485,7 @@ window.
 - **`render_format_bar`** / **`render_style_button`** / **`render_menu_button`** / **`format_dropdown`** / **`format_menu_of`** / **`render_font_picker`** / **`render_size_picker`** / **`render_align_picker`** / **`render_color_picker`** / **`format_body`** / **`toggle_format_menu`** / enum **`FormatMenu`** / **`family_label`** / **`message_html`** / **`body_selection_color`** / **`body_scrollbar_colors`** (private, `compose`): the formatting bar, and what is sent.
 - **`has_edits`** (`pub(crate)`, `compose`): whether replacing the content would lose typed text.
 - **`quotable_text`** (pub, `mail_html`): a plain-text original for a reply's quote.
+- **`DocumentColors::dark_page`** (pub, `mail_html`): colors for `html_view` to keep text readable on a dark page.
 - **`quotable_html`** (pub, `mail_html`): the original's sanitized body for a reply's quote, without `cid:` images.
 - **struct `BulkSelection`** (`commands`) and **`bulk_move_targets`** (private): what commands know about a multiple selection; folders all its accounts share.
 - **`delete_forever_confirm(language, count)`** (pub, `locale`): question before a bulk permanent deletion.

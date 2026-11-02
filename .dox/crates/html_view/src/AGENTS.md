@@ -434,6 +434,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   image and upload size (pre-downscaled when `downscaled_size` says so).
 - `HtmlDocument::follow_selection_drag` / `text_boxes` / `nearest_text_position`, `nearest_box`, `drag_scroll_delta` (private): selection by dragging from and to anywhere.
 - `HtmlView::set_display_scale` (pub): scales the page on top of the user's zoom.
+- `contrast`: `DarkPage` (pub), `adapt_text_contrast`, `behind`, `is_line`, `adapt`, `readable_color`, `luminance`, `contrast`, `rgb_to_hsl`, `hsl_to_rgb` (private).
 - `struct DetachedDocument` (`new`, `into_inner`) / `HtmlDocument::prepare(width)` / `HtmlView::content_height()` (pub): moving a document between threads, doing its first layout and recording up front, and the laid out height.
 - `fn with_family_name(font, family)` (`fonts`, pub(crate)): the sfnt rewritten with a `name` table for `family` (checksums redone); `None` when not a single-face sfnt.
 - `fn register_web_font(face, window)` (private): hands a web font file to GPUI under a family of its own; returns the family to request.

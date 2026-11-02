@@ -1,5 +1,6 @@
 //! A parsed, styled and laid-out HTML document, independent of any window.
 
+use crate::contrast::{adapt_text_contrast, DarkPage};
 use crate::display_list::DisplayList;
 use crate::interaction::{
     find_all, word_bounds, HitInfo, LinkCapture, PointerButton, PointerInput, PointerPhase,
@@ -579,6 +580,8 @@ pub struct DocumentOptions {
     pub resources: Resources,
     /// Text selection highlight (RGBA); the host passes its theme's color.
     pub selection_color: Option<[u8; 4]>,
+    /// The page is dark: text unreadable on what is behind it is adapted.
+    pub dark_page: Option<DarkPage>,
 }
 
 /// Inline formatting roots (the boxes that own text) under `node_id`, in
@@ -659,6 +662,7 @@ pub struct HtmlDocument {
     /// Cached display list and the height it was painted for.
     display_list: Option<(f32, Arc<DisplayList>)>,
     selection_color: peniko::Color,
+    dark_page: Option<DarkPage>,
     /// Base URL links resolve against.
     base_url: url::Url,
     /// Links activated by clicks, for the host to open.
@@ -751,6 +755,7 @@ impl HtmlDocument {
                 let [r, g, b, a] = options.selection_color.unwrap_or(DEFAULT_SELECTION_COLOR);
                 peniko::Color::from_rgba8(r, g, b, a)
             },
+            dark_page: options.dark_page,
             base_url: base,
             links,
             find_matches: Vec::new(),
@@ -890,6 +895,9 @@ impl HtmlDocument {
             0,
             self.selection_color,
         );
+        if let Some(page) = self.dark_page {
+            adapt_text_contrast(&mut list, page);
+        }
         let list = Arc::new(list);
         self.display_list = Some((height, list.clone()));
         list

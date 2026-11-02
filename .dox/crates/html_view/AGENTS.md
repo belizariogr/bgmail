@@ -145,6 +145,11 @@ positions Blitz computed.
   browser; Blitz only reacts over text. `HtmlView` scrolls while the pointer is
   past its edges.
 
+- `DocumentOptions::dark_page`: on a dark page, text that can't be read on what is
+  behind it is adapted when recording the display list (`contrast`), as colors fixed
+  inline for a white page beat any stylesheet. Neutral text takes the page's text
+  color, colored text keeps its hue; text on images and gradients stays.
+
 ## Work Guidance
 
 - Prefer fixing layout/style issues upstream in Blitz; keep local changes to the
