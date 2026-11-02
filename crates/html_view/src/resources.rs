@@ -139,7 +139,7 @@ impl Resources {
 /// stands for. Resolved against the message base URL it comes out as
 /// `bgmail://host/path`; mail clients load it over HTTPS. `None` for any
 /// other URL, including real message-relative ones (`bgmail://message/…`).
-fn protocol_relative_web_url(url: &url::Url) -> Option<url::Url> {
+pub(crate) fn protocol_relative_web_url(url: &url::Url) -> Option<url::Url> {
     // `message` is the host of `MESSAGE_BASE_URL` (checked by the tests).
     if url.scheme() != "bgmail" || url.host_str()? == "message" {
         return None;

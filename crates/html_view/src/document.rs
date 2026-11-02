@@ -1093,7 +1093,11 @@ impl HtmlDocument {
                     info.link = element
                         .attr(local_name!("href"))
                         .and_then(|href| self.base_url.join(href.trim()).ok())
-                        .map(|url| url.to_string());
+                        .map(|url| {
+                            crate::resources::protocol_relative_web_url(&url)
+                                .unwrap_or(url)
+                                .to_string()
+                        });
                     break;
                 }
             }
@@ -1760,6 +1764,17 @@ mod tests {
             Some("https://example.com/x")
         );
         assert_eq!(doc.take_activated_link(), None);
+    }
+
+    #[test]
+    fn hit_info_reports_a_protocol_relative_link_as_a_web_link() {
+        const HTML: &str = "<!DOCTYPE html><body style=\"margin:0\"><p id=\"l\" style=\"margin:0\"><a href=\"//example.com/x\">link</a></p>";
+        let doc = laid_out(HTML);
+        let (x, y, _, h) = box_of(HTML, "l");
+        assert_eq!(
+            doc.hit_info(x + 5.0, y + h / 2.0).link.as_deref(),
+            Some("https://example.com/x")
+        );
     }
 
     #[test]
