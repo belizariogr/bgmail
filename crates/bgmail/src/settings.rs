@@ -84,6 +84,7 @@ impl SettingsSection {
 /// rest is the state of the background lookups.
 struct AccountForm {
     name: Entity<TextInput>,
+    sender_name: Entity<TextInput>,
     email: Entity<TextInput>,
     password: Entity<TextInput>,
     imap_host: Entity<TextInput>,
@@ -118,6 +119,7 @@ impl AccountForm {
             cx.new(|cx| TextInput::new(placeholder, cx))
         };
         let name = input(Key::AccountNamePlaceholder.tr(language));
+        let sender_name = input(Key::AccountSenderPlaceholder.tr(language));
         let email = input(Key::AccountEmailPlaceholder.tr(language));
         let password = input("");
         let imap_host = input("imap.example.com");
@@ -157,6 +159,7 @@ impl AccountForm {
 
         Self {
             name,
+            sender_name,
             email,
             password,
             imap_host,
@@ -262,8 +265,9 @@ pub(crate) struct SettingsView {
     form_open: bool,
     /// Account whose password is being replaced inline.
     password_edit: Option<(i64, Entity<TextInput>)>,
-    /// Account being renamed, with the field holding its new name.
-    rename_edit: Option<(i64, Entity<TextInput>)>,
+    /// Account whose names are being edited, with the fields holding them: what
+    /// it is listed under and what its mail goes out with.
+    names_edit: Option<(i64, Entity<TextInput>, Entity<TextInput>)>,
     oauth: Option<OAuthFlow>,
     /// Last failure of a per-account action (re-sign-in), shown under its row.
     account_messages: HashMap<i64, FailureMessage>,
@@ -283,7 +287,7 @@ impl SettingsView {
             form: None,
             form_open: false,
             password_edit: None,
-            rename_edit: None,
+            names_edit: None,
             oauth: None,
             account_messages: HashMap::new(),
         }
@@ -530,8 +534,13 @@ impl SettingsView {
         secret: String,
         cx: &mut Context<Self>,
     ) {
+        let sender_name = self
+            .form
+            .as_ref()
+            .map(|form| AccountForm::text(&form.sender_name, cx))
+            .unwrap_or_default();
         let added = self.root.update(cx, |root, cx| {
-            root.add_remote_account(&name, config, secret, cx)
+            root.add_remote_account(&name, &sender_name, config, secret, cx)
         });
         match added {
             Ok(Ok(_)) => {
@@ -730,34 +739,42 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn begin_rename(
+    fn begin_names_edit(
         &mut self,
-        account_id: i64,
-        name: &str,
+        account: &storage::Account,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = cx.new(|cx| {
-            let mut input = TextInput::new(Key::AccountNewName.tr(cx.language()), cx);
-            input.set_content(name, cx);
+        let language = cx.language();
+        let name = cx.new(|cx| {
+            let mut input = TextInput::new(Key::AccountNamePlaceholder.tr(language), cx);
+            input.set_content(&account.name, cx);
             input
         });
-        input.read(cx).focus_handle(cx).focus(window);
-        self.rename_edit = Some((account_id, input));
+        let sender = cx.new(|cx| {
+            let mut input = TextInput::new(Key::AccountSenderPlaceholder.tr(language), cx);
+            input.set_content(account.from_name(), cx);
+            input
+        });
+        name.read(cx).focus_handle(cx).focus(window);
+        self.names_edit = Some((account.id, name, sender));
         cx.notify();
     }
 
-    fn save_rename(&mut self, cx: &mut Context<Self>) {
-        let Some((account_id, input)) = self.rename_edit.take() else {
+    fn save_names(&mut self, cx: &mut Context<Self>) {
+        let Some((account_id, name_input, sender_input)) = self.names_edit.take() else {
             return;
         };
-        let name = AccountForm::text(&input, cx);
+        let name = AccountForm::text(&name_input, cx);
         if name.trim().is_empty() {
-            self.rename_edit = Some((account_id, input));
+            self.names_edit = Some((account_id, name_input, sender_input));
             return;
         }
+        let sender = AccountForm::text(&sender_input, cx);
         self.root
-            .update(cx, |root, cx| root.rename_account(account_id, &name, cx))
+            .update(cx, |root, cx| {
+                root.set_account_names(account_id, &name, &sender, cx)
+            })
             .ok();
         cx.notify();
     }
@@ -1172,16 +1189,16 @@ impl SettingsView {
             .is_some_and(|flow| flow.target == OAuthTarget::Account(id));
 
         let mut actions = h_flex().gap_1().flex_shrink_0();
-        let current_name = account.name.clone();
+        let editing = account.clone();
         actions = actions.child(
             Button::new(
                 ("account-rename", id as usize),
-                Key::AccountRename.tr(language),
+                Key::AccountEditNames.tr(language),
             )
             .style(ButtonStyle::Subtle)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.begin_rename(id, &current_name, window, cx)
-            })),
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.begin_names_edit(&editing, window, cx)),
+            ),
         );
         if signing_in {
             actions = actions.child(
@@ -1253,7 +1270,7 @@ impl SettingsView {
                                     .child(badge_element(badge, cx)),
                             )
                             .child(
-                                Label::new(account.email.clone())
+                                Label::new(format!("{} <{}>", account.from_name(), account.email))
                                     .size(LabelSize::Small)
                                     .color(Color::Muted)
                                     .single_line(),
@@ -1267,31 +1284,45 @@ impl SettingsView {
                     .child(actions),
             );
 
-        if let Some((_, input)) = self.rename_edit.as_ref().filter(|(edit, _)| *edit == id) {
-            row = row.child(
-                h_flex()
-                    .gap_2()
-                    .child(div().flex_1().child(input_box(input, window, cx)))
-                    .child(
-                        Button::new(
-                            ("account-rename-save", id as usize),
-                            Key::AccountSave.tr(language),
+        if let Some((_, name, sender)) = self.names_edit.as_ref().filter(|(edit, _, _)| *edit == id)
+        {
+            row = row
+                .child(labeled_field(
+                    Key::AccountFieldName.tr(language),
+                    name,
+                    window,
+                    cx,
+                ))
+                .child(labeled_field(
+                    Key::AccountFieldSender.tr(language),
+                    sender,
+                    window,
+                    cx,
+                ))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new(
+                                ("account-names-save", id as usize),
+                                Key::AccountSave.tr(language),
+                            )
+                            .style(ButtonStyle::Filled)
+                            .on_click(cx.listener(|this, _, _, cx| this.save_names(cx))),
                         )
-                        .style(ButtonStyle::Filled)
-                        .on_click(cx.listener(|this, _, _, cx| this.save_rename(cx))),
-                    )
-                    .child(
-                        Button::new(
-                            ("account-rename-cancel", id as usize),
-                            Key::AccountCancel.tr(language),
-                        )
-                        .style(ButtonStyle::Subtle)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.rename_edit = None;
-                            cx.notify();
-                        })),
-                    ),
-            );
+                        .child(
+                            Button::new(
+                                ("account-names-cancel", id as usize),
+                                Key::AccountCancel.tr(language),
+                            )
+                            .style(ButtonStyle::Subtle)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.names_edit = None;
+                                cx.notify();
+                            })),
+                        ),
+                );
         }
         if let Some((_, input)) = self.password_edit.as_ref().filter(|(edit, _)| *edit == id) {
             row = row.child(
@@ -1357,6 +1388,12 @@ impl SettingsView {
             .child(labeled_field(
                 Key::AccountFieldName.tr(language),
                 &form.name,
+                window,
+                cx,
+            ))
+            .child(labeled_field(
+                Key::AccountFieldSender.tr(language),
+                &form.sender_name,
                 window,
                 cx,
             ))

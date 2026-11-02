@@ -163,8 +163,9 @@ wiring to `storage`.
   senders with their name and recipients without one, by `mail_sync` for synced
   mail (Junk excluded, backfilled once per account) and `send_draft` for what is
   sent. A known name is never overwritten; a blank one is filled by later mail.
-- Accounts can be renamed (Settings ▸ Accounts): the sidebar and the name mail is
-  sent with.
+- Accounts have two editable names (Settings ▸ Accounts, also when adding one):
+  the account name, listed in the sidebar, and the sender name, in the "From" of
+  their mail. A blank sender name uses the account name.
 - Default mail app: Settings ▸ General shows whether BGMail handles `mailto:`
   and offers "Make default" (`default_mail_app`, one API per OS, run off the UI
   thread and only on that click): Linux `xdg-mime` (refused when no installed

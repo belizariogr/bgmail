@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use crate::schema::{
     CREATE_ACCOUNTS, CREATE_FOLDERS, CREATE_MESSAGES, CREATE_META, INDEX_MESSAGES_ACCOUNT,
     INDEX_MESSAGES_FOLDERS, INDEX_MESSAGES_SEARCH, SCHEMA_VERSION, V2_COLUMNS, V2_OBJECTS,
-    V3_COLUMNS, V3_OBJECTS, V4_OBJECTS,
+    V3_COLUMNS, V3_OBJECTS, V4_OBJECTS, V5_COLUMNS,
 };
 
 /// Brings the database to [`SCHEMA_VERSION`] inside one `IMMEDIATE` transaction,
@@ -42,6 +42,12 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if version < 4 {
         tx.execute_batch(V4_OBJECTS)?;
         version = 4;
+    }
+    if version < 5 {
+        for (table, column, definition) in V5_COLUMNS {
+            add_column_if_missing(&tx, table, column, definition)?;
+        }
+        version = 5;
     }
     if version != start || schema_version(&tx)?.is_none() {
         tx.execute(

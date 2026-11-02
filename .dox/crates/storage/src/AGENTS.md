@@ -181,6 +181,7 @@ _(No functions.)_
 - **`Database::apply_remote_flags`** (pub) — `pub fn apply_remote_flags(&self, folder_id: i64, uid: u32, unread: bool, starred: bool, answered: bool) -> rusqlite::Result<bool>`: updates flags only if different, refreshes membership when changed; `false` for unknown location or no change.
 - **`Database::store_body`** (pub) — `pub fn store_body(&self, message_id: i64, raw: &[u8], content: &str, format: &str, plain_text: &str, preview: &str, attachments: &[NewAttachment]) -> rusqlite::Result<()>`: write tx; upserts `message_bodies.raw`, sets raw_content/raw_format (`html`|`text`, CHECK-enforced)/plain_text/preview/search_text (recomputed)/`has_attachment` (any non-inline)/`body_state 1`, replaces attachments. No-op for a deleted message.
 - Starred (`system::FLAGGED`) leaves out mail in the Trash, in lists and unread counts (`hidden_from_folder`); it keeps its star for when it is restored.
+- **`Account::from_name`** (pub) / **`Database::set_account_names`** (pub): the name in the "From" (`sender_name`, schema v5, or the account's name when blank), and setting both.
 - **`contacts`**: `Contact`; `Database::record_contacts`, `list_contacts`, `contact_sources`, `meta_flag`, `set_meta_flag` (pub).
 - **`Database::messages_with_markup_preview`** (pub) — downloaded messages of an account whose preview starts with `<` or holds `&…;`.
 - **`Database::update_body_text`** (pub) — replaces plain text and preview, keeping search text in step; no-op for a missing message.

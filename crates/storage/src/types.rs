@@ -11,12 +11,26 @@ pub const PROVIDER_GMAIL: &str = "gmail";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
     pub id: i64,
+    /// What the account is listed under.
     pub name: String,
     pub email: String,
     /// `local`, `imap` or `gmail` (see the `PROVIDER_*` constants).
     pub provider: String,
     /// Opaque connection settings owned by callers (JSON text, `{}` when unset).
     pub config_json: String,
+    /// Name its mail goes out with; blank uses [`Self::name`] (see [`Self::from_name`]).
+    pub sender_name: String,
+}
+
+impl Account {
+    /// The name in the "From" of its mail.
+    pub fn from_name(&self) -> &str {
+        if self.sender_name.trim().is_empty() {
+            &self.name
+        } else {
+            &self.sender_name
+        }
+    }
 }
 
 /// A folder within an account.

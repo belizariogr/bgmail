@@ -3,7 +3,7 @@
 //! The v1 DDL below is the base every database starts from; later versions are
 //! applied as in-place steps by `migration.rs` so existing user data survives.
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub const CREATE_ACCOUNTS: &str = "
 CREATE TABLE IF NOT EXISTS accounts (
@@ -181,3 +181,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     name TEXT NOT NULL DEFAULT ''
 );
 ";
+
+/// v5: the name an account's mail goes out with, apart from the one it is listed
+/// under. Blank until set: mail keeps going out with the account's name.
+pub const V5_COLUMNS: &[(&str, &str, &str)] =
+    &[("accounts", "sender_name", "TEXT NOT NULL DEFAULT ''")];

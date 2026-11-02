@@ -1867,6 +1867,7 @@ impl RootView {
     pub(crate) fn add_remote_account(
         &mut self,
         name: &str,
+        sender_name: &str,
         config: AccountConfig,
         secret: String,
         cx: &mut Context<Self>,
@@ -1886,6 +1887,9 @@ impl RootView {
             .db
             .create_account(&name, &config.email, provider, &config_json)
             .map_err(|error| error.to_string())?;
+        self.db
+            .set_account_names(account_id, &name, sender_name.trim())
+            .map_err(|error| error.to_string())?;
         self.store_secret(&config, &secret, cx);
         self.reload_from_database();
         // A new worker begins with a full sync; no `SyncNow` needed (and it
@@ -1897,19 +1901,22 @@ impl RootView {
 
     /// Replaces an account's secret (e.g. after a password change) and
     /// reconnects it. The worker restart runs off the UI thread.
-    /// Renames an account: what the sidebar shows, and the name its mail is sent
-    /// with. Blank names are ignored.
-    pub(crate) fn rename_account(&mut self, account_id: i64, name: &str, cx: &mut Context<Self>) {
+    /// Changes the names of an account: `name`, what the sidebar shows, and
+    /// `sender_name`, what its mail goes out with. A blank `name` is ignored.
+    pub(crate) fn set_account_names(
+        &mut self,
+        account_id: i64,
+        name: &str,
+        sender_name: &str,
+        cx: &mut Context<Self>,
+    ) {
         let name = name.trim();
-        let Some(account) = self.accounts.iter().find(|a| a.id == account_id).cloned() else {
-            return;
-        };
-        if name.is_empty() || name == account.name {
+        if name.is_empty() {
             return;
         }
         match self
             .db
-            .update_account(account_id, name, &account.config_json)
+            .set_account_names(account_id, name, sender_name.trim())
         {
             Ok(()) => self.reload_from_database(),
             Err(error) => self.set_status_note(
@@ -3390,7 +3397,7 @@ impl RootView {
             .iter()
             .map(|account| ComposeAccount {
                 id: account.id,
-                name: account.name.clone(),
+                name: account.from_name().to_string(),
                 email: account.email.clone(),
                 can_send: account.provider != storage::PROVIDER_LOCAL,
             })
@@ -3418,7 +3425,7 @@ impl RootView {
             .accounts
             .iter()
             .filter(|account| account.id == detail.account_id)
-            .map(|account| Address::new(Some(account.name.clone()), account.email.clone()))
+            .map(|account| Address::new(Some(account.from_name()), account.email.clone()))
             .collect();
         let language = cx.language();
         let date = dates::full_date(detail.date_ts, &detail.received_at, language);
