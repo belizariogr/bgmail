@@ -333,7 +333,7 @@ const DISALLOWED_ELEMENTS: &str = "script, object, embed, applet, \
      input, textarea, select, button, form, \
      base, meta, link, canvas, dialog, portal, \
      foreignobject, animate, animatetransform, animatemotion, set, \
-     math, template";
+     math, template, noscript";
 
 /// URL-bearing attributes whose value we vet against dangerous schemes.
 const URL_ATTRIBUTES: &[&str] = &[
@@ -904,6 +904,15 @@ mod tests {
             let clean = sanitize_html(payload, false);
             assert!(!clean.contains("onerror"), "{payload}: {clean}");
         }
+    }
+
+    #[test]
+    fn nothing_hides_in_noscript() {
+        let clean = sanitize_html(
+            "<noscript><form action=https://evil.test><button>Go</button></form></noscript>x",
+            false,
+        );
+        assert_eq!(clean, "x");
     }
 
     #[test]
