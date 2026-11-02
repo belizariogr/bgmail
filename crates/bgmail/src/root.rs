@@ -91,9 +91,9 @@ const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 /// the same time as a short one.
 const FOLD_ANIM_MS: u64 = 90;
 /// Tilt of the sheets behind a multiple selection's message, in degrees.
-const SHEET_TILTS: [f32; 4] = [3.0, -2.2, 4.4, -3.4];
+const SHEET_TILTS: [f32; 4] = [1.8, -1.3, 2.6, -2.0];
 /// How much smaller a multiple selection's message shows.
-const STACK_SCALE: f32 = 0.85;
+const STACK_SCALE: f32 = 0.9;
 /// Space around it on each side of the pane, as a fraction of the pane.
 const STACK_MARGIN: f32 = (1.0 - STACK_SCALE) / 2.0;
 /// Tallest a dropdown gets before it scrolls, in pixels.
@@ -6108,7 +6108,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         const ACTIONS_OVERLAP: f32 = 15.0;
-        const SHADOW_OFFSET: f32 = 6.0;
+        const SHADOW_OFFSET: f32 = 4.0;
 
         let colors = cx.theme().colors();
         let (bg, border, surface) = (colors.background, colors.border, colors.surface_background);
@@ -6147,7 +6147,7 @@ impl RootView {
                         builder.build()
                     };
                     if let Ok(path) = outline(PathBuilder::fill(), SHADOW_OFFSET) {
-                        window.paint_path(path, gpui::black().opacity(0.35));
+                        window.paint_path(path, gpui::black().opacity(0.25));
                     }
                     if let Ok(path) = outline(PathBuilder::fill(), 0.0) {
                         window.paint_path(path, sheet_fill);
@@ -6288,7 +6288,7 @@ impl RootView {
                     .rounded_md()
                     .border_1()
                     .border_color(border)
-                    .shadow_2xl()
+                    .shadow_xl()
                     .child(reader),
             )
             .child(

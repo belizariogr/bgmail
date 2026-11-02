@@ -210,7 +210,7 @@ wiring to `storage`.
 - Message rows: Ctrl/Cmd+click toggles, Shift+click and Shift+arrows take a
   range, Ctrl/Cmd+A selects all (list focus only). Two or more selected rows
   (`multi_selection`, with `selected_message_id` = `None`) show, as in macOS
-  Mail, the row picked last (`multi_preview`, not marked read) on a sheet 15%
+  Mail, the row picked last (`multi_preview`, not marked read) on a sheet 10%
   smaller, its page scaled to match, with tilted, shadowed sheets behind it and a floating bar: Delete, Archive, Junk, star,
   read/unread and Move, or Restore and Delete forever (confirmed) in the Trash.
   In the Trash, the toolbar's delete button, a row's Delete button and the Delete
