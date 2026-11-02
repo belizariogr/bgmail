@@ -7585,7 +7585,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             cx.update(|_, cx| cx.active_drag_cursor_style()),
-            Some(CursorStyle::ClosedHand)
+            Some(drag_cursor(DRAG_DRAWS_HAND))
         );
         let card = cx.debug_bounds("drag-card").expect("the card shows");
         assert_eq!(card.origin, pointer_inset(far));
@@ -7595,7 +7595,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             cx.update(|_, cx| cx.active_drag_cursor_style()),
-            Some(CursorStyle::ClosedHand)
+            Some(drag_cursor(DRAG_DRAWS_HAND))
         );
         assert_eq!(
             cx.debug_bounds("drag-card").expect("still shows").origin,

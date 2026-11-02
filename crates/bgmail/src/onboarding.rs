@@ -864,6 +864,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("mail.db");
         let (root, cx) = cx.add_window_view(|_, _| RootView::for_tests(&path));
+        // Windows shows only a background until the window has settled.
+        root.update(cx, |root, cx| root.mark_content_ready(cx));
         cx.run_until_parked();
         let setup = root.read_with(cx, |root, _| root.onboarding_view());
         let setup = setup.expect("the first render creates the setup");
