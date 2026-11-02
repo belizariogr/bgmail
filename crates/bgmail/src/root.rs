@@ -5224,7 +5224,7 @@ impl RootView {
                         .unwrap_or_default()
                         .iter()
                         .enumerate()
-                        .map(|(ix, address)| address_card((field, ix), address, cx).pr_2())
+                        .map(|(ix, address)| address_card((field, ix), address).pr_2())
                         .collect();
                     // A header that doesn't parse is still shown as it came.
                     let raw = cards.is_empty().then(|| {
