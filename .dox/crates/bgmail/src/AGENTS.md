@@ -1195,6 +1195,7 @@ Message dates in the local zone (chrono `clock`); the formatting core takes expl
   - Signature: `pub fn email_document(colors: DocumentColors, body: &MessageBody, load_remote: bool) -> RenderedEmail`
   - Purpose: Builds the reader document for a body.
   - Behavior: HTML bodies are sanitized keeping remote sources only with `load_remote` (else blocked and counted); document CSS: 16px body text (Chromium's default), plain text in the body font; plain text is escaped into `<pre class="plain">`. Wraps the result in a document with `document_css` that starts with the body's own doctype (`leading_doctype`, so legacy mail keeps its quirks mode), else `<!DOCTYPE html>`.
+- **`without_foreign_content`** (private): removes `svg` and `math` in passes before anything else reads the HTML (user decision), since the parser and a browser disagree on where they end; dropped if it doesn't settle.
 - **`decoded_attribute`** / **`is_inline_raster`** (private): an attribute value with its references decoded, as a browser reads it, which `neutralize_attributes` judges (`href` of SVG `image`/`feimage` only stays as a `data:` raster). **`email_document`** drops a doctype holding `<`.
 - **`leading_doctype`** (private): The doctype an HTML body starts with, after a BOM, whitespace, `<?…?>` declarations and comments; `None` without one.
 - **`print_document`** (pub)

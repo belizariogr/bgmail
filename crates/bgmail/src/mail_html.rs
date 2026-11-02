@@ -323,17 +323,17 @@ fn channel(value: f32) -> u8 {
 ///   `<style>`.
 /// - **Misc scripting surfaces** (`canvas`, `dialog`, `portal`).
 ///
-/// `svg` is intentionally **kept** (some e-mails use inline vector art), but its
-/// scriptable parts are removed: `script` (covered above), `foreignobject` (hosts
-/// arbitrary HTML) and the SMIL animation family (`animate`, `animatetransform`,
-/// `animatemotion`, `set`) which can assign event-handler attributes at runtime.
+/// `svg` and `math` go in passes of their own (see [`without_foreign_content`], user
+/// decision). The SVG parts stay listed for a stray tag outside one: `foreignobject`
+/// (hosts arbitrary HTML) and the SMIL animation family (`animate`, `animatetransform`,
+/// `animatemotion`, `set`), which can assign event-handler attributes at runtime.
 const DISALLOWED_ELEMENTS: &str = "script, object, embed, applet, \
      iframe, frame, frameset, \
      video, audio, source, track, \
      input, textarea, select, button, form, \
      base, meta, link, canvas, dialog, portal, \
      foreignobject, animate, animatetransform, animatemotion, set, \
-     math, template, noscript";
+     template, noscript";
 
 /// URL-bearing attributes whose value we vet against dangerous schemes.
 const URL_ATTRIBUTES: &[&str] = &[
@@ -358,6 +358,41 @@ const URL_ATTRIBUTES: &[&str] = &[
 /// `srcset` is handled separately. Dangerous-scheme vetting still applies to
 /// every [`URL_ATTRIBUTES`] entry regardless.
 const RESOURCE_ATTRIBUTES: &[&str] = &["src", "poster", "background", "data", "xlink:href"];
+
+/// `html` with no `svg` or `math`, in passes of their own, before anything else reads
+/// it. Once it has seen one of these tags the parser stays in "foreign" mode until its
+/// own end tag, where a browser leaves it at any HTML end tag (`<div><svg></div>`), so
+/// from there on the two read different tags: whatever it takes for text, like a
+/// `<style>`'s content, could be real elements nothing has checked. Passes until none
+/// is left, as a removal can join the pieces of a tag. Anything that doesn't settle is
+/// dropped.
+fn without_foreign_content(html: &str) -> std::borrow::Cow<'_, str> {
+    use lol_html::{element, rewrite_str, RewriteStrSettings};
+    const MAX_PASSES: usize = 8;
+
+    let has_tag = |text: &str| {
+        let lower = text.to_ascii_lowercase();
+        lower.contains("<svg") || lower.contains("<math")
+    };
+    if !has_tag(html) {
+        return html.into();
+    }
+    let mut current = html.to_string();
+    for _ in 0..MAX_PASSES {
+        let settings =
+            RewriteStrSettings::new().append_element_content_handler(element!("svg, math", |el| {
+                el.remove();
+                Ok(())
+            }));
+        let next = rewrite_str(&current, settings).unwrap_or_default();
+        // Still there but unchanged: inside text or a `<style>`, where it isn't a tag.
+        if next == current || !has_tag(&next) {
+            return next.into();
+        }
+        current = next;
+    }
+    "".into()
+}
 
 /// Sanitizes an e-mail HTML fragment so it can never execute code or load
 /// untrusted active content in the renderer.
@@ -397,9 +432,7 @@ fn sanitize_html_inner(
     use lol_html::{element, rewrite_str, text, RewriteStrSettings};
     use std::cell::{Cell, RefCell};
 
-    // The parser takes what is inside a CDATA section as text when it thinks it is in an
-    // SVG, and a browser that thinks otherwise reads tags there, which nothing checked.
-    let without_cdata = html.replace("<![CDATA[", "").replace("]]>", "");
+    let without_foreign = without_foreign_content(html);
     let has_remote = Cell::new(false);
     let blocked = Cell::new(0usize);
     // `<style>` text arrives in chunks (a `url(` may straddle two): buffer it
@@ -444,7 +477,7 @@ fn sanitize_html_inner(
             Ok(())
         }));
 
-    let html = rewrite_str(&without_cdata, settings).unwrap_or_default();
+    let html = rewrite_str(&without_foreign, settings).unwrap_or_default();
     (html, has_remote.get(), blocked.get())
 }
 
@@ -895,11 +928,31 @@ mod tests {
     }
 
     #[test]
+    fn text_with_cdata_markers_is_left_alone() {
+        let clean = sanitize_html("<p>if (a[b[0]]>1)</p>", false);
+        assert!(clean.contains("a[b[0]]>1"), "{clean}");
+    }
+
+    #[test]
+    fn vector_and_math_content_goes_but_the_rest_stays() {
+        let clean = sanitize_html("<p>a</p><svg><path d=\"M0 0\"/></svg><p>b</p>", false);
+        assert_eq!(clean, "<p>a</p><p>b</p>");
+        let clean = sanitize_html("<p>a</p><math><mi>x</mi></math><p>b</p>", false);
+        assert_eq!(clean, "<p>a</p><p>b</p>");
+        let clean = sanitize_html("<style>a{content:\"<svg\"}</style><p>b</p>", false);
+        assert!(clean.contains("<p>b</p>"), "{clean}");
+    }
+
+    #[test]
     fn markup_that_parses_differently_in_a_browser_is_dropped() {
         for payload in [
             "<math><mtext><mglyph><style><img src=x onerror=alert(1)>",
             "<math><mi><malignmark><style><img src=x onerror=alert(1)>",
             "<template><svg></template><![CDATA[><img src=x onerror=alert(1)>]]>",
+            "<div><svg></div><style><a id=\"</style><img src=http://t/x onerror=a()>\">",
+            "<div><math></div><style><a id=\"</style><img src=http://t/x onerror=a()>\">",
+            "<template><svg></template><![CDA<![CDATA[TA[><img src=x onerror=alert(1)>]]]]>>",
+            "<sv<svg></svg>g></div><style><a id=\"</style><img src=x onerror=a()>\">",
         ] {
             let clean = sanitize_html(payload, false);
             assert!(!clean.contains("onerror"), "{payload}: {clean}");
@@ -950,15 +1003,12 @@ mod tests {
             "https://tracker.test/p.png",
             "\\\\host\\share\\x.png",
         ] {
-            let clean = sanitize_html(&format!("<svg><image href=\"{href}\"/></svg>"), true);
+            let clean = sanitize_html(&format!("<image href=\"{href}\"/>"), true);
             assert!(!clean.contains("href"), "{href}: {clean}");
         }
         let inline = "data:image/png;base64,AAAA";
-        let clean = sanitize_html(&format!("<svg><image href=\"{inline}\"/></svg>"), false);
+        let clean = sanitize_html(&format!("<image href=\"{inline}\"/>"), false);
         assert!(clean.contains(inline), "{clean}");
-        // A reference inside the SVG itself isn't an image.
-        let clean = sanitize_html("<svg><use href=\"#a\"/></svg>", false);
-        assert!(clean.contains("href=\"#a\""), "{clean}");
     }
 
     #[test]
@@ -1180,24 +1230,14 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_keeps_svg_but_removes_its_scriptable_parts() {
+    fn sanitize_removes_svg_with_its_scriptable_parts() {
         let dirty = "<svg viewBox=\"0 0 10 10\">\
-             <rect width=\"10\" height=\"10\"></rect>\
-             <script>alert(1)</script>\
-             <foreignObject><body>x</body></foreignObject>\
-             <animate attributeName=\"x\"></animate>\
-             <set attributeName=\"onload\" to=\"alert(1)\"></set>\
-             </svg>";
-        let clean = sanitize_html(dirty, true);
-        let lower = clean.to_ascii_lowercase();
-        assert!(clean.contains("<svg"));
-        assert!(clean.contains("<rect"));
-        for needle in ["<script", "alert(1)", "foreignobject", "<animate", "<set"] {
-            assert!(
-                !lower.contains(needle),
-                "expected `{needle}` to be stripped from svg, got: {clean}"
-            );
-        }
+             <script>x()</script>\
+             <foreignObject><p>y</p></foreignObject>\
+             <animate attributeName=\"onclick\"/>\
+             <set attributeName=\"onload\"/>\
+             </svg><p>after</p>";
+        assert_eq!(sanitize_html(dirty, false), "<p>after</p>");
     }
 
     #[test]

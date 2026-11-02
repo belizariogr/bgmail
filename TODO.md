@@ -182,9 +182,8 @@
         document/redirect/external-resource heads (`base`/`meta`/`link`); and misc
         scripting surfaces (`canvas`/`dialog`/`portal`). `head`/`title` are kept so
         full-document e-mails don't lose their `<style>`.
-      - **`svg` is kept** (inline vector art), but its scriptable parts are removed:
-        `script`, `foreignObject` and the SMIL family (`animate`/`animatetransform`/
-        `animatemotion`/`set`).
+      - **`svg` and `math` are removed** (user decision, review round 5): the sanitizer's
+        parser and a browser disagree on where they end, so what follows could hide tags.
       - **Attribute neutralization**: every inline event handler (`on*`),
         `contenteditable`, dangerous URL schemes on link/source attrs
         (`javascript:`/`vbscript:`, and non-image `data:` incl. `image/svg+xml` —
@@ -415,6 +414,8 @@
       what the reader lists; `noscript` dropped; backoff grows when a server fails right
       after login; Sent syncs after sending; a pending attachment read counts as an
       edit; dragging a row no longer scans the list.
+- ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user
+      decision), which closes the mXSS through foreign content.
 - ✅ Remote images can't reach this machine or link-local addresses, resolved by IP;
       private ranges stay reachable for intranet images (user decision).
 
