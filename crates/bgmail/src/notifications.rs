@@ -133,12 +133,38 @@ fn linux_icon(exe: Option<&std::path::Path>) -> String {
         )
 }
 
+/// The body as the notification server should get it.
+fn displayed_body(body: &str) -> String {
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let markup = notify_rust::get_capabilities()
+            .is_ok_and(|capabilities| capabilities.iter().any(|c| c == "body-markup"));
+        escape_for_server(body, markup)
+    }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        body.to_string()
+    }
+}
+
+/// A server with `body-markup` reads the body as markup, and a subject comes from
+/// whoever sent the message: it can't be left to make links or hide its own text.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn escape_for_server(body: &str, markup: bool) -> String {
+    if !markup {
+        return body.to_string();
+    }
+    body.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 fn show(notice: &Notice) {
     let mut notification = notify_rust::Notification::new();
     notification
         .appname("BGMail")
         .summary(&notice.summary)
-        .body(&notice.body);
+        .body(&displayed_body(&notice.body));
     #[cfg(target_os = "windows")]
     if let Some(app_id) = windows_app_id() {
         notification.app_id(app_id);
@@ -159,6 +185,17 @@ fn show(notice: &Notice) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[test]
+    fn a_subject_is_only_escaped_for_a_server_that_reads_markup() {
+        let subject = "R&D <a href=\"x\">pay</a>";
+        assert_eq!(escape_for_server(subject, false), subject);
+        assert_eq!(
+            escape_for_server(subject, true),
+            "R&amp;D &lt;a href=\"x\"&gt;pay&lt;/a&gt;"
+        );
+    }
 
     fn notice(sender: &str, subject: &str) -> NewMailNotice {
         NewMailNotice {
