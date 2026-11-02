@@ -458,6 +458,8 @@
 - 🔄 Keyboard shortcuts (command palette + Cmd+Q; per-action bindings still TODO)
 - ⬜ Accessibility
 - ✅ Native notifications (`notify-rust`, bursts summarized, Settings switch)
+- ✅ App icon: italic **BG** with speed trails on the blue envelope
+      (`assets/appIcon/BGMail.svg`; PNG 16–1024, `BGMail.ico`, `BGMail.icns`)
 - 🔄 Packaging: `cargo-packager` metadata, icons, desktop entry, CI + release
       workflows (GitHub Actions matrix). deb/AppImage/pacman built locally;
       **macOS and Windows jobs never ran yet** (check the first CI run);
