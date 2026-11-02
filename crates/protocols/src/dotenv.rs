@@ -1,6 +1,19 @@
 //! Minimal `.env` reader, shared by `build.rs` (through `#[path]`) and the
 //! unit tests: build scripts can't have tests of their own.
 
+use std::io;
+use std::path::Path;
+
+/// Contents of the `.env` at `path`, creating an empty one if it's missing.
+pub fn read_or_create(path: &Path) -> io::Result<String> {
+    // Append mode: an existing file keeps its contents and its mtime.
+    std::fs::File::options()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    std::fs::read_to_string(path)
+}
+
 /// Value of `key` in `.env` text: `KEY=value`, optionally `export KEY=value`
 /// and wrapped in quotes. Blank values, comments and other keys are skipped;
 /// the last assignment wins.
@@ -29,6 +42,24 @@ fn unquote(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_or_create_creates_missing_and_keeps_existing() {
+        let dir = std::env::temp_dir().join(format!("bgmail-dotenv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env");
+
+        assert_eq!(read_or_create(&path).unwrap(), "");
+        assert!(path.exists());
+
+        std::fs::write(&path, "KEY=v\n").unwrap();
+        assert_eq!(read_or_create(&path).unwrap(), "KEY=v\n");
+
+        // Unwritable location (no parent directory): the caller gets the error.
+        assert!(read_or_create(&dir.join("missing/.env")).is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn lookup_reads_plain_exported_and_quoted_values() {
