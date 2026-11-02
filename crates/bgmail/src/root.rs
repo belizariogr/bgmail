@@ -335,32 +335,56 @@ fn drag_counts(origin: Point<Pixels>, position: Point<Pixels>) -> bool {
     dx * dx + dy * dy > MESSAGE_DRAG_THRESHOLD * MESSAGE_DRAG_THRESHOLD
 }
 
+/// How far a drag went. Once past the threshold it counts for good: the way back to
+/// a folder close to where it started mustn't undo it.
+#[derive(Default)]
+struct DragProgress {
+    origin: Cell<Option<Point<Pixels>>>,
+    counted: Cell<bool>,
+}
+
+impl DragProgress {
+    fn start(&self, origin: Point<Pixels>) {
+        self.origin.set(Some(origin));
+        self.counted.set(false);
+    }
+
+    /// Whether the drag counts with the pointer at `position`.
+    fn counts_at(&self, position: Point<Pixels>) -> bool {
+        if !self.counted.get() {
+            let far = self
+                .origin
+                .get()
+                .is_some_and(|origin| drag_counts(origin, position));
+            self.counted.set(far);
+        }
+        self.counted.get()
+    }
+}
+
 /// The messages being dragged from the list. GPUI starts a drag after a couple of
-/// pixels, so where it started is kept to tell when it counts.
+/// pixels, so its progress is kept to tell when it counts.
 #[derive(Clone)]
 struct DraggedMessages {
     ids: Vec<i64>,
     /// The account they belong to: `None` for a selection across accounts, which
     /// has no folder in common.
     account_id: Option<i64>,
-    origin: Rc<Cell<Option<Point<Pixels>>>>,
+    progress: Rc<DragProgress>,
 }
 
 impl DraggedMessages {
     /// Whether they can be dropped on `folder_path` of `account_id` right now.
     fn can_drop_on(&self, account_id: i64, folder_path: &str, position: Point<Pixels>) -> bool {
-        self.account_id == Some(account_id)
+        self.progress.counts_at(position)
+            && self.account_id == Some(account_id)
             && !storage::is_manual_move_destination_forbidden(folder_path)
-            && self
-                .origin
-                .get()
-                .is_some_and(|origin| drag_counts(origin, position))
     }
 }
 
 /// The row that follows the pointer: nothing until the drag counts.
 struct DragPreview {
-    origin: Point<Pixels>,
+    progress: Rc<DragProgress>,
     width: Pixels,
     title: SharedString,
     subtitle: SharedString,
@@ -368,7 +392,7 @@ struct DragPreview {
 
 impl Render for DragPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !drag_counts(self.origin, window.mouse_position()) {
+        if !self.progress.counts_at(window.mouse_position()) {
             return div().into_any_element();
         }
         let colors = cx.theme().colors();
@@ -1691,7 +1715,7 @@ impl RootView {
         DraggedMessages {
             account_id: first.filter(|first| accounts.all(|other| other == *first)),
             ids,
-            origin: Rc::default(),
+            progress: Rc::default(),
         }
     }
 
@@ -5063,8 +5087,7 @@ impl RootView {
                 let subject: SharedString = message.subject.clone().into();
                 let language = cx.language();
                 move |dragged: &DraggedMessages, _, window, cx| {
-                    let origin = window.mouse_position();
-                    dragged.origin.set(Some(origin));
+                    dragged.progress.start(window.mouse_position());
                     let (title, subtitle) = if dragged.ids.len() > 1 {
                         (
                             locale::messages_selected(language, dragged.ids.len()).into(),
@@ -5073,8 +5096,9 @@ impl RootView {
                     } else {
                         (title.clone(), subject.clone())
                     };
+                    let progress = dragged.progress.clone();
                     cx.new(|_| DragPreview {
-                        origin,
+                        progress,
                         width,
                         title,
                         subtitle,
@@ -7125,30 +7149,46 @@ mod tests {
 
     #[test]
     fn dropping_needs_the_distance_a_folder_of_the_account_and_a_valid_target() {
-        let origin = point(px(0.0), px(0.0));
         let far = point(px(300.0), px(0.0));
-        let dragged = DraggedMessages {
-            ids: vec![1],
-            account_id: Some(7),
-            origin: Rc::new(Cell::new(Some(origin))),
+        let near = point(px(50.0), px(0.0));
+        let started = || {
+            let progress = DragProgress::default();
+            progress.start(point(px(0.0), px(0.0)));
+            DraggedMessages {
+                ids: vec![1],
+                account_id: Some(7),
+                progress: Rc::new(progress),
+            }
         };
         let folder = storage::system::ARCHIVE;
-        assert!(dragged.can_drop_on(7, folder, far));
-        assert!(!dragged.can_drop_on(7, folder, point(px(50.0), px(0.0))));
-        assert!(!dragged.can_drop_on(8, folder, far));
-        assert!(!dragged.can_drop_on(7, storage::system::SENT, far));
-        assert!(!dragged.can_drop_on(7, storage::system::DRAFTS, far));
+        assert!(!started().can_drop_on(7, folder, near));
+        assert!(started().can_drop_on(7, folder, far));
+        assert!(!started().can_drop_on(8, folder, far));
+        assert!(!started().can_drop_on(7, storage::system::SENT, far));
+        assert!(!started().can_drop_on(7, storage::system::DRAFTS, far));
 
         let not_started = DraggedMessages {
-            origin: Rc::default(),
-            ..dragged.clone()
+            progress: Rc::default(),
+            ..started()
         };
         assert!(!not_started.can_drop_on(7, folder, far));
         let across_accounts = DraggedMessages {
             account_id: None,
-            ..dragged
+            ..started()
         };
         assert!(!across_accounts.can_drop_on(7, folder, far));
+    }
+
+    #[test]
+    fn past_the_threshold_a_drag_counts_even_back_near_its_start() {
+        let progress = DragProgress::default();
+        progress.start(point(px(0.0), px(0.0)));
+        assert!(!progress.counts_at(point(px(50.0), px(0.0))));
+        assert!(progress.counts_at(point(px(150.0), px(0.0))));
+        assert!(progress.counts_at(point(px(10.0), px(0.0))));
+        // A new drag starts over.
+        progress.start(point(px(0.0), px(0.0)));
+        assert!(!progress.counts_at(point(px(10.0), px(0.0))));
     }
 
     #[test]
