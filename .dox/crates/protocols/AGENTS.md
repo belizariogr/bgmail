@@ -62,8 +62,9 @@ presets, Thunderbird autoconfig, guess).
 - **Secrets:** `Secret`/`Credential` `Debug` never prints values. Google's
   client id/secret come from `BGMAIL_GOOGLE_CLIENT_ID` /
   `BGMAIL_GOOGLE_CLIENT_SECRET` (runtime, then build-time `option_env!`). At
-  build time `build.rs` also reads them from the workspace `.env` (gitignored;
-  real environment variables win). Never commit them. An installed-app client
+  build time `build.rs` also reads them from the workspace `.env` (gitignored,
+  created empty when missing so edits always trigger a rebuild; real environment
+  variables win). Never commit them. An installed-app client
   secret ships inside the binary, so it can be extracted: PKCE and the redirect
   rules protect the flow, not its secrecy. `ConnectOptions::accept_invalid_certs` is for local test
   servers only and is never set by the app.
