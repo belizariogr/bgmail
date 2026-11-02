@@ -88,11 +88,13 @@ that edit the database and queue those server ops.
   `connector.saves_sent_copy()`; APPEND failures retry with back-off and are
   given up after `MAX_APPEND_DEFERRALS`, never resending); `Transient` →
   `queued` with back-off (`EngineOptions::send_retry_delays`, default
-  1 m/5 m/15 m/1 h repeating), attempts untouched, `failed` after
-  `MAX_SEND_DEFERRALS` (72, about three days; user decision); `Permanent` → attempts+1,
+  1 m/5 m/15 m/1 h repeating), attempts untouched; a queued row 3 days old
+  becomes `failed` before any further try (`SEND_GIVE_UP_AFTER`,
+  `Database::give_up_outgoing`, by age from creation or the last user retry, even with
+  the app closed in between; user decision); `Permanent` → attempts+1,
   back-off, `failed` at `MAX_SEND_ATTEMPTS` (3); `Uncertain` → `maybe_sent`,
   never retried. `failed` / `maybe_sent` rows wait for the UI, which also lists rows
-  still retrying (`Database::unsent_outgoing` / `retry_outgoing` / `stop_outgoing`,
+  stuck in the queue, after a failure or left for 5 minutes (`Database::unsent_outgoing` / `retry_outgoing` / `stop_outgoing`,
   and `delete_outgoing`, which refuses a row being sent);
   `SendFailed { permanent }` is `true` exactly when a row stopped retrying.
   `sending` leases older than `SEND_LEASE` (10 min) become `maybe_sent`.

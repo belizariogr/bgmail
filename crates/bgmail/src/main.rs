@@ -446,6 +446,9 @@ fn main() {
 
         startup::log_milestone("main window opened");
 
+        main_window
+            .update(cx, |view, _, cx| view.watch_unsent(cx))
+            .ok();
         cx.spawn(async move |cx| {
             while let Ok(link) = incoming_links.recv().await {
                 main_window

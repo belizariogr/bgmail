@@ -79,6 +79,8 @@ pub(crate) const WINDOW_MIN_HEIGHT: f32 = 480.0;
 pub(crate) const MAIN_WINDOW_APP_ID: &str = "com.bgmail.main";
 /// Wayland app_id / X11 WM_CLASS of the settings window.
 pub(crate) const SETTINGS_WINDOW_APP_ID: &str = "com.bgmail.settings";
+/// How often the list of unsent messages is read again.
+const UNSENT_REFRESH: Duration = Duration::from_secs(60);
 /// Wayland app_id / X11 WM_CLASS of the compose window.
 pub(crate) const COMPOSE_WINDOW_APP_ID: &str = "com.bgmail.newmail";
 /// Below this window width the sidebar collapses automatically and, once
@@ -2151,6 +2153,25 @@ impl RootView {
         if self.unsent.is_empty() {
             self.unsent_panel_open = false;
         }
+    }
+
+    /// Keeps the unsent list current on its own: a message can get stuck with no event
+    /// to tell, as when its account is offline.
+    pub(crate) fn watch_unsent(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(UNSENT_REFRESH).await;
+            let alive = this.update(cx, |this, cx| {
+                let before = this.unsent.clone();
+                this.refresh_unsent();
+                if this.unsent != before {
+                    cx.notify();
+                }
+            });
+            if alive.is_err() {
+                return;
+            }
+        })
+        .detach();
     }
 
     /// Asks every account to sync now ("Get mail").
@@ -8086,6 +8107,37 @@ mod tests {
         assert!(!view.showing_trash());
         view.list_messages[1].folders_csv = ",sys:trash,".into();
         assert!(view.showing_trash());
+    }
+
+    #[gpui::test]
+    fn the_unsent_list_notices_a_stuck_message_by_itself(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            view.watch_unsent(cx);
+            let id = view
+                .db
+                .enqueue_outgoing(
+                    view.accounts[0].id,
+                    "a@x.com",
+                    &["b@x.com".into()],
+                    b"r",
+                    None,
+                )
+                .unwrap();
+            view.db
+                .defer_outgoing(id, "connect", 9_999_999_999)
+                .unwrap();
+            assert!(view.unsent.is_empty());
+        });
+        cx.executor().advance_clock(UNSENT_REFRESH);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert_eq!(view.unsent.len(), 1));
     }
 
     #[gpui::test]

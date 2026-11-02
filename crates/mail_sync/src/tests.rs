@@ -1496,7 +1496,7 @@ fn transient_send_failures_back_off_without_using_attempts() {
 }
 
 #[test]
-fn a_message_stops_being_retried_after_about_three_days() {
+fn a_message_three_days_old_is_not_sent_any_more() {
     let h = Harness::imap().started();
     let id =
         h.db.enqueue_outgoing(
@@ -1507,17 +1507,13 @@ fn a_message_stops_being_retried_after_about_three_days() {
             None,
         )
         .unwrap();
+    let age = crate::worker::SEND_GIVE_UP_AFTER.as_secs() as i64;
     h.db.conn()
         .execute(
-            "UPDATE outbox SET deferrals = ?1 WHERE id = ?2",
-            [i64::from(crate::worker::MAX_SEND_DEFERRALS) - 1, id],
+            "UPDATE outbox SET created_at = ?1 WHERE id = ?2",
+            [crate::worker::unix_now() - age, id],
         )
         .unwrap();
-    h.connector
-        .sender()
-        .fail_next_with(mail_core::SendError::transient(
-            mail_core::RemoteError::new(RemoteErrorKind::Network, "connect"),
-        ));
     let events = h.run(Command::ProcessQueue);
     assert!(events.iter().any(|e| matches!(
         e,
@@ -1526,6 +1522,7 @@ fn a_message_stops_being_retried_after_about_three_days() {
             ..
         }
     )));
+    assert_eq!(h.connector.sender().sends(), 0);
     let row = &h.db.outbox(h.account).unwrap()[0];
     assert_eq!(row.state, storage::OutgoingState::Failed);
 }

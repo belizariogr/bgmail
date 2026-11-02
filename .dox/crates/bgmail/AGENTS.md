@@ -183,7 +183,7 @@ wiring to `storage`.
   message in the outbox (`RootView::send_draft`). A failed action shows a
   localized status note (`StatusActionFailed: {error}`), never only a log.
 - Unsent mail is never silently stuck: outbox rows that stopped retrying
-  (`storage::Database::unsent_outgoing`: `failed`, `maybe_sent`, or still retrying) show as
+  (`storage::Database::unsent_outgoing`: `failed`, `maybe_sent`, or stuck in the queue; `RootView::watch_unsent` rereads it every minute) show as
   "N unsent" (`Color::Warning`) in the status bar, refreshed on reload and on
   `Sent`/`SendFailed`. Clicking it opens a panel listing subject (parsed from
   the raw), recipients, last error and, for `maybe_sent`, "May already have

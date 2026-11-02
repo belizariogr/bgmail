@@ -9,7 +9,7 @@ use crate::folder::folder_csv_needle;
 use crate::schema::{
     CREATE_ACCOUNTS, CREATE_FOLDERS, CREATE_MESSAGES, CREATE_META, INDEX_MESSAGES_ACCOUNT,
     INDEX_MESSAGES_FOLDERS, INDEX_MESSAGES_SEARCH, SCHEMA_VERSION, V2_COLUMNS, V2_OBJECTS,
-    V3_COLUMNS, V3_OBJECTS, V4_OBJECTS, V5_COLUMNS,
+    V3_COLUMNS, V3_OBJECTS, V4_OBJECTS, V5_COLUMNS, V7_COLUMNS,
 };
 
 /// Brings the database to [`SCHEMA_VERSION`] inside one `IMMEDIATE` transaction,
@@ -53,6 +53,12 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if version < 6 {
         encode_commas_in_folders_csv(&tx)?;
         version = 6;
+    }
+    if version < 7 {
+        for (table, column, definition) in V7_COLUMNS {
+            add_column_if_missing(&tx, table, column, definition)?;
+        }
+        version = 7;
     }
     if version != start || schema_version(&tx)?.is_none() {
         tx.execute(

@@ -9,6 +9,18 @@ use crate::types::{OutgoingRow, OutgoingState, PendingOp};
 use crate::Database;
 
 /// Current time in unix seconds (0 if the clock is before the epoch).
+/// A queued row counts as stuck after this long without leaving.
+const STUCK_AFTER_SECS: i64 = 5 * 60;
+/// When a row's age starts: its creation, or the user's last retry. 0 for rows from
+/// before `created_at` was recorded.
+const OUTGOING_AGE_FROM: &str = "MAX(created_at, retry_from)";
+/// SQL for a queued row stuck in the queue; `?1` is [`STUCK_AFTER_SECS`] ago.
+const STUCK_IN_QUEUE: &str =
+    "state = 'queued' AND (deferrals > 0 OR MAX(created_at, retry_from) <= ?1)";
+/// [`STUCK_IN_QUEUE`] with its parameter at `?3`.
+const STUCK_IN_QUEUE_2: &str =
+    "state = 'queued' AND (deferrals > 0 OR MAX(created_at, retry_from) <= ?3)";
+
 pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -234,16 +246,38 @@ impl Database {
     }
 
     /// Rows the user should know about, across every account, oldest first: those
-    /// that stopped retrying (`failed`, `maybe_sent`) and those still retrying after
-    /// a failure, which could otherwise go out days later with no way to stop them.
+    /// that stopped retrying (`failed`, `maybe_sent`) and those stuck in the queue,
+    /// which could otherwise go out days later with no way to stop them: after a
+    /// failure, or left for a few minutes (a worker offline never tries them at all).
     /// `raw` is left empty: the UI lists these on every reload and attachments can
     /// be large, so it gets the bytes from [`Self::outgoing`] only when needed.
     pub fn unsent_outgoing(&self) -> rusqlite::Result<Vec<OutgoingRow>> {
         self.query_outgoing(
             "X''",
-            "WHERE state IN ('failed', 'maybe_sent') OR (state = 'queued' AND deferrals > 0)",
-            [],
+            &format!("WHERE state IN ('failed', 'maybe_sent') OR ({STUCK_IN_QUEUE})"),
+            params![unix_now() - STUCK_AFTER_SECS],
         )
+    }
+
+    /// Stops the queued rows of the account older than `max_age_secs`, counted from
+    /// their creation or the user's last retry: what the author wanted sent then may
+    /// no longer be what they want now. Returns the ids and errors of the stopped rows.
+    pub fn give_up_outgoing(
+        &self,
+        account_id: i64,
+        now: i64,
+        max_age_secs: i64,
+    ) -> rusqlite::Result<Vec<(i64, Option<String>)>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "UPDATE outbox SET state = 'failed', lease_at = NULL
+             WHERE account_id = ?1 AND state = 'queued'
+               AND {OUTGOING_AGE_FROM} > 0 AND {OUTGOING_AGE_FROM} <= ?2
+             RETURNING id, last_error"
+        ))?;
+        let rows = stmt.query_map(params![account_id, now - max_age_secs], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        rows.collect()
     }
 
     /// Stops the automatic retries of a queued row: it becomes `failed`, waiting for
@@ -421,11 +455,12 @@ impl Database {
     /// stale click can't disturb a row already being sent.
     pub fn retry_outgoing(&self, id: i64) -> rusqlite::Result<bool> {
         let changed = self.conn().execute(
-            "UPDATE outbox SET state = 'queued', attempts = 0, deferrals = 0,
-                    next_attempt_at = 0, lease_at = NULL, last_error = NULL
-             WHERE id = ?1
-               AND (state IN ('failed', 'maybe_sent') OR (state = 'queued' AND deferrals > 0))",
-            params![id],
+            &format!(
+                "UPDATE outbox SET state = 'queued', attempts = 0, deferrals = 0,
+                        next_attempt_at = 0, lease_at = NULL, last_error = NULL, retry_from = ?2
+                 WHERE id = ?1 AND (state IN ('failed', 'maybe_sent') OR ({STUCK_IN_QUEUE_2}))"
+            ),
+            params![id, unix_now(), unix_now() - STUCK_AFTER_SECS],
         )?;
         Ok(changed == 1)
     }
@@ -580,6 +615,66 @@ mod tests {
         assert!(!db.stop_outgoing(id).unwrap());
         assert!(db.delete_outgoing(id).unwrap());
         assert!(db.outgoing(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_row_left_in_the_queue_for_minutes_is_listed_and_can_be_retried() {
+        let (_file, db, fx) = remote_db();
+        let id = db
+            .enqueue_outgoing(fx.account, "a@x", &["b@x".into()], b"r", None)
+            .unwrap();
+        assert!(db.unsent_outgoing().unwrap().is_empty());
+        assert!(!db.retry_outgoing(id).unwrap());
+
+        db.conn()
+            .execute(
+                "UPDATE outbox SET created_at = ?1 WHERE id = ?2",
+                params![unix_now() - STUCK_AFTER_SECS, id],
+            )
+            .unwrap();
+        assert_eq!(db.unsent_outgoing().unwrap()[0].id, id);
+
+        // A retry starts the clock again, and the row waits for its result.
+        assert!(db.retry_outgoing(id).unwrap());
+        assert!(db.unsent_outgoing().unwrap().is_empty());
+    }
+
+    #[test]
+    fn old_queued_rows_are_given_up_counting_from_the_last_retry() {
+        let (_file, db, fx) = remote_db();
+        let now = unix_now();
+        let queue = || {
+            db.enqueue_outgoing(fx.account, "a@x", &["b@x".into()], b"r", None)
+                .unwrap()
+        };
+        let (old, retried, recent, unknown, other) = (queue(), queue(), queue(), queue(), queue());
+        for (id, created, retry_from) in [
+            (old, now - 100, 0),
+            (retried, now - 100, now - 10),
+            (recent, now - 10, 0),
+            (unknown, 0, 0),
+            (other, now - 100, 0),
+        ] {
+            db.conn()
+                .execute(
+                    "UPDATE outbox SET created_at = ?1, retry_from = ?2 WHERE id = ?3",
+                    params![created, retry_from, id],
+                )
+                .unwrap();
+        }
+        db.conn()
+            .execute("UPDATE outbox SET state = 'sending' WHERE id = ?1", [other])
+            .unwrap();
+        let stopped = db.give_up_outgoing(fx.account, now, 50).unwrap();
+        assert_eq!(stopped, [(old, None)]);
+        assert_eq!(
+            db.outgoing(old).unwrap().unwrap().state,
+            OutgoingState::Failed
+        );
+        assert_eq!(
+            db.outgoing(retried).unwrap().unwrap().state,
+            OutgoingState::Queued
+        );
     }
 
     #[test]

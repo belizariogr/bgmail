@@ -399,14 +399,14 @@
       transparent mail text stays hidden on dark pages; bulk actions off the UI
       thread; a forward waits for the body.
 - ✅ Archive with Gmail labels only leaves the Inbox.
-- ✅ A message still being retried shows in the unsent panel, with Edit and Discard;
-      retries stop after about three days.
+- ✅ A message still being retried shows in the unsent panel, with Edit and Discard.
 - ✅ Review round 3: Archive leaves Spam on labeled accounts, compose-busy check before
       stopping a retry, no retry of a message being edited, search no longer held to
       its starting folder's rules, whole-token `cid:` match.
-- 🔄 Awaiting a user decision (review round 3): list and limit queued messages that were
-      never tried (account offline or failing to log in); count the give-up limit by
-      age rather than by tries; filter private addresses when fetching remote images.
+- ✅ Messages stuck in the queue for 5 minutes show in the unsent panel, whatever the
+      cause; retries stop at 3 days of age, counted from creation or the last Retry.
+- ✅ Remote images can't reach this machine or link-local addresses, resolved by IP;
+      private ranges stay reachable for intranet images (user decision).
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
 - ✅ Read / mark read-unread (opening marks read on the server; toggle via
