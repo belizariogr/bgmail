@@ -147,15 +147,8 @@ pub fn load() -> Config {
     config_path().map(load_from).unwrap_or_default()
 }
 
-/// Persists the settings (best-effort; errors are ignored).
-pub fn save(config: &Config) {
-    if let Some(path) = config_path() {
-        let _ = save_to(&path, config);
-    }
-}
-
 /// Reads and parses a config file, falling back to defaults on any error.
-fn load_from(path: PathBuf) -> Config {
+pub(crate) fn load_from(path: PathBuf) -> Config {
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -163,7 +156,7 @@ fn load_from(path: PathBuf) -> Config {
 }
 
 /// Writes the config as pretty JSON, creating the parent directory if needed.
-fn save_to(path: &Path, config: &Config) -> std::io::Result<()> {
+pub(crate) fn save_to(path: &Path, config: &Config) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

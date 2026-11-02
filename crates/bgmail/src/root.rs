@@ -795,6 +795,8 @@ pub struct RootView {
     /// after launch, once the initial window state (including a restored maximize)
     /// has settled, so the opening sequence never overwrites the saved sizes.
     persist_ready: bool,
+    /// Where settings are written; a field so tests can keep off the real profile.
+    config_file: Option<std::path::PathBuf>,
     /// Gate that holds the UI behind a plain background until the window has
     /// reached its final size. On Windows the maximize-on-open is asynchronous and
     /// the `WM_SIZE` that grows GPUI's cached viewport can be lost during the busy
@@ -1299,6 +1301,7 @@ impl RootView {
             max_size,
             save_seq: 0,
             persist_ready: false,
+            config_file: config::config_path(),
             // Only Windows defers the first layout (see the field docs); elsewhere
             // the window already has its final size when the UI first renders.
             content_ready: !cfg!(target_os = "windows"),
@@ -3006,7 +3009,14 @@ impl RootView {
     /// saved sizes.
     pub(crate) fn persist_now(&self) {
         if self.persist_ready {
-            config::save(&self.current_config());
+            self.save_config();
+        }
+    }
+
+    /// Best effort; there is nobody to tell.
+    fn save_config(&self) {
+        if let Some(path) = &self.config_file {
+            let _ = config::save_to(path, &self.current_config());
         }
     }
 
@@ -3094,7 +3104,7 @@ impl RootView {
             let _ = this.update(cx, |this, _| {
                 // Skip if a newer change has since scheduled its own save.
                 if this.save_seq == token {
-                    config::save(&this.current_config());
+                    this.save_config();
                 }
             });
         })
@@ -8286,15 +8296,36 @@ mod tests {
         });
     }
 
-    #[test]
-    fn the_saved_language_is_kept_by_later_saves() {
+    #[gpui::test]
+    fn the_saved_language_is_kept_by_later_saves(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
         let dir = tempfile::tempdir().expect("tempdir");
-        let config = Config {
-            language: Language::Portuguese.code().to_string(),
-            ..Config::default()
-        };
-        let view = RootView::new_with_database(config, dir.path().join("mail.db"), true);
-        assert_eq!(view.current_config().language(), Language::Portuguese);
+        let file = dir.path().join("config.json");
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            view.config_file = Some(file.clone());
+            view.enable_persistence();
+            view.set_language(Language::Portuguese, cx);
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(
+            config::load_from(file.clone()).language(),
+            Language::Portuguese
+        );
+
+        view.update(cx, |view, cx| {
+            view.set_appearance(theme::Appearance::Light, cx);
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let saved = config::load_from(file);
+        assert!(saved.light_theme);
+        assert_eq!(saved.language(), Language::Portuguese);
     }
 
     #[gpui::test]
