@@ -33,6 +33,7 @@ Continuous integration on the three desktop platforms and release packaging
   - Reads no secrets.
 - **`release.yml`** (tags `v*`, manual):
   Also packages (without publishing) on pull requests touching packaging files; `workflow_dispatch` works only once the file is on the default branch.
+  - macOS packaging retries up to 3 times: `hdiutil` fails now and then on runners ("Resource busy").
   - `package` matrix: linux-x86_64 (ubuntu-22.04: deb, AppImage, pacman),
     macos-aarch64 and macos-x86_64 (both macos-15; x86_64 cross-compiled via
     `CARGO_BUILD_TARGET` + `--target`: app, dmg), windows-x86_64 (NSIS, WiX

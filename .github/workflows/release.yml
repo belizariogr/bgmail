@@ -139,7 +139,15 @@ jobs:
           done
           args=(--release --formats "${{ matrix.formats }}")
           if [ -n "${{ matrix.target }}" ]; then args+=(--target "${{ matrix.target }}"); fi
-          cargo packager "${args[@]}"
+          # hdiutil fails now and then on macOS runners ("Resource busy").
+          attempts=1
+          if [ "$RUNNER_OS" = "macOS" ]; then attempts=3; fi
+          for attempt in $(seq 1 "$attempts"); do
+            cargo packager "${args[@]}" && exit 0
+            echo "Packaging failed (attempt $attempt of $attempts)"
+            if [ "$attempt" -lt "$attempts" ]; then sleep 30; fi
+          done
+          exit 1
 
       # The tarball script/install.sh downloads from the release.
       - name: Bundle the Linux tarball
