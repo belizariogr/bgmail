@@ -77,6 +77,15 @@ pub fn parse_address_list(input: &str) -> Result<Vec<Address>, Vec<String>> {
     }
 }
 
+/// The valid addresses of a stored header, skipping whatever isn't one: mail from
+/// outside can hold anything, and one odd token shouldn't lose the others.
+pub fn valid_addresses(input: &str) -> Vec<Address> {
+    split_tokens(input)
+        .into_iter()
+        .filter_map(|token| parse_single(token.trim()))
+        .collect()
+}
+
 /// Inverse of [`parse_address_list`]: `display()` of each, comma separated.
 pub fn format_address_list(addresses: &[Address]) -> String {
     addresses
@@ -231,6 +240,10 @@ mod tests {
             ]
         );
         assert_eq!(parse_address_list("   ").unwrap(), vec![]);
+        assert_eq!(valid_addresses("   "), vec![]);
+        let kept = valid_addresses("ok@x.com, nope, Bob <bob@z.io>");
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[1].email, "bob@z.io");
         assert_eq!(
             parse_address_list("<solo@x.com>").unwrap(),
             vec![addr(None, "solo@x.com")]

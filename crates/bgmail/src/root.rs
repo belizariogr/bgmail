@@ -935,8 +935,8 @@ pub struct RootView {
     command_palette_focus_pending: bool,
 }
 
-/// Minimal parsed form of a stored message whose raw source is missing
-/// (local/demo messages), so reply/forward still work.
+/// Minimal parsed form of a stored message whose raw source is missing (local/demo
+/// messages, or one whose body wasn't downloaded yet), so reply/forward still work.
 fn parsed_from_detail(detail: &MessageDetail) -> ParsedMessage {
     let from = Address::new(
         (!detail.sender.is_empty()).then(|| detail.sender.clone()),
@@ -957,8 +957,9 @@ fn parsed_from_detail(detail: &MessageDetail) -> ParsedMessage {
             .collect(),
         subject: detail.subject.clone(),
         from: Some(from),
-        to: mail_core::parse_address_list(&detail.to_addrs).unwrap_or_default(),
-        cc: mail_core::parse_address_list(&detail.cc_addrs).unwrap_or_default(),
+        reply_to: mail_core::valid_addresses(&detail.reply_to),
+        to: mail_core::valid_addresses(&detail.to_addrs),
+        cc: mail_core::valid_addresses(&detail.cc_addrs),
         text,
         html,
         ..ParsedMessage::default()
@@ -7754,6 +7755,52 @@ mod tests {
         view.prune_multi_selection();
         assert!(view.multi_selection.is_empty());
         assert_eq!(view.selected_message_id, Some(ids[0]));
+    }
+
+    #[test]
+    fn a_multiple_selection_that_left_the_list_leaves_the_reader_empty() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.apply_selection(vec![ids[0], ids[1]]);
+        assert!(view.reader_detail().is_some());
+
+        view.list_messages.clear();
+        assert!(!view.prune_multi_selection());
+        assert!(view.multi_selection.is_empty());
+        assert!(view.reader_detail().is_none());
+        assert!(view.attachments.is_empty());
+    }
+
+    #[test]
+    fn a_plain_selection_survives_pruning_an_empty_multiple_one() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.apply_selection(vec![ids[0]]);
+        assert!(!view.prune_multi_selection());
+        assert_eq!(view.selected_message_id, Some(ids[0]));
+    }
+
+    #[test]
+    fn a_multiple_selection_down_to_one_row_counts_as_collapsed() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.apply_selection(vec![ids[0], ids[1]]);
+        view.list_messages.retain(|message| message.id == ids[1]);
+        assert!(view.prune_multi_selection());
+        assert_eq!(view.selected_message_id, Some(ids[1]));
+    }
+
+    #[test]
+    fn a_reply_without_the_body_still_follows_reply_to() {
+        let (_dir, view) = test_view();
+        let id = view.list_ids()[0];
+        let mut detail = view.db.get_message(id).unwrap().unwrap();
+        detail.reply_to = "Support <support@example.com>".into();
+        detail.to_addrs = "ok@example.com, not an address".into();
+        let parsed = parsed_from_detail(&detail);
+        assert_eq!(parsed.reply_to[0].email, "support@example.com");
+        assert_eq!(parsed.to.len(), 1);
+        assert_eq!(parsed.to[0].email, "ok@example.com");
     }
 
     #[test]
