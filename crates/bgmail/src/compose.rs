@@ -19,7 +19,7 @@ use html_view::{
     Resources,
 };
 use mail_core::{Address, Draft, OutgoingAttachment};
-use theme::ActiveTheme;
+use theme::{ActiveTheme, Theme, ThemeColors};
 
 use crate::data::MessageBody;
 use crate::mail_html::{email_document, DocumentColors};
@@ -1067,6 +1067,7 @@ impl ComposeView {
     fn render_quote(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = cx.language();
         let border = cx.theme().colors().border;
+        let toggle = quote_toggle_colors(self.white_background, cx.theme().colors());
         let attribution = self
             .reply
             .quoted
@@ -1086,14 +1087,21 @@ impl ComposeView {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 h_flex().child(
-                    div()
+                    h_flex()
                         .id("compose-quote-toggle")
+                        .h(px(18.0))
+                        .px_2()
+                        .justify_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .bg(toggle.background)
+                        .hover(move |el| el.bg(toggle.hover))
                         .tooltip(Tooltip::text(Key::ComposeToggleQuote.tr(language)))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_quote(cx)))
                         .child(
-                            IconButton::new("compose-quote-toggle-button", IconName::More)
+                            Icon::new(IconName::More)
                                 .size(IconSize::Small)
-                                .selected(self.quote_expanded)
-                                .on_click(cx.listener(|this, _, _, cx| this.toggle_quote(cx))),
+                                .color(Color::Custom(toggle.icon)),
                         ),
                 ),
             )
@@ -1115,6 +1123,30 @@ impl ComposeView {
                     )
                 })
             })
+    }
+}
+
+/// Colors of the button that reveals the quote.
+#[derive(Clone, Copy)]
+struct QuoteToggleColors {
+    background: Hsla,
+    hover: Hsla,
+    icon: Hsla,
+}
+
+/// The button sits on the page, not on the app: over a white page it takes the
+/// light theme's colors, whatever the app's theme is.
+fn quote_toggle_colors(white_background: bool, theme: &ThemeColors) -> QuoteToggleColors {
+    let light = Theme::light();
+    let colors = if white_background {
+        light.colors()
+    } else {
+        theme
+    };
+    QuoteToggleColors {
+        background: colors.element_active,
+        hover: colors.element_hover,
+        icon: colors.text_muted,
     }
 }
 
@@ -1600,6 +1632,16 @@ mod tests {
 
         let plain = ReplyHeaders::default();
         assert_eq!(reply_text(&plain, "Hi\n"), "Hi\n");
+    }
+
+    #[test]
+    fn quote_toggle_follows_the_page_not_the_app_theme() {
+        let dark = Theme::dark();
+        let on_white = quote_toggle_colors(true, dark.colors());
+        assert!(on_white.background.l > 0.7, "{:?}", on_white.background);
+        assert!(on_white.icon.l < 0.5, "{:?}", on_white.icon);
+        let on_dark = quote_toggle_colors(false, dark.colors());
+        assert_eq!(on_dark.background, dark.colors().element_active);
     }
 
     #[test]

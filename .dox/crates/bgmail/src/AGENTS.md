@@ -478,6 +478,7 @@ window.
 - **`merge_attachments`** (private, L1212) — appends files while the total stays within `cap`; returns whether any was rejected.
 
 - **struct `QuotedOriginal`** / **`reply_html`** / **`reply_text`** / **`toggle_quote`** / **`build_quote_view`** / **`render_quote`** (private, `compose`): what a reply quotes, the HTML and plain-text versions sent, and the quote below the editor.
+- **struct `QuoteToggleColors`** / **`quote_toggle_colors`** (private, `compose`): colors of the `⋯` button, from the light theme over a white page.
 - **`quotable_text`** (pub, `mail_html`): a plain-text original for a reply's quote.
 - **`quotable_html`** (pub, `mail_html`): the original's sanitized body for a reply's quote, without `cid:` images.
 - **struct `BulkSelection`** (`commands`) and **`bulk_move_targets`** (private): what commands know about a multiple selection; folders all its accounts share.
