@@ -82,6 +82,11 @@ pub enum Key {
     ToolbarFlag,
     ToolbarMove,
     ToolbarFilter,
+    FilterAll,
+    FilterUnread,
+    FilterStarred,
+    FilterAttachments,
+    FilterNoResults,
     ToolbarMore,
 
     CommandPalette,
@@ -119,10 +124,8 @@ pub enum Key {
     FindMatches,
     FindNoMatches,
     // Reader: plain-text fallback notices.
-    NoticeTooLarge,
     NoticeTooDeep,
     NoticeCrashed,
-    NoticeShowFormatted,
     StatusBodyFailed,
     StatusMessageSent,
     StatusSendFailed,
@@ -249,8 +252,8 @@ impl Key {
             (MailboxTrash, P) => "Lixeira",
             (MailboxArchive, E) => "Archive",
             (MailboxArchive, P) => "Arquivo",
-            (MailboxFlagged, E) => "Flagged",
-            (MailboxFlagged, P) => "Sinalizadas",
+            (MailboxFlagged, E) => "Starred",
+            (MailboxFlagged, P) => "Com estrela",
 
             (SettingsGeneral, E) => "General",
             (SettingsGeneral, P) => "Geral",
@@ -320,12 +323,22 @@ impl Key {
             (ToolbarReplyAll, P) => "Responder a todos",
             (ToolbarForward, E) => "Forward",
             (ToolbarForward, P) => "Encaminhar",
-            (ToolbarFlag, E) => "Flag message",
-            (ToolbarFlag, P) => "Sinalizar mensagem",
+            (ToolbarFlag, E) => "Star message",
+            (ToolbarFlag, P) => "Marcar com estrela",
             (ToolbarMove, E) => "Move to folder",
             (ToolbarMove, P) => "Mover para pasta",
             (ToolbarFilter, E) => "Filter messages",
             (ToolbarFilter, P) => "Filtrar mensagens",
+            (FilterAll, E) => "All messages",
+            (FilterAll, P) => "Todas as mensagens",
+            (FilterUnread, E) => "Unread",
+            (FilterUnread, P) => "Não lidas",
+            (FilterStarred, E) => "Starred",
+            (FilterStarred, P) => "Com estrela",
+            (FilterAttachments, E) => "With attachments",
+            (FilterAttachments, P) => "Com anexos",
+            (FilterNoResults, E) => "No messages match this filter",
+            (FilterNoResults, P) => "Nenhuma mensagem corresponde ao filtro",
             (ToolbarMore, E) => "More actions",
             (ToolbarMore, P) => "Mais ações",
 
@@ -341,10 +354,10 @@ impl Key {
             (CommandArchive, P) => "Arquivar",
             (CommandMarkJunk, E) => "Mark as Junk",
             (CommandMarkJunk, P) => "Marcar como spam",
-            (CommandFlag, E) => "Flag",
-            (CommandFlag, P) => "Sinalizar",
-            (CommandUnflag, E) => "Unflag",
-            (CommandUnflag, P) => "Remover sinalização",
+            (CommandFlag, E) => "Star",
+            (CommandFlag, P) => "Marcar com estrela",
+            (CommandUnflag, E) => "Remove star",
+            (CommandUnflag, P) => "Remover estrela",
             (CommandPrint, E) => "Print…",
             (CommandPrint, P) => "Imprimir…",
             (PrintFrom, E) => "From",
@@ -394,14 +407,10 @@ impl Key {
             (FindMatches, P) => "{} de {}",
             (FindNoMatches, E) => "No matches",
             (FindNoMatches, P) => "Nenhum resultado",
-            (NoticeTooLarge, E) => "This message is very large, so it is shown as plain text.",
-            (NoticeTooLarge, P) => "Esta mensagem é muito grande, por isso é exibida como texto simples.",
             (NoticeTooDeep, E) => "This message couldn't be displayed formatted, so it is shown as plain text.",
             (NoticeTooDeep, P) => "Não foi possível exibir esta mensagem formatada, por isso ela é exibida como texto simples.",
             (NoticeCrashed, E) => "BGMail closed while showing this message, so it is shown as plain text.",
             (NoticeCrashed, P) => "O BGMail fechou ao exibir esta mensagem, por isso ela é exibida como texto simples.",
-            (NoticeShowFormatted, E) => "Show formatted",
-            (NoticeShowFormatted, P) => "Mostrar formatada",
             (StatusBodyFailed, E) => "Could not download the message",
             (StatusBodyFailed, P) => "Não foi possível baixar a mensagem",
             (StatusMessageSent, E) => "Message sent",
@@ -654,6 +663,14 @@ pub fn message_count(language: Language, count: usize) -> String {
     format!("{count} {}", messages_noun(language, count))
 }
 
+/// Reader pane while several messages are selected.
+pub fn messages_selected(language: Language, count: usize) -> String {
+    match language {
+        Language::English => format!("{count} messages selected"),
+        Language::Portuguese => format!("{count} mensagens selecionadas"),
+    }
+}
+
 /// Status bar (left): account and message counts.
 pub fn status_counts(language: Language, accounts: usize, messages: usize) -> String {
     format!(
@@ -702,7 +719,7 @@ pub fn status_unsent(language: Language, unsent: usize) -> String {
 /// Attribution line above a quoted reply.
 pub fn reply_attribution(language: Language, date: &str, sender: &str) -> String {
     match language {
-        Language::English => format!("On {date}, {sender} wrote:"),
+        Language::English => format!("On {date} {sender} wrote:"),
         Language::Portuguese => format!("Em {date}, {sender} escreveu:"),
     }
 }
@@ -758,7 +775,7 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 173] = [
+    const ALL_KEYS: [Key; 176] = [
         Key::MailboxInbox,
         Key::MailboxDrafts,
         Key::MailboxSent,
@@ -798,6 +815,11 @@ mod tests {
         Key::ToolbarFlag,
         Key::ToolbarMove,
         Key::ToolbarFilter,
+        Key::FilterAll,
+        Key::FilterUnread,
+        Key::FilterStarred,
+        Key::FilterAttachments,
+        Key::FilterNoResults,
         Key::ToolbarMore,
         Key::ComposeWindowTitle,
         Key::ComposeSend,
@@ -819,10 +841,8 @@ mod tests {
         Key::FindPlaceholder,
         Key::FindMatches,
         Key::FindNoMatches,
-        Key::NoticeTooLarge,
         Key::NoticeTooDeep,
         Key::NoticeCrashed,
-        Key::NoticeShowFormatted,
         Key::CommandPrint,
         Key::PrintFrom,
         Key::PrintDate,

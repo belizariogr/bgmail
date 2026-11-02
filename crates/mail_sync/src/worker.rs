@@ -19,7 +19,7 @@ use storage::{
     BODY_STATE_FULL, PROVIDER_LOCAL,
 };
 
-use crate::body::body_content;
+use crate::body::{body_content, repair_stale_previews};
 use crate::engine::EngineOptions;
 use crate::events::{AccountStatus, Command, SyncEvent};
 use crate::plan::{
@@ -206,6 +206,9 @@ pub(crate) fn run_worker(setup: WorkerSetup) {
             return;
         }
     };
+    if let Err(error) = repair_stale_previews(&db, setup.account_id) {
+        eprintln!("BGMail: could not repair message previews: {error}");
+    }
     Worker::new(setup, db).run();
 }
 

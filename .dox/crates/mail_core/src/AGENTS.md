@@ -243,11 +243,15 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`prefixed_subject`** (private) — shared prefix logic.
 - **`quote_text`** (pub) — `pub fn quote_text(text: &str) -> String` — trims trailing whitespace, `> ` per line, `>` for blank lines, `\n` joined (CRLF accepted).
 - **`prepare_reply`** (pub) — `pub fn prepare_reply(original: &ParsedMessage, kind: ReplyKind, me: &[Address], labels: &QuoteLabels) -> Draft`
-  - Behavior: `from` = `me[0]` (or default). Body source = `text`, else `html_to_text(html)`. Reply: `to` = reply_to or from (if those are all me → original `to`), minus me, deduped. ReplyAll: additionally `cc` = original to + cc minus me and minus `to`, deduped. Reply kinds set `in_reply_to` = original id and `references` = original references + id (no duplicate); text = `"\n\n" + attribution + "\n" + quote_text(body)`. Forward: no recipients/threading; text = `"\n\n" + forward_header + From/Date/Subject/To lines (labels; From/Date/To omitted when empty) + "\n\n" + body`. Attachments not copied.
+  - Behavior: `from` = `me[0]` (or default). Body source = `readable_text(text, html)`. Reply: `to` = reply_to or from (if those are all me → original `to`), minus me, deduped. ReplyAll: additionally `cc` = original to + cc minus me and minus `to`, deduped. Reply kinds set `in_reply_to` = original id and `references` = original references + id (no duplicate); text = `"\n\n" + attribution + "\n" + quote_text(body)`. Forward: no recipients/threading; text = `"\n\n" + forward_header + From/Date/Subject/To lines (labels; From/Date/To omitted when empty) + "\n\n" + body`. Attachments not copied.
 - **`unique`** (private) — keeps first occurrence per email, skipping `exclude`.
 - **`html_to_text`** (pub) — `pub fn html_to_text(html: &str) -> String` — drops comments, tags, `script/style/head/title` content; decodes `&amp; &lt; &gt; &quot; &apos; &#39; &nbsp;` and numeric entities (unknown kept literally); collapses whitespace; line breaks for `br p div tr li h1-6 blockquote table ul ol hr pre` (li/tr on open only); trims lines and keeps at most one blank line.
 - **`push_text`** (private) — appends entity-decoded text collapsing whitespace (`&nbsp;` → space).
-- **`decode_entities`** (private) — entity decoding described above.
+- **`is_invisible_filler`** (private) — soft hyphen, zero-width space/non-joiner, word joiner and BOM, dropped from converted text (the zero width joiner stays for emoji).
+- **`readable_text`** (pub) — `pub fn readable_text(text: Option<&str>, html: Option<&str>) -> String`: the text part, or the converted HTML when that part is missing, blank or HTML itself.
+- **`looks_like_html`** (private) — text starting with `<!doctype`, `<html`, `<head` or `<body`.
+- **`reply_html`** (pub) — `pub fn reply_html(text: &str) -> String`: HTML alternative of a reply with Gmail's markup (`div.gmail_quote`, `div.gmail_attr`, nested `blockquote.gmail_quote`); text below a quote stays outside it.
+- **`quote_depth`** (private) — quote depth of a line and its text without the `>` markers.
 - **`tidy_lines`** (private) — trims lines, collapses blank runs, drops leading/trailing blanks.
 
 #### Tests

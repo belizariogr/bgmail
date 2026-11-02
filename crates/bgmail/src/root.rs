@@ -27,7 +27,8 @@ use ui::{
 };
 
 use crate::actions::{
-    FindInMessage, SelectNextMessage, SelectPreviousMessage, ToggleCommandPalette,
+    ExtendSelectionDown, ExtendSelectionUp, FindInMessage, SelectAllMessages, SelectNextMessage,
+    SelectPreviousMessage, ToggleCommandPalette,
 };
 use crate::app_menus;
 use crate::attachments;
@@ -70,10 +71,13 @@ pub(crate) const WINDOW_MIN_WIDTH: f32 = 950.0;
 /// Minimum window height, in pixels.
 pub(crate) const WINDOW_MIN_HEIGHT: f32 = 480.0;
 
-/// Wayland app_id / X11 WM_CLASS of every BGMail window: must match the
-/// packaged `BGMail.desktop` (StartupWMClass) so docks group the main,
-/// compose and settings windows under one icon.
-pub(crate) const WINDOW_APP_ID: &str = "BGMail";
+/// Wayland app_id / X11 WM_CLASS of the main window: must match the packaged
+/// `BGMail.desktop` (StartupWMClass) so docks show the app's icon for it.
+pub(crate) const MAIN_WINDOW_APP_ID: &str = "com.bgmail.main";
+/// Wayland app_id / X11 WM_CLASS of the settings window.
+pub(crate) const SETTINGS_WINDOW_APP_ID: &str = "com.bgmail.settings";
+/// Wayland app_id / X11 WM_CLASS of the compose window.
+pub(crate) const COMPOSE_WINDOW_APP_ID: &str = "com.bgmail.newmail";
 /// Below this window width the sidebar collapses automatically and, once
 /// reopened, floats over the content instead of pushing the columns.
 const NARROW_BREAKPOINT: f32 = 1200.0;
@@ -83,6 +87,10 @@ const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 /// It is fixed (not proportional to the number of rows), so a long list folds in
 /// the same time as a short one.
 const FOLD_ANIM_MS: u64 = 90;
+/// Tallest a dropdown gets before it scrolls, in pixels.
+const MENU_MAX_HEIGHT: f32 = 420.0;
+/// Width a list row's text gives up per action button, in pixels.
+const ROW_ACTION_WIDTH: f32 = 30.0;
 /// Fixed height of a sidebar row (account header and mailbox rows alike), in
 /// pixels. Pinning it keeps the fold (accordion) animation's height math exact,
 /// so the list never snaps at the end of the transition.
@@ -163,6 +171,81 @@ enum Selection {
     },
 }
 
+/// Rows shown by the message list's filter button.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ListFilter {
+    #[default]
+    All,
+    Unread,
+    Starred,
+    Attachments,
+}
+
+impl ListFilter {
+    const OPTIONS: [ListFilter; 4] = [
+        ListFilter::All,
+        ListFilter::Unread,
+        ListFilter::Starred,
+        ListFilter::Attachments,
+    ];
+
+    fn matches(self, message: &MessageListItem) -> bool {
+        match self {
+            ListFilter::All => true,
+            ListFilter::Unread => message.unread,
+            ListFilter::Starred => message.starred,
+            ListFilter::Attachments => message.has_attachment,
+        }
+    }
+
+    fn label(self) -> Key {
+        match self {
+            ListFilter::All => Key::FilterAll,
+            ListFilter::Unread => Key::FilterUnread,
+            ListFilter::Starred => Key::FilterStarred,
+            ListFilter::Attachments => Key::FilterAttachments,
+        }
+    }
+}
+
+/// Rows selected after clicking `clicked`: Shift takes the range from the
+/// `anchor`, Ctrl/Cmd (`toggle`) adds or removes that row, a plain click
+/// selects only it. The result follows the list's order.
+fn clicked_selection(
+    list: &[i64],
+    current: &[i64],
+    anchor: Option<i64>,
+    clicked: i64,
+    extend: bool,
+    toggle: bool,
+) -> Vec<i64> {
+    if extend {
+        return selection_range(list, anchor.unwrap_or(clicked), clicked);
+    }
+    if toggle {
+        return list
+            .iter()
+            .copied()
+            .filter(|id| current.contains(id) != (*id == clicked))
+            .collect();
+    }
+    vec![clicked]
+}
+
+/// Rows between `from` and `to`, inclusive, in the list's order.
+fn selection_range(list: &[i64], from: i64, to: i64) -> Vec<i64> {
+    let position = |id| list.iter().position(|row| *row == id);
+    let (Some(from), Some(to)) = (position(from), position(to)) else {
+        return vec![to];
+    };
+    list[from.min(to)..=from.max(to)].to_vec()
+}
+
+/// Whether a folder's row counts unread mail: what is in the Trash is done with.
+fn folder_shows_unread(path: &str) -> bool {
+    path != storage::system::TRASH
+}
+
 /// Builds the SQLite list query for the current sidebar selection or search.
 fn mail_list_query(selection: &Selection, search: &str) -> MailListQuery {
     if !search.trim().is_empty() {
@@ -208,7 +291,7 @@ fn mailbox_icon(kind: MailboxKind) -> IconName {
 fn global_mailbox_icon(kind: GlobalMailbox) -> IconName {
     match kind {
         GlobalMailbox::Inbox => IconName::Inbox,
-        GlobalMailbox::Flagged => IconName::Flag,
+        GlobalMailbox::Flagged => IconName::Star,
         GlobalMailbox::Drafts => IconName::Drafts,
         GlobalMailbox::Sent => IconName::Sent,
     }
@@ -233,42 +316,17 @@ fn chevron_svg(color: Hsla, angle: f32) -> Svg {
 struct ReaderSignature {
     selected: i64,
     colors: DocumentColors,
-    /// The user asked to show a large message formatted anyway.
-    formatted_anyway: bool,
     /// Remote content loads (always, or allowed for this message).
     remote: bool,
 }
 
-/// HTML bodies larger than this are shown as plain text unless the user asks
-/// for the formatted version: formatting runs on the UI thread (~100 ms per
-/// MB measured), so a huge newsletter would freeze the window.
-const MAX_FORMATTED_HTML_BYTES: usize = 1024 * 1024;
-
 /// Why the reader shows a message as plain text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReaderNotice {
-    /// Bigger than [`MAX_FORMATTED_HTML_BYTES`] (can be shown formatted).
-    TooLarge,
     /// The renderer refused it (`RenderError`).
     Unrenderable,
     /// The app closed while rendering it last time (see [`CrashGuard`]).
     Crashed,
-}
-
-/// Plain-text fallback reason for an HTML body (`None`: render formatted):
-/// a crash while rendering it wins, then the size limit unless overridden.
-fn plain_text_reason(
-    html_len: usize,
-    crashed: bool,
-    formatted_anyway: bool,
-) -> Option<ReaderNotice> {
-    if crashed {
-        Some(ReaderNotice::Crashed)
-    } else if html_len > MAX_FORMATTED_HTML_BYTES && !formatted_anyway {
-        Some(ReaderNotice::TooLarge)
-    } else {
-        None
-    }
 }
 
 /// A reader context menu: where it was summoned and what it applies to.
@@ -304,10 +362,16 @@ fn step_match(current: usize, count: usize, step: isize) -> usize {
     (current as isize + step).rem_euclid(count as isize) as usize
 }
 
-/// Text selection highlight of the reader (RGBA): the accent at a strength
-/// that keeps dark and light text readable on any page.
-fn reader_selection_color(accent: Hsla) -> [u8; 4] {
-    let rgba: gpui::Rgba = accent.opacity(0.35).into();
+/// Text selection highlight of the reader (RGBA). Over a light page it is the
+/// accent already blended with the page and fully opaque: a translucent fill
+/// lowers the window's own alpha where it paints, and on a translucent window
+/// the dark desktop then shows through a white page, turning it dark blue.
+/// Text is painted after it, so opaque hides nothing. A dark page stays
+/// translucent to keep dark text on white blocks of the message readable.
+fn reader_selection_color(accent: Hsla, page: Hsla) -> [u8; 4] {
+    let tint = accent.opacity(0.35);
+    let color = if page.l > 0.5 { page.blend(tint) } else { tint };
+    let rgba: gpui::Rgba = color.into();
     let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
     [
         channel(rgba.r),
@@ -431,6 +495,21 @@ pub struct RootView {
     /// message list.
     list_scroll: UniformListScrollHandle,
     list_scrollbar: Option<Entity<ScrollbarState>>,
+    reader_v_scrollbar: Option<Entity<ScrollbarState>>,
+    reader_h_scrollbar: Option<Entity<ScrollbarState>>,
+    list_filter: ListFilter,
+    /// Where the filter button's menu is open.
+    filter_menu: Option<Point<Pixels>>,
+    /// Where the Move button's menu is open.
+    move_menu: Option<Point<Pixels>>,
+    /// Rows of a selection of two or more, in list order. While it is set,
+    /// `selected_message_id` is `None`: the reader has no single message.
+    multi_selection: Vec<i64>,
+    /// Fixed end of a Shift selection and the end that moves.
+    selection_anchor: Option<i64>,
+    selection_focus: Option<i64>,
+    /// Row under the mouse, whose text makes room for its action buttons.
+    hovered_row: Option<i64>,
     /// Focus of the message list (key context `MessageList`: arrows/j/k move
     /// the selection, Delete/Backspace trash). Created on first render.
     list_focus: Option<FocusHandle>,
@@ -454,7 +533,6 @@ pub struct RootView {
     /// Why the current message is shown as plain text, if it is.
     reader_notice: Option<ReaderNotice>,
     /// Large messages the user chose to show formatted anyway.
-    formatted_anyway: HashSet<i64>,
     /// Messages whose rendering crashed the app (shown as plain text).
     crashed_messages: HashSet<i64>,
     /// Marker of the message being rendered (crash-loop protection).
@@ -865,6 +943,15 @@ impl RootView {
             compose_size,
             list_scroll: UniformListScrollHandle::new(),
             list_scrollbar: None,
+            reader_v_scrollbar: None,
+            reader_h_scrollbar: None,
+            list_filter: ListFilter::All,
+            filter_menu: None,
+            move_menu: None,
+            multi_selection: Vec::new(),
+            selection_anchor: None,
+            selection_focus: None,
+            hovered_row: None,
             list_focus: None,
             attachments,
             attachment_menu: None,
@@ -875,7 +962,6 @@ impl RootView {
             reader_menu: None,
             find_bar: None,
             reader_notice: None,
-            formatted_anyway: HashSet::new(),
             crashed_messages: crash_guard.take_unfinished().into_iter().collect(),
             crash_guard,
             last_reader_sig: None,
@@ -910,6 +996,21 @@ impl RootView {
             self.list_messages
                 .retain(|message| !removing.contains(&message.account_id));
         }
+        if self.list_filter != ListFilter::All {
+            // A message being read stays until the selection moves, even if it
+            // no longer matches: opening an unread one marks it read.
+            let (filter, selected, multi) = (
+                self.list_filter,
+                self.selected_message_id,
+                &self.multi_selection,
+            );
+            self.list_messages.retain(|message| {
+                filter.matches(message)
+                    || selected == Some(message.id)
+                    || multi.contains(&message.id)
+            });
+        }
+        self.prune_multi_selection();
         if let Some(selected) = self.selected_message_id {
             if self.list_messages.iter().any(|m| m.id == selected) {
                 self.reload_selected_detail();
@@ -919,7 +1020,121 @@ impl RootView {
         }
     }
 
+    /// Drops selected rows that left the list; one survivor is a plain
+    /// selection again.
+    fn prune_multi_selection(&mut self) {
+        let list = &self.list_messages;
+        self.multi_selection
+            .retain(|id| list.iter().any(|message| message.id == *id));
+        if let [only] = self.multi_selection[..] {
+            self.selected_message_id = Some(only);
+            self.multi_selection.clear();
+        }
+    }
+
+    /// Every selected row, however many.
+    fn selected_ids(&self) -> Vec<i64> {
+        match self.selected_message_id {
+            Some(id) => vec![id],
+            None => self.multi_selection.clone(),
+        }
+    }
+
+    fn row_is_selected(&self, id: i64) -> bool {
+        self.selected_message_id == Some(id) || self.multi_selection.contains(&id)
+    }
+
+    fn list_ids(&self) -> Vec<i64> {
+        self.list_messages.iter().map(|m| m.id).collect()
+    }
+
+    /// Makes `ids` the selection. Returns whether a single message came out of
+    /// it, which the caller then opens.
+    fn apply_selection(&mut self, ids: Vec<i64>) -> bool {
+        self.clear_message_selection();
+        match ids[..] {
+            [] => false,
+            [id] => {
+                self.selected_message_id = Some(id);
+                true
+            }
+            _ => {
+                self.multi_selection = ids;
+                false
+            }
+        }
+    }
+
+    fn set_selection(&mut self, ids: Vec<i64>, cx: &mut Context<Self>) {
+        if self.apply_selection(ids) {
+            self.on_message_selection_changed(cx);
+        } else {
+            self.sync_app_menus(cx);
+            cx.notify();
+        }
+    }
+
+    /// Mouse selection of a row: see [`clicked_selection`].
+    fn click_message_row(
+        &mut self,
+        id: i64,
+        modifiers: gpui::Modifiers,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(focus) = &self.list_focus {
+            window.focus(focus);
+        }
+        let ids = clicked_selection(
+            &self.list_ids(),
+            &self.selected_ids(),
+            self.selection_anchor,
+            id,
+            modifiers.shift,
+            modifiers.secondary(),
+        );
+        if !modifiers.shift {
+            self.selection_anchor = Some(id);
+        }
+        self.selection_focus = Some(id);
+        self.set_selection(ids, cx);
+    }
+
+    /// Core of Shift+arrow: moves the free end of the selection `step` rows.
+    /// Returns the selected rows, or `None` when it can't move.
+    fn extended_selection(&mut self, step: isize) -> Option<Vec<i64>> {
+        let list = self.list_ids();
+        let focus = self.selection_focus.or(self.selected_message_id);
+        let current = focus.and_then(|id| list.iter().position(|row| *row == id));
+        let target = list[adjacent_index(current, list.len(), step)?];
+        let anchor = self.selection_anchor.or(focus).unwrap_or(target);
+        self.selection_anchor = Some(anchor);
+        self.selection_focus = Some(target);
+        Some(selection_range(&list, anchor, target))
+    }
+
+    fn extend_selection(&mut self, step: isize, cx: &mut Context<Self>) {
+        if let Some(ids) = self.extended_selection(step) {
+            if let Some(ix) = self
+                .selection_focus
+                .and_then(|id| self.list_messages.iter().position(|m| m.id == id))
+            {
+                self.list_scroll.scroll_to_item(ix, ScrollStrategy::Top);
+            }
+            self.set_selection(ids, cx);
+        }
+    }
+
+    fn set_list_filter(&mut self, filter: ListFilter, cx: &mut Context<Self>) {
+        self.list_filter = filter;
+        self.filter_menu = None;
+        self.reload_message_list();
+        self.sync_app_menus(cx);
+        cx.notify();
+    }
+
     fn clear_message_selection(&mut self) {
+        self.multi_selection.clear();
         self.selected_message_id = None;
         self.selected_detail = None;
         self.attachments.clear();
@@ -966,6 +1181,7 @@ impl RootView {
     fn select_adjacent_message(&mut self, step: isize) -> bool {
         let current = self
             .selected_message_id
+            .or(self.selection_focus)
             .and_then(|id| self.list_messages.iter().position(|m| m.id == id));
         let Some(target) = adjacent_index(current, self.list_messages.len(), step) else {
             return false;
@@ -973,7 +1189,11 @@ impl RootView {
         if Some(target) == current {
             return false;
         }
-        self.selected_message_id = Some(self.list_messages[target].id);
+        let id = self.list_messages[target].id;
+        self.multi_selection.clear();
+        self.selected_message_id = Some(id);
+        self.selection_anchor = Some(id);
+        self.selection_focus = Some(id);
         self.last_reader_sig = None;
         true
     }
@@ -1027,12 +1247,66 @@ impl RootView {
     fn run_message_action(
         &mut self,
         cx: &mut Context<Self>,
-        action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
     ) {
+        if !self.multi_selection.is_empty() {
+            if let Err(error) = self.apply_action_to_selection(action) {
+                self.set_status_note(
+                    format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
+                    cx,
+                );
+            }
+            self.sync_app_menus(cx);
+            cx.notify();
+            return;
+        }
         let Some(id) = self.selected_message_id else {
             return;
         };
         self.run_action_on_message(id, cx, action);
+    }
+
+    /// Runs `action` on every row of a multiple selection, even if one fails
+    /// (the first error is returned), and leaves nothing selected: opening the
+    /// next message would mark it read without it being asked for.
+    fn apply_action_to_selection(
+        &mut self,
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
+    ) -> rusqlite::Result<()> {
+        let mut result = Ok(());
+        for id in std::mem::take(&mut self.multi_selection) {
+            let outcome = self.act_on_message(id, &action);
+            if result.is_ok() {
+                result = outcome;
+            }
+        }
+        self.clear_message_selection();
+        self.reload_message_list();
+        result
+    }
+
+    /// Runs `action` on message `id` and hands its server work to the worker.
+    fn act_on_message(
+        &self,
+        id: i64,
+        action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
+    ) -> rusqlite::Result<()> {
+        let account_id = self
+            .list_messages
+            .iter()
+            .find(|message| message.id == id)
+            .map(|message| message.account_id)
+            .or_else(|| {
+                self.selected_detail
+                    .as_ref()
+                    .filter(|detail| detail.id == id)
+                    .map(|detail| detail.account_id)
+            });
+        action(&self.db, id).map(|outcome| {
+            if let Some(account_id) = account_id {
+                self.after_action(account_id, outcome);
+            }
+        })
     }
 
     /// [`Self::run_message_action`] for any message, selected or not.
@@ -1061,23 +1335,8 @@ impl RootView {
         id: i64,
         action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
     ) -> rusqlite::Result<()> {
-        let account_id = self
-            .list_messages
-            .iter()
-            .find(|message| message.id == id)
-            .map(|message| message.account_id)
-            .or_else(|| {
-                self.selected_detail
-                    .as_ref()
-                    .filter(|detail| detail.id == id)
-                    .map(|detail| detail.account_id)
-            });
         let position = self.list_messages.iter().position(|m| m.id == id);
-        let result = action(&self.db, id).map(|outcome| {
-            if let Some(account_id) = account_id {
-                self.after_action(account_id, outcome);
-            }
-        });
+        let result = self.act_on_message(id, action);
         self.reload_message_list();
         if self.selected_message_id.is_none() {
             if let Some(next) = position.and_then(|ix| {
@@ -1577,6 +1836,8 @@ impl RootView {
             selected_message_id: self.selected_message_id,
             message_detail: self.selected_detail.clone(),
             folders_by_account: self.folders_by_account.clone(),
+            bulk_selection: !self.multi_selection.is_empty(),
+            list_in_trash: self.showing_trash(),
         }
     }
 
@@ -1954,6 +2215,12 @@ impl RootView {
     }
 
     pub(crate) fn delete_message_to_trash(&mut self, cx: &mut Context<Self>) {
+        // Trashing what is already in the Trash would delete it for good.
+        let selection = std::mem::take(&mut self.multi_selection);
+        self.multi_selection = selection
+            .into_iter()
+            .filter(|id| self.row_can_be_trashed(*id))
+            .collect();
         self.run_message_action(cx, mail_actions::trash);
     }
 
@@ -2177,7 +2444,12 @@ impl RootView {
     /// Lazily creates the scrollbar state entities (needs an app context, which
     /// is only available at render time).
     fn ensure_scrollbar_states(&mut self, cx: &mut Context<Self>) {
-        for slot in [&mut self.list_scrollbar, &mut self.sidebar_scrollbar] {
+        for slot in [
+            &mut self.list_scrollbar,
+            &mut self.sidebar_scrollbar,
+            &mut self.reader_v_scrollbar,
+            &mut self.reader_h_scrollbar,
+        ] {
             slot.get_or_insert_with(|| cx.new(|_| ScrollbarState::new()));
         }
     }
@@ -2435,7 +2707,6 @@ impl RootView {
         let signature = ReaderSignature {
             selected: id,
             colors: doc_colors,
-            formatted_anyway: self.formatted_anyway.contains(&id),
             remote,
         };
         if self.reader_view.is_some() && self.last_reader_sig == Some(signature) {
@@ -2443,12 +2714,10 @@ impl RootView {
         }
         let body = db_seed::message_body_from_detail(detail);
         let mut notice = match &body {
-            MessageBody::Html(html) => plain_text_reason(
-                html.len(),
-                self.crashed_messages.contains(&id),
-                signature.formatted_anyway,
-            ),
-            MessageBody::Text(_) => None,
+            MessageBody::Html(_) if self.crashed_messages.contains(&id) => {
+                Some(ReaderNotice::Crashed)
+            }
+            _ => None,
         };
         let options = || DocumentOptions {
             appearance: if doc_colors.is_dark() {
@@ -2456,7 +2725,7 @@ impl RootView {
             } else {
                 PageAppearance::Light
             },
-            selection_color: Some(reader_selection_color(colors.accent)),
+            selection_color: Some(reader_selection_color(colors.accent, background)),
             resources: html_view::Resources::new().allow_remote(remote),
             ..Default::default()
         };
@@ -2518,7 +2787,6 @@ impl RootView {
         let colors = cx.theme().colors();
         let language = cx.language();
         let text = match notice {
-            ReaderNotice::TooLarge => Key::NoticeTooLarge,
             ReaderNotice::Unrenderable => Key::NoticeTooDeep,
             ReaderNotice::Crashed => Key::NoticeCrashed,
         }
@@ -2539,18 +2807,6 @@ impl RootView {
                     .min_w_0()
                     .child(Label::new(text).size(LabelSize::Small).color(Color::Muted)),
             )
-            .when(notice == ReaderNotice::TooLarge, |el| {
-                el.child(
-                    Button::new("show-formatted", Key::NoticeShowFormatted.tr(language)).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            if let Some(id) = this.selected_message_id {
-                                this.formatted_anyway.insert(id);
-                                cx.notify();
-                            }
-                        }),
-                    ),
-                )
-            })
             .into_any_element()
     }
 
@@ -2723,7 +2979,7 @@ impl RootView {
                 appears_transparent: false,
                 traffic_light_position: None,
             }),
-            app_id: Some(WINDOW_APP_ID.into()),
+            app_id: Some(SETTINGS_WINDOW_APP_ID.into()),
             ..Default::default()
         };
 
@@ -2806,13 +3062,14 @@ impl RootView {
             .collect();
         let language = cx.language();
         let date = dates::full_date(detail.date_ts, &detail.received_at, language);
-        let sender = if detail.sender.is_empty() {
-            detail.sender_email.clone()
-        } else {
-            detail.sender.clone()
-        };
+        let sender = Address::new(
+            (!detail.sender.is_empty()).then(|| detail.sender.clone()),
+            detail.sender_email.clone(),
+        )
+        .display();
+        let quote_date = dates::quote_date(detail.date_ts, &detail.received_at, language);
         let labels = QuoteLabels {
-            attribution: locale::reply_attribution(language, &date, &sender),
+            attribution: locale::reply_attribution(language, &quote_date, &sender),
             forward_header: Key::ForwardHeader.tr(language).to_string(),
             from: Key::QuoteFrom.tr(language).to_string(),
             date: Key::QuoteDate.tr(language).to_string(),
@@ -2937,7 +3194,7 @@ impl RootView {
                 appears_transparent: false,
                 traffic_light_position: None,
             }),
-            app_id: Some(WINDOW_APP_ID.into()),
+            app_id: Some(COMPOSE_WINDOW_APP_ID.into()),
             ..Default::default()
         };
 
@@ -3165,10 +3422,25 @@ impl RootView {
                 h_flex()
                     .gap_1()
                     .child(Self::icon_button_with_tooltip(
+                        "get-mail",
+                        Key::CommandSyncNow.tr(language),
+                        Some((shortcuts::GET_MAIL_MAC, shortcuts::GET_MAIL_OTHER)),
+                        IconButton::new("get-mail", IconName::Refresh).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.sync_now(cx);
+                            },
+                        )),
+                    ))
+                    .child(Self::icon_button_with_tooltip(
                         "filter",
                         Key::ToolbarFilter.tr(language),
                         None,
-                        IconButton::new("filter", IconName::Filter),
+                        IconButton::new("filter", IconName::Filter)
+                            .selected(self.list_filter != ListFilter::All)
+                            .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                                this.filter_menu = Some(event.position());
+                                cx.notify();
+                            })),
                     ))
                     .child(Self::icon_button_with_tooltip(
                         "more",
@@ -3393,16 +3665,6 @@ impl RootView {
                                 this.open_compose(window, cx);
                             })),
                     ))
-                    .child(Self::icon_button_with_tooltip(
-                        "get-mail",
-                        Key::CommandSyncNow.tr(language),
-                        Some((shortcuts::GET_MAIL_MAC, shortcuts::GET_MAIL_OTHER)),
-                        IconButton::new("get-mail", IconName::Refresh).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.sync_now(cx);
-                            },
-                        )),
-                    ))
                     .child(div().flex_1())
                     // Centered action groups, divided like macOS Mail. Whole groups
                     // are dropped (right to left) as space shrinks so they never
@@ -3538,13 +3800,18 @@ impl RootView {
                                                     shortcuts::TOGGLE_FLAG_MAC,
                                                     shortcuts::TOGGLE_FLAG_OTHER,
                                                 )),
-                                                IconButton::new("flag", IconName::Flag)
-                                                    .disabled(!enabled(
-                                                        CommandId::MessageToggleFlag,
-                                                    ))
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.toggle_message_flag(cx);
-                                                    })),
+                                                IconButton::new(
+                                                    "flag",
+                                                    if ctx.message_starred() {
+                                                        IconName::StarFilled
+                                                    } else {
+                                                        IconName::Star
+                                                    },
+                                                )
+                                                .disabled(!enabled(CommandId::MessageToggleFlag))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.toggle_message_flag(cx);
+                                                })),
                                             ))
                                             .child(Self::icon_button_with_tooltip(
                                                 "toggle-read",
@@ -3565,7 +3832,16 @@ impl RootView {
                                                 "move",
                                                 Key::ToolbarMove.tr(language),
                                                 None,
-                                                IconButton::new("move", IconName::Folder),
+                                                IconButton::new("move", IconName::Folder)
+                                                    .disabled(!enabled(CommandId::MoveToFolder(
+                                                        SharedString::default(),
+                                                    )))
+                                                    .on_click(cx.listener(
+                                                        |this, event: &gpui::ClickEvent, _, cx| {
+                                                            this.move_menu = Some(event.position());
+                                                            cx.notify();
+                                                        },
+                                                    )),
                                             )),
                                     )
                                 }),
@@ -3862,10 +4138,13 @@ impl RootView {
                     account_id: account.id,
                     folder_path: folder.path.clone(),
                 };
-            let unread = self
-                .db
-                .unread_in_folder(Some(account.id), &folder.path)
-                .unwrap_or(0);
+            let unread = if folder_shows_unread(&folder.path) {
+                self.db
+                    .unread_in_folder(Some(account.id), &folder.path)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
             let badge = if unread > 0 {
                 Some(self.render_count_badge(unread, selected, cx))
             } else {
@@ -4042,13 +4321,19 @@ impl RootView {
         // Virtualized: only the visible rows are built, so mailboxes with
         // thousands of messages stay cheap. Rows have a uniform height
         // (measured from the first one).
-        let content = if self.list_messages.is_empty() && self.search_is_active(cx) {
+        let no_results = if self.list_filter != ListFilter::All {
+            Key::FilterNoResults
+        } else {
+            Key::SearchNoResults
+        };
+        let filtering = self.list_filter != ListFilter::All || self.search_is_active(cx);
+        let content = if self.list_messages.is_empty() && filtering {
             div()
                 .id("message-list")
                 .size_full()
                 .child(
                     div().w_full().py_8().flex().justify_center().child(
-                        Label::new(Key::SearchNoResults.tr(language))
+                        Label::new(no_results.tr(language))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     ),
@@ -4125,6 +4410,15 @@ impl RootView {
             .on_action(cx.listener(|this, _: &SelectPreviousMessage, _, cx| {
                 this.move_selection(-1, cx);
             }))
+            .on_action(cx.listener(|this, _: &ExtendSelectionDown, _, cx| {
+                this.extend_selection(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExtendSelectionUp, _, cx| {
+                this.extend_selection(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectAllMessages, _, cx| {
+                this.set_selection(this.list_ids(), cx);
+            }))
             .children(header)
             .child(
                 // Inner relative wrapper so the scrollbar overlay aligns with the
@@ -4146,7 +4440,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let selected = self.selected_message_id == Some(message.id);
+        let selected = self.row_is_selected(message.id);
         let bg_selected = colors.element_selected;
         let hover = colors.element_hover;
         let border = colors.border_variant;
@@ -4195,9 +4489,15 @@ impl RootView {
         );
 
         let message_id = message.id;
-        let actions_bg = colors
-            .background
-            .blend(if selected { bg_selected } else { hover });
+        // The text gives way to the action buttons, so they cover nothing. The
+        // row's own padding already accounts for part of their width.
+        let room_for_actions = if self.hovered_row != Some(message_id) {
+            px(0.0)
+        } else if self.showing_trash() {
+            px(ROW_ACTION_WIDTH - 8.0)
+        } else {
+            px(ROW_ACTION_WIDTH * 2.0 - 8.0)
+        };
         h_flex()
             .id(("message", message_id as u64))
             .group(MESSAGE_ROW_GROUP)
@@ -4213,11 +4513,19 @@ impl RootView {
             .when(!selected, |el| el.hover(move |el| el.bg(hover)))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                let row = hovered.then_some(message_id);
+                if *hovered || this.hovered_row == Some(message_id) {
+                    this.hovered_row = row;
+                    cx.notify();
+                }
+            }))
             .child(div().pt_1().child(unread_dot))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
+                    .mr(room_for_actions)
                     .gap_0p5()
                     .child(
                         h_flex()
@@ -4242,10 +4550,12 @@ impl RootView {
                             .single_line(),
                     ),
             )
-            .child(self.render_message_row_actions(message_id, actions_bg, cx))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.select_message_row(message_id, window, cx);
-            }))
+            .child(self.render_message_row_actions(message_id, cx))
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    this.click_message_row(message_id, event.modifiers(), window, cx);
+                }),
+            )
     }
 
     /// Selects and opens a row of the list.
@@ -4253,17 +4563,18 @@ impl RootView {
         if let Some(focus) = &self.list_focus {
             window.focus(focus);
         }
+        self.multi_selection.clear();
         self.selected_message_id = Some(id);
+        self.selection_anchor = Some(id);
+        self.selection_focus = Some(id);
         self.last_reader_sig = None;
         self.on_message_selection_changed(cx);
     }
 
-    /// Reply and Delete, over the right edge of a row while the mouse is on it.
-    /// `bg` is opaque so the text underneath doesn't show through.
+    /// Reply and Delete, centered at the right of a row while the mouse is on it.
     fn render_message_row_actions(
         &self,
         message_id: i64,
-        bg: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let language = cx.language();
@@ -4272,33 +4583,37 @@ impl RootView {
             .top_0()
             .bottom_0()
             .right_0()
-            .px_2()
-            .gap_1()
+            .pr_1()
             .items_center()
-            .bg(bg)
             .invisible()
             .group_hover(MESSAGE_ROW_GROUP, |style| style.visible())
             .child(Self::icon_button_with_tooltip(
                 "row-reply",
                 Key::ToolbarReply.tr(language),
                 None,
-                IconButton::new("row-reply-button", IconName::Reply).on_click(cx.listener(
-                    move |this, _, window, cx| {
+                IconButton::new("row-reply-button", IconName::Reply)
+                    .size(IconSize::Small)
+                    .color(Color::Muted)
+                    .hover_color(Color::Default)
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         // Replying opens the message first, so its body gets
                         // fetched and the reader shows what is being answered.
                         this.select_message_row(message_id, window, cx);
                         this.reply_to_selected(ReplyKind::Reply, window, cx);
-                    },
-                )),
+                    })),
             ))
             .when(!self.showing_trash(), |el| {
                 el.child(Self::icon_button_with_tooltip(
                     "row-delete",
                     Key::CommandDelete.tr(language),
                     None,
-                    IconButton::new("row-delete-button", IconName::Trash).on_click(
-                        cx.listener(move |this, _, _, cx| this.delete_row_message(message_id, cx)),
-                    ),
+                    IconButton::new("row-delete-button", IconName::Trash)
+                        .size(IconSize::Small)
+                        .color(Color::Muted)
+                        .hover_color(Color::Default)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.delete_row_message(message_id, cx)
+                        })),
                 ))
             })
     }
@@ -4643,6 +4958,96 @@ impl RootView {
             .into_any_element()
     }
 
+    /// A dropdown over the window at `position`; a mouse-down outside it runs
+    /// `close`.
+    fn render_dropdown(
+        id: &'static str,
+        position: Point<Pixels>,
+        items: ui::ContextMenu,
+        close: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                close(this, cx);
+                cx.notify();
+            }))
+            .child(deferred(
+                anchored()
+                    .position(position)
+                    .anchor(Corner::TopLeft)
+                    .snap_to_window_with_margin(px(8.0))
+                    // Accounts can have more folders than fit on screen.
+                    .child(
+                        div()
+                            .id(id)
+                            .max_h(px(MENU_MAX_HEIGHT))
+                            .overflow_y_scroll()
+                            .occlude()
+                            .child(items),
+                    ),
+            ))
+    }
+
+    /// The filter button's menu; the active filter carries a check mark.
+    fn render_filter_menu(
+        &self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let language = cx.language();
+        let root = cx.weak_entity();
+        let mut items = ui::ContextMenu::new();
+        for filter in ListFilter::OPTIONS {
+            let root = root.clone();
+            let choose = move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                let _ = root.update(cx, |this, cx| this.set_list_filter(filter, cx));
+            };
+            let label = filter.label().tr(language);
+            items = if filter == self.list_filter {
+                items.entry_with_key_hint(label, "✓", choose)
+            } else {
+                items.entry(label, choose)
+            };
+        }
+        Self::render_dropdown(
+            "filter-menu",
+            position,
+            items,
+            |this, _| this.filter_menu = None,
+            cx,
+        )
+    }
+
+    /// The Move button's menu: the folders the selected message can go to.
+    fn render_move_menu(
+        &self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let root = cx.weak_entity();
+        let mut items = ui::ContextMenu::new();
+        for (label, path) in self.command_context().move_targets(cx.language()) {
+            let root = root.clone();
+            items = items.entry(label, move |_, _, cx| {
+                let _ = root.update(cx, |this, cx| {
+                    this.move_menu = None;
+                    this.move_message_to_folder(&path, cx);
+                });
+            });
+        }
+        Self::render_dropdown(
+            "move-menu",
+            position,
+            items,
+            |this, _| this.move_menu = None,
+            cx,
+        )
+    }
+
     /// Panel above the status bar listing unsent messages with Retry / Edit /
     /// Discard; a mouse-down outside closes it.
     fn render_unsent_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4827,7 +5232,18 @@ impl RootView {
         let border = colors.border;
         let accent = colors.accent;
         let on_accent = colors.text_on_accent;
+        // The thumb must show on the page's color, not the app's.
+        let thumb = if self.reader_white_background {
+            let light = theme::Theme::light();
+            let colors = light.colors();
+            (colors.scrollbar_thumb, colors.scrollbar_thumb_hover)
+        } else {
+            (colors.scrollbar_thumb, colors.scrollbar_thumb_hover)
+        };
 
+        if !self.multi_selection.is_empty() {
+            return self.render_multi_selection(cx).into_any_element();
+        }
         let Some(message) = self.selected_detail.as_ref() else {
             let language = cx.language();
             return v_flex()
@@ -4933,7 +5349,29 @@ impl RootView {
         let language = cx.language();
         // The body is rendered natively by `html_view` (scrolls on both axes;
         // laid out at the pane width).
+        let scrollbars = self
+            .reader_view
+            .as_ref()
+            .filter(|_| !loading_body)
+            .map(|view| view.read(cx).scroll_handle().clone())
+            .into_iter()
+            .flat_map(|handle| {
+                let vertical = self
+                    .reader_v_scrollbar
+                    .clone()
+                    .map(|state| Scrollbar::vertical(state, handle.clone()));
+                let horizontal = self
+                    .reader_h_scrollbar
+                    .clone()
+                    .map(|state| Scrollbar::horizontal(state, handle));
+                vertical
+                    .into_iter()
+                    .chain(horizontal)
+                    .map(move |bar| bar.always_visible().thumb_colors(thumb.0, thumb.1))
+            })
+            .collect::<Vec<_>>();
         let body_area = div()
+            .relative()
             .flex_1()
             .min_h_0()
             .min_w_0()
@@ -4949,7 +5387,8 @@ impl RootView {
             })
             .when(!loading_body, |el| {
                 el.when_some(self.reader_view.clone(), |el, view| el.child(view))
-            });
+            })
+            .children(scrollbars);
 
         v_flex()
             .flex_1()
@@ -4965,6 +5404,107 @@ impl RootView {
             })
             .child(body_area)
             .into_any_element()
+    }
+
+    /// Reader pane for a multiple selection: a stack of cards, with the first
+    /// message on top, and the actions that apply to all of them.
+    fn render_multi_selection(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        const CARD_WIDTH: f32 = 300.0;
+        const CARD_HEIGHT: f32 = 150.0;
+        const CARD_STEP: f32 = 7.0;
+        const MAX_CARDS: usize = 5;
+
+        let colors = cx.theme().colors();
+        let (border, surface, background) =
+            (colors.border, colors.surface_background, colors.background);
+        let language = cx.language();
+        let count = self.multi_selection.len();
+        let cards = count.min(MAX_CARDS);
+        let spread = CARD_STEP * (cards - 1) as f32;
+        let top = self
+            .list_messages
+            .iter()
+            .find(|message| self.multi_selection.contains(&message.id));
+
+        let card = |depth: usize| {
+            let offset = px(CARD_STEP * depth as f32);
+            v_flex()
+                .absolute()
+                .left(offset)
+                .top(offset)
+                .w(px(CARD_WIDTH))
+                .h(px(CARD_HEIGHT))
+                .p_4()
+                .gap_1()
+                .overflow_hidden()
+                .rounded_lg()
+                .border_1()
+                .border_color(border)
+                .bg(surface)
+                .shadow_md()
+        };
+        let mut stack = div()
+            .relative()
+            .w(px(CARD_WIDTH + spread))
+            .h(px(CARD_HEIGHT + spread));
+        for depth in (1..cards).rev() {
+            stack = stack.child(card(depth));
+        }
+        stack = stack.child(card(0).when_some(top, |el, message| {
+            el.child(
+                Label::new(message.sender.clone())
+                    .weight(FontWeight::SEMIBOLD)
+                    .single_line(),
+            )
+            .child(
+                Label::new(message.subject.clone())
+                    .size(LabelSize::Small)
+                    .single_line(),
+            )
+            .child(
+                Label::new(message.preview.clone())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+        }));
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(background)
+            .items_center()
+            .justify_center()
+            .gap_6()
+            .child(stack)
+            .child(
+                Label::new(locale::messages_selected(language, count)).weight(FontWeight::SEMIBOLD),
+            )
+            .when(!self.showing_trash(), |el| {
+                el.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("bulk-trash", Key::CommandDelete.tr(language))
+                                .icon(IconName::Trash)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.delete_message_to_trash(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("bulk-archive", Key::CommandArchive.tr(language))
+                                .icon(IconName::Archive)
+                                .on_click(cx.listener(|this, _, _, cx| this.archive_message(cx))),
+                        )
+                        .child(
+                            Button::new("bulk-junk", Key::CommandMarkJunk.tr(language))
+                                .icon(IconName::Junk)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.mark_message_junk(cx);
+                                })),
+                        ),
+                )
+            })
     }
 
     // ----- Status bar -----------------------------------------------------
@@ -5254,6 +5794,12 @@ impl Render for RootView {
             .when(self.attachment_menu.is_some(), |el| {
                 el.child(self.render_attachment_menu(cx))
             })
+            .when_some(self.filter_menu, |el, position| {
+                el.child(self.render_filter_menu(position, cx))
+            })
+            .when_some(self.move_menu, |el, position| {
+                el.child(self.render_move_menu(position, cx))
+            })
             .when(self.unsent_panel_open, |el| {
                 el.child(self.render_unsent_panel(cx))
             })
@@ -5309,22 +5855,6 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_reasons_follow_crash_size_and_override() {
-        let big = MAX_FORMATTED_HTML_BYTES + 1;
-        assert_eq!(plain_text_reason(10, false, false), None);
-        assert_eq!(
-            plain_text_reason(big, false, false),
-            Some(ReaderNotice::TooLarge)
-        );
-        assert_eq!(plain_text_reason(big, false, true), None);
-        // A crash wins over the override.
-        assert_eq!(
-            plain_text_reason(10, true, true),
-            Some(ReaderNotice::Crashed)
-        );
-    }
-
-    #[test]
     fn find_steps_wrap_around() {
         assert_eq!(step_match(0, 3, 1), 1);
         assert_eq!(step_match(2, 3, 1), 0);
@@ -5333,10 +5863,13 @@ mod tests {
     }
 
     #[test]
-    fn reader_selection_is_a_translucent_accent() {
-        let [r, g, b, a] = reader_selection_color(gpui::hsla(0.0, 1.0, 0.5, 1.0));
-        assert_eq!((r, g, b), (255, 0, 0));
-        assert_eq!(a, 89);
+    fn reader_selection_is_opaque_on_light_pages_only() {
+        let accent = gpui::rgb(0x0078d4).into();
+        let on_white = reader_selection_color(accent, gpui::white());
+        assert_eq!(on_white[3], 255);
+        assert!(on_white[0] > 150 && on_white[2] > 220, "{on_white:?}");
+        let on_dark = reader_selection_color(accent, gpui::black());
+        assert_eq!(on_dark[3], 89);
     }
 
     #[test]
@@ -5710,6 +6243,120 @@ mod tests {
         view.sync_layout(px(1600.0));
         view.search_force_expanded = true;
         assert!(!view.should_collapse_search_after_blur(""));
+    }
+
+    #[test]
+    fn trash_folder_shows_no_unread_count() {
+        assert!(!folder_shows_unread(storage::system::TRASH));
+        assert!(folder_shows_unread(storage::system::INBOX));
+        assert!(folder_shows_unread(storage::system::JUNK));
+    }
+
+    #[test]
+    fn window_classes_are_distinct() {
+        assert_eq!(MAIN_WINDOW_APP_ID, "com.bgmail.main");
+        assert_eq!(SETTINGS_WINDOW_APP_ID, "com.bgmail.settings");
+        assert_eq!(COMPOSE_WINDOW_APP_ID, "com.bgmail.newmail");
+    }
+
+    #[test]
+    fn clicks_select_one_toggle_or_take_the_range() {
+        let list = [1, 2, 3, 4, 5];
+        assert_eq!(
+            clicked_selection(&list, &[1, 2], Some(1), 4, false, false),
+            vec![4]
+        );
+        assert_eq!(
+            clicked_selection(&list, &[1], Some(1), 3, false, true),
+            vec![1, 3]
+        );
+        assert_eq!(
+            clicked_selection(&list, &[1, 3], Some(1), 3, false, true),
+            vec![1]
+        );
+        assert_eq!(
+            clicked_selection(&list, &[2], Some(2), 4, true, false),
+            vec![2, 3, 4]
+        );
+        assert_eq!(
+            clicked_selection(&list, &[4], Some(4), 2, true, false),
+            vec![2, 3, 4]
+        );
+        // The anchor left the list: only the clicked row.
+        assert_eq!(
+            clicked_selection(&list, &[], Some(99), 2, true, false),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn multiple_selection_leaves_the_reader_empty_until_one_row_remains() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        assert!(ids.len() >= 3);
+        assert!(view.apply_selection(vec![ids[0]]));
+        assert_eq!(view.selected_message_id, Some(ids[0]));
+
+        assert!(!view.apply_selection(vec![ids[0], ids[1]]));
+        assert_eq!(view.selected_message_id, None);
+        assert!(view.row_is_selected(ids[1]));
+        assert!(view.command_context().bulk_selection);
+
+        view.multi_selection = vec![ids[0], -1];
+        view.prune_multi_selection();
+        assert!(view.multi_selection.is_empty());
+        assert_eq!(view.selected_message_id, Some(ids[0]));
+    }
+
+    #[test]
+    fn shift_arrow_grows_and_shrinks_from_the_anchor() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.selected_message_id = Some(ids[1]);
+        assert_eq!(view.extended_selection(1), Some(ids[1..=2].to_vec()));
+        assert_eq!(view.extended_selection(-1), Some(vec![ids[1]]));
+        assert_eq!(view.extended_selection(-1), Some(ids[0..=1].to_vec()));
+    }
+
+    #[test]
+    fn bulk_action_reaches_every_row_and_clears_the_selection() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        let chosen = vec![ids[0], ids[1]];
+        view.apply_selection(chosen.clone());
+        view.apply_action_to_selection(mail_actions::trash).unwrap();
+        assert!(view.multi_selection.is_empty());
+        assert_eq!(view.selected_message_id, None);
+        for id in chosen {
+            assert_eq!(view.db.message_is_in_trash(id), Ok(true));
+            assert!(!view.list_messages.iter().any(|m| m.id == id));
+        }
+    }
+
+    #[test]
+    fn filter_narrows_the_list_but_keeps_the_open_message() {
+        let (_dir, mut view) = test_view();
+        let all = view.list_messages.len();
+        let read = view
+            .list_messages
+            .iter()
+            .find(|m| !m.unread)
+            .map(|m| m.id)
+            .expect("a read message");
+        view.clear_message_selection();
+        view.list_filter = ListFilter::Unread;
+        view.reload_message_list();
+        assert!(view.list_messages.len() < all);
+        assert!(view.list_messages.iter().all(|m| m.unread));
+
+        view.selected_message_id = Some(read);
+        view.reload_message_list();
+        assert!(view.list_messages.iter().any(|m| m.id == read));
+
+        view.selected_message_id = None;
+        view.list_filter = ListFilter::All;
+        view.reload_message_list();
+        assert_eq!(view.list_messages.len(), all);
     }
 
     #[test]

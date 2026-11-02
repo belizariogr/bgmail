@@ -3918,6 +3918,7 @@ dependencies = [
 name = "mail_core"
 version = "0.1.0"
 dependencies = [
+ "html-escape",
  "mail-builder",
  "mail-parser",
  "serde",

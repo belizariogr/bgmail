@@ -218,8 +218,131 @@ mod platform {
     }
 }
 
+/// `font` with its family renamed to `family`, so GPUI (which caches a family's
+/// faces when first asked) sees each embedded web font as a family of its own:
+/// otherwise the faces of "Open Sans" that load after the first one (often the
+/// italic, as Google Fonts lists it first) are never found. `None` when it is
+/// not a single-face sfnt.
+pub(crate) fn with_family_name(font: &[u8], family: &str) -> Option<Vec<u8>> {
+    const HEADER: usize = 12;
+    const RECORD: usize = 16;
+    let be16 = |at: usize| Some(u16::from_be_bytes(font.get(at..at + 2)?.try_into().ok()?));
+    let be32 = |at: usize| Some(u32::from_be_bytes(font.get(at..at + 4)?.try_into().ok()?));
+    if !matches!(font.get(..4)?, [0, 1, 0, 0] | b"OTTO" | b"true") {
+        return None;
+    }
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
+    for ix in 0..usize::from(be16(4)?) {
+        let record = HEADER + ix * RECORD;
+        let tag: [u8; 4] = font.get(record..record + 4)?.try_into().ok()?;
+        let offset = be32(record + 8)? as usize;
+        let length = be32(record + 12)? as usize;
+        if &tag != b"name" {
+            tables.push((tag, font.get(offset..offset.checked_add(length)?)?.to_vec()));
+        }
+    }
+    tables.push((*b"name", name_table(family)));
+    tables.sort_by_key(|(tag, _)| *tag);
+
+    let count = u16::try_from(tables.len()).ok()?;
+    let log2 = count.ilog2();
+    let mut out = font[..4].to_vec();
+    out.extend_from_slice(&count.to_be_bytes());
+    out.extend_from_slice(&((1u16 << log2) * 16).to_be_bytes());
+    out.extend_from_slice(&(log2 as u16).to_be_bytes());
+    out.extend_from_slice(&((count - (1u16 << log2)) * 16).to_be_bytes());
+    let mut offset = HEADER + tables.len() * RECORD;
+    let mut head_offset = None;
+    for (tag, data) in &mut tables {
+        if tag == b"head" {
+            // The adjustment is summed as zero, then patched below.
+            data.get_mut(8..12)?.fill(0);
+            head_offset = Some(offset);
+        }
+        out.extend_from_slice(tag.as_slice());
+        out.extend_from_slice(&table_checksum(data).to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        offset += data.len().next_multiple_of(4);
+    }
+    for (_, data) in &tables {
+        out.extend_from_slice(data);
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
+    if let Some(head) = head_offset {
+        let adjustment = 0xB1B0_AFBAu32.wrapping_sub(table_checksum(&out));
+        out[head + 8..head + 12].copy_from_slice(&adjustment.to_be_bytes());
+    }
+    Some(out)
+}
+
+/// A `name` table naming only family, style, full and PostScript names.
+fn name_table(family: &str) -> Vec<u8> {
+    const WINDOWS: [u16; 3] = [3, 1, 0x409]; // platform, encoding, US English
+    let utf16 =
+        |text: &str| -> Vec<u8> { text.encode_utf16().flat_map(u16::to_be_bytes).collect() };
+    let family_bytes = utf16(family);
+    let regular = utf16("Regular");
+    let records: [(u16, &[u8]); 4] = [
+        (1, &family_bytes),
+        (2, &regular),
+        (4, &family_bytes),
+        (6, &family_bytes),
+    ];
+    let mut table = Vec::new();
+    table.extend_from_slice(&0u16.to_be_bytes());
+    table.extend_from_slice(&(records.len() as u16).to_be_bytes());
+    table.extend_from_slice(&(6 + records.len() as u16 * 12).to_be_bytes());
+    let mut strings = Vec::new();
+    for (name_id, text) in records {
+        for field in WINDOWS {
+            table.extend_from_slice(&field.to_be_bytes());
+        }
+        table.extend_from_slice(&name_id.to_be_bytes());
+        table.extend_from_slice(&(text.len() as u16).to_be_bytes());
+        table.extend_from_slice(&(strings.len() as u16).to_be_bytes());
+        strings.extend_from_slice(text);
+    }
+    table.extend_from_slice(&strings);
+    table
+}
+
+/// OpenType table checksum: big-endian u32 sum, zero padded.
+fn table_checksum(data: &[u8]) -> u32 {
+    data.chunks(4).fold(0u32, |sum, chunk| {
+        let mut word = [0; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        sum.wrapping_add(u32::from_be_bytes(word))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn with_family_name_renames_without_losing_tables() {
+        use skrifa::{string::StringId, MetadataProvider, Tag};
+        let source = blitz_dom::BULLET_FONT.to_vec();
+        let renamed = super::with_family_name(&source, "BGMail Web 1").expect("sfnt");
+        let font = skrifa::FontRef::new(&renamed).expect("still a font");
+        let family = font
+            .localized_strings(StringId::FAMILY_NAME)
+            .english_or_first()
+            .expect("family")
+            .to_string();
+        assert_eq!(family, "BGMail Web 1");
+        let original = skrifa::FontRef::new(&source).unwrap();
+        assert_eq!(font.charmap().map('A'), original.charmap().map('A'));
+        for tag in [b"head", b"hhea", b"maxp", b"cmap"] {
+            assert!(font.table_data(Tag::new(tag)).is_some());
+        }
+    }
+
+    #[test]
+    fn with_family_name_refuses_what_is_not_a_single_font() {
+        assert_eq!(super::with_family_name(b"ttcf....", "x"), None);
+        assert_eq!(super::with_family_name(b"", "x"), None);
+    }
+
     use super::*;
 
     /// A collection of three bundled fonts (distinct families), no system fonts.

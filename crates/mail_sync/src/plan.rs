@@ -7,8 +7,8 @@
 use std::collections::HashSet;
 
 use mail_core::{
-    decode_imap_utf7, format_address_list, thread_key, FolderRole, FolderStatus, MessageFlags,
-    ParsedMessage, RemoteFolder, RemoteHeader,
+    decode_imap_utf7, format_address_list, role_from_special_use, thread_key, FolderRole,
+    FolderStatus, MessageFlags, ParsedMessage, RemoteFolder, RemoteHeader,
 };
 use serde::{Deserialize, Serialize};
 use storage::{system, user_folder_path, Folder, FolderSyncState, NewRemoteMessage, PendingOp};
@@ -94,9 +94,16 @@ impl FolderPlan {
 /// Diffs the server folder list against the local one. Local-only folders
 /// (`remote_name == None`) are never touched.
 pub fn plan_folders(remote: &[RemoteFolder], local: &[Folder]) -> FolderPlan {
-    // Archive-role folders must claim the archive path before All Mail does.
+    // Archive-role folders must claim the archive path before All Mail does,
+    // and a folder the server declares (SPECIAL-USE) before one that only has
+    // a matching name: Gmail's `[Gmail]/Rascunhos` over a label `Rascunhos`.
     let mut ordered: Vec<&RemoteFolder> = remote.iter().collect();
-    ordered.sort_by_key(|folder| folder.role == Some(FolderRole::All));
+    ordered.sort_by_key(|folder| {
+        (
+            folder.role == Some(FolderRole::All),
+            role_from_special_use(&folder.attributes).is_none(),
+        )
+    });
 
     let mut used_system = HashSet::new();
     let mut planned_paths = HashSet::new();
@@ -641,6 +648,30 @@ mod tests {
         let plan = plan_folders(&server, &[]);
         assert_eq!(plan.upserts.len(), 1);
         assert_eq!(plan.upserts[0].remote_name, "Archive");
+    }
+
+    #[test]
+    fn plan_folders_gives_the_system_path_to_the_declared_folder() {
+        let server = vec![
+            remote("Rascunhos", &[]),
+            remote("[Gmail]/Rascunhos", &["\\Drafts"]),
+        ];
+        let local = vec![
+            local(1, system::DRAFTS, Some("Rascunhos"), Some("drafts")),
+            local(
+                2,
+                "user:[Gmail]/Rascunhos",
+                Some("[Gmail]/Rascunhos"),
+                Some("drafts"),
+            ),
+        ];
+        let plan = plan_folders(&server, &local);
+        let drafts = &plan.upserts[0];
+        assert_eq!(drafts.path, system::DRAFTS);
+        assert_eq!(drafts.remote_name, "[Gmail]/Rascunhos");
+        assert!(drafts.reset);
+        assert_eq!(plan.upserts[1].path, "user:Rascunhos");
+        assert_eq!(plan.deletes, vec![2]);
     }
 
     #[test]

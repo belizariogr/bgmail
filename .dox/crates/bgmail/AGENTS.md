@@ -29,9 +29,10 @@ wiring to `storage`.
   release binary); outputs land in `target/[<triple>/]release/`.
   - Linux: `packaging/linux/BGMail.desktop` is the Handlebars desktop template
     for deb/AppImage/pacman (`Categories=Network;Email;`, mailto handler,
-    `StartupWMClass=BGMail`). Every window (main, compose, settings) sets
-    GPUI `app_id` to `root::WINDOW_APP_ID` = `"BGMail"` (desktop file
-    basename = binary name) so docks group them. Deb `Depends` lists the
+    `StartupWMClass=com.bgmail.main`). Each window has its own GPUI `app_id`
+    (user decision): main `com.bgmail.main`, settings `com.bgmail.settings`,
+    compose `com.bgmail.newmail` (`root::*_WINDOW_APP_ID`); only the main one
+    matches the desktop entry. Deb `Depends` lists the
     linked/dlopen'ed libs (xcb, xkbcommon, wayland, Vulkan + ICD, fontconfig);
     secrets go over D-Bus Secret Service (pure Rust), so a keyring daemon
     (gnome-keyring, KeePassXC…) is needed at runtime but not a package dep.
@@ -65,9 +66,9 @@ wiring to `storage`.
   writes `mail_html::print_document` (light page, header, CSP allowing only
   `data:` images and its own nonce'd `print()` script) to a private temp
   file and `open_with_system` opens it.
-- Reader robustness: HTML over 1 MB is shown as plain text (with "Show
-  formatted"), bodies `html_view` refuses (too deep) as plain text, and a
-  message whose formatted rendering was interrupted by a crash (the
+- Reader robustness: HTML is always shown formatted, whatever its size
+  (user decision; large bodies still parse on the UI thread). Bodies
+  `html_view` refuses (too deep) show as plain text, and a message whose formatted rendering was interrupted by a crash (the
   `crash_guard` marker survived) as plain text, each with a notice. The
   release profile keeps `panic = "abort"` (decided with two opposing
   reviews): unwinding through Blitz/GPUI state isn't safe and stack overflow
@@ -162,10 +163,23 @@ wiring to `storage`.
   with `mail_core::attachment_content`, written to a private temp copy,
   `open_with_system`), Save As… (`prompt_for_new_path` starting in
   Downloads), Save to Downloads. Results/errors go to the status bar.
-- Toolbar: compose + Get mail (sync now) on the left; reply / reply all /
+- List header: Get mail (sync now), filter (All / Unread / Starred /
+  Attachments; session state, the open message stays listed even if it stops
+  matching) and more. Toolbar: compose on the left; reply / reply all /
   forward, trash / archive / junk, flag / mark read|unread / move centered;
-  message buttons are disabled when their command isn't available.
-- Mail shortcuts (mac / other): Reply `cmd-r`/`ctrl-r`, Reply All
+  message buttons are disabled when their command isn't available. Move opens
+  a dropdown of `CommandContext::move_targets`.
+- Message rows: Ctrl/Cmd+click toggles, Shift+click and Shift+arrows take a
+  range, Ctrl/Cmd+A selects all (list focus only). Two or more selected rows
+  (`multi_selection`, with `selected_message_id` = `None`) show a card stack
+  in the reader with Delete / Archive / Junk; a bulk action never deletes for
+  good and leaves nothing selected. On hover a row's text shrinks to make room
+  for Reply / Delete, centered at the right with no background (their icons
+  brighten on hover). Trash shows no unread badge.
+- Replies carry Gmail's structure: `In-Reply-To`/`References`, a `Re:`
+  subject, Gmail's attribution line and an HTML alternative from
+  `mail_core::reply_html`, built from the edited text.
+- Command palette: `cmd-k` / `ctrl-k`. Mail shortcuts (mac / other): Reply `cmd-r`/`ctrl-r`, Reply All
   `cmd-shift-r`/`ctrl-shift-r`, Forward `cmd-shift-f`/`ctrl-shift-f`, Mark
   read/unread `cmd-shift-u`/`ctrl-shift-m` (Ctrl+Shift+U is the Linux IME
   Unicode key), Get New Mail `cmd-shift-n`/`ctrl-shift-n`; also in the

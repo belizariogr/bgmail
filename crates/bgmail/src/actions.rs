@@ -28,6 +28,9 @@ actions!(
         MessageToggleRead,
         GetNewMail,
         SelectNextMessage,
+        ExtendSelectionDown,
+        ExtendSelectionUp,
+        SelectAllMessages,
         SelectPreviousMessage,
     ]
 );

@@ -380,6 +380,24 @@
       `ui::TextArea` body, quoting, forwarded attachments, address validation)
 - ✅ Send (SMTP + Gmail XOAUTH2) through the outbox; copy APPENDed to Sent
       unless the server files it (Gmail)
+- ✅ Mail list and reader round (user list, 2026-11-02): Ctrl/Cmd+K palette;
+      `com.bgmail.main|settings|newmail` window classes; word/field selection on
+      repeated clicks in `TextInput`; multiple selection (Ctrl/Cmd/Shift, Shift+
+      arrows, Ctrl/Cmd+A) with card stack and bulk Delete/Archive/Junk; row
+      actions centered at the right without covering text, icon-only hover;
+      working Archive on Gmail, Move menu and list filter; Get mail moved above
+      the list; star icon and "Starred"/"Com estrela"; no badge on Trash; always
+      formatted; always-visible reader scrollbars; `[Gmail]/Rascunhos` as Drafts;
+      replies with Gmail's markup; readable previews and quotes (HTML in the
+      text part, all named entities; stored previews repaired on worker start);
+      opaque selection over white pages; web fonts registered per file
+      (messages no longer turn italic).
+- ⬜ Bulk mark read / star / move and bulk actions inside Trash (restore, delete
+      for good with confirmation)
+- ⬜ Selection on a dark page is still translucent, so a translucent window
+      shows the desktop through it
+- ⬜ Replies quote the original as text, not its formatted HTML
+- ⬜ Parse large HTML bodies off the UI thread (they are always formatted now)
 - ⬜ Drafts (save/resume) and HTML composing (plain text only today)
 - ⬜ Set `\\Answered` on the original after a reply is sent
 - ✅ Move / delete / archive / junk, reflected on the server (optimistic

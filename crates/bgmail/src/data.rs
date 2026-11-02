@@ -616,11 +616,11 @@ mod tests {
     fn global_mailboxes_are_localized() {
         assert_eq!(
             GlobalMailbox::Flagged.display_name(Language::English),
-            "Flagged"
+            "Starred"
         );
         assert_eq!(
             GlobalMailbox::Flagged.display_name(Language::Portuguese),
-            "Sinalizadas"
+            "Com estrela"
         );
         // The unified inbox reuses the standard inbox label.
         assert_eq!(

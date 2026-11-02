@@ -60,11 +60,10 @@ struct CommandPaletteShortcut {
 
 impl Global for CommandPaletteShortcut {}
 
-/// Whether `keystroke` is the command-palette shortcut (Ctrl+Shift+P /
-/// Cmd+Shift+P, as in Zed; Ctrl/Cmd+P prints).
+/// Whether `keystroke` is the command-palette shortcut (Ctrl+K / Cmd+K).
 fn is_command_palette_keystroke(keystroke: &Keystroke) -> bool {
-    keystroke.key.eq_ignore_ascii_case("p")
-        && keystroke.modifiers.shift
+    keystroke.key.eq_ignore_ascii_case("k")
+        && !keystroke.modifiers.shift
         && (keystroke.modifiers.control || keystroke.modifiers.platform)
 }
 
@@ -240,7 +239,7 @@ fn main() {
                         window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
                         titlebar: Some(window_frame::main_titlebar_options()),
                         window_decorations: window_frame::main_window_decorations(),
-                        app_id: Some(root::WINDOW_APP_ID.into()),
+                        app_id: Some(root::MAIN_WINDOW_APP_ID.into()),
                         // Windows opens hidden so we can cloak it and run the
                         // (asynchronous) maximize + first layout off-screen, then reveal
                         // the finished window — see the spawn below. Elsewhere GPUI shows
@@ -388,45 +387,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_palette_shortcut_matches_ctrl_p_and_cmd_p() {
-        let ctrl_p = Keystroke {
+    fn command_palette_shortcut_is_ctrl_k_or_cmd_k() {
+        let chord = |key: &str, control, platform, shift| Keystroke {
             modifiers: gpui::Modifiers {
-                control: true,
+                control,
+                platform,
+                shift,
                 ..Default::default()
             },
-            key: "p".into(),
+            key: key.into(),
             key_char: None,
         };
-        let cmd_p = Keystroke {
-            modifiers: gpui::Modifiers {
-                platform: true,
-                ..Default::default()
-            },
-            key: "p".into(),
-            key_char: None,
-        };
-        let uppercase_ctrl_p = Keystroke {
-            modifiers: gpui::Modifiers {
-                control: true,
-                ..Default::default()
-            },
-            key: "P".into(),
-            key_char: None,
-        };
-        let plain_p = Keystroke::default();
-        let shifted = |keystroke: &Keystroke| Keystroke {
-            modifiers: gpui::Modifiers {
-                shift: true,
-                ..keystroke.modifiers
-            },
-            ..keystroke.clone()
-        };
-        assert!(is_command_palette_keystroke(&shifted(&ctrl_p)));
-        assert!(is_command_palette_keystroke(&shifted(&cmd_p)));
-        assert!(is_command_palette_keystroke(&shifted(&uppercase_ctrl_p)));
-        // Ctrl/Cmd+P without Shift is Print.
-        assert!(!is_command_palette_keystroke(&ctrl_p));
-        assert!(!is_command_palette_keystroke(&cmd_p));
-        assert!(!is_command_palette_keystroke(&plain_p));
+        assert!(is_command_palette_keystroke(&chord(
+            "k", true, false, false
+        )));
+        assert!(is_command_palette_keystroke(&chord(
+            "k", false, true, false
+        )));
+        assert!(is_command_palette_keystroke(&chord(
+            "K", true, false, false
+        )));
+        assert!(!is_command_palette_keystroke(&chord(
+            "k", false, false, false
+        )));
+        assert!(!is_command_palette_keystroke(&chord(
+            "k", true, false, true
+        )));
+        assert!(!is_command_palette_keystroke(&chord(
+            "p", true, false, true
+        )));
     }
 }

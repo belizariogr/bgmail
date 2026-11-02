@@ -442,6 +442,10 @@ _300 functions/methods documented._
   - Purpose: Inert state (as Zed's `Disableable`), e.g. message actions with no selection.
   - Behavior: Render uses `Color::Disabled`, no hover/selected background, drops the click handler, but still swallows left mouse-down (no title-bar drag).
 
+- **`IconButton::hover_color`** (pub): brightens the icon on hover instead of showing a background.
+- **`Icon::group_hover_color`** (pub): icon color while the named group is hovered.
+- **`click_selection`** (private, `text_input`): range selected by a repeated click (word, or the whole field when masked or on a triple click).
+- **`Scrollbar::always_visible`** / **`Scrollbar::thumb_colors`** (pub): keep the thumb on screen whenever content overflows / override its theme colors.
 - **`effective_color`** (private)
   - Signature: `fn effective_color(&self) -> Color`
   - Purpose: Icon color after states.

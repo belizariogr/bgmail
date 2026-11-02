@@ -35,11 +35,17 @@ an e-mail client, without Zed-scale bloat.
   emit a `Changed` event (`TextInputEvent` / `TextAreaEvent`) on user edits
   only; programmatic `set_content` / `clear` stay silent. Both own IME via
   `EntityInputHandler` and call `set_native_text_focus` on click.
+- Repeated clicks: double click selects the word (a masked `TextInput` selects
+  everything), triple click the field (`TextInput`) or line (`TextArea`).
+- `IconButton::hover_color`: hover feedback through the icon color and no
+  background, for buttons over surfaces of varying color.
+- `Scrollbar::always_visible` / `thumb_colors`: for content that doesn't follow
+  the theme (the reader's page).
 - `TextArea` (compose body): plain text with `\n` line endings only (`\r\n`
   normalized on load/paste/input), soft-wraps to its width and grows to its
   content height (`min_lines` floor) — the caller provides the scroll
   container and may pass its `ScrollHandle` via `track_scroll` for caret
-  autoscroll. Tab is not consumed (parent focus navigation). Its actions are
+  autoscroll. Tab and Shift+Tab move focus to the next/previous field. Its actions are
   namespaced under `ui::text_area::*`; only `TextArea` / `TextAreaEvent` are
   re-exported at the crate root.
 - `TextArea` keeps GPUI-free editing logic (text/selection/undo in
@@ -59,8 +65,9 @@ an e-mail client, without Zed-scale bloat.
 ## Verification
 
 - Component/unit tests in each module where logic exists (e.g. scrollbar
-  geometry, `text_area` buffer/rows core). GPUI `test-support` is not enabled
-  for this crate, so element/entity code is covered through its pure helpers.
+  geometry, `text_area` buffer/rows core). Focus navigation runs on
+  GPUI's `test-support` (dev-dependency); other element code is covered through
+  its pure helpers.
 - `cargo test -p ui`
 - Workspace clippy/fmt as in parent.
 

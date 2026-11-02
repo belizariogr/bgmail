@@ -1161,7 +1161,11 @@ fn build_draft(
         bcc,
         subject: fields.subject.trim().to_string(),
         text: fields.body.clone(),
-        html: None,
+        // Same structure as Gmail's replies, which it collapses in conversations.
+        html: reply
+            .in_reply_to
+            .is_some()
+            .then(|| mail_core::reply_html(&fields.body)),
         in_reply_to: reply.in_reply_to.clone(),
         references: reply.references.clone(),
         attachments: attachments.to_vec(),
@@ -1398,8 +1402,11 @@ mod tests {
         assert_eq!(draft.bcc[0].email, "secret@example.com");
         assert_eq!(draft.subject, "Hello");
         assert_eq!(draft.text, "Body\n> quote");
-        assert_eq!(draft.html, None);
         assert_eq!(draft.in_reply_to.as_deref(), Some("parent@x"));
+        assert_eq!(
+            draft.html.as_deref(),
+            Some(mail_core::reply_html(&draft.text).as_str())
+        );
         assert_eq!(draft.references, reply.references);
         assert_eq!(draft.attachments, files);
     }

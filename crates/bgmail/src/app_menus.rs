@@ -66,7 +66,7 @@ fn edit_menu() -> Menu {
 /// Builds the menu tree for the main mail window.
 pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
     let move_items: Vec<MenuItem> = ctx
-        .move_targets()
+        .move_targets(language)
         .into_iter()
         .filter(|(_, path)| commands::command_enabled(&CommandId::MoveToFolder(path.clone()), ctx))
         .map(|(label, path)| MenuItem::action(label, MoveMessageToFolder { path }))
@@ -318,6 +318,7 @@ mod tests {
                     role: None,
                 }],
             )]),
+            ..Default::default()
         }
     }
 

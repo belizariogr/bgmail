@@ -149,6 +149,7 @@ pub struct Icon {
     name: IconName,
     size: IconSize,
     color: Color,
+    group_hover: Option<(SharedString, Color)>,
 }
 
 impl Icon {
@@ -158,6 +159,7 @@ impl Icon {
             name,
             size: IconSize::default(),
             color: Color::default(),
+            group_hover: None,
         }
     }
 
@@ -172,6 +174,12 @@ impl Icon {
         self.color = color;
         self
     }
+
+    /// Color of the icon while the element with group `group` is hovered.
+    pub fn group_hover_color(mut self, group: impl Into<SharedString>, color: Color) -> Self {
+        self.group_hover = Some((group.into(), color));
+        self
+    }
 }
 
 impl RenderOnce for Icon {
@@ -184,6 +192,10 @@ impl RenderOnce for Icon {
             .h(size)
             .path(self.name.path())
             .text_color(color)
+            .when_some(self.group_hover, |el, (group, color)| {
+                let color = color.hsla(cx);
+                el.group_hover(group, move |style| style.text_color(color))
+            })
     }
 }
 

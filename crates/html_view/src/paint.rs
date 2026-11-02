@@ -7,6 +7,7 @@
 use crate::display_list::{
     Brush, ColorGlyphRun, Command, DisplayList, FaceSpec, Geometry, TextRun,
 };
+use crate::fonts::with_family_name;
 use gpui::{
     linear_gradient, point, px, size, App, BorderStyle, Bounds, BoxShadow, ContentMask, Corners,
     Edges, Font, FontFeatures, FontStyle, FontWeight, Hsla, LinearColorStop, PaintQuad,
@@ -29,7 +30,8 @@ pub struct PaintCache {
     /// Colour glyph bitmaps by (font blob, face index, glyph, strike ppem).
     color_glyphs: HashMap<(u64, u32, u32, u32), Option<ColorGlyphImage>>,
     known_families: Option<HashSet<String>>,
-    registered_fonts: HashSet<u64>,
+    /// GPUI family of each registered web font file, by (blob id, face index).
+    web_font_families: HashMap<(u64, u32), String>,
     /// Animated images of the list being replayed (see
     /// [`DisplayList::animations`]) and when each started playing.
     animations: HashMap<u64, Arc<blitz_dom::node::AnimationFrames>>,
@@ -390,18 +392,17 @@ fn gpui_font(face: &FaceSpec, cache: &mut PaintCache, window: &mut Window) -> Fo
     let known = cache
         .known_families
         .get_or_insert_with(|| window.text_system().all_font_names().into_iter().collect());
-    if !known.contains(&face.family) && cache.registered_fonts.insert(face.font.data.id()) {
-        let bytes = face.font.data.data().to_vec();
-        if window
-            .text_system()
-            .add_fonts(vec![Cow::Owned(bytes)])
-            .is_ok()
-        {
-            known.insert(face.family.clone());
-        }
-    }
+    let family = if known.contains(&face.family) {
+        face.family.clone()
+    } else {
+        cache
+            .web_font_families
+            .entry((face.font.data.id(), face.font.index))
+            .or_insert_with(|| register_web_font(face, window))
+            .clone()
+    };
     Font {
-        family: SharedString::from(face.family.clone()),
+        family: SharedString::from(family),
         features: FontFeatures::default(),
         fallbacks: None,
         weight: FontWeight(face.weight),
@@ -411,6 +412,22 @@ fn gpui_font(face: &FaceSpec, cache: &mut PaintCache, window: &mut Window) -> Fo
             FontStyle::Normal
         },
     }
+}
+
+/// Hands a web font's file to GPUI, under a family only this file uses when
+/// it can be renamed (see [`with_family_name`]). Returns the family to ask for.
+fn register_web_font(face: &FaceSpec, window: &mut Window) -> String {
+    let bytes = face.font.data.data();
+    let unique = format!("BGMail Web {:x}-{}", face.font.data.id(), face.font.index);
+    let renamed = (face.font.index == 0)
+        .then(|| with_family_name(bytes, &unique))
+        .flatten();
+    let (family, bytes) = match renamed {
+        Some(bytes) => (unique, bytes),
+        None => (face.family.clone(), bytes.to_vec()),
+    };
+    window.text_system().add_fonts(vec![Cow::Owned(bytes)]).ok();
+    family
 }
 
 fn path_builder(path: &BezPath, origin: Point<Pixels>, mut builder: PathBuilder) -> PathBuilder {
@@ -852,11 +869,11 @@ mod tests {
         // A new document drops the old one's images and animations.
         assert!(render_image(&mut cache, &brush, (1.0, 1.0)).is_some());
         assert!(!cache.images.is_empty());
-        cache.registered_fonts.insert(7);
+        cache.web_font_families.insert((7, 0), "x".into());
         cache.forget_document();
         assert!(cache.images.is_empty() && cache.animations.is_empty());
         assert!(cache.animation_starts.is_empty() && cache.next_animation_frame().is_none());
-        assert!(cache.registered_fonts.contains(&7));
+        assert!(cache.web_font_families.contains_key(&(7, 0)));
         assert!(animated_frame(&mut cache, &brush, Instant::now()).is_none());
     }
 

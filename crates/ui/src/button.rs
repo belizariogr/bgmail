@@ -119,8 +119,12 @@ pub struct IconButton {
     color: Color,
     selected: bool,
     disabled: bool,
+    hover_color: Option<Color>,
     on_click: Option<ClickHandler>,
 }
+
+/// Group of an icon button whose icon reacts to the hover.
+const ICON_BUTTON_GROUP: &str = "icon-button";
 
 impl IconButton {
     /// Creates a new icon button.
@@ -132,6 +136,7 @@ impl IconButton {
             color: Color::Default,
             selected: false,
             disabled: false,
+            hover_color: None,
             on_click: None,
         }
     }
@@ -158,6 +163,13 @@ impl IconButton {
     /// and the click handler is dropped.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Hover feedback through the icon color instead of a background, for
+    /// buttons over surfaces whose color varies (e.g. a selected list row).
+    pub fn hover_color(mut self, color: Color) -> Self {
+        self.hover_color = Some(color);
         self
     }
 
@@ -189,20 +201,28 @@ impl RenderOnce for IconButton {
         let selected_bg = colors.element_active;
         let color = self.effective_color();
         let disabled = self.disabled;
+        let hover_color = self.hover_color.filter(|_| !disabled);
         let on_click = self.on_click.filter(|_| !disabled);
+        let mut icon = Icon::new(self.icon).size(self.size).color(color);
+        if let Some(hover_color) = hover_color {
+            icon = icon.group_hover_color(ICON_BUTTON_GROUP, hover_color);
+        }
 
         h_flex()
             .id(self.id)
+            .group(ICON_BUTTON_GROUP)
             .justify_center()
             .size(px(28.0))
             .rounded_md()
             .when(self.selected && !disabled, |el| el.bg(selected_bg))
-            .when(!disabled, |el| el.hover(move |el| el.bg(hover_bg)))
+            .when(!disabled && hover_color.is_none(), |el| {
+                el.hover(move |el| el.bg(hover_bg))
+            })
             // A dead button still must not start a title-bar window drag.
             .when(disabled, |el| {
                 el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             })
-            .child(Icon::new(self.icon).size(self.size).color(color))
+            .child(icon)
             .when_some(on_click, |el, handler| {
                 // See `Button`: keep title-bar dragging from swallowing button clicks.
                 el.cursor_pointer()

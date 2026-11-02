@@ -45,9 +45,10 @@ use crate::text_input::{
     set_native_text_focus, FocusNext, FocusPrevious,
 };
 
+pub(crate) use buffer::word_range_at;
 use buffer::{
     line_range_at, next_grapheme_boundary, offset_from_utf16, offset_to_utf16,
-    previous_grapheme_boundary, word_range_at, EditKind, TextBuffer,
+    previous_grapheme_boundary, EditKind, TextBuffer,
 };
 use rows::{
     build_rows, clamp_offset_to_row, row_caret_end, row_index_for_offset, selection_spans,

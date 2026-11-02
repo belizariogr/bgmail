@@ -271,10 +271,9 @@ _(No functions — only action types.)_
   - Purpose: Whether the selected message is in Junk.
   - Behavior: True when folders CSV contains the system junk path.
 
-- **`message_in_archive`** (pub, L47)
-  - Signature: `pub fn message_in_archive(&self) -> bool`
-  - Purpose: Whether the selected message is in Archive.
-  - Behavior: True when folders CSV contains the system archive path.
+- **`message_archivable`** (pub)
+  - Signature: `pub fn message_archivable(&self) -> bool`
+  - Purpose: Whether archiving would change anything: not in Archive, or still in Inbox (Gmail keeps Inbox mail in All Mail, which maps to Archive).
 
 - **`message_starred`** (pub, L53)
   - Signature: `pub fn message_starred(&self) -> bool`
@@ -282,7 +281,7 @@ _(No functions — only action types.)_
   - Behavior: Reads `starred` from `message_detail` when present.
 
 - **`move_targets`** (pub, L59)
-  - Signature: `pub fn move_targets(&self) -> Vec<(SharedString, SharedString)>`
+  - Signature: `pub fn move_targets(&self, language: Language) -> Vec<(SharedString, SharedString)>` (localized labels; skips the folders the message is in, except Archive)
   - Purpose: Eligible move destinations for the selected message.
   - Behavior: Returns `(display_name, path)` pairs for folders in the message's account, excluding forbidden manual-move destinations (sent, drafts, flagged, etc.).
 
@@ -1036,6 +1035,7 @@ _(None at module top level — conversion helpers only.)_
 Message dates in the local zone (chrono `clock`); the formatting core takes explicit `NaiveDateTime`s so tests don't depend on the machine's zone.
 - **`local(unix)`** (private): local wall-clock time; `None` for `<= 0`/out of range.
 - **`format_list_date(time, now, language)`** (pub): today → `HH:MM`; 1 day → "Yesterday"/"Ontem"; 2–6 days → weekday; older/future → short date (`Mar 4` / `04/03`, other years `3/4/24` / `04/03/24`).
+- **`format_quote_date(time, language)`** / **`quote_date(unix, fallback, language)`** (pub): reply attribution date as Gmail writes it (`Mon, Nov 2, 2026 at 9:05 AM` / `seg., 2 de nov. de 2026 às 09:05`).
 - **`format_full_date(time, language)`** (pub): reader date (`Oct 31, 2026 at 14:07` / `31/10/2026 14:07`).
 - **`short_date`**, **`weekday`** (private): helpers above (weekday index clamped to Sunday).
 - **`list_date(unix, fallback, language)`** / **`full_date(...)`** (pub): local formatting, or `fallback` (legacy `received_at` text of local/demo rows) when the time is unknown.
@@ -1045,7 +1045,7 @@ Message dates in the local zone (chrono `clock`); the formatting core takes expl
 
 ### `src/locale.rs`
 
-- **`reply_attribution(language, date, sender)`** (pub): "On {date}, {sender} wrote:" / "Em {date}, {sender} escreveu:".
+- **`reply_attribution(language, date, sender)`** (pub): "On {date} {sender} wrote:" / "Em {date}, {sender} escreveu:".
 
 #### Types / constants
 
@@ -1062,7 +1062,7 @@ Message dates in the local zone (chrono `clock`); the formatting core takes expl
 - **`Key`** (pub, L38)
   - Signature: `pub enum Key { … }` (66 UI string keys)
   - Purpose: Typed catalog of translatable UI chrome strings.
-  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`), plain-text fallback notices (`NoticeTooLarge`, `NoticeTooDeep`, `NoticeCrashed`, `NoticeShowFormatted`), status strings, Settings ▸ Accounts (`Account*`: form labels, provider notes, health, errors) and `NotificationsHint`.
+  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`), plain-text fallback notices (`NoticeTooDeep`, `NoticeCrashed`), status strings, Settings ▸ Accounts (`Account*`: form labels, provider notes, health, errors) and `NotificationsHint`.
 
 - **`GlobalLanguage`** (private, L332)
   - Signature: `struct GlobalLanguage(Language)`
@@ -1244,7 +1244,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 
 - **`is_command_palette_keystroke`** (private, L56)
   - Signature: `fn is_command_palette_keystroke(keystroke: &Keystroke) -> bool`
-  - Purpose: Detects the Ctrl+Shift+P / Cmd+Shift+P command-palette shortcut (Ctrl/Cmd+P prints).
+  - Purpose: Detects the Ctrl+K / Cmd+K command-palette shortcut.
   - Behavior: Matches key P (case-insensitive) without Shift when Control or platform (Cmd) modifier is held.
 
 - **`toggle_command_palette`** (private, L62)
@@ -1285,17 +1285,17 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`register_command_palette_shortcuts`** (private, L168)
   - Signature: `fn register_command_palette_shortcuts(cx: &mut App)`
   - Purpose: Wires command palette toggle action and keystroke interceptor.
-  - Behavior: Registers `ToggleCommandPalette` handler and intercepts Ctrl/Cmd+Shift+P globally, stopping propagation.
+  - Behavior: Registers `ToggleCommandPalette` handler and intercepts Ctrl/Cmd+K globally, stopping propagation.
 
 - **`main`** (private, L181)
   - Signature: `fn main()`
   - Purpose: Application entry point.
-  - Behavior: Startup milestones, theme/locale init, window open with persisted bounds (main window `app_id` `root::WINDOW_APP_ID` = Wayland app_id / X11 WM_CLASS, matching the packaged `BGMail.desktop`), Windows cloaked maximize sequence, persistence hooks and globals.
+  - Behavior: Startup milestones, theme/locale init, window open with persisted bounds (main window `app_id` `root::MAIN_WINDOW_APP_ID` = Wayland app_id / X11 WM_CLASS, matching the packaged `BGMail.desktop`), Windows cloaked maximize sequence, persistence hooks and globals.
 
 - **`command_palette_shortcut_matches_ctrl_p_and_cmd_p`** (private, L391)
   - Signature: `fn command_palette_shortcut_matches_ctrl_p_and_cmd_p()`
   - Purpose: Test: palette shortcut detection.
-  - Behavior: Asserts Ctrl/Cmd+Shift+P (also uppercase) match; Ctrl/Cmd+P without Shift and plain P do not.
+  - Behavior: Asserts Ctrl/Cmd+K (also uppercase) match; plain K, Ctrl+Shift+K and Ctrl+Shift+P do not.
 
 ### `src/root.rs`
 
@@ -1305,7 +1305,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **const `LIST_MIN_WIDTH`**: Minimum message-list column width (350px).
 - **const `READER_MIN_WIDTH`**: Minimum reading-pane width (550px).
 - **const `WINDOW_MIN_WIDTH` / `WINDOW_MIN_HEIGHT`**: Minimum main window size (950×480px); exported for startup clamping.
-- **const `WINDOW_APP_ID`** = `"BGMail"`: Wayland app_id / X11 WM_CLASS of the main, compose and settings windows (matches the packaged `BGMail.desktop`).
+- **const `MAIN_WINDOW_APP_ID` / `SETTINGS_WINDOW_APP_ID` / `COMPOSE_WINDOW_APP_ID`** = `com.bgmail.main` / `.settings` / `.newmail`: Wayland app_id / X11 WM_CLASS of each window; the main one matches the packaged desktop entry's `StartupWMClass`.
 - **const `NARROW_BREAKPOINT`**: Window width (1200px) below which sidebar auto-collapses and floats when reopened.
 - **const `RESIZE_HANDLE_WIDTH`**: Hit width of column resize dividers (6px).
 - **const `FOLD_ANIM_MS`**: Fixed sidebar account fold animation duration (90ms).
@@ -1325,9 +1325,10 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **const `TOOLBAR_FIXED_OVERHEAD`** (140px, compose + get-mail) / **`ACTIONS_1/2/3_WIDTH`** (92 / 193 / 322px): toolbar budget used by `visible_action_groups`.
 - **struct `ReaderMenu`**: Open reader context menu: window position, `HitInfo`, whether text was selected.
 - **struct `FindBar`**: Open find bar: query `TextInput`, match count, current match, input observation.
-- **const `MAX_FORMATTED_HTML_BYTES`** (1 MB): HTML bodies above it are shown as plain text unless the user asks for the formatted version.
-- **enum `ReaderNotice`**: Why a message is shown as plain text: `TooLarge`, `Unrenderable` (`RenderError`), `Crashed` (crash guard).
-- **`plain_text_reason`** (private): `Crashed` if the message crashed the renderer, else `TooLarge` above the limit unless shown formatted anyway, else `None`.
+- **enum `ReaderNotice`**: Why a message is shown as plain text: `Unrenderable` (`RenderError`), `Crashed` (crash guard).
+- **enum `ListFilter`** (`matches`, `label`, `OPTIONS`): rows shown by the filter button.
+- **`clicked_selection`** / **`selection_range`** (private): rows selected after a click (Shift range from the anchor, Ctrl/Cmd toggle, plain single) and the inclusive range between two rows, in list order.
+- **`folder_shows_unread`** (private): whether a folder's row counts unread (not the Trash).
 - **struct `RootView`**: Main application view state (layout, selection, reader `HtmlView`, search, palette, auxiliary windows, persistence). List state: `list_scroll: UniformListScrollHandle`, `list_focus`, `attachments` (chips of the selected message), `attachment_menu`.
 
 #### Functions / methods
@@ -1714,7 +1715,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Purpose: Next/previous find match index, wrapping; 0 without matches.
 
 - **`reader_selection_color`** (private)
-  - Signature: `fn reader_selection_color(accent: Hsla) -> [u8; 4]`
+  - Signature: `fn reader_selection_color(accent: Hsla, page: Hsla) -> [u8; 4]` (opaque accent blend over light pages: translucent fills lower the window's alpha, letting a dark desktop show through; translucent over dark pages)
   - Purpose: Reader selection highlight: the accent at 35% opacity as RGBA (readable over dark and light text).
 
 - **`on_reader_event`** (private)
@@ -1734,7 +1735,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`sync_reader`** (private)
   - Signature: `fn sync_reader(&mut self, window: &mut Window, cx: &mut Context<Self>)`
   - Purpose: Keeps the reader document in sync with the selected message and theme.
-  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, picks plain text per `plain_text_reason` (`mail_html::plain_text`), builds the sanitized themed document (`mail_html::email_document`, remote content per `remote_allowed_for`, with `Resources::allow_remote` to match), parses it with `HtmlDocument::try_parse` (falling back to plain text, `Unrenderable`, when too deep; dark appearance for dark pages, `reader_selection_color`), records the blocked image count (0 for plain text) and the notice, marks formatted HTML renders in the `CrashGuard` from before parsing until the next frame (`window.on_next_frame`), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
+  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, picks plain text only after a crash (`mail_html::plain_text`), builds the sanitized themed document (`mail_html::email_document`, remote content per `remote_allowed_for`, with `Resources::allow_remote` to match), parses it with `HtmlDocument::try_parse` (falling back to plain text, `Unrenderable`, when too deep; dark appearance for dark pages, `reader_selection_color`), records the blocked image count (0 for plain text) and the notice, marks formatted HTML renders in the `CrashGuard` from before parsing until the next frame (`window.on_next_frame`), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
 
 - **`set_reader_white_background`** (private, L1658)
   - Signature: `fn set_reader_white_background(&mut self, value: bool, cx: &mut Context<Self>)`
@@ -1759,7 +1760,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`open_compose_with`** (pub(crate))
   - Signature: `pub(crate) fn open_compose_with(&mut self, init: Option<ComposeInit>, _window, cx: &mut Context<Self>)`
   - Purpose: Opens the compose window, optionally prefilled (reply / reply all / forward).
-  - Behavior: New windows carry `app_id: WINDOW_APP_ID`. When a compose window is open, hands a `Some(init)` to it via `ComposeView::apply_init` and activates it. Otherwise opens a window with persisted bounds, the localized title and `ComposeView::new(self.compose_accounts(), root, compose_white_background, init, window, cx)`; `on_window_should_close` notifies `on_compose_window_closed`.
+  - Behavior: New windows carry `app_id: COMPOSE_WINDOW_APP_ID`. When a compose window is open, hands a `Some(init)` to it via `ComposeView::apply_init` and activates it. Otherwise opens a window with persisted bounds, the localized title and `ComposeView::new(self.compose_accounts(), root, compose_white_background, init, window, cx)`; `on_window_should_close` notifies `on_compose_window_closed`.
 
 - **`select_mailbox`** (private, L1780)
   - Signature: `fn select_mailbox(&mut self, selection: Selection, cx: &mut Context<Self>)`
@@ -1905,6 +1906,9 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Signature: `fn render_message_row(&self, message, cx) -> impl IntoElement`
   - Purpose: Single message list row.
   - Behavior: Sender, subject preview, date, unread/flag/attachment indicators; click calls `select_message_row`. Hover group `MESSAGE_ROW_GROUP` reveals `render_message_row_actions`.
+- **`click_message_row`** / **`set_selection`** / **`apply_selection`** / **`prune_multi_selection`** / **`selected_ids`** / **`row_is_selected`** / **`list_ids`** / **`extended_selection`** / **`extend_selection`** / **`set_list_filter`** (private): multiple selection and filter state. `apply_selection` returns whether a single message resulted, which `set_selection` then opens.
+- **`apply_action_to_selection`** / **`act_on_message`** (private): runs an action on every selected row (first error returned, nothing left selected) / on one message plus its worker notification.
+- **`render_multi_selection`** / **`render_dropdown`** / **`render_filter_menu`** / **`render_move_menu`** (private): reader card stack for a multiple selection and the toolbar dropdowns.
 - **`select_message_row`** (private)
   - Signature: `fn select_message_row(&mut self, id: i64, window, cx)`
   - Purpose: Selects and opens a list row (focuses the list first).
@@ -1948,7 +1952,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 
 - **`render_reader_notice`** (private)
   - Signature: `fn render_reader_notice(&self, cx) -> impl IntoElement`
-  - Purpose: Notice above a message shown as plain text (reason text); `TooLarge` adds "Show formatted" (adds the message to `formatted_anyway`).
+  - Purpose: Notice above a message shown as plain text (reason text).
 
 - **`render_find_bar`** (private)
   - Signature: `fn render_find_bar(&self, cx) -> impl IntoElement`
@@ -2210,7 +2214,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_welcome(cx)`** (private): shown instead of list + reader while no account exists; "Add account…" opens Settings ▸ Accounts.
 - Module helpers: **`parsed_from_detail(detail)`** (stored detail → minimal `ParsedMessage` for reply/forward of local/demo mail), **`forwarded_attachments(raw, parsed)`** (non-inline parts as `OutgoingAttachment`s), **`unique_token()`** (random-seeded hash of a counter + time for Message-IDs), **struct `UnsentItem { id, account_id, subject, recipients, error, maybe_sent }`**, **`unsent_item(row, subject)`** (outbox row → panel summary: recipients comma-joined, blank `last_error` → `None`, `maybe_sent` from `OutgoingState::MaybeSent`), **`load_unsent(db, removing, previous)`** (`failed_outgoing` minus removing accounts; subjects reused from `previous` by id, else parsed from one `outgoing` read (the listing has no raw); read error logged and `previous` kept), **`compose_init_from_outgoing(row, parsed)`** (`ComposeInit` for Edit: from/to/cc/subject/text/threading headers/attachments from the parsed raw, envelope recipients missing from To/Cc restored as Bcc, `replaces_outgoing = row.id`).
 - Tests: `unsent_item_summarizes_the_row`, `compose_init_from_outgoing_restores_the_draft`, `removing_an_account_hides_it_until_reload_clears_it` (see the tests module).
-- Tests (existing, still contracts): `find_steps_wrap_around`, `plain_text_reasons_follow_crash_size_and_override`, `reader_selection_is_a_translucent_accent`, plus the layout/selection/action tests listed above.
+- Tests (existing, still contracts): `find_steps_wrap_around`, `reader_selection_is_opaque_on_light_pages_only`, plus the layout/selection/action tests listed above.
 
 ### `src/settings.rs`
 
@@ -2297,7 +2301,7 @@ in `account_setup`.
 - **const `COMPOSE_MAC` / `COMPOSE_OTHER`**: GPUI binding strings for New Message (Cmd+N / Ctrl+N).
 - **const `SETTINGS_MAC` / `SETTINGS_OTHER`**: Binding strings for Settings (Cmd+, / Ctrl+,).
 - **const `TOGGLE_SIDEBAR_MAC` / `TOGGLE_SIDEBAR_OTHER`**: Binding strings for sidebar toggle.
-- **const `COMMAND_PALETTE_MAC` / `COMMAND_PALETTE_OTHER`**: `cmd-shift-p` / `ctrl-shift-p`, the command palette (as in Zed).
+- **const `COMMAND_PALETTE_MAC` / `COMMAND_PALETTE_OTHER`**: `cmd-k` / `ctrl-k`, the command palette (as in Zed).
 - **const `DELETE_MESSAGE_MAC` / `DELETE_MESSAGE_OTHER`**: Binding strings for move-to-trash.
 - **const `ARCHIVE_MAC` / `ARCHIVE_OTHER`**: Binding strings for archive.
 - **const `MARK_JUNK_MAC` / `MARK_JUNK_OTHER`**: Binding strings for mark junk.

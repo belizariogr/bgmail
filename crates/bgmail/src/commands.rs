@@ -35,9 +35,19 @@ pub struct CommandContext {
     pub selected_message_id: Option<i64>,
     pub message_detail: Option<MessageDetail>,
     pub folders_by_account: HashMap<i64, Vec<Folder>>,
+    /// Several list rows are selected: only actions that work on all of them
+    /// are available (the reader has no single message then).
+    pub bulk_selection: bool,
+    /// The list shows the Trash, where trashing means deleting for good.
+    pub list_in_trash: bool,
 }
 
 impl CommandContext {
+    /// Whether the action can run on the rows of a bulk selection.
+    fn bulk_action_available(&self) -> bool {
+        self.bulk_selection && !self.list_in_trash
+    }
+
     pub fn message_in_trash(&self) -> bool {
         self.message_detail
             .as_ref()
@@ -50,10 +60,14 @@ impl CommandContext {
             .is_some_and(|detail| message_has_folder(&detail.folders_csv, system::JUNK))
     }
 
-    pub fn message_in_archive(&self) -> bool {
-        self.message_detail
-            .as_ref()
-            .is_some_and(|detail| message_has_folder(&detail.folders_csv, system::ARCHIVE))
+    /// Whether archiving would change anything. Gmail keeps every message in
+    /// All Mail (which maps to Archive), Inbox included, so being there alone
+    /// doesn't mean it was archived.
+    pub fn message_archivable(&self) -> bool {
+        self.message_detail.as_ref().is_some_and(|detail| {
+            !message_has_folder(&detail.folders_csv, system::ARCHIVE)
+                || message_has_folder(&detail.folders_csv, system::INBOX)
+        })
     }
 
     pub fn message_unread(&self) -> bool {
@@ -68,7 +82,9 @@ impl CommandContext {
             .is_some_and(|detail| detail.starred)
     }
 
-    pub fn move_targets(&self) -> Vec<(SharedString, SharedString)> {
+    /// Folders the selected message can move to, as (label, path): not the
+    /// ones it is already in, except Archive, where Gmail keeps all its mail.
+    pub fn move_targets(&self, language: Language) -> Vec<(SharedString, SharedString)> {
         let Some(detail) = &self.message_detail else {
             return Vec::new();
         };
@@ -77,9 +93,13 @@ impl CommandContext {
             .into_iter()
             .flatten()
             .filter(|folder| !is_manual_move_destination_forbidden(&folder.path))
+            .filter(|folder| {
+                folder.path == system::ARCHIVE
+                    || !message_has_folder(&detail.folders_csv, &folder.path)
+            })
             .map(|folder| {
                 (
-                    folder_display_name(folder, Language::English).into(),
+                    folder_display_name(folder, language).into(),
                     folder.path.clone().into(),
                 )
             })
@@ -163,17 +183,24 @@ pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool {
         | CommandId::OpenSettings
         | CommandId::ToggleSidebar
         | CommandId::SyncNow => true,
-        CommandId::MessageDelete => ctx.selected_message_id.is_some() && !ctx.message_in_trash(),
+        CommandId::MessageDelete => {
+            ctx.bulk_action_available()
+                || (ctx.selected_message_id.is_some() && !ctx.message_in_trash())
+        }
         CommandId::MessageDeletePermanent | CommandId::MessageRestore => {
             ctx.selected_message_id.is_some() && ctx.message_in_trash()
         }
         CommandId::MessageArchive => {
-            ctx.selected_message_id.is_some()
-                && !ctx.message_in_trash()
-                && !ctx.message_in_archive()
+            ctx.bulk_action_available()
+                || (ctx.selected_message_id.is_some()
+                    && !ctx.message_in_trash()
+                    && ctx.message_archivable())
         }
         CommandId::MessageMarkJunk => {
-            ctx.selected_message_id.is_some() && !ctx.message_in_trash() && !ctx.message_in_junk()
+            ctx.bulk_action_available()
+                || (ctx.selected_message_id.is_some()
+                    && !ctx.message_in_trash()
+                    && !ctx.message_in_junk())
         }
         CommandId::MessagePrint
         | CommandId::MessageToggleRead
@@ -188,7 +215,7 @@ pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool {
 
 /// All commands for the palette, filtered by selection and availability.
 pub fn palette_commands(language: Language, ctx: &CommandContext) -> Vec<CommandEntry> {
-    let has_message = ctx.selected_message_id.is_some();
+    let has_message = ctx.selected_message_id.is_some() || ctx.bulk_selection;
     let mut ids = vec![
         CommandId::ComposeNew,
         CommandId::OpenSettings,
@@ -209,7 +236,7 @@ pub fn palette_commands(language: Language, ctx: &CommandContext) -> Vec<Command
             CommandId::MessageToggleFlag,
             CommandId::MessagePrint,
         ]);
-        for (_label, path) in ctx.move_targets() {
+        for (_label, path) in ctx.move_targets(language) {
             ids.push(CommandId::MoveToFolder(path));
         }
     }
@@ -297,6 +324,7 @@ mod tests {
                 folders_csv: folders_csv.into(),
             }),
             folders_by_account,
+            ..Default::default()
         }
     }
 
@@ -396,11 +424,72 @@ mod tests {
             .any(|entry| matches!(entry.id, CommandId::MoveToFolder(_))));
     }
 
+    fn ctx_in_folders(folders_csv: &str) -> CommandContext {
+        let mut ctx = ctx_with_message(false, false);
+        ctx.message_detail.as_mut().unwrap().folders_csv = folders_csv.into();
+        ctx
+    }
+
+    #[test]
+    fn gmail_inbox_mail_can_be_archived_despite_all_mail() {
+        let enabled = |csv| command_enabled(&CommandId::MessageArchive, &ctx_in_folders(csv));
+        assert!(enabled(",sys:archive,sys:inbox,"));
+        assert!(enabled(",sys:inbox,"));
+        assert!(enabled(",user:Work,"));
+        assert!(!enabled(",sys:archive,"));
+        assert!(!enabled(",sys:archive,user:Work,"));
+    }
+
+    #[test]
+    fn bulk_selection_offers_only_actions_on_every_row() {
+        let mut ctx = CommandContext {
+            bulk_selection: true,
+            ..Default::default()
+        };
+        for id in [
+            CommandId::MessageDelete,
+            CommandId::MessageArchive,
+            CommandId::MessageMarkJunk,
+        ] {
+            assert!(command_enabled(&id, &ctx), "{id:?}");
+        }
+        for id in [CommandId::MessageReply, CommandId::MessageToggleFlag] {
+            assert!(!command_enabled(&id, &ctx), "{id:?}");
+        }
+        ctx.list_in_trash = true;
+        assert!(!command_enabled(&CommandId::MessageDelete, &ctx));
+    }
+
+    #[test]
+    fn move_targets_are_localized_and_skip_the_current_folder() {
+        let mut ctx = ctx_in_folders(",sys:inbox,sys:archive,");
+        ctx.folders_by_account.insert(
+            1,
+            [system::INBOX, system::ARCHIVE, system::TRASH]
+                .iter()
+                .enumerate()
+                .map(|(ix, path)| Folder {
+                    id: ix as i64,
+                    account_id: 1,
+                    path: path.to_string(),
+                    display_name: String::new(),
+                    remote_name: None,
+                    role: None,
+                })
+                .collect(),
+        );
+        ctx.message_detail.as_mut().unwrap().account_id = 1;
+        let targets = ctx.move_targets(Language::Portuguese);
+        let paths: Vec<&str> = targets.iter().map(|(_, path)| path.as_ref()).collect();
+        assert_eq!(paths, vec![system::ARCHIVE, system::TRASH]);
+        assert_eq!(targets[1].0.as_ref(), "Lixeira");
+    }
+
     #[test]
     fn flag_label_reflects_starred_state() {
         let starred = ctx_with_message(false, true);
         let label = label_for(&CommandId::MessageToggleFlag, Language::English, &starred);
-        assert_eq!(label.as_ref(), "Unflag");
+        assert_eq!(label.as_ref(), "Remove star");
     }
 
     #[test]
@@ -413,7 +502,7 @@ mod tests {
     fn move_targets_exclude_sent_drafts_and_flagged() {
         let ctx = ctx_with_message(false, false);
         let paths: Vec<_> = ctx
-            .move_targets()
+            .move_targets(Language::English)
             .into_iter()
             .map(|(_, path)| path.to_string())
             .collect();

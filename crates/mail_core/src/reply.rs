@@ -82,11 +82,7 @@ pub fn prepare_reply(
     me: &[Address],
     labels: &QuoteLabels,
 ) -> Draft {
-    let body_source = original
-        .text
-        .clone()
-        .or_else(|| original.html.as_deref().map(html_to_text))
-        .unwrap_or_default();
+    let body_source = readable_text(original.text.as_deref(), original.html.as_deref());
     let mut draft = Draft {
         from: me.first().cloned().unwrap_or_default(),
         ..Default::default()
@@ -141,6 +137,107 @@ pub fn prepare_reply(
         }
     }
     draft
+}
+
+/// The text a person reads for a message's bodies: its plain-text part, or its
+/// HTML converted when that part is missing, blank or HTML itself (some senders
+/// put the same markup in both parts).
+pub fn readable_text(text: Option<&str>, html: Option<&str>) -> String {
+    match (text, html) {
+        (Some(text), Some(html)) if text.trim().is_empty() || looks_like_html(text) => {
+            html_to_text(html)
+        }
+        (Some(text), _) => text.to_string(),
+        (None, Some(html)) => html_to_text(html),
+        (None, None) => String::new(),
+    }
+}
+
+/// Whether `text` starts like an HTML document.
+fn looks_like_html(text: &str) -> bool {
+    let start: String = text
+        .trim_start()
+        .chars()
+        .take(9)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    ["<!doctype", "<html", "<head", "<body"]
+        .iter()
+        .any(|tag| start.starts_with(tag))
+}
+
+/// Style of Gmail's quote block, which it also uses to recognize and collapse
+/// quoted text.
+const GMAIL_QUOTE_STYLE: &str =
+    "margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex";
+
+/// HTML alternative of a reply's plain text, with the markup Gmail writes:
+/// `> ` lines become nested `blockquote.gmail_quote` inside a `div.gmail_quote`,
+/// headed by their attribution line (the last text line before them, when it
+/// ends in a colon). Built from the text so it always matches what was edited.
+pub fn reply_html(text: &str) -> String {
+    let lines: Vec<(usize, &str)> = text.lines().map(quote_depth).collect();
+    let attribution = lines
+        .iter()
+        .position(|(depth, _)| *depth > 0)
+        .and_then(|first| {
+            lines[..first]
+                .iter()
+                .rposition(|(_, line)| !line.trim().is_empty())
+                .filter(|&ix| lines[ix].1.trim_end().ends_with(':'))
+        });
+    const OPEN_QUOTE: &str = "</div><br><div class=\"gmail_quote\">";
+
+    let mut out = String::from("<div dir=\"ltr\">");
+    let mut in_quote = false;
+    let mut depth = 0;
+    for (ix, &(line_depth, line)) in lines.iter().enumerate() {
+        if Some(ix) == attribution {
+            out.push_str(OPEN_QUOTE);
+            out.push_str("<div dir=\"ltr\" class=\"gmail_attr\">");
+            out.push_str(&html_escape::encode_text(line.trim_end()));
+            out.push_str("<br></div>");
+            in_quote = true;
+            continue;
+        }
+        if line_depth == 0 && in_quote {
+            if line.trim().is_empty() {
+                continue;
+            }
+            // Text written below the quote must not collapse with it.
+            out.push_str(&"</blockquote>".repeat(depth));
+            out.push_str("</div><div dir=\"ltr\">");
+            depth = 0;
+            in_quote = false;
+        }
+        if line_depth > 0 && !in_quote {
+            out.push_str(OPEN_QUOTE);
+            in_quote = true;
+        }
+        if depth < line_depth {
+            let open = format!("<blockquote class=\"gmail_quote\" style=\"{GMAIL_QUOTE_STYLE}\">");
+            out.push_str(&open.repeat(line_depth - depth));
+        } else {
+            out.push_str(&"</blockquote>".repeat(depth - line_depth));
+        }
+        depth = line_depth;
+        out.push_str(&html_escape::encode_text(line));
+        out.push_str("<br>");
+    }
+    out.push_str(&"</blockquote>".repeat(depth));
+    out.push_str("</div>");
+    out
+}
+
+/// Quote depth of a line and its text without the `> ` markers.
+fn quote_depth(line: &str) -> (usize, &str) {
+    let mut depth = 0;
+    let mut rest = line;
+    while let Some(after) = rest.strip_prefix('>') {
+        depth += 1;
+        rest = after.strip_prefix(' ').unwrap_or(after);
+    }
+    (depth, rest)
 }
 
 /// Keeps the first occurrence of each email, skipping those in `exclude`.
@@ -226,59 +323,26 @@ pub fn html_to_text(html: &str) -> String {
     tidy_lines(&out)
 }
 
+/// Invisible characters marketing mail pads hidden preview text with. The zero
+/// width joiner stays: it builds emoji sequences.
+fn is_invisible_filler(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}' | '\u{200b}' | '\u{200c}' | '\u{2060}' | '\u{feff}'
+    )
+}
+
 /// Appends decoded text, collapsing source whitespace into single spaces.
 fn push_text(out: &mut String, raw: &str) {
-    for c in decode_entities(raw).chars() {
-        if c.is_whitespace() && c != '\u{a0}' {
+    for c in html_escape::decode_html_entities(raw).chars() {
+        if c.is_whitespace() {
             if !out.ends_with([' ', '\n']) && !out.is_empty() {
                 out.push(' ');
             }
-        } else if c == '\u{a0}' {
-            out.push(' ');
-        } else {
+        } else if !is_invisible_filler(c) {
             out.push(c);
         }
     }
-}
-
-fn decode_entities(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut rest = raw;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        let after = &rest[amp + 1..];
-        let decoded = after.find(';').filter(|&end| end <= 10).and_then(|end| {
-            let entity = &after[..end];
-            let c = match entity {
-                "amp" => Some('&'),
-                "lt" => Some('<'),
-                "gt" => Some('>'),
-                "quot" => Some('"'),
-                "apos" | "#39" => Some('\''),
-                "nbsp" => Some('\u{a0}'),
-                _ => entity.strip_prefix('#').and_then(|num| {
-                    let code = match num.strip_prefix(['x', 'X']) {
-                        Some(hex) => u32::from_str_radix(hex, 16).ok(),
-                        None => num.parse().ok(),
-                    };
-                    code.and_then(char::from_u32)
-                }),
-            }?;
-            Some((c, end))
-        });
-        match decoded {
-            Some((c, end)) => {
-                out.push(c);
-                rest = &after[end + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Trims each line and keeps at most one blank line between paragraphs.
@@ -294,6 +358,63 @@ fn tidy_lines(text: &str) -> String {
         lines.pop();
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod reply_format_tests {
+    use super::*;
+
+    #[test]
+    fn named_entities_and_fillers_leave_no_trace() {
+        let text = html_to_text("<p>Ol&aacute;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;mundo&#8203;!</p>");
+        assert_eq!(text, "Olá mundo!");
+    }
+
+    #[test]
+    fn readable_text_prefers_the_text_part_unless_it_is_html() {
+        let html = "<p>Real</p>";
+        assert_eq!(readable_text(Some("Plain"), Some(html)), "Plain");
+        assert_eq!(readable_text(None, Some(html)), "Real");
+        assert_eq!(readable_text(Some("  \n"), Some(html)), "Real");
+        assert_eq!(
+            readable_text(Some("<!DOCTYPE html><html><p>Copy</p></html>"), Some(html)),
+            "Real"
+        );
+        // Without an HTML part the sender's text stays as it was written.
+        assert_eq!(
+            readable_text(Some("<html> is a tag"), None),
+            "<html> is a tag"
+        );
+        assert_eq!(readable_text(None, None), "");
+    }
+
+    #[test]
+    fn reply_html_follows_gmail_structure() {
+        let html = reply_html("Hi <you>\n\nOn Mon, Ann <a@x> wrote:\n> first\n>\n>> deep\n");
+        assert_eq!(
+            html,
+            format!(
+                "<div dir=\"ltr\">Hi &lt;you&gt;<br><br></div><br><div class=\"gmail_quote\">\
+                 <div dir=\"ltr\" class=\"gmail_attr\">On Mon, Ann &lt;a@x&gt; wrote:<br></div>\
+                 <blockquote class=\"gmail_quote\" style=\"{GMAIL_QUOTE_STYLE}\">first<br><br>\
+                 <blockquote class=\"gmail_quote\" style=\"{GMAIL_QUOTE_STYLE}\">deep<br>\
+                 </blockquote></blockquote></div>"
+            )
+        );
+    }
+
+    #[test]
+    fn reply_html_keeps_text_below_the_quote_out_of_it() {
+        let html = reply_html("On Ann wrote:\n> quoted\n\nMy answer");
+        let quote_end = html.find("</blockquote>").unwrap();
+        assert!(html.find("My answer").unwrap() > quote_end);
+        assert!(html.ends_with("<div dir=\"ltr\">My answer<br></div>"));
+    }
+
+    #[test]
+    fn reply_html_without_quote_is_a_single_block() {
+        assert_eq!(reply_html("Hi"), "<div dir=\"ltr\">Hi<br></div>");
+    }
 }
 
 #[cfg(test)]

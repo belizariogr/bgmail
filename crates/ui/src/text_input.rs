@@ -16,7 +16,7 @@ use theme::ActiveTheme;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::prelude::*;
-use crate::text_area::marked_text_runs;
+use crate::text_area::{marked_text_runs, word_range_at};
 
 #[cfg(target_os = "windows")]
 pub fn set_native_text_focus(window: &Window) {
@@ -141,6 +141,22 @@ pub(crate) fn next_word_start(content: &str, offset: usize) -> usize {
 /// Folds `\r\n` / `\r` / `\n` into single spaces for a one-line field.
 pub(crate) fn single_line(text: &str) -> String {
     text.replace("\r\n", " ").replace(['\r', '\n'], " ")
+}
+
+/// Selection made by a repeated click at `offset`: a double click takes the
+/// word and a triple click the whole field. A masked field selects everything
+/// on a double click too, so its word boundaries stay hidden.
+fn click_selection(
+    content: &str,
+    offset: usize,
+    click_count: usize,
+    masked: bool,
+) -> Option<Range<usize>> {
+    match click_count {
+        0 | 1 => None,
+        2 if !masked => Some(word_range_at(content, offset)),
+        _ => Some(0..content.len()),
+    }
 }
 
 /// Glyph drawn for every character of a masked (password) field.
@@ -430,10 +446,16 @@ impl TextInput {
         window.focus(&self.focus_handle);
         cx.stop_propagation();
         self.is_selecting = true;
-        if event.modifiers.shift {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
+        let offset = self.index_for_mouse_position(event.position);
+        if let Some(range) = click_selection(&self.content, offset, event.click_count, self.masked)
+        {
+            self.selected_range = range;
+            self.selection_reversed = false;
+            cx.notify();
+        } else if event.modifiers.shift {
+            self.select_to(offset, cx);
         } else {
-            self.move_to(self.index_for_mouse_position(event.position), cx);
+            self.move_to(offset, cx);
         }
     }
 
@@ -980,8 +1002,8 @@ mod focus_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        masked_offset, masked_text, next_word_start, previous_word_start, single_line,
-        unmasked_offset,
+        click_selection, masked_offset, masked_text, next_word_start, previous_word_start,
+        single_line, unmasked_offset,
     };
 
     #[test]
@@ -1005,6 +1027,20 @@ mod tests {
     fn single_line_folds_line_breaks_into_spaces() {
         assert_eq!(single_line("a\r\nb\nc\rd"), "a b c d");
         assert_eq!(single_line("plain"), "plain");
+    }
+
+    #[test]
+    fn repeated_clicks_select_the_word_then_the_field() {
+        let text = "Re: hello world";
+        assert_eq!(click_selection(text, 6, 1, false), None);
+        assert_eq!(click_selection(text, 6, 2, false), Some(4..9));
+        assert_eq!(click_selection(text, 6, 3, false), Some(0..text.len()));
+        assert_eq!(click_selection(text, 6, 4, false), Some(0..text.len()));
+    }
+
+    #[test]
+    fn double_click_on_a_masked_field_selects_everything() {
+        assert_eq!(click_selection("my secret", 1, 2, true), Some(0..9));
     }
 
     #[test]
