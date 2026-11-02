@@ -23,8 +23,9 @@ use crate::body::body_content;
 use crate::engine::EngineOptions;
 use crate::events::{AccountStatus, Command, SyncEvent};
 use crate::plan::{
-    in_flight_uids, messages_with_pending_flags, new_remote_message, notice_for_new, plan_folder,
-    plan_folders, should_announce, sync_order, LocalFolderState, PendingAction,
+    in_flight_uids, is_new_arrival, messages_with_pending_flags, new_remote_message,
+    notice_for_new, plan_folder, plan_folders, should_announce, sync_order, LocalFolderState,
+    PendingAction,
 };
 
 /// Headers fetched per round trip (progress + list refresh after each).
@@ -1327,6 +1328,7 @@ impl Worker {
         let status = self.rm()?.select(&name)?;
         let remote_uids = self.rm()?.uids(&name)?;
         let before = self.db.folder_sync_state(folder.id)?;
+        let uid_next_before = before.uid_next;
         let local = LocalFolderState {
             sync: before,
             uids: self
@@ -1384,7 +1386,12 @@ impl Worker {
                 notices.extend(notice_for_new(
                     insert.message_id,
                     &message,
-                    insert.created,
+                    is_new_arrival(
+                        insert.created,
+                        message.gm_msgid,
+                        header.uid,
+                        uid_next_before,
+                    ),
                     announce,
                 ));
             }

@@ -119,6 +119,20 @@ fn windows_app_id() -> Option<&'static str> {
         .then_some(WINDOWS_APP_ID)
 }
 
+/// Icon of the notification on Linux/BSD: the icon of an installed bundle
+/// (`<prefix>/bin/bgmail` + `<prefix>/share/icons/...`, possibly outside the
+/// icon theme search path) as a `file://` URI, else the icon theme name.
+#[cfg_attr(any(target_os = "windows", target_os = "macos"), allow(dead_code))]
+fn linux_icon(exe: Option<&std::path::Path>) -> String {
+    exe.and_then(|exe| exe.parent()?.parent())
+        .map(|prefix| prefix.join("share/icons/hicolor/128x128/apps/bgmail.png"))
+        .filter(|icon| icon.is_absolute() && icon.exists())
+        .map_or_else(
+            || "bgmail".to_string(),
+            |icon| format!("file://{}", icon.display()),
+        )
+}
+
 fn show(notice: &Notice) {
     let mut notification = notify_rust::Notification::new();
     notification
@@ -128,6 +142,14 @@ fn show(notice: &Notice) {
     #[cfg(target_os = "windows")]
     if let Some(app_id) = windows_app_id() {
         notification.app_id(app_id);
+    }
+    // macOS and Windows take the icon from the app bundle / Start Menu shortcut.
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let exe = std::env::current_exe().ok();
+        notification
+            .icon(&linux_icon(exe.as_deref()))
+            .hint(notify_rust::Hint::DesktopEntry("BGMail".into()));
     }
     if let Err(error) = notification.show() {
         eprintln!("BGMail: notification failed: {error}");
@@ -184,6 +206,21 @@ mod tests {
             ]
         );
         assert_eq!(WINDOWS_APP_ID, "io.github.belizariogr.bgmail");
+    }
+
+    #[test]
+    fn linux_icon_prefers_the_installed_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("bin/bgmail");
+        assert_eq!(linux_icon(Some(&exe)), "bgmail", "no bundled icon");
+        assert_eq!(linux_icon(None), "bgmail");
+
+        let icon = dir
+            .path()
+            .join("share/icons/hicolor/128x128/apps/bgmail.png");
+        std::fs::create_dir_all(icon.parent().unwrap()).unwrap();
+        std::fs::write(&icon, b"png").unwrap();
+        assert_eq!(linux_icon(Some(&exe)), format!("file://{}", icon.display()));
     }
 
     #[test]
