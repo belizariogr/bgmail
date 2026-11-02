@@ -414,6 +414,11 @@
       what the reader lists; `noscript` dropped; backoff grows when a server fails right
       after login; Sent syncs after sending; a pending attachment read counts as an
       edit; dragging a row no longer scans the list.
+- ✅ Review round 6: every body part of a message counts, not only the first of each
+      type; text attachments keep their bytes and charset; a press that moved a little
+      still clicks its row; a quoted name with a comma stays one recipient, and the
+      exact address comes first among suggestions; a secret shared with another
+      account survives a removal; a search can't return to a removed account's folder.
 - ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user
       decision), which closes the mXSS through foreign content.
 - ✅ Remote images can't reach this machine or link-local addresses, resolved by IP;

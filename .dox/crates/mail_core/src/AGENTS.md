@@ -96,6 +96,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ##### Context: module
 
+- **`split_tokens`** (pub): splits at `,`/`;` outside quotes and angle brackets.
 - **`parse_address_list`** (pub) — `pub fn parse_address_list(input: &str) -> Result<Vec<Address>, Vec<String>>`
   - Purpose: parse a user-typed To/Cc field.
   - Behavior: splits on `,`/`;` outside quotes/angle brackets; skips empty tokens (trailing separators, whitespace); accepts `email`, `Name <email>`, `"Quoted, Name" <email>`, `<email>`; `Err` lists every invalid trimmed token (in order) if any; validity = exactly one `@`, non-empty local/domain, no whitespace or `<>,;"`, nothing after `>`.
@@ -182,7 +183,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 #### Types
 
 - **struct `ParsedMessage`**: `message_id`, `in_reply_to` (no `<>`), `references: Vec<String>`, `subject`, `from`/`sender: Option<Address>`, `to`/`cc`/`bcc`/`reply_to: Vec<Address>`, `date: Option<i64>` (unix UTC), `html`/`text: Option<String>`, `attachments: Vec<AttachmentInfo>`. Default, Clone, Eq.
-- **struct `AttachmentInfo { index, filename, mime_type, size, content_id, inline }`**: serde.
+- **struct `AttachmentInfo { index, filename, mime_type, size, content_id, charset, inline }`**: serde. `size` and `attachment_content` give the part's bytes as sent (`part_bytes`, `original_bytes`): a text part is the raw body with only its Content-Transfer-Encoding reverted. **`html_body`** / **`text_body`** (private): every body part in order, the other kind converted; `None` when no part is of that kind.
 
 #### Functions
 
