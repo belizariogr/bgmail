@@ -105,8 +105,9 @@ that edit the database and queue those server ops.
   concurrently with its successor.
 - **NewMail:** only unread rows *created* (not merged) in the `sys:inbox`
   folder after its first sync, never after a UIDVALIDITY reset.
-- **Folder mapping** (`plan::folder_path_for`): first folder per role takes
-  the system path; Gmail `\All` becomes `sys:archive` only when no
+- **Folder mapping** (`plan::folder_path_for`, order from `plan_folders`: declared
+  SPECIAL-USE first, `\All` after the other declared, then by name nearest the top,
+  a leading `INBOX` not counting): first folder per role takes the system path; Gmail `\All` becomes `sys:archive` only when no
   `\Archive` folder exists; `\Flagged`/`\Important`/non-selectable folders
   are not synced; other folders → `user:<decoded/path>` (leading `INBOX`
   segment dropped). A system path re-pointed at another mailbox is reset.
