@@ -231,6 +231,8 @@ struct Worker {
     remote: Option<Box<dyn MailRemote>>,
     queue: VecDeque<Command>,
     backoff: Backoff,
+    /// A message was filed in Sent since that folder last synced.
+    sent_is_stale: bool,
     retry_at: Option<Instant>,
     auth_failed: bool,
     next_poll: Instant,
@@ -252,6 +254,7 @@ impl Worker {
             connector: setup.connector,
             events: setup.events,
             backoff: Backoff::new(setup.options.retry_base, setup.options.retry_max),
+            sent_is_stale: false,
             next_poll: Instant::now() + setup.options.poll_interval,
             options: setup.options,
             cancel: setup.cancel,
@@ -541,6 +544,7 @@ impl Worker {
             .map_or(DEFAULT_SYNC_WINDOW, |config| config.sync_window);
         let mut changed = self.process_queue()?;
         self.process_outbox()?;
+        self.sent_is_stale = false;
         self.sync_folder_list()?;
         for folder in sync_order(&self.db.list_folders(self.account_id)?) {
             self.check_interrupts()?;
@@ -598,6 +602,17 @@ impl Worker {
             self.mailbox_changed();
         }
         self.process_outbox()?;
+        // What was just sent shows in Sent now, rather than at the next poll.
+        if std::mem::take(&mut self.sent_is_stale) {
+            let sent = self
+                .db
+                .list_folders(self.account_id)?
+                .into_iter()
+                .find(|folder| folder.path == system::SENT && folder.remote_name.is_some());
+            if let Some(folder) = sent {
+                self.sync_folder(&folder)?;
+            }
+        }
         self.idle_status();
         Ok(())
     }
@@ -1178,6 +1193,7 @@ impl Worker {
             self.db.mark_outgoing_append_pending(row.id)?;
         } else {
             self.db.complete_outgoing(row.id)?;
+            self.sent_is_stale = true;
         }
         self.emit(SyncEvent::Sent {
             account_id: self.account_id,
@@ -1269,6 +1285,7 @@ impl Worker {
         match self.rm()?.append(&sent, seen, &row.raw) {
             Ok(()) => {
                 self.db.complete_outgoing(row.id)?;
+                self.sent_is_stale = true;
                 Ok(())
             }
             Err(error) => {

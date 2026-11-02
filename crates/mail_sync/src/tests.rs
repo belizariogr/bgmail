@@ -1528,6 +1528,27 @@ fn a_message_three_days_old_is_not_sent_any_more() {
 }
 
 #[test]
+fn a_sent_message_is_listed_in_sent_right_away() {
+    let h = Harness::imap().started();
+    h.db.enqueue_outgoing(
+        h.account,
+        "me@example.com",
+        &strings(&["b@x.com"]),
+        &mail("outgoing", 9),
+        None,
+    )
+    .unwrap();
+    h.run(Command::ProcessQueue);
+    let sent =
+        h.db.list_folders(h.account)
+            .unwrap()
+            .into_iter()
+            .find(|folder| folder.path == system::SENT)
+            .unwrap();
+    assert!(!h.db.folder_uids(sent.id).unwrap().is_empty());
+}
+
+#[test]
 fn uncertain_sends_are_never_resent_automatically() {
     let h = Harness::imap().started();
     let id =
