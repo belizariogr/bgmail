@@ -66,6 +66,7 @@ pub struct MessageListItem {
     pub unread: bool,
     pub starred: bool,
     pub has_attachment: bool,
+    pub folders_csv: String,
 }
 
 /// Full message for the reader (raw body for rendering).

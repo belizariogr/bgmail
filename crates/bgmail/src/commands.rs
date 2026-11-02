@@ -35,6 +35,8 @@ pub struct BulkSelection {
     pub account_ids: Vec<i64>,
     pub has_unread: bool,
     pub all_starred: bool,
+    /// Some row is only in Sent: the selection can't be moved.
+    pub any_sent_only: bool,
 }
 
 /// Snapshot of UI state used to decide which commands are available.
@@ -48,6 +50,8 @@ pub struct CommandContext {
     pub bulk: Option<BulkSelection>,
     /// The list shows the Trash, where trashing means deleting for good.
     pub list_in_trash: bool,
+    /// The list shows Sent, whose items can't leave it.
+    pub list_in_sent: bool,
 }
 
 impl CommandContext {
@@ -80,6 +84,20 @@ impl CommandContext {
     /// Whether the action can run on the rows of a bulk selection.
     fn bulk_action_available(&self) -> bool {
         self.bulk.is_some() && !self.list_in_trash
+    }
+
+    /// Whether the selection may go to another folder: sent mail is only deleted.
+    pub fn selection_movable(&self) -> bool {
+        if self.list_in_sent {
+            return false;
+        }
+        match &self.bulk {
+            Some(bulk) => !bulk.any_sent_only,
+            None => !self
+                .message_detail
+                .as_ref()
+                .is_some_and(|detail| message_only_in_sent(&detail.folders_csv)),
+        }
     }
 
     pub fn message_in_trash(&self) -> bool {
@@ -131,6 +149,9 @@ impl CommandContext {
     /// Folders the selected message can move to, as (label, path): not the
     /// ones it is already in, except Archive, where Gmail keeps all its mail.
     pub fn move_targets(&self, language: Language) -> Vec<(SharedString, SharedString)> {
+        if !self.selection_movable() {
+            return Vec::new();
+        }
         if let Some(bulk) = &self.bulk {
             return self.bulk_move_targets(bulk, language);
         }
@@ -167,6 +188,12 @@ fn message_has_folder(csv: &str, folder_path: &str) -> bool {
     csv.split(',')
         .filter(|segment| !segment.is_empty())
         .any(|path| path == folder_path)
+}
+
+/// Mail sent to oneself is also in the Inbox: from there it is received mail, which
+/// has to remain archivable like any other.
+pub fn message_only_in_sent(folders_csv: &str) -> bool {
+    message_has_folder(folders_csv, system::SENT) && !message_has_folder(folders_csv, system::INBOX)
 }
 
 /// Localized display name for a storage folder path.
@@ -241,25 +268,32 @@ pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool {
                 || (ctx.selected_message_id.is_some() && ctx.message_in_trash())
         }
         CommandId::MessageArchive => {
-            ctx.bulk_action_available()
-                || (ctx.selected_message_id.is_some()
-                    && !ctx.message_in_trash()
-                    && ctx.message_archivable())
+            ctx.selection_movable()
+                && (ctx.bulk_action_available()
+                    || (ctx.selected_message_id.is_some()
+                        && !ctx.message_in_trash()
+                        && ctx.message_archivable()))
         }
         CommandId::MessageMarkJunk => {
-            ctx.bulk_action_available()
-                || (ctx.selected_message_id.is_some()
-                    && !ctx.message_in_trash()
-                    && !ctx.message_in_junk())
+            ctx.selection_movable()
+                && (ctx.bulk_action_available()
+                    || (ctx.selected_message_id.is_some()
+                        && !ctx.message_in_trash()
+                        && !ctx.message_in_junk()))
         }
         CommandId::MessageToggleRead => ctx.selected_message_id.is_some() || ctx.bulk.is_some(),
         CommandId::MessagePrint
         | CommandId::MessageReply
         | CommandId::MessageReplyAll
         | CommandId::MessageForward => ctx.selected_message_id.is_some(),
-        CommandId::MessageToggleFlag | CommandId::MoveToFolder(_) => {
+        CommandId::MessageToggleFlag => {
             ctx.bulk_action_available()
                 || (ctx.selected_message_id.is_some() && !ctx.message_in_trash())
+        }
+        CommandId::MoveToFolder(_) => {
+            ctx.selection_movable()
+                && (ctx.bulk_action_available()
+                    || (ctx.selected_message_id.is_some() && !ctx.message_in_trash()))
         }
     }
 }
@@ -315,6 +349,60 @@ pub fn command_matches_query(label: &str, query: &str) -> bool {
 mod tests {
     use super::*;
     use storage::user_folder_path;
+
+    fn only_moves_are_blocked(ctx: &CommandContext) {
+        for id in [
+            CommandId::MessageArchive,
+            CommandId::MessageMarkJunk,
+            CommandId::MoveToFolder(user_folder_path("Clients").into()),
+        ] {
+            assert!(!command_enabled(&id, ctx), "{id:?} must be blocked");
+        }
+        assert!(ctx.move_targets(Language::default()).is_empty());
+        for id in [
+            CommandId::MessageDelete,
+            CommandId::MessageToggleFlag,
+            CommandId::MessageToggleRead,
+        ] {
+            assert!(command_enabled(&id, ctx), "{id:?} must stay available");
+        }
+    }
+
+    #[test]
+    fn a_sent_message_can_only_be_deleted() {
+        let mut ctx = ctx_with_message(false, false);
+        ctx.message_detail.as_mut().unwrap().folders_csv = ",sys:sent,".into();
+        only_moves_are_blocked(&ctx);
+    }
+
+    #[test]
+    fn gmails_all_mail_copy_does_not_free_a_sent_message() {
+        let mut ctx = ctx_with_message(false, false);
+        ctx.message_detail.as_mut().unwrap().folders_csv = ",sys:sent,sys:archive,".into();
+        only_moves_are_blocked(&ctx);
+    }
+
+    #[test]
+    fn mail_sent_to_oneself_moves_from_the_inbox_but_not_from_sent() {
+        let mut ctx = ctx_with_message(false, false);
+        ctx.message_detail.as_mut().unwrap().folders_csv = ",sys:inbox,sys:sent,".into();
+        assert!(command_enabled(&CommandId::MessageArchive, &ctx));
+        ctx.list_in_sent = true;
+        only_moves_are_blocked(&ctx);
+    }
+
+    #[test]
+    fn one_sent_row_blocks_moving_a_multiple_selection() {
+        let mut ctx = ctx_with_message(false, false);
+        ctx.bulk = Some(BulkSelection {
+            account_ids: vec![1],
+            any_sent_only: true,
+            ..Default::default()
+        });
+        only_moves_are_blocked(&ctx);
+        ctx.bulk.as_mut().unwrap().any_sent_only = false;
+        assert!(command_enabled(&CommandId::MessageArchive, &ctx));
+    }
 
     fn ctx_with_message(in_trash: bool, starred: bool) -> CommandContext {
         let folders_csv = if in_trash {

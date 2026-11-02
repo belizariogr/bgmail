@@ -34,7 +34,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Columns read into [`MessageListItem`] (see [`list_item_from_row`]).
 const LIST_COLUMNS: &str = "id, account_id, sender, sender_email, subject, preview,
-    received_at, date_ts, thread_id, unread, starred, has_attachment";
+    received_at, date_ts, thread_id, unread, starred, has_attachment, folders_csv";
 
 /// Newest first; mock rows share `date_ts = 0`, so `sort_order` orders them.
 const LIST_ORDER: &str = "ORDER BY date_ts DESC, sort_order ASC, id DESC";
@@ -332,6 +332,7 @@ fn list_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageListIt
         unread: row.get::<_, i64>(9)? != 0,
         starred: row.get::<_, i64>(10)? != 0,
         has_attachment: row.get::<_, i64>(11)? != 0,
+        folders_csv: row.get(12)?,
     })
 }
 

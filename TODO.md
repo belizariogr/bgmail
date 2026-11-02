@@ -377,6 +377,8 @@
       opt-in "default mail app" switch. Shown only to a profile with no account
       that never finished it. The theme choice is now persisted
       (`Config::light_theme`, also from Settings).
+- ✅ Sent mail can only be deleted: Archive, Junk, Move and dragging are blocked
+      for it (`commands::message_only_in_sent`, `selection_movable`).
 - ⬜ Persist the UI language (`locale` always starts in English, so the setup does
       too); consider a language picker on the welcome step.
 

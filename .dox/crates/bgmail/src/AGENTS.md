@@ -34,7 +34,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ## API Catalog
 
-_720 functions/methods documented._
+_723 functions/methods documented._
 
 ### `src/account_setup.rs`
 
@@ -2874,3 +2874,7 @@ First-run setup view; see the crate doc for its contract.
 - **`RootView::render_onboarding(window, cx)`**: the setup under a draggable title bar with the window controls.
 - **`RootView::window_drag_bar(bar, cx)`**: makes an element act as the title bar (shared with the toolbar).
 - **`RootView::toggle_command_palette`**: does nothing during the setup.
+- **`CommandContext::selection_movable()`**: false in Sent or when the selection has a sent-only message; Archive, Junk and Move require it.
+- **`message_only_in_sent(folders_csv)`**: in Sent and not in the Inbox.
+- **`RootView::showing_sent()`**: the list shows Sent (unified or an account's).
+- **`RootView::dragged_messages(id)`**: now `None` when the row or its selection can't be moved.

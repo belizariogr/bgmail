@@ -1786,24 +1786,30 @@ impl RootView {
     }
 
     /// What dragging row `id` takes along: the whole selection when the row is
-    /// part of it.
-    fn dragged_messages(&self, id: i64) -> DraggedMessages {
+    /// part of it. `None` when that includes sent mail, which can't be moved.
+    fn dragged_messages(&self, id: i64) -> Option<DraggedMessages> {
         let ids = if self.multi_selection.contains(&id) {
             self.multi_selection.clone()
         } else {
             vec![id]
         };
+        let sent_only = self.list_messages.iter().any(|message| {
+            ids.contains(&message.id) && commands::message_only_in_sent(&message.folders_csv)
+        });
+        if sent_only || self.showing_sent() {
+            return None;
+        }
         let mut accounts = self
             .list_messages
             .iter()
             .filter(|message| ids.contains(&message.id))
             .map(|message| message.account_id);
         let first = accounts.next();
-        DraggedMessages {
+        Some(DraggedMessages {
             account_id: first.filter(|first| accounts.all(|other| other == *first)),
             ids,
             progress: Rc::default(),
-        }
+        })
     }
 
     /// Toggles read/unread of the selected message (it stays selected).
@@ -2347,6 +2353,7 @@ impl RootView {
             }
             bulk.has_unread |= message.unread;
             bulk.all_starred &= message.starred;
+            bulk.any_sent_only |= commands::message_only_in_sent(&message.folders_csv);
         }
         Some(bulk)
     }
@@ -2359,6 +2366,7 @@ impl RootView {
             folders_by_account: self.folders_by_account.clone(),
             bulk: self.bulk_selection(),
             list_in_trash: self.showing_trash(),
+            list_in_sent: self.showing_sent(),
         }
     }
 
@@ -2766,6 +2774,13 @@ impl RootView {
     }
 
     /// Whether the list shows a Trash folder, whose rows offer no delete button.
+    fn showing_sent(&self) -> bool {
+        match &self.selected_mailbox {
+            Selection::Global(mailbox) => *mailbox == GlobalMailbox::Sent,
+            Selection::Mailbox { folder_path, .. } => folder_path == storage::system::SENT,
+        }
+    }
+
     fn showing_trash(&self) -> bool {
         matches!(
             &self.selected_mailbox,
@@ -2832,10 +2847,16 @@ impl RootView {
     }
 
     pub(crate) fn archive_message(&mut self, cx: &mut Context<Self>) {
+        if !self.command_context().selection_movable() {
+            return;
+        }
         self.run_message_action(cx, mail_actions::archive);
     }
 
     pub(crate) fn mark_message_junk(&mut self, cx: &mut Context<Self>) {
+        if !self.command_context().selection_movable() {
+            return;
+        }
         self.run_message_action(cx, mail_actions::junk);
     }
 
@@ -2856,6 +2877,9 @@ impl RootView {
     }
 
     pub(crate) fn move_message_to_folder(&mut self, folder_path: &str, cx: &mut Context<Self>) {
+        if !self.command_context().selection_movable() {
+            return;
+        }
         let target = folder_path.to_string();
         self.run_message_action(cx, move |db, id| {
             mail_actions::move_to_folder(db, id, &target)
@@ -5252,31 +5276,33 @@ impl RootView {
             .when(!selected, |el| el.hover(move |el| el.bg(hover)))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_drag(self.dragged_messages(message_id), {
-                let width = self.list_width;
-                let title: SharedString = message.sender.clone().into();
-                let subject: SharedString = message.subject.clone().into();
-                let language = cx.language();
-                move |dragged: &DraggedMessages, grab, window, cx| {
-                    dragged.progress.start(window.mouse_position());
-                    let (title, subtitle) = if dragged.ids.len() > 1 {
-                        (
-                            locale::messages_selected(language, dragged.ids.len()).into(),
-                            SharedString::default(),
-                        )
-                    } else {
-                        (title.clone(), subject.clone())
-                    };
-                    let progress = dragged.progress.clone();
-                    cx.new(|_| DragPreview {
-                        progress,
-                        grab,
-                        draws_hand: DRAG_DRAWS_HAND,
-                        width,
-                        title,
-                        subtitle,
-                    })
-                }
+            .when_some(self.dragged_messages(message_id), |row, dragged| {
+                row.on_drag(dragged, {
+                    let width = self.list_width;
+                    let title: SharedString = message.sender.clone().into();
+                    let subject: SharedString = message.subject.clone().into();
+                    let language = cx.language();
+                    move |dragged: &DraggedMessages, grab, window, cx| {
+                        dragged.progress.start(window.mouse_position());
+                        let (title, subtitle) = if dragged.ids.len() > 1 {
+                            (
+                                locale::messages_selected(language, dragged.ids.len()).into(),
+                                SharedString::default(),
+                            )
+                        } else {
+                            (title.clone(), subject.clone())
+                        };
+                        let progress = dragged.progress.clone();
+                        cx.new(|_| DragPreview {
+                            progress,
+                            grab,
+                            draws_hand: DRAG_DRAWS_HAND,
+                            width,
+                            title,
+                            subtitle,
+                        })
+                    }
+                })
             })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 let row = hovered.then_some(message_id);
@@ -6284,6 +6310,7 @@ impl RootView {
         let language = cx.language();
         let count = self.multi_selection.len();
         let in_trash = self.showing_trash();
+        let movable = self.command_context().selection_movable();
         let bulk = self.bulk_selection().unwrap_or_default();
         let (has_unread, all_starred) = (bulk.has_unread, bulk.all_starred);
         let tilts: Vec<f32> = SHEET_TILTS.iter().copied().take(count - 1).collect();
@@ -6380,20 +6407,22 @@ impl RootView {
                     Self::delete_message_to_trash,
                     cx,
                 ))
-                .child(action(
-                    "bulk-archive",
-                    IconName::Archive,
-                    Key::CommandArchive,
-                    Self::archive_message,
-                    cx,
-                ))
-                .child(action(
-                    "bulk-junk",
-                    IconName::Junk,
-                    Key::CommandMarkJunk,
-                    Self::mark_message_junk,
-                    cx,
-                ))
+                .when(movable, |el| {
+                    el.child(action(
+                        "bulk-archive",
+                        IconName::Archive,
+                        Key::CommandArchive,
+                        Self::archive_message,
+                        cx,
+                    ))
+                    .child(action(
+                        "bulk-junk",
+                        IconName::Junk,
+                        Key::CommandMarkJunk,
+                        Self::mark_message_junk,
+                        cx,
+                    ))
+                })
                 .child(action(
                     "bulk-star",
                     star_icon(all_starred),
@@ -6416,17 +6445,19 @@ impl RootView {
                     Self::toggle_message_read,
                     cx,
                 ))
-                .child(Self::icon_button_with_tooltip(
-                    "bulk-move",
-                    Key::ToolbarMove.tr(language),
-                    None,
-                    IconButton::new("bulk-move", IconName::Folder)
-                        .size(IconSize::Small)
-                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
-                            this.move_menu = Some(event.position());
-                            cx.notify();
-                        })),
-                ))
+                .when(movable, |el| {
+                    el.child(Self::icon_button_with_tooltip(
+                        "bulk-move",
+                        Key::ToolbarMove.tr(language),
+                        None,
+                        IconButton::new("bulk-move", IconName::Folder)
+                            .size(IconSize::Small)
+                            .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                                this.move_menu = Some(event.position());
+                                cx.notify();
+                            })),
+                    ))
+                })
             });
 
         div()
@@ -7541,9 +7572,9 @@ mod tests {
         let (_dir, mut view) = test_view();
         let ids = view.list_ids();
         view.apply_selection(ids[..2].to_vec());
-        assert_eq!(view.dragged_messages(ids[0]).ids, ids[..2]);
-        assert_eq!(view.dragged_messages(ids[2]).ids, [ids[2]]);
-        assert!(view.dragged_messages(ids[2]).account_id.is_some());
+        assert_eq!(view.dragged_messages(ids[0]).unwrap().ids, ids[..2]);
+        assert_eq!(view.dragged_messages(ids[2]).unwrap().ids, [ids[2]]);
+        assert!(view.dragged_messages(ids[2]).unwrap().account_id.is_some());
     }
 
     #[test]
@@ -7766,6 +7797,84 @@ mod tests {
         assert!(view.row_can_be_trashed(id));
         view.db.move_message_to_trash(id).unwrap();
         assert!(!view.row_can_be_trashed(id));
+    }
+
+    #[test]
+    fn nothing_listed_in_sent_can_be_dragged() {
+        let (_dir, mut view) = test_view();
+        let id = view.selected_message_id.unwrap();
+        assert!(view.dragged_messages(id).is_some());
+        view.apply_mailbox_selection(Selection::Global(GlobalMailbox::Sent));
+        assert!(view.dragged_messages(id).is_none());
+    }
+
+    #[test]
+    fn a_sent_row_keeps_its_selection_from_being_dragged() {
+        let (_dir, mut view) = test_view();
+        let ids: Vec<i64> = view.list_messages.iter().take(2).map(|m| m.id).collect();
+        view.multi_selection = ids.clone();
+        assert!(view.dragged_messages(ids[0]).is_some());
+        view.list_messages[1].folders_csv = ",sys:sent,".into();
+        assert!(view.dragged_messages(ids[0]).is_none());
+        assert!(view
+            .command_context()
+            .bulk
+            .is_some_and(|bulk| bulk.any_sent_only));
+    }
+
+    #[gpui::test]
+    fn archive_junk_and_move_leave_sent_mail_where_it_is(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            let id = view.selected_message_id.expect("seeded mail");
+            let before = view.db.get_message(id).unwrap().unwrap().folders_csv;
+            // The sample data has no sent mail: only what the rule reads says so.
+            view.selected_detail.as_mut().unwrap().folders_csv = ",sys:sent,".into();
+
+            view.archive_message(cx);
+            view.mark_message_junk(cx);
+            view.move_message_to_folder(storage::system::ARCHIVE, cx);
+
+            let after = view.db.get_message(id).unwrap().unwrap().folders_csv;
+            assert_eq!(before, after);
+        });
+    }
+
+    #[gpui::test]
+    fn archive_still_moves_received_mail(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            let id = view.selected_message_id.expect("seeded mail");
+            let before = view.db.get_message(id).unwrap().unwrap().folders_csv;
+            view.archive_message(cx);
+            let after = view.db.get_message(id).unwrap().unwrap().folders_csv;
+            assert_ne!(before, after);
+        });
+    }
+
+    #[test]
+    fn showing_sent_follows_the_mailbox_selection() {
+        let (_dir, mut view) = test_view();
+        assert!(!view.showing_sent());
+        view.apply_mailbox_selection(Selection::Global(GlobalMailbox::Sent));
+        assert!(view.showing_sent());
+        view.apply_mailbox_selection(Selection::Mailbox {
+            account_id: 1,
+            folder_path: storage::system::SENT.into(),
+        });
+        assert!(view.showing_sent());
     }
 
     #[test]

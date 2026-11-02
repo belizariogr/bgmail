@@ -48,6 +48,11 @@ wiring to `storage`.
     exists; unpackaged runs keep notify-rust's PowerShell id (Windows drops
     toasts from an unregistered id). WiX shortcuts are assumed to carry the
     same id.
+- Sent mail can only be deleted (user decision): Archive, Junk, Move and dragging
+  are unavailable while the list shows Sent, and everywhere for a message that is
+  in Sent but not in the Inbox (`commands::message_only_in_sent`; Gmail's All Mail
+  copy doesn't change this, mail sent to oneself stays movable from the Inbox). One
+  such row blocks them for a whole multiple selection.
 - First-run setup (`onboarding::OnboardingView`, rendered by `RootView` instead
   of the toolbar and columns, under a title bar with the window controls): welcome
   → theme → account → conclusion. Shown only while `needs_onboarding` holds (setup
