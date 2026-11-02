@@ -96,6 +96,10 @@ fn behind(painted: &[(Rect, Behind)], point: kurbo::Point, page: Color) -> Behin
 }
 
 fn adapt(color: &mut Color, behind: Behind, page_text: Color) {
+    // Text meant not to be seen stays that way (hidden preheaders, for one).
+    if color.components[3] < 0.01 {
+        return;
+    }
     if let Behind::Color(background) = behind {
         if contrast(*color, background) < MIN_CONTRAST {
             *color = readable_color(*color, background, page_text);
@@ -109,7 +113,8 @@ fn readable_color(color: Color, background: Color, page_text: Color) -> Color {
     let [r, g, b, alpha] = color.components;
     let (hue, saturation, _) = rgb_to_hsl(r, g, b);
     if saturation < NEUTRAL_SATURATION && contrast(page_text, background) >= TARGET_CONTRAST {
-        return page_text;
+        let [r, g, b, _] = page_text.components;
+        return Color::new([r, g, b, alpha]);
     }
     let lighten = luminance(background) < 0.18;
     let mut lightness = if lighten { 0.0 } else { 1.0 };
@@ -186,6 +191,19 @@ fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transparent_text_stays_invisible_and_alpha_is_kept() {
+        let page = Color::new([0.1, 0.1, 0.1, 1.0]);
+        let light = Color::new([0.9, 0.9, 0.9, 1.0]);
+        let mut hidden = Color::new([0.0, 0.0, 0.0, 0.0]);
+        adapt(&mut hidden, Behind::Color(page), light);
+        assert_eq!(hidden.components[3], 0.0);
+
+        let mut half = Color::new([0.0, 0.0, 0.0, 0.5]);
+        adapt(&mut half, Behind::Color(page), light);
+        assert_eq!(half.components, [0.9, 0.9, 0.9, 0.5]);
+    }
     use crate::{DocumentOptions, HtmlDocument};
 
     const PAGE: DarkPage = DarkPage {
