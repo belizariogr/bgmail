@@ -109,6 +109,9 @@ that edit the database and queue those server ops.
   concurrently with its successor.
 - **NewMail:** only unread rows *created* (not merged) in the `sys:inbox`
   folder after its first sync, never after a UIDVALIDITY reset.
+- **Backoff** resets after a completed cycle (or a good IDLE result), not when a
+  connection opens, so a server failing right after login is retried with growing
+  delays. A send through the queue syncs Sent before going idle (`sent_is_stale`).
 - **Archive with labels** (user decision): on an All Mail account a message with
   labels only leaves the Inbox and keeps them (`actions::archive_keeping_labels`); out
   of the Inbox, Archive does nothing (Spam and Trash aren't labels: it leaves them). Move, Trash and Junk still leave every label.

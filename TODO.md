@@ -411,6 +411,10 @@
       big to embed stays an attachment; rich-text edits follow the real range.
 - ✅ Discovery ignores servers without encryption, so the login test never sends a
       password in clear (user decision); no encryption stays a manual choice.
+- ✅ Review round 5: replacing a whole line keeps the next one's style; forwards carry
+      what the reader lists; `noscript` dropped; backoff grows when a server fails right
+      after login; Sent syncs after sending; a pending attachment read counts as an
+      edit; dragging a row no longer scans the list.
 - ✅ Remote images can't reach this machine or link-local addresses, resolved by IP;
       private ranges stay reachable for intranet images (user decision).
 
