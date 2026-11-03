@@ -88,10 +88,33 @@ fn parse_raw(raw: &[u8]) -> Option<Parsed<'_>> {
     MessageParser::default().parse(raw).map(Parsed)
 }
 
+/// `raw`, with the `*` of RFC 2231 parameter continuations (`name*0=`) taken out when it has more
+/// than any message needs. The parser is quadratic in them, in every part's headers: 31 MB took
+/// 115 s. Same length, so offsets into the original stay right; such a message only loses the
+/// joining of what was split.
+fn without_excess_continuations(raw: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    const MAX_CONTINUATIONS: usize = 4096;
+    let is_marker = |star: usize| {
+        let rest = &raw[star + 1..];
+        let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+        digits > 0 && matches!(rest.get(digits), Some(b'=' | b'*'))
+    };
+    let stars = || raw.iter().enumerate().filter(|(_, &byte)| byte == b'*');
+    if stars().filter(|(at, _)| is_marker(*at)).count() <= MAX_CONTINUATIONS {
+        return raw.into();
+    }
+    let mut owned = raw.to_vec();
+    for (at, _) in stars().filter(|(at, _)| is_marker(*at)) {
+        owned[at] = b'_';
+    }
+    owned.into()
+}
+
 /// Parses a full message or just its header block (bodies are then `None`).
 /// Returns `None` only when no headers can be found at all.
 pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
-    let message = parse_raw(raw)?;
+    let parseable = without_excess_continuations(raw);
+    let message = parse_raw(&parseable)?;
     if message.headers().is_empty() {
         return None;
     }
@@ -140,7 +163,8 @@ const MAX_HEADER_BLOCK_BYTES: usize = 1 << 20;
 
 /// Decoded bytes of the part listed as `AttachmentInfo::index`.
 pub fn attachment_content(raw: &[u8], index: usize) -> Option<Vec<u8>> {
-    let message = parse_raw(raw)?;
+    let parseable = without_excess_continuations(raw);
+    let message = parse_raw(&parseable)?;
     let part = message.parts.get(index)?;
     part_bytes(raw, part)
 }
@@ -148,7 +172,8 @@ pub fn attachment_content(raw: &[u8], index: usize) -> Option<Vec<u8>> {
 /// Decoded bytes of the parts at `indexes`, parsing the message once: a forward can carry
 /// thousands of them.
 pub fn attachment_contents(raw: &[u8], indexes: &[usize]) -> Vec<Option<Vec<u8>>> {
-    let Some(message) = parse_raw(raw) else {
+    let parseable = without_excess_continuations(raw);
+    let Some(message) = parse_raw(&parseable) else {
         return vec![None; indexes.len()];
     };
     indexes
@@ -201,7 +226,8 @@ fn other_body_versions(message: &Message<'_>) -> Vec<u32> {
 /// `(content_id, mime_type, bytes)` for every image with a Content-ID, i.e.
 /// everything an HTML body can reference via `cid:`.
 pub fn inline_images(raw: &[u8]) -> Vec<(String, String, Vec<u8>)> {
-    let Some(message) = parse_raw(raw) else {
+    let parseable = without_excess_continuations(raw);
+    let Some(message) = parse_raw(&parseable) else {
         return Vec::new();
     };
     attachment_parts(&message)
@@ -1017,6 +1043,29 @@ amanh=E3.\r\n";
             20_000
         );
         assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn excess_parameter_continuations_stay_linear_and_keep_their_length() {
+        let mut raw = String::from("Subject: kept\r\nContent-Type: text/plain; ");
+        for i in 0..500_000 {
+            raw.push_str(&format!("name*{i}=x; "));
+        }
+        raw.push_str("\r\n\r\nbody");
+        let parseable = without_excess_continuations(raw.as_bytes());
+        assert_eq!(parseable.len(), raw.len());
+        assert!(!parseable.windows(6).any(|bytes| bytes == b"name*0"));
+        let start = std::time::Instant::now();
+        let parsed = parse_message(raw.as_bytes()).unwrap();
+        assert_eq!(parsed.subject, "kept");
+        assert!(parsed.text.unwrap().contains("body"));
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+        // A few are left to be joined, and multiplication in the text is no continuation.
+        let few = b"Content-Type: text/plain; name*0=a; name*1=b\r\n\r\n2*3 x*y";
+        assert!(matches!(
+            without_excess_continuations(few),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]

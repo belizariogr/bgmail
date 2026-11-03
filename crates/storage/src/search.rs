@@ -4,8 +4,9 @@ use unicode_normalization::UnicodeNormalization;
 
 /// Folds accents and lowercases text for partial SQL `LIKE` search.
 pub fn fold_for_search(text: &str) -> String {
+    // Without NUL too, which FTS takes for the end of the query.
     text.nfd()
-        .filter(|ch| !unicode_normalization::char::is_combining_mark(*ch))
+        .filter(|ch| !unicode_normalization::char::is_combining_mark(*ch) && *ch != '\0')
         .collect::<String>()
         .to_lowercase()
 }
