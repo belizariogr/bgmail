@@ -217,6 +217,10 @@ When the user requests a durable behavior change, record it here or in the relev
   control flow over narration. Tests (`#[cfg(test)]`) are included when they
   encode behavioral contracts.
 
+- **Product questions:** don't ask the user. Research how Thunderbird and Gmail handle
+  it, decide from that, and report the decision with its source. Only what the user
+  alone can do (credentials, external access) goes to them.
+
 ## Child DOX Index
 
 | Scope | Doc | Owns |
