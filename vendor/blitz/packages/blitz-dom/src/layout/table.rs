@@ -722,11 +722,13 @@ fn collect_table_cells(
         | DisplayInside::TableHeaderGroup
         | DisplayInside::TableFooterGroup
         | DisplayInside::Contents => {
+            // BGMail: its own, not its children's: a cell needs its own to rebuild its boxes, as
+            // a width can make it a block with an inline layout, and keeping that one after it
+            // is a cell again aborted the app. Rows clear theirs.
+            node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             let first_row = rows.len();
             let children = std::mem::take(&mut doc.nodes[node_id].children);
             for child_id in children.iter().copied() {
-                doc.nodes[child_id]
-                    .remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                 collect_table_cells(
                     doc,
                     child_id,
@@ -795,6 +797,18 @@ fn collect_table_cells(
             doc.nodes[node_id].children = children;
         }
         DisplayInside::TableCell => {
+            // BGMail: a cell with no row yet (its `<tr>` is `display:contents`) opens one. On
+            // grid line 0, which doesn't exist, it would land after the rows that follow it.
+            if *row == 0 {
+                *row = 1;
+                cursor.start_row();
+                rows.push(TableRow {
+                    node_id,
+                    group: None,
+                    height: None,
+                    is_constrained: false,
+                });
+            }
             let anonymous = treat_as_anonymous_cell;
             let collapsed = border_collapse == BorderCollapse::Collapse && !anonymous;
             // BGMail: the cell's own layout must not count its borders either

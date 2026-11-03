@@ -3368,4 +3368,36 @@ mod hostile_tests {
         document.layout(300.0);
         assert_eq!(document.layout(640.0), fresh);
     }
+
+    #[test]
+    fn a_cell_that_stops_being_a_block_rebuilds_its_layout() {
+        // It kept an inline layout with a float in it, reaching an `unreachable!()`.
+        for row in [
+            "style=display:contents",
+            "style=\"display:table-row-group\"",
+        ] {
+            let html = format!(
+                "<style>@media(max-width:400px){{*{{float:right}}}}</style>\
+                 <table><tr {row}><td><ul></ul>x"
+            );
+            let mut document = parse(&html);
+            for width in [300.0, 640.0, 300.0, 640.0] {
+                document.layout(width);
+                document.display_list();
+            }
+        }
+    }
+
+    #[test]
+    fn a_contents_row_keeps_its_text_and_place() {
+        let html =
+            "<table><tr style=display:contents><td>First</td></tr><tr><td>Second</td></tr></table>";
+        let mut document = parse(html);
+        let list = format!("{:?}", document.display_list().commands);
+        let (first, second) = (list.find("First"), list.find("Second"));
+        assert!(
+            first.is_some() && second.is_some() && first < second,
+            "{first:?} {second:?}"
+        );
+    }
 }

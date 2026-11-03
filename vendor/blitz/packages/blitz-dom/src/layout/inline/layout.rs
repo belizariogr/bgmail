@@ -800,7 +800,8 @@ impl LayoutPassState<'_> {
                             let direction = match style.float() {
                                 Float::Left => taffy::FloatDirection::Left,
                                 Float::Right => taffy::FloatDirection::Right,
-                                Float::None => unreachable!(),
+                                // BGMail: a layout older than the style; this used to abort.
+                                Float::None => taffy::FloatDirection::Left,
                             };
                             (
                                 direction,
