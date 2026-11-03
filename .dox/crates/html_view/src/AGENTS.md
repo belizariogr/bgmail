@@ -312,6 +312,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `fn gradient_stops(brush)`: what a brush adds to a command's cost.
 - `fn should_dash(path, stroke)`: dashes only up to `MAX_DASHES` (16384) per path, finite
   lengths only (`kurbo::dash` wouldn't return); otherwise the stroke is solid.
+- `fn curve_fits(points)`: a curve within `MAX_CURVE_EXTENT` (16384 px) on each axis, as its
+  segments grow with its size whatever shows; `is_finite_path` refuses paths with larger ones.
 - `fn is_finite_geometry(geometry)`, `fn is_finite_path(path)`: no NaN/∞
   (GPUI's tessellator rejects them).
 - `fn is_polygonal(path)`: only straight segments.

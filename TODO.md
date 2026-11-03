@@ -452,6 +452,16 @@
   refuses over 500k tags or 1024 attributes in one, also when printing; a frame past 512 MiB of
   pixels leaves the rest out instead of remaking textures; the sync thread has 16 MiB of stack; a
   hostile `COPYUID` isn't expanded.
+- ✅ Review round 19 (146000 render seeds with no panic, 671000 on the sanitizer with no violation):
+  huge curves aren't recorded, as flattening one froze the window (80 bytes of dashed corner under
+  `scale(1e16)`: 10 s); parts declaring boundaries they never use stay linear (3.2 MB: 51 s, now
+  0.1 s during sync), and boundaries over 256 bytes are ignored; GPUI's `BoundsTree` balances by
+  rotation, which also removes its recursion over a list; anonymous table rows have no color, as
+  a first cell's filled the whole row; a `<tr style=display:contents>` is a row of its own; `form`
+  and `button` become `div` and `span`, so what they hide stays hidden. Round 18's fixes for ties
+  and for `form` were incomplete.
+- ⬜ Known limits of round 19. `form{display:none}` no longer matches, as the tag is a `div`. An
+  image with both `style` and a stray `=` attribute loses the tag once allowed.
 - ✅ Review round 18 (75000 render seeds, one panic; 1.2 M seeds on the sanitizer against the real tree
   builder, no real violation): a group no longer clears its cells' construction damage, which kept
   a stale inline layout and aborted, and `<tr style=display:contents>` keeps its text and place.

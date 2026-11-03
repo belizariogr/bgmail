@@ -126,8 +126,8 @@ wiring to `storage`.
   Thunderbird hanging on huge bodies); replying and forwarding use all of it. The sanitizer's
   output is read back with the parser's tokenizer (`mail_html::reads_as_safe`, the last check): if it
   finds what the sanitizer removes, the body shows as text and the quote is left out. `form` and
-  `button` go without what they hold (a whole ASP.NET message comes in a `<form>`; Gmail and
-  Thunderbird show it); other controls go with it. A later attribute name starting with `=` drops
+  `button` become `div` and `span`, keeping what they hold and its style (a whole ASP.NET message
+  comes in a `<form>`; Gmail and Thunderbird show it); other controls go with their content. A later attribute name starting with `=` drops
   the tag only if the tag would be rewritten. Documents build
   off the pool's stack (`with_render_stack`). The
   release profile keeps `panic = "abort"` (decided with two opposing

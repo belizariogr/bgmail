@@ -35,10 +35,13 @@ repository instead of living in someone's checkout.
   `serde_fmt`; that foreign impl makes `?` ambiguous in Stylo's `ToCss` derive.
 - `mail_parser` (`parsers/fields/content_type.rs`): RFC 2231 continuations merge by a map and append
   in place, and `-language` names are a set. Quadratic before, on parts the parser decodes too, so
-  no scan of the raw message could bound it; this runs during sync.
-- `gpui` (`bounds_tree.rs`): on a tie, inserting goes to the side with fewer leaves. Identical bounds
-  always went right, a list as deep as they are many (36000 stacked boxes: 7.7 s per frame, now
-  15 ms). Orders come from an exact search, so what draws over what doesn't change.
+  no scan of the raw message could bound it; this runs during sync. `parsers/message.rs`: past 64
+  failed searches for a part's boundary, or with a boundary over 256 bytes, multiparts read as
+  text, as each failure read to the end of the message.
+- `gpui` (`bounds_tree.rs`): inserting balances on the way up by rotation, as boxes that stack or
+  shrink made a list as deep as they are many (85000: 16 s per frame), walked recursively. Orders
+  come from the search, exact to an ulp, so what draws over what doesn't change. Its own tests don't
+  run in this workspace: check with a copy of the module (order against brute force).
 - `gpui`: per-window content scale, for the zoom of the whole app (no public API
   can scale a window's rendering and input together). `Window::set_content_scale`
   multiplies the scale factor and divides the viewport and event positions
@@ -93,8 +96,9 @@ repository instead of living in someone's checkout.
   - `events/pointer.rs`: a label passes a click on once (`in_label_click`), as its control's own
     click bubbles back to it.
   - `layout/table.rs`: `display:contents` on a row group keeps its children in the table, and a
-    cell with no row opens one; a group clears its own construction damage, not its children's, so
-    a cell rebuilds after being a block; what isn't a row or cell directly in a table or row group gets an anonymous row and cell, captions
+    cell outside a row opens an anonymous one, shared with its sibling cells; a group clears its own construction damage, not its children's, so
+    a cell rebuilds after being a block; an anonymous row has no node (`TableRow::node_id: None`), so
+    a cell's color stays in the cell; what isn't a row or cell directly in a table or row group gets an anonymous row and cell, captions
     included (first column), rebuilding its subtree.
   - `document.rs` + `resolve.rs` (`rebuild_boxes_once`): a media query changing result rebuilds every
     box in the next pass, about 190 ms at 1 MB, once per crossing. `layout/damage.rs`: a table
