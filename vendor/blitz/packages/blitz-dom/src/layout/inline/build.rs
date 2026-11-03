@@ -542,9 +542,9 @@ fn inline_edge_space(style: &style::properties::ComputedValues) -> (f32, f32) {
     };
     let start = margin_px(&margin.margin_left)
         + side(border.border_left_width.0, border.border_left_style)
-        + padding.padding_left.0.resolve(zero).px();
+        + stylo_taffy::convert::saturate_px(padding.padding_left.0.resolve(zero).px());
     let end = margin_px(&margin.margin_right)
         + side(border.border_right_width.0, border.border_right_style)
-        + padding.padding_right.0.resolve(zero).px();
+        + stylo_taffy::convert::saturate_px(padding.padding_right.0.resolve(zero).px());
     (start.max(0.0), end.max(0.0))
 }

@@ -641,11 +641,14 @@ impl PaintScene for DisplayList {
             return;
         }
         let geometry = transform_geometry(shape, transform);
+        if !is_finite_geometry(&geometry) {
+            return;
+        }
         let elements = match &geometry {
             Geometry::Path(path) => path_cost(path),
             Geometry::Rect(_) | Geometry::RoundedRect(..) => 0,
         } + gradient_stops(&brush);
-        if is_finite_geometry(&geometry) && self.charge(elements) {
+        if self.charge(elements) {
             self.commands.push(Command::Fill { geometry, brush });
         }
     }

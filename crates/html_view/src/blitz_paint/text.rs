@@ -116,7 +116,10 @@ pub(crate) fn draw_inline_backgrounds<'a>(
         }
         let padding = styles.get_padding();
         let pad = |lp: &style::values::computed::LengthPercentage| {
-            lp.resolve(style::values::computed::Length::new(0.0)).px() as f64
+            // BGMail: saturated as layout saturates lengths, since a box this big makes corners
+            // of millions of curves: 77 bytes of `padding:1e39px` took 1.4 GB.
+            (lp.resolve(style::values::computed::Length::new(0.0)).px() as f64)
+                .min(MAX_DECORATION_SIZE)
         };
         let first = !fragments[..index]
             .iter()

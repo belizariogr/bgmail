@@ -130,6 +130,9 @@ pub const MAX_NESTING_DEPTH: usize = 256;
 const MAX_OPENING_TAGS: usize = 500_000;
 pub const MAX_TAG_ATTRIBUTES: usize = 1024;
 
+/// Longest a first recording of a document can take in [`HtmlDocument::prepare_within`].
+const MAX_RECORDING_TIME: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Most table cells that `colspan`, `rowspan` and `<col span>` can add to a document. A few
 /// bytes declare them, and each costs memory in the layout's grid.
 pub const MAX_TABLE_SPAN_AREA: u64 = 2_000_000;
@@ -973,8 +976,10 @@ impl HtmlDocument {
         if self.inner.layout_timed_out {
             return false;
         }
+        // Recording too, at most what a repaint can take, as hovering repeats it on the UI thread.
+        let recording = std::time::Instant::now();
         self.display_list();
-        true
+        recording.elapsed() <= limit.min(MAX_RECORDING_TIME)
     }
 
     /// Element nesting depth of the document.
@@ -3557,5 +3562,55 @@ mod hostile_tests {
         let mut document = parse(html);
         let list = format!("{:?}", document.display_list().commands);
         assert!(list.contains("Kept") && list.contains("Also"));
+    }
+
+    #[test]
+    fn a_color_attribute_outside_ascii_is_no_color() {
+        for html in [
+            "<p bgcolor=\"#日\">x",
+            "<p bgcolor=\"#éa\">x",
+            "<p bgcolor=\"#日本\">x",
+            "<font color=\"#日\">x",
+        ] {
+            parse(html);
+        }
+    }
+
+    #[test]
+    fn sibling_selectors_stay_bounded() {
+        let many = "<p>".repeat(8000);
+        let start = std::time::Instant::now();
+        parse(&format!("<style>x~p{{color:red}}</style>{many}"));
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+        // And what they select is still right.
+        let html =
+            "<style>i~b{color:#ff0000}b+b{color:#00ff00}</style><b>a</b><i>x</i><b>c</b><b>d</b>";
+        let mut document = parse(html);
+        let list = format!("{:?}", document.display_list().commands);
+        assert!(
+            list.contains("components: [1.0, 0.0, 0.0, 1.0]")
+                || list.contains("components: [0.0, 1.0, 0.0, 1.0]")
+        );
+    }
+
+    #[test]
+    fn a_style_pass_out_of_steps_gives_up_a_first_layout() {
+        let rules = "x~p{color:red}".repeat(400);
+        let html = format!("<style>{rules}</style>{}", "<p>".repeat(8000));
+        let mut document = HtmlDocument::parse(&html, DocumentOptions::default());
+        let start = std::time::Instant::now();
+        let _ = document.prepare_within(640.0, std::time::Duration::from_secs(30));
+        assert!(start.elapsed().as_secs() < 30, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn inline_padding_saturates_before_making_corners() {
+        let html =
+            "<span style=\"border:1px dotted red;border-radius:50%;padding:1e39px\">x</span>";
+        let start = std::time::Instant::now();
+        let mut document = parse(html);
+        document.layout(300.0);
+        document.display_list();
+        assert!(start.elapsed().as_millis() < 500, "{:?}", start.elapsed());
     }
 }
