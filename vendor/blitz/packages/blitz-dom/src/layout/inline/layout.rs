@@ -729,8 +729,18 @@ impl LayoutPassState<'_> {
             let initial_slot = block_ctx.find_content_slot(0.0, Clear::None, None);
             let mut has_active_floats = initial_slot.segment_id.is_some();
             let state = breaker.state_mut();
-            state.set_layout_max_advance(width + LINE_FIT_TOLERANCE);
-            state.set_line_max_advance(initial_slot.width * scale + LINE_FIT_TOLERANCE);
+            // BGMail: Parley asserts, also in release, that a line isn't wider than the layout.
+            // Both come from different `f32` sums, which round apart at huge lengths and can
+            // be NaN.
+            let layout_max = if width.is_nan() {
+                f32::INFINITY
+            } else {
+                width + LINE_FIT_TOLERANCE
+            };
+            let line_max =
+                |slot_width: f32| (slot_width * scale + LINE_FIT_TOLERANCE).min(layout_max);
+            state.set_layout_max_advance(layout_max);
+            state.set_line_max_advance(line_max(initial_slot.width));
             state.set_line_x(initial_slot.x * scale);
             state.set_line_y((initial_slot.y * scale) as f64);
 
@@ -755,13 +765,12 @@ impl LayoutPassState<'_> {
                                 block_ctx.find_content_slot(min_y as f32, Clear::None, None);
                             has_active_floats = next_slot.segment_id.is_some();
 
-                            state
-                                .set_line_max_advance(next_slot.width * scale + LINE_FIT_TOLERANCE);
+                            state.set_line_max_advance(line_max(next_slot.width));
                             state.set_line_x(next_slot.x * scale);
                             state.set_line_y((next_slot.y * scale) as f64);
                         } else {
                             state.set_line_x(0.0);
-                            state.set_line_max_advance(width + LINE_FIT_TOLERANCE);
+                            state.set_line_max_advance(layout_max);
                         }
 
                         continue;
@@ -814,7 +823,7 @@ impl LayoutPassState<'_> {
                             block_ctx.find_content_slot(min_y as f32, Clear::None, None);
                         has_active_floats = next_slot.segment_id.is_some();
 
-                        state.set_line_max_advance(next_slot.width * scale + LINE_FIT_TOLERANCE);
+                        state.set_line_max_advance(line_max(next_slot.width));
                         state.set_line_x(next_slot.x * scale);
                         state.set_line_y((next_slot.y * scale) as f64);
 

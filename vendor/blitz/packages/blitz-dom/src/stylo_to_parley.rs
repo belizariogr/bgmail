@@ -483,16 +483,21 @@ pub(crate) fn style(
     };
     let vertical_align = self::vertical_align(style);
 
-    let letter_spacing = itext_styles
-        .letter_spacing
-        .0
-        .resolve(Length::new(font_size))
-        .px();
+    // BGMail: saturated like the lengths layout takes; see `MAX_LENGTH_PX`.
+    let letter_spacing = stylo_taffy::convert::saturate_px(
+        itext_styles
+            .letter_spacing
+            .0
+            .resolve(Length::new(font_size))
+            .px(),
+    );
 
-    let word_spacing = itext_styles
-        .word_spacing
-        .resolve(Length::new(font_size))
-        .px();
+    let word_spacing = stylo_taffy::convert::saturate_px(
+        itext_styles
+            .word_spacing
+            .resolve(Length::new(font_size))
+            .px(),
+    );
 
     // Convert Bold/Italic
     let mut font_weight = self::font_weight(font_styles.font_weight);
