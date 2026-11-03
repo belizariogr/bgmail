@@ -1110,6 +1110,9 @@ pub(crate) fn find_inline_layout_embedded_boxes(
                 match (display.outside(), display.inside()) {
                     (DisplayOutside::None, DisplayInside::None) => {
                         node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+                        // BGMail: its boxes aren't rebuilt, so walks over inline roots must
+                        // not take the ones it had as current.
+                        node.flags.remove(NodeFlags::IS_INLINE_ROOT);
                     }
                     (DisplayOutside::None, DisplayInside::Contents) => {
                         node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);

@@ -242,6 +242,16 @@ impl LayoutPassState<'_> {
         let font_size = font_styles.map(|s| s.0);
         let resolved_line_height = font_styles.map(|s| s.1);
 
+        // BGMail: the layout a hidden box keeps from when it was shown can't be run: its
+        // descendants may have lost their styles.
+        if matches!(
+            node.data,
+            NodeData::Element(_) | NodeData::AnonymousBlock(_)
+        ) && node.taffy_display() == Display::None
+        {
+            return taffy::LayoutOutput::HIDDEN;
+        }
+
         match &mut node.data {
             NodeData::Text(data) => {
                 // With the new "inline context" architecture all text nodes should be wrapped in an "inline layout context"
