@@ -963,6 +963,20 @@ impl HtmlDocument {
         self.display_list();
     }
 
+    /// [`Self::prepare`] that gives up on a layout passing `limit`, returning `false`: the document
+    /// is then incomplete, and hosts show what they can instead. The last resort for what no other
+    /// limit caught: a hang can't be stopped from outside, and a partial message would hide its end.
+    pub fn prepare_within(&mut self, width: f32, limit: std::time::Duration) -> bool {
+        self.inner.layout_deadline = Some(std::time::Instant::now() + limit);
+        self.layout(width);
+        self.inner.layout_deadline = None;
+        if self.inner.layout_timed_out {
+            return false;
+        }
+        self.display_list();
+        true
+    }
+
     /// Element nesting depth of the document.
     pub fn depth(&self) -> usize {
         self.depth
@@ -3450,5 +3464,98 @@ mod hostile_tests {
                 )), "{html}");
             }
         }
+    }
+
+    #[test]
+    fn a_layout_past_its_time_gives_up() {
+        let mut document = HtmlDocument::parse("<p>hello</p>", DocumentOptions::default());
+        assert!(!document.prepare_within(640.0, std::time::Duration::ZERO));
+        let mut document = HtmlDocument::parse("<p>hello</p>", DocumentOptions::default());
+        assert!(document.prepare_within(640.0, std::time::Duration::from_secs(60)));
+        assert!(format!("{:?}", document.display_list().commands).contains("hello"));
+    }
+
+    #[test]
+    fn generated_text_has_a_budget_per_pass() {
+        let big = "a".repeat(32 << 10);
+        let start = std::time::Instant::now();
+        parse(&format!(
+            "<style>b::before{{content:'{big}'}}</style>{}",
+            "<b></b>".repeat(4000)
+        ));
+        parse(&format!(
+            "<style>li{{list-style-type:'{big}'}}</style>{}",
+            "<li>".repeat(4000)
+        ));
+        assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+        // What fits is kept, across widths.
+        let mut document = parse(
+            "<style>b::before{content:'Made'}@media(max-width:400px){b{color:red}}</style><b>x</b>",
+        );
+        for width in [300.0, 640.0, 300.0] {
+            document.layout(width);
+            assert!(format!("{:?}", document.display_list().commands).contains("Made"));
+        }
+    }
+
+    #[test]
+    fn rounding_doesnt_keep_grid_tracks_growing() {
+        let html = "<ul style=\"grid-template-areas:'a b' 'c d';display:grid\">t<div style=\"grid-area:1/1/99999/99999\">fi fl ffi iso</div><p style=\"margin:auto;grid-column:-32768/-1\"><div style=\"margin-left:auto\">x</div><ul style=\"grid-column:-32768/-1\">y".repeat(8);
+        let start = std::time::Instant::now();
+        parse(&html);
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn huge_rounded_borders_share_the_budget_by_their_cost() {
+        let html = format!(
+            "<style>b{{position:absolute;left:0;top:0;width:16000px;height:16000px;border:1px solid red;\
+             border-radius:50%;display:block}}</style>{}",
+            "<b></b>".repeat(36_000)
+        );
+        let mut document = parse(&html);
+        let curves: usize = document
+            .display_list()
+            .commands
+            .iter()
+            .map(|command| match command {
+                Command::Fill {
+                    geometry: Geometry::Path(path),
+                    ..
+                }
+                | Command::Stroke { path, .. } => path.elements().len(),
+                _ => 0,
+            })
+            .sum();
+        assert!(curves < 100_000, "{curves}");
+    }
+
+    #[test]
+    fn rows_of_contents_in_separate_groups_stay_apart() {
+        let html = "<table><tbody><tr style=display:contents><td>A</td></tr></tbody>\
+            <tbody><tr style=display:contents><td>B</td></tr></tbody></table>";
+        let mut document = parse(html);
+        let baselines: Vec<u32> = document
+            .display_list()
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Text(run) => Some(run.baseline as u32),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            baselines.len() == 2 && baselines[0] < baselines[1],
+            "{baselines:?}"
+        );
+    }
+
+    #[test]
+    fn a_contents_wrapper_in_a_row_keeps_its_cells() {
+        let html = "<div style=display:table><div style=display:table-row><div style=display:contents>\
+            <div style=display:table-cell>Kept</div></div><div style=display:table-cell>Also</div></div></div>";
+        let mut document = parse(html);
+        let list = format!("{:?}", document.display_list().commands);
+        assert!(list.contains("Kept") && list.contains("Also"));
     }
 }

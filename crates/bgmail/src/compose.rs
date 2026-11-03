@@ -151,6 +151,9 @@ enum FormatMenu {
 /// Width the quoted original is first laid out at, before the real one is known.
 const QUOTE_FIRST_LAYOUT_WIDTH: f32 = 800.0;
 
+/// Longest the quote's first layout can take before it shows as text.
+const QUOTE_LAYOUT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The original message of a reply: its `> ` quote for the plain-text version
 /// and its HTML, ready to be sent on.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -526,7 +529,11 @@ impl ComposeView {
                         let fallback = email_document(colors, &text, false);
                         HtmlDocument::parse(&fallback.html, options())
                     });
-                document.prepare(QUOTE_FIRST_LAYOUT_WIDTH);
+                if !document.prepare_within(QUOTE_FIRST_LAYOUT_WIDTH, QUOTE_LAYOUT_LIMIT) {
+                    let fallback = email_document(colors, &text, false);
+                    document = HtmlDocument::parse(&fallback.html, options());
+                    document.prepare(QUOTE_FIRST_LAYOUT_WIDTH);
+                }
                 DetachedDocument::new(document)
             })
         });

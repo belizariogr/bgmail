@@ -611,9 +611,10 @@ fn needs_anonymous_cell(doc: &BaseDocument, node_id: NodeId) -> bool {
 
 /// BGMail: whether an element generates no box (`display: none`).
 fn generates_no_box(doc: &BaseDocument, node_id: NodeId) -> bool {
-    doc.nodes[node_id]
-        .display_style()
-        .is_some_and(|display| display.outside() == DisplayOutside::None)
+    doc.nodes[node_id].display_style().is_some_and(|display| {
+        // `contents` has no box, but what is inside it does.
+        display.outside() == DisplayOutside::None && display.inside() != DisplayInside::Contents
+    })
 }
 
 /// BGMail: `children` of row `row_id` with each run of consecutive children
@@ -802,7 +803,11 @@ fn collect_table_cells(
             // BGMail: a cell outside a row (its `<tr>` is `display:contents`) opens an anonymous
             // one, unless the one before is anonymous too, as siblings in `display:table` share
             // it. On grid line 0, which doesn't exist, it would land after the rows following it.
-            if !in_row && rows.last().is_none_or(|last| last.node_id.is_some()) {
+            if !in_row
+                && rows
+                    .last()
+                    .is_none_or(|last| last.node_id.is_some() || last.group.is_some())
+            {
                 *row = row.saturating_add(1);
                 cursor.start_row();
                 rows.push(TableRow {

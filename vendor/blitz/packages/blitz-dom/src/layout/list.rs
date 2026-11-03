@@ -75,6 +75,11 @@ fn node_list_item_child(
     let list_style_type = styles.get_list_style_type();
     let list_style_position = styles.clone_list_style_position();
     let marker = marker_for_style(list_style_type, index)?;
+    if let Marker::String(text) = &marker
+        && !doc.take_generated_text(text.len())
+    {
+        return None;
+    }
 
     let position = match list_style_position {
         ListStylePosition::Inside => ListItemLayoutPosition::Inside,

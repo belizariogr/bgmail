@@ -175,6 +175,16 @@ impl LayoutPassState<'_> {
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::tree::LayoutOutput {
         self.layout_visits += 1;
+        // BGMail: every so many visits, so that hosts can fall back on what they can show.
+        if let Some(deadline) = self.layout_deadline {
+            if self.deadline_visits & 255 == 0 && std::time::Instant::now() >= deadline {
+                self.layout_timed_out = true;
+            }
+            self.deadline_visits = self.deadline_visits.wrapping_add(1);
+            if self.layout_timed_out {
+                return taffy::tree::LayoutOutput::HIDDEN;
+            }
+        }
         #[cfg(feature = "writing-mode")]
         {
             self.compute_child_layout_in_own_wm(node_id, inputs, block_ctx)

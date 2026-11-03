@@ -276,6 +276,9 @@ pub enum DocumentEvent {
     },
 }
 
+/// BGMail: see `BaseDocument::generated_text_left`.
+pub(crate) const MAX_GENERATED_TEXT_BYTES: usize = 256 << 10;
+
 pub struct BaseDocument {
     /// ID of the document
     id: usize,
@@ -431,6 +434,16 @@ pub struct BaseDocument {
     /// BGMail: the parser stopped at a budget, so the document is partial (see
     /// `blitz_html`'s sink); hosts refuse it.
     pub parse_refused: bool,
+    /// BGMail: bytes of `content` and list markers this pass can still generate. They come from
+    /// style, past what the parser counts: 61 KB of them took over 8 GB.
+    pub(crate) generated_text_left: std::cell::Cell<usize>,
+    /// BGMail: when the running layout gives up, returning empty boxes (see
+    /// `layout_timed_out`). Thread can't be stopped from outside, so layout checks it itself.
+    pub layout_deadline: Option<std::time::Instant>,
+    /// BGMail: the deadline passed, so the layout is incomplete; hosts discard the document.
+    pub layout_timed_out: bool,
+    /// BGMail: visits since the deadline was last compared.
+    pub(crate) deadline_visits: u32,
     /// BGMail: a media query changed result, so the next pass rebuilds every box.
     pub(crate) rebuild_boxes_once: bool,
     /// BGMail: a click on a label is being passed on to its control.
@@ -582,6 +595,10 @@ impl BaseDocument {
             font_bytes: 0,
             in_label_click: false,
             rebuild_boxes_once: false,
+            generated_text_left: std::cell::Cell::new(MAX_GENERATED_TEXT_BYTES),
+            layout_deadline: None,
+            layout_timed_out: false,
+            deadline_visits: 0,
             pending_critical_resources: HashSet::new(),
             line_height_quirk: false,
             controls_to_form: HashMap::new(),
@@ -952,6 +969,13 @@ impl BaseDocument {
     /// Remove a node from the node tree, clearing any interaction state
     /// (hover/active/focus/mousedown/selection/drag/scrollbar) that references
     /// it so that stale NodeIds are never dereferenced after the slot is freed.
+    /// BGMail: takes `bytes` of generated text from this pass's budget, if it still has them.
+    pub(crate) fn take_generated_text(&self, bytes: usize) -> bool {
+        let left = self.generated_text_left.get();
+        self.generated_text_left.set(left.saturating_sub(bytes));
+        bytes <= left
+    }
+
     pub(crate) fn remove_node_from_tree(&mut self, node_id: NodeId) -> Option<Node> {
         self.clear_interaction_state_for_removed_node(node_id);
         self.paint_tree_stale = true;

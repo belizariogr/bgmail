@@ -49,6 +49,8 @@ impl BaseDocument {
         // Process messages that have been sent to our message channel (e.g. loaded resource)
         self.handle_messages();
         self.layout_visits = 0;
+        self.generated_text_left
+            .set(crate::document::MAX_GENERATED_TEXT_BYTES);
 
         // While render-blocking resources (e.g. stylesheets linked from the `<head>`) are
         // still loading, don't resolve styles or layout (matching how browsers block

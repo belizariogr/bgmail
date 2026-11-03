@@ -766,7 +766,9 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
                     .insert(NodeFlags::IS_IN_DOCUMENT);
             }
 
-            if let Some(text) = pe_content_text(pe_style) {
+            if let Some(text) =
+                pe_content_text(pe_style).filter(|text| doc.take_generated_text(text.len()))
+            {
                 let text_node_id = doc.create_text_node(&text);
                 doc.nodes[text_node_id].parent = Some(new_node_id);
                 doc.nodes[new_node_id].children.push(text_node_id);
@@ -797,7 +799,8 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
             // the style-pointer comparison below, as the pseudo-element's style may
             // already have been updated by `sync_pseudo_element_styles` during the
             // style traversal without the text having been updated.
-            let new_text = pe_content_text(&pe_style);
+            let new_text =
+                pe_content_text(&pe_style).filter(|text| doc.take_generated_text(text.len()));
             let existing_text_node_id = doc.nodes[pe_node_id]
                 .children
                 .first()
