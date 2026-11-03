@@ -128,6 +128,10 @@ pub fn prepare_reply(
             }
             draft.in_reply_to = original.message_id.clone();
             draft.references = original.references.clone();
+            // RFC 5322 3.6.4: with no References, the parent is In-Reply-To.
+            if draft.references.is_empty() {
+                draft.references.extend(original.in_reply_to.clone());
+            }
             if let Some(id) = &original.message_id {
                 if !draft.references.contains(id) {
                     draft.references.push(id.clone());
@@ -221,12 +225,27 @@ pub fn reply_html(text: &str) -> String {
             out.push_str(&"</blockquote>".repeat(depth - line_depth));
         }
         depth = line_depth;
-        out.push_str(&html_escape::encode_text(line));
+        push_keeping_spaces(&mut out, line);
         out.push_str("<br>");
     }
     out.push_str(&"</blockquote>".repeat(depth));
     out.push_str("</div>");
     out
+}
+
+/// Escapes a line for HTML, keeping the runs of spaces it would collapse, and those it
+/// starts with: indentation or a table in columns would otherwise lose their shape.
+fn push_keeping_spaces(out: &mut String, line: &str) {
+    for piece in line.split_inclusive(' ') {
+        match piece.strip_suffix(' ') {
+            Some("") => out.push_str("&nbsp;"),
+            Some(text) => {
+                out.push_str(&html_escape::encode_text(text));
+                out.push(' ');
+            }
+            None => out.push_str(&html_escape::encode_text(piece)),
+        }
+    }
 }
 
 /// What the user wrote, already as HTML, followed by a Gmail quote of the
@@ -285,6 +304,13 @@ pub fn html_to_text(html: &str) -> String {
                 rest = after.find("-->").map_or("", |end| &after[end + 3..]);
                 continue;
             }
+            // Like a browser, `a < b` is text: a tag starts with a letter, `/`, `!` or `?`.
+            let next = rest[1..].chars().next();
+            if !next.is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?')) {
+                push_text(&mut out, "<");
+                rest = &rest[1..];
+                continue;
+            }
             let Some(end) = rest.find('>') else {
                 push_text(&mut out, rest);
                 break;
@@ -298,7 +324,7 @@ pub fn html_to_text(html: &str) -> String {
                 .take_while(|c| c.is_ascii_alphanumeric())
                 .collect::<String>()
                 .to_ascii_lowercase();
-            if !closing && matches!(name.as_str(), "script" | "style" | "head" | "title") {
+            if !closing && matches!(name.as_str(), "script" | "style" | "title") {
                 let close = format!("</{name}");
                 let lower = rest.to_ascii_lowercase();
                 rest = match lower.find(&close) {
@@ -447,6 +473,50 @@ mod reply_format_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_document_without_its_closing_tags_keeps_its_text() {
+        for html in [
+            "<html><head><meta charset=utf-8><body><p>Hello world</p></body></html>",
+            "<head/><p>Hello world</p>",
+            "<head><meta x><p>Hello world</p>",
+        ] {
+            assert_eq!(html_to_text(html), "Hello world", "{html}");
+        }
+        assert_eq!(
+            html_to_text("<html><head><title>T</title><style>a{}</style></head><p>x</p>"),
+            "x"
+        );
+    }
+
+    #[test]
+    fn a_less_than_sign_in_text_is_not_a_tag() {
+        assert_eq!(
+            html_to_text("<p>if x < 3 and y > 2 then</p><p>I <3 you</p>"),
+            "if x < 3 and y > 2 then\n\nI <3 you"
+        );
+        assert_eq!(html_to_text("a <"), "a <");
+    }
+
+    #[test]
+    fn a_reply_keeps_spaces_and_the_conversation() {
+        let html = reply_html("Total:   10\n    indented");
+        assert!(html.contains("Total: &nbsp;&nbsp;10"), "{html}");
+        assert!(
+            html.contains("<br>&nbsp;&nbsp;&nbsp;&nbsp;indented"),
+            "{html}"
+        );
+        assert!(reply_html("a b").contains("a b"));
+
+        let original = ParsedMessage {
+            message_id: Some("child@x".into()),
+            in_reply_to: Some("root@x".into()),
+            from: Some(Address::new(None::<String>, "a@x.test")),
+            ..Default::default()
+        };
+        let draft = prepare_reply(&original, ReplyKind::Reply, &[], &QuoteLabels::default());
+        assert_eq!(draft.references, ["root@x", "child@x"]);
+    }
 
     fn a(email: &str) -> Address {
         Address::new(None::<String>, email)
