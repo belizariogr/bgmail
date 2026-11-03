@@ -88,26 +88,57 @@ fn parse_raw(raw: &[u8]) -> Option<Parsed<'_>> {
     MessageParser::default().parse(raw).map(Parsed)
 }
 
-/// `raw`, with the `*` of RFC 2231 parameter continuations (`name*0=`) taken out when it has more
-/// than any message needs. The parser is quadratic in them, in every part's headers: 31 MB took
-/// 115 s. Same length, so offsets into the original stay right; such a message only loses the
-/// joining of what was split.
+/// `raw`, with the `*` in `Content-Type` and `Content-Disposition` headers taken out when they
+/// have more than any message needs, which keeps RFC 2231 continuations (`name*0=`) from being
+/// joined. The parser is quadratic in them, in every part's headers: 31 MB took 115 s. All of the
+/// `*`, as it also reads `a* 1=` and `a*+1=`; only there, so a body keeps its `2*3=6`. Same
+/// length, so offsets into the original stay right.
 fn without_excess_continuations(raw: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     const MAX_CONTINUATIONS: usize = 4096;
-    let is_marker = |star: usize| {
-        let rest = &raw[star + 1..];
-        let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
-        digits > 0 && matches!(rest.get(digits), Some(b'=' | b'*'))
-    };
-    let stars = || raw.iter().enumerate().filter(|(_, &byte)| byte == b'*');
-    if stars().filter(|(at, _)| is_marker(*at)).count() <= MAX_CONTINUATIONS {
+    let mut stars = Vec::new();
+    let mut in_parameters = false;
+    let mut at = 0;
+    for line in raw.split_inclusive(|&byte| byte == b'\n') {
+        // A line starting with a space or tab continues the header before it.
+        if !matches!(line.first(), Some(b' ' | b'\t')) {
+            in_parameters = is_parameter_header(line);
+        }
+        if in_parameters {
+            stars.extend(
+                line.iter()
+                    .enumerate()
+                    .filter(|(_, &byte)| byte == b'*')
+                    .map(|(offset, _)| at + offset),
+            );
+        }
+        at += line.len();
+    }
+    if stars.len() <= MAX_CONTINUATIONS {
         return raw.into();
     }
     let mut owned = raw.to_vec();
-    for (at, _) in stars().filter(|(at, _)| is_marker(*at)) {
-        owned[at] = b'_';
+    for star in stars {
+        owned[star] = b'_';
     }
     owned.into()
+}
+
+/// Whether `line` starts a header with parameters, read as the parser reads a header's name: it
+/// ignores spaces in it and colons before it.
+fn is_parameter_header(line: &[u8]) -> bool {
+    const NAMES: [&[u8]; 2] = [b"content-type", b"content-disposition"];
+    let longest = NAMES.iter().map(|name| name.len()).max().unwrap_or(0);
+    let mut name = Vec::with_capacity(longest);
+    for &byte in line {
+        match byte {
+            b':' if name.is_empty() => {}
+            b':' => break,
+            byte if byte.is_ascii_whitespace() => {}
+            byte if name.len() < longest => name.push(byte.to_ascii_lowercase()),
+            _ => return false,
+        }
+    }
+    NAMES.contains(&name.as_slice())
 }
 
 /// Parses a full message or just its header block (bodies are then `None`).
@@ -1047,25 +1078,43 @@ amanh=E3.\r\n";
 
     #[test]
     fn excess_parameter_continuations_stay_linear_and_keep_their_length() {
-        let mut raw = String::from("Subject: kept\r\nContent-Type: text/plain; ");
-        for i in 0..500_000 {
-            raw.push_str(&format!("name*{i}=x; "));
+        for parameter in ["name*{i}=x; ", "a*{i} =x; ", "a* {i}=x; ", "a*+{i}=x; "] {
+            let mut raw = String::from("Subject: kept\r\nContent -Type: text/plain; ");
+            for i in 0..500_000 {
+                raw.push_str(&parameter.replace("{i}", &i.to_string()));
+            }
+            raw.push_str("\r\n\r\nbody");
+            assert_eq!(
+                without_excess_continuations(raw.as_bytes()).len(),
+                raw.len()
+            );
+            let start = std::time::Instant::now();
+            let parsed = parse_message(raw.as_bytes()).unwrap();
+            assert_eq!(parsed.subject, "kept");
+            assert!(parsed.text.unwrap().contains("body"));
+            assert!(
+                start.elapsed().as_secs() < 5,
+                "{parameter}: {:?}",
+                start.elapsed()
+            );
         }
-        raw.push_str("\r\n\r\nbody");
-        let parseable = without_excess_continuations(raw.as_bytes());
-        assert_eq!(parseable.len(), raw.len());
-        assert!(!parseable.windows(6).any(|bytes| bytes == b"name*0"));
-        let start = std::time::Instant::now();
-        let parsed = parse_message(raw.as_bytes()).unwrap();
-        assert_eq!(parsed.subject, "kept");
-        assert!(parsed.text.unwrap().contains("body"));
-        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
-        // A few are left to be joined, and multiplication in the text is no continuation.
-        let few = b"Content-Type: text/plain; name*0=a; name*1=b\r\n\r\n2*3 x*y";
+    }
+
+    #[test]
+    fn a_body_full_of_multiplications_is_left_alone() {
+        let mut raw = String::from("Content-Type: text/plain\r\n\r\n");
+        for i in 0..6000 {
+            raw.push_str(&format!("{i}*2={}\r\n", i * 2));
+        }
         assert!(matches!(
-            without_excess_continuations(few),
+            without_excess_continuations(raw.as_bytes()),
             std::borrow::Cow::Borrowed(_)
         ));
+        assert!(parse_message(raw.as_bytes())
+            .unwrap()
+            .text
+            .unwrap()
+            .contains("7*2=14"));
     }
 
     #[test]
