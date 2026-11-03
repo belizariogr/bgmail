@@ -59,6 +59,22 @@ repository instead of living in someone's checkout.
   - `net.rs`/`mutator.rs`: nothing in a message's CSS or HTML can abort: an `@import`
     or `<img src>` that doesn't resolve is refused (`resolve_url` removed), and
     `MAX_IMPORTS` limits the total imports of a stylesheet.
+  - `net.rs` (`keep_only_paint_in_state_rules`, also called by `make_stylesheet`): author rules
+    matching on `:hover`, `:active`, `:focus*`, `:checked`, `:target` keep only paint properties,
+    so moving the pointer never creates or frees a box. Reconstruction still happens when a
+    width crosses `@media`, so stale-id tolerance stays.
+  - `blitz-html/src/html_sink.rs`: fed in 4 KiB pieces, stops at `MAX_DOM_NODES` (500k), since a
+    tag can make hundreds of nodes; hosts refuse the partial document by its node count.
+  - `net.rs` + `document.rs`: WOFF1 tables sum at most 128 MiB (`woff1_table_bytes`), a
+    document's fonts 512 MiB (`font_bytes`).
+  - `layout/table.rs`: `TableContext` and `TableCell` keep the `ComputedValues` their `calc()`
+    pointers point into (`computed_style`).
+  - `layout/inline/build.rs`: at most `MAX_INLINE_SPANS` (60k) style spans per inline context,
+    as Parley asserts on more than `u16::MAX`; past it text takes the open style and `<br>`
+    doesn't break.
+  - `layout/inline/layout.rs`: at most `MAX_FORCED_INLINE_LAYOUTS` (100k) full layouts per pass
+    for baselines (`forced_inline_layouts`), as nested inline tables were exponential.
+  - `node/node.rs`: `containing_block` and the walks up skip freed boxes.
   - `net.rs`: GIF animations decode under `Limits` (2 × `MAX_ANIMATION_BYTES`), still images
     under `MAX_IMAGE_BYTES` (256 MiB), and a document's images share
     `MAX_DOCUMENT_IMAGE_BYTES` (2 GiB, `BaseDocument::image_budget`): past it they stay

@@ -121,7 +121,10 @@ wiring to `storage`.
   `html_view` refuses (too deep or too complex) show as plain text, and a message that was
   showing formatted when the app crashed or was killed (the `crash_guard` marker survived,
   armed for as long as it shows) as plain text, each with a notice. Reply quotes follow the
-  same rules with a marker of their own. The
+  same rules with a marker of their own. A plain-text body shows up to `MAX_SHOWN_TEXT_BYTES`
+  (2 MiB, cut at a line, with a notice; decided from Gmail clipping at about 102 KB and
+  Thunderbird hanging on huge bodies); replying and forwarding use all of it. Documents build
+  off the pool's stack (`with_render_stack`). The
   release profile keeps `panic = "abort"` (decided with two opposing
   reviews): unwinding through Blitz/GPUI state isn't safe and stack overflow
   or OOM can't be caught anyway.

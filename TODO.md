@@ -444,6 +444,22 @@
       the main window; discovery keeps its login; IME selection stays inside the text;
       pasting cleans line breaks; single-line fields scroll and clip; `EHLO` doesn't
       send the machine's name, as Thunderbird (decided from its behavior).
+- ✅ Review round 13: nested `message/rfc822` no longer overflow the sync thread's stack on
+  every start; a table's `calc()` no longer reads freed styles; rules on `:hover` and other
+  states keep only paint properties (from Gmail, which keeps hover for colors), so the pointer
+  can't create or free a box; walks up tolerate freed boxes; 60k style spans per inline context,
+  and a long word of many styles records in linear time; parsing stops at 500k nodes, and a scan
+  refuses over 16k open tags before sanitizing; nested inline tables have a layout budget; the
+  display list also charges gradient stops, shadows and layers, with a 2 M budget; images upload
+  in halved sizes up to 8192 px, gradients only when visible, with a 512 MiB pixel cache; WOFF1
+  and per-document font limits; `space` tiles limited; documents build on an 8 MiB stack; plain
+  text shows up to 2 MiB with a notice and builds in the background; MIME parsing is linear in
+  parts and references.
+- ⬜ Parsing a reply's original (`reply_to_selected`) and sanitizing its quote still run on the
+  UI thread; both are linear now, but a large message delays the window.
+- ⬜ Rendering in a child process would contain every renderer failure (panic, memory, hang),
+  at the cost of IPC for hover, selection, find and zoom. Reassess if the renderer keeps
+  failing on hostile input after these limits.
 - ✅ Review round 12 (hostile HTML, measured under a memory cap): a 113-byte GIF no longer
   allocates the canvas it declares (decoder limits, 256 MiB per image, 2 GiB per document);
   dotted/dashed borders and text decorations are bounded per line and per document, drawn

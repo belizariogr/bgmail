@@ -77,7 +77,11 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   selection_color }`: parse options; extra UA CSS goes after Blitz's default
   sheet; `selection_color` is RGBA.
 - `const MAX_NESTING_DEPTH = 256`: deepest nesting `try_parse` accepts.
-- `const MAX_MARKUP_TAGS = 2_000_000`: most `<` of a document `try_parse` accepts.
+- `fn has_too_many_open_tags(html) -> bool` (pub): linear scan for more than `MAX_OPEN_TAGS`
+  (16384) elements left open, by name; hosts run it before sanitizing and parsing, both
+  quadratic in them.
+- `fn with_render_stack(build) -> T` (pub): runs `build` on a thread with 8 MiB of stack,
+  what `MAX_NESTING_DEPTH` assumes; pool threads have less (512 KB on macOS).
 - `const MAX_TABLE_SPAN_AREA = 2_000_000`: most cells `colspan`/`rowspan`/`<col span>` add.
 - `enum RenderError { TooDeep { depth }, TooComplex }` (+ `Display`, `Error`).
 - `fn nesting_depth(doc, root)` (private): deepest node nesting, iterative.
@@ -152,8 +156,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
     `document_mode(html)` is `NoQuirks`.
 - `with_depth()` (private): records the tree's nesting depth after parsing.
 - `HtmlDocument::try_parse(html, options) -> Result<Self, RenderError>`:
-  `TooComplex` above `MAX_MARKUP_TAGS` (before parsing), then `parse`, `TooDeep` above
-  `MAX_NESTING_DEPTH`, and `TooComplex` above `MAX_TABLE_SPAN_AREA` (`table_span_area`).
+  `parse`, then `TooComplex` at `blitz_dom::MAX_DOM_NODES` (where parsing stopped), `TooDeep`
+  above `MAX_NESTING_DEPTH`, and `TooComplex` above `MAX_TABLE_SPAN_AREA` (`table_span_area`,
+  any element, as a cell's display isn't known yet).
 - `HtmlDocument::depth()`: element nesting depth.
 - `HtmlDocument::layout(width) -> f32`: returns 0 without resolving a tree
   deeper than the limit; otherwise sets the viewport when the width changes
@@ -302,8 +307,10 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `fn layer_radii(geometry)` (private): radii of a rounded clip.
 - `fn convert_paint(paint, transform, brush_transform)` (private): owned
   `Brush`, folding transforms; resource/custom paints become transparent.
-- `DisplayList::charge(elements)`: takes a shape from `MAX_PATH_ELEMENTS` (8 M, each shape
-  counting at least 4); `fill`/`stroke` drop what no longer fits.
+- `DisplayList::charge(elements)`: takes a command from `MAX_PATH_ELEMENTS` (2 M: path elements
+  and gradient stops, each command counting at least 4). Once one doesn't fit nothing does;
+  refused layers are counted (`refused_layers`) so their `Pop`s and contents stay out.
+- `fn gradient_stops(brush)`: what a brush adds to a command's cost.
 - `fn should_dash(path, stroke)`: dashes only up to `MAX_DASHES` (16384) per path, finite
   lengths only (`kurbo::dash` wouldn't return); otherwise the stroke is solid.
 - `fn is_finite_geometry(geometry)`, `fn is_finite_path(path)`: no NaN/∞
