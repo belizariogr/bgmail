@@ -53,6 +53,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 - **const `CONNECT_TIMEOUT`** (pub): 20 s per resolved address.
 - **const `IO_TIMEOUT`** (pub): 60 s per blocking read/write.
+- **`ConnectOptions::for_host`** (pub): the options for a host: a literal loopback address skips validation.
 - **struct `ConnectOptions { accept_invalid_certs: bool }`** (pub): Copy,
   Default (verifying). `accept_invalid_certs` = local test servers only.
 - **type `TlsStream`** (pub): `rustls::StreamOwned<ClientConnection, TcpStream>`.

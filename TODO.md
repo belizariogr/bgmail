@@ -427,6 +427,8 @@
       renderings leave the attachments; MIME types kept as plain tokens; text after an
       unclosed `<head>` and a literal `<` survive `html_to_text`; a long name can't hide
       `.exe` from `runs_code`; replies keep runs of spaces and the thread's root.
+- ✅ A certificate on a loopback address isn't validated, so Proton Bridge's preset works
+      (user decision). Confirm it with a real Bridge: only tested against a local server.
 - ✅ A search gives the mailbox's selection back; a complete typed address beats the
       suggestion on Enter and Tab; the Sent copy records the Bcc (user decisions).
 - ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user

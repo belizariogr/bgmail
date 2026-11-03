@@ -19,6 +19,9 @@ presets, Thunderbird autoconfig, guess).
 
 ## Local Contracts
 
+- **Certificates:** always validated, except on a literal loopback address
+  (`ConnectOptions::for_host`, user decision), for Proton Bridge's self-signed one.
+  Applied per host in `connect_tls` and `SmtpSender::new`.
 - **Blocking, no async runtime.** Callers run every call on a background
   thread. No GPUI. `#![forbid(unsafe_code)]`.
 - **Dependencies (decided stack):** `imap = "3.0.0-alpha.15"` with
