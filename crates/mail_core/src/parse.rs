@@ -88,64 +88,10 @@ fn parse_raw(raw: &[u8]) -> Option<Parsed<'_>> {
     MessageParser::default().parse(raw).map(Parsed)
 }
 
-/// `raw`, with the `*` in `Content-Type` and `Content-Disposition` headers taken out when they
-/// have more than any message needs, which keeps RFC 2231 continuations (`name*0=`) from being
-/// joined. The parser is quadratic in them, in every part's headers: 31 MB took 115 s. All of the
-/// `*`, as it also reads `a* 1=` and `a*+1=`; only there, so a body keeps its `2*3=6`. Same
-/// length, so offsets into the original stay right.
-fn without_excess_continuations(raw: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    const MAX_CONTINUATIONS: usize = 4096;
-    let mut stars = Vec::new();
-    let mut in_parameters = false;
-    let mut at = 0;
-    for line in raw.split_inclusive(|&byte| byte == b'\n') {
-        // A line starting with a space or tab continues the header before it.
-        if !matches!(line.first(), Some(b' ' | b'\t')) {
-            in_parameters = is_parameter_header(line);
-        }
-        if in_parameters {
-            stars.extend(
-                line.iter()
-                    .enumerate()
-                    .filter(|(_, &byte)| byte == b'*')
-                    .map(|(offset, _)| at + offset),
-            );
-        }
-        at += line.len();
-    }
-    if stars.len() <= MAX_CONTINUATIONS {
-        return raw.into();
-    }
-    let mut owned = raw.to_vec();
-    for star in stars {
-        owned[star] = b'_';
-    }
-    owned.into()
-}
-
-/// Whether `line` starts a header with parameters, read as the parser reads a header's name: it
-/// ignores spaces in it and colons before it.
-fn is_parameter_header(line: &[u8]) -> bool {
-    const NAMES: [&[u8]; 2] = [b"content-type", b"content-disposition"];
-    let longest = NAMES.iter().map(|name| name.len()).max().unwrap_or(0);
-    let mut name = Vec::with_capacity(longest);
-    for &byte in line {
-        match byte {
-            b':' if name.is_empty() => {}
-            b':' => break,
-            byte if byte.is_ascii_whitespace() => {}
-            byte if name.len() < longest => name.push(byte.to_ascii_lowercase()),
-            _ => return false,
-        }
-    }
-    NAMES.contains(&name.as_slice())
-}
-
 /// Parses a full message or just its header block (bodies are then `None`).
 /// Returns `None` only when no headers can be found at all.
 pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
-    let parseable = without_excess_continuations(raw);
-    let message = parse_raw(&parseable)?;
+    let message = parse_raw(raw)?;
     if message.headers().is_empty() {
         return None;
     }
@@ -194,8 +140,7 @@ const MAX_HEADER_BLOCK_BYTES: usize = 1 << 20;
 
 /// Decoded bytes of the part listed as `AttachmentInfo::index`.
 pub fn attachment_content(raw: &[u8], index: usize) -> Option<Vec<u8>> {
-    let parseable = without_excess_continuations(raw);
-    let message = parse_raw(&parseable)?;
+    let message = parse_raw(raw)?;
     let part = message.parts.get(index)?;
     part_bytes(raw, part)
 }
@@ -203,8 +148,7 @@ pub fn attachment_content(raw: &[u8], index: usize) -> Option<Vec<u8>> {
 /// Decoded bytes of the parts at `indexes`, parsing the message once: a forward can carry
 /// thousands of them.
 pub fn attachment_contents(raw: &[u8], indexes: &[usize]) -> Vec<Option<Vec<u8>>> {
-    let parseable = without_excess_continuations(raw);
-    let Some(message) = parse_raw(&parseable) else {
+    let Some(message) = parse_raw(raw) else {
         return vec![None; indexes.len()];
     };
     indexes
@@ -257,8 +201,7 @@ fn other_body_versions(message: &Message<'_>) -> Vec<u32> {
 /// `(content_id, mime_type, bytes)` for every image with a Content-ID, i.e.
 /// everything an HTML body can reference via `cid:`.
 pub fn inline_images(raw: &[u8]) -> Vec<(String, String, Vec<u8>)> {
-    let parseable = without_excess_continuations(raw);
-    let Some(message) = parse_raw(&parseable) else {
+    let Some(message) = parse_raw(raw) else {
         return Vec::new();
     };
     attachment_parts(&message)
@@ -1077,27 +1020,61 @@ amanh=E3.\r\n";
     }
 
     #[test]
-    fn excess_parameter_continuations_stay_linear_and_keep_their_length() {
-        for parameter in ["name*{i}=x; ", "a*{i} =x; ", "a* {i}=x; ", "a*+{i}=x; "] {
-            let mut raw = String::from("Subject: kept\r\nContent -Type: text/plain; ");
-            for i in 0..500_000 {
-                raw.push_str(&parameter.replace("{i}", &i.to_string()));
+    fn parameter_continuations_stay_linear_however_they_are_wrapped() {
+        let plain = |parameter: &str| {
+            let mut parameters = String::new();
+            for i in 0..100_000 {
+                parameters.push_str(&parameter.replace("{i}", &i.to_string()));
             }
-            raw.push_str("\r\n\r\nbody");
-            assert_eq!(
-                without_excess_continuations(raw.as_bytes()).len(),
-                raw.len()
-            );
-            let start = std::time::Instant::now();
-            let parsed = parse_message(raw.as_bytes()).unwrap();
-            assert_eq!(parsed.subject, "kept");
-            assert!(parsed.text.unwrap().contains("body"));
-            assert!(
-                start.elapsed().as_secs() < 5,
-                "{parameter}: {:?}",
-                start.elapsed()
-            );
+            parameters
+        };
+        for parameter in ["a{i}*1=x; ", "a*{i}=x; ", "a{i}*=u'en'x; "] {
+            let parameters = plain(parameter);
+            let encoded = |text: &str| {
+                let mut out = String::new();
+                for chunk in text.as_bytes().chunks(57) {
+                    for bytes in chunk.chunks(3) {
+                        const ALPHABET: &[u8] =
+                            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                        let word = bytes.iter().fold(0u32, |w, b| w << 8 | *b as u32)
+                            << (8 * (3 - bytes.len()));
+                        for at in 0..4 {
+                            out.push(if at <= bytes.len() {
+                                ALPHABET[(word >> (18 - 6 * at) & 63) as usize] as char
+                            } else {
+                                '='
+                            });
+                        }
+                    }
+                    out.push_str("\r\n");
+                }
+                out
+            };
+            let header = format!("Content-Type: text/plain; {parameters}\r\n\r\nbody");
+            for raw in [
+                format!("Subject: kept\r\n{header}"),
+                format!(" {header}"),
+                format!(
+                    "Subject: kept\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n{header}\r\n--b--\r\n"
+                ),
+                format!(
+                    "Subject: kept\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n\r\n{}",
+                    encoded(&header)
+                ),
+            ] {
+                let start = std::time::Instant::now();
+                let _ = parse_message(raw.as_bytes());
+                assert!(start.elapsed().as_secs() < 5, "{parameter}: {:?}", start.elapsed());
+            }
         }
+    }
+
+    #[test]
+    fn continuations_are_still_joined_in_order() {
+        let raw = b"Content-Type: text/plain; name*1=b.txt; name*0=a\r\n\r\nbody";
+        let message = parse_raw(raw).unwrap();
+        let content_type = message.parts[0].content_type().unwrap();
+        assert_eq!(content_type.attribute("name"), Some("ab.txt"));
     }
 
     #[test]
@@ -1106,10 +1083,6 @@ amanh=E3.\r\n";
         for i in 0..6000 {
             raw.push_str(&format!("{i}*2={}\r\n", i * 2));
         }
-        assert!(matches!(
-            without_excess_continuations(raw.as_bytes()),
-            std::borrow::Cow::Borrowed(_)
-        ));
         assert!(parse_message(raw.as_bytes())
             .unwrap()
             .text
