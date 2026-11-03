@@ -478,6 +478,40 @@ pub fn is_finite_path(path: &BezPath) -> bool {
     })
 }
 
+/// What a path costs: its elements, and for each curve the segments flattening it takes, which
+/// grow with the square root of its size. By elements alone, 112 KB of big round borders took
+/// 7.5 GB of triangles.
+fn path_cost(path: &BezPath) -> usize {
+    let curve = |points: &[Point]| {
+        let extent = |value: fn(&Point) -> f64| {
+            let values = points.iter().map(value);
+            values.clone().fold(f64::MIN, f64::max) - values.fold(f64::MAX, f64::min)
+        };
+        (extent(|p| p.x).max(extent(|p| p.y)) / PATH_TOLERANCE).sqrt() as usize
+    };
+    let mut from = Point::ZERO;
+    path.elements()
+        .iter()
+        .map(|element| match element {
+            PathEl::MoveTo(a) | PathEl::LineTo(a) => {
+                from = *a;
+                1
+            }
+            PathEl::QuadTo(a, b) => {
+                let cost = curve(&[from, *a, *b]);
+                from = *b;
+                1 + cost
+            }
+            PathEl::CurveTo(a, b, c) => {
+                let cost = curve(&[from, *a, *b, *c]);
+                from = *c;
+                1 + cost
+            }
+            PathEl::ClosePath => 1,
+        })
+        .sum()
+}
+
 /// Whether a curve is small enough to flatten. The segments it takes grow with its size, whatever
 /// part of it shows: a dashed corner under `scale(1e16)` froze the window for 10 s. No
 /// message means a curve this big, and it isn't drawn.
@@ -578,7 +612,7 @@ impl PaintScene for DisplayList {
         }
         path.apply_affine(transform);
         let brush = convert_paint(brush.into(), transform, brush_transform);
-        if !is_finite_path(&path) || !self.charge(path.elements().len() + gradient_stops(&brush)) {
+        if !is_finite_path(&path) || !self.charge(path_cost(&path) + gradient_stops(&brush)) {
             return;
         }
         let [a, b, c, d, _, _] = transform.as_coeffs();
@@ -608,7 +642,7 @@ impl PaintScene for DisplayList {
         }
         let geometry = transform_geometry(shape, transform);
         let elements = match &geometry {
-            Geometry::Path(path) => path.elements().len(),
+            Geometry::Path(path) => path_cost(path),
             Geometry::Rect(_) | Geometry::RoundedRect(..) => 0,
         } + gradient_stops(&brush);
         if is_finite_geometry(&geometry) && self.charge(elements) {

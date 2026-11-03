@@ -5,6 +5,9 @@ use std::{
     ops::{Add, Sub},
 };
 
+/// BGMail: how much taller than its sibling a node can be before rotating.
+const MAX_HEIGHT_DIFFERENCE: u32 = 16;
+
 #[derive(Debug)]
 pub(crate) struct BoundsTree<U>
 where
@@ -156,7 +159,9 @@ where
         } else {
             (right, left)
         };
-        if self.nodes[tall].height() <= self.nodes[short].height() + 1 {
+        // With some slack: rotating ignores area, joining boxes far apart, and each such union
+        // is walked without finding anything. Doing it at every level took seconds on grids.
+        if self.nodes[tall].height() <= self.nodes[short].height() + MAX_HEIGHT_DIFFERENCE {
             return;
         }
         let Node::Internal {
