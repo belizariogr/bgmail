@@ -325,13 +325,18 @@ pub(crate) fn build_table_context(
         let display = doc.nodes[child_id]
             .primary_styles()
             .map(|s| s.clone_display());
+        // BGMail: captions last, so that the first real row sets what depends on it (fixed
+        // widths, collapsed borders). They are moved into place below.
+        if display.is_some_and(|d| d.outside() == DisplayOutside::TableCaption) {
+            return 3;
+        }
         match display.map(|d| d.inside()) {
             Some(DisplayInside::TableHeaderGroup) => 0,
             Some(DisplayInside::TableFooterGroup) => 2,
             _ => 1,
         }
     };
-    for order in 0..3 {
+    for order in 0..4 {
         for child_id in children.iter().copied() {
             if row_group_order(doc, child_id) != order {
                 continue;
@@ -372,6 +377,40 @@ pub(crate) fn build_table_context(
     }
     let num_columns = cursor.num_columns.max(column_sizes.len() as u16);
     column_sizes.resize(num_columns as usize, remaining_column);
+    // BGMail: a caption spans the table, and comes before the rows. `caption-side` isn't in this
+    // build of Stylo, so `bottom` is read as the top.
+    let is_caption = |doc: &BaseDocument, cell: &TableCell| {
+        doc.nodes[cell.node_id]
+            .display_style()
+            .is_some_and(|d| d.outside() == DisplayOutside::TableCaption)
+    };
+    let mut top_captions = Vec::new();
+    for cell in cells.iter_mut().filter(|cell| is_caption(doc, cell)) {
+        cell.span.0 = num_columns.max(1);
+        cell.style.grid_column.end = style_helpers::span(num_columns.max(1));
+        top_captions.push(cell.row);
+    }
+    if !top_captions.is_empty() {
+        let mut order: Vec<u16> = top_captions.clone();
+        order.extend((0..rows.len() as u16).filter(|row| !top_captions.contains(row)));
+        let mut new_row = vec![0u16; rows.len()];
+        for (new, old) in order.iter().enumerate() {
+            new_row[*old as usize] = new as u16;
+        }
+        let mut taken: Vec<Option<TableRow>> =
+            std::mem::take(&mut rows).into_iter().map(Some).collect();
+        rows = order
+            .iter()
+            .filter_map(|old| taken[*old as usize].take())
+            .collect();
+        for cell in &mut cells {
+            if let Some(&row) = new_row.get(cell.row as usize) {
+                cell.row = row;
+                cell.style.grid_row.start =
+                    style_helpers::line((row + 1).min(MAX_TABLE_ROW) as i16);
+            }
+        }
+    }
     if is_fixed {
         // In the fixed table layout algorithm, percentage column widths resolve against
         // the table's content width minus the horizontal border-spacing between columns,
