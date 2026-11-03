@@ -431,6 +431,8 @@ pub struct BaseDocument {
     /// BGMail: the parser stopped at a budget, so the document is partial (see
     /// `blitz_html`'s sink); hosts refuse it.
     pub parse_refused: bool,
+    /// BGMail: a click on a label is being passed on to its control.
+    pub(crate) in_label_click: bool,
     /// BGMail: bytes of web fonts this document has registered.
     font_bytes: u64,
 
@@ -576,6 +578,7 @@ impl BaseDocument {
             layout_visits: 0,
             parse_refused: false,
             font_bytes: 0,
+            in_label_click: false,
             pending_critical_resources: HashSet::new(),
             line_height_quirk: false,
             controls_to_form: HashMap::new(),

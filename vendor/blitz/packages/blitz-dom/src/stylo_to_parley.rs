@@ -479,8 +479,14 @@ pub(crate) fn style(
     let font_size = stylo_taffy::convert::saturate_px(font_styles.font_size.used_size.0.px());
     let line_height = match font_styles.line_height {
         stylo::LineHeight::Normal => parley::LineHeight::NORMAL,
-        stylo::LineHeight::Number(num) => parley::LineHeight::FontSizeRelative(num.0),
-        stylo::LineHeight::Length(value) => parley::LineHeight::Absolute(value.0.px()),
+        // BGMail: saturated as `font_size` above.
+        stylo::LineHeight::Number(num) => parley::LineHeight::FontSizeRelative(
+            num.0
+                .min(stylo_taffy::convert::MAX_LENGTH_PX / font_size.max(1.0)),
+        ),
+        stylo::LineHeight::Length(value) => {
+            parley::LineHeight::Absolute(stylo_taffy::convert::saturate_px(value.0.px()))
+        }
     };
     let vertical_align = self::vertical_align(style);
 

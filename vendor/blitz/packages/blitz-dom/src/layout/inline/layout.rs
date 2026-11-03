@@ -34,8 +34,8 @@ use crate::stylo_to_parley;
 /// (e.g. 150.016px in a 150px column) still fits on one line in browsers.
 const LINE_FIT_TOLERANCE: f32 = 1.0 / 32.0;
 
-/// BGMail: nodes a layout pass may visit and still force full layouts for baselines; see
-/// their use. Counting visits, as one forced layout can hold a table of any size.
+/// BGMail: nodes visited and bytes of text laid out in a pass that still force full layouts
+/// for baselines; see their use. Not counting layouts, as one can hold a table of any size.
 const MAX_LAYOUT_VISITS_FOR_BASELINES: usize = 4_000_000;
 
 fn subtract_margins(mut child_inputs: LayoutInput, margin: taffy::Rect<f32>) -> LayoutInput {
@@ -725,6 +725,9 @@ impl LayoutPassState<'_> {
                 .layout
                 .break_all_lines(Some(width + LINE_FIT_TOLERANCE));
         }
+
+        // BGMail: its cost for the budget of forced layouts is in its text, not its one visit.
+        self.layout_visits += inline_layout.text.len();
 
         // Out-of-flow candidates bubbled up from this container and its in-flow subtree.
         // These are laid out by the out-of-flow positioning pass (`compute_oof_layout`).

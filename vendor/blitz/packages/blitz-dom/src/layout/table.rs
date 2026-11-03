@@ -683,7 +683,9 @@ fn collect_table_cells(
         return;
     };
 
-    if display.outside() == DisplayOutside::None {
+    // BGMail: `display:contents` has no outer display either, but its children are the table's
+    // (the arm for it below was unreachable, and the row or table's text vanished).
+    if display.outside() == DisplayOutside::None && display.inside() != DisplayInside::Contents {
         node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
         return;
     }
