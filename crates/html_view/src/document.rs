@@ -3925,6 +3925,21 @@ mod hostile_tests {
     }
 
     #[test]
+    fn a_stretched_dotted_border_keeps_its_shape() {
+        let dots = |transform: &str| {
+            parse(&format!(
+                "<div style=\"width:100px;height:10px;border:2px dotted #123;transform:{transform}\">x</div>"
+            ))
+            .display_list()
+            .commands
+            .iter()
+            .any(|command| matches!(command, Command::Dots { .. }))
+        };
+        assert!(dots("scale(2)"));
+        assert!(!dots("scale(2,1)"));
+    }
+
+    #[test]
     fn text_past_a_cells_height_can_be_scrolled_to() {
         let lines = "<br>line".repeat(40);
         let html = format!(

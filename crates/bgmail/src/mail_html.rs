@@ -344,6 +344,7 @@ fn document_css(colors: DocumentColors) -> String {
            font: 16px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; \
            overflow-wrap: anywhere; }}\
          a {{ color: {accent}; }}\
+         :where([data-rm-button]:not([hidden])) {{ display: inline-block; }}\
          img[data-rm-blocked-src] {{ background: {soft}; border: 1px dashed {line}; \
            box-sizing: border-box; min-width: 24px; min-height: 24px; }}\
          h1, h2, h3 {{ line-height: 1.25; }}\
@@ -590,6 +591,12 @@ fn sanitize_html_inner(
             } else {
                 "section"
             };
+            // A button is a box inside a line, which `document_css` makes of this mark.
+            let mark = if control == "button" {
+                " data-rm-button=\"\""
+            } else {
+                ""
+            };
             let attributes: String = el
                 .attributes()
                 .iter()
@@ -598,12 +605,13 @@ fn sanitize_html_inner(
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
                 })
+                .filter(|attr| attr.name() != "data-rm-button")
                 .map(|attr| {
                     let value = escape_html(&decoded_attribute(&attr.value()));
                     format!(" {}=\"{value}\"", attr.name())
                 })
                 .collect();
-            el.before(&format!("<{plain}{attributes}>"), ContentType::Html);
+            el.before(&format!("<{plain}{mark}{attributes}>"), ContentType::Html);
             el.remove_and_keep_content();
             el.on_end_tag(lol_html::end_tag!(move |end| {
                 let closing = if end.name() == control {
@@ -1905,7 +1913,7 @@ mod tests {
             ),
             (
                 "<button class=x>Hidden</button>",
-                "<span class=\"x\">Hidden</span>",
+                "<span data-rm-button=\"\" class=\"x\">Hidden</span>",
             ),
         ] {
             assert_eq!(sanitize_html_inner(html, true, &HashSet::new()).0, expected);
@@ -1932,6 +1940,33 @@ mod tests {
         let (clean, has_remote, blocked) = sanitize_html_inner(html, true, &HashSet::new());
         assert!(has_remote && clean.contains("background"));
         assert_eq!(blocked, 0);
+    }
+
+    #[test]
+    fn a_button_comes_out_as_a_box_unless_the_message_hides_it() {
+        let height = |html: &str| {
+            let colors = DocumentColors {
+                background: gpui::white(),
+                text: gpui::black(),
+                accent: gpui::black(),
+            };
+            let body = MessageBody::Html(html.to_string().into());
+            let document = email_document(colors, &body, false);
+            let mut document = html_view::HtmlDocument::parse(
+                &document.html,
+                html_view::DocumentOptions::default(),
+            );
+            document.layout(640.0)
+        };
+        let button = "<button style=\"padding:30px\">Buy</button>";
+        assert!(height(button) - height("<span>Buy</span>") >= 50.0);
+        // As the message's own rules and the attribute keep saying.
+        for hidden in [
+            "<style>.x{display:none}</style><button class=x style=\"padding:30px\">Buy</button>",
+            "<button hidden style=\"padding:30px\">Buy</button>",
+        ] {
+            assert!(height(hidden) < height("<span>Buy</span>"), "{hidden}");
+        }
     }
 
     #[test]

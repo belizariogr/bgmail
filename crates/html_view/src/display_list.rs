@@ -193,14 +193,15 @@ impl DisplayList {
         if self.exhausted() || centers.is_empty() {
             return;
         }
-        if !is_axis_aligned(&transform) {
+        let [scale, _, _, scale_y, ..] = transform.as_coeffs();
+        // Circles only while the scale is the same both ways: quads are round, not oval.
+        if !is_axis_aligned(&transform) || scale.abs() != scale_y.abs() {
             let mut path = BezPath::new();
             for center in centers {
                 path.extend(kurbo::Circle::new(*center, radius).path_elements(PATH_TOLERANCE));
             }
             return self.fill(Fill::NonZero, transform, color, None, &path);
         }
-        let [scale, ..] = transform.as_coeffs();
         let centers: Vec<Point> = centers.iter().map(|center| transform * *center).collect();
         let radius = radius * scale.abs();
         let finite =
