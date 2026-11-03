@@ -359,8 +359,13 @@ impl Element for Scrollbar {
         window.on_mouse_event({
             let state = self.state.clone();
             let handle = self.handle.clone();
+            let hover_hitbox = layout.hover_hitbox.clone();
             move |event: &MouseDownEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                    return;
+                }
+                // A menu over the track gets the click, not the list under it.
+                if !hover_hitbox.is_hovered(window) {
                     return;
                 }
                 if thumb.contains(&event.position) {

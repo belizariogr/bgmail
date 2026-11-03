@@ -2140,6 +2140,17 @@ mod tests {
     }
 
     #[gpui::test]
+    fn closing_from_the_main_window_leaves_compose_alone(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (root, _compose, cx) = composing("First", &dir.path().join("mail.db"), cx);
+        root.update_in(cx, |_, window, _| window.activate_window());
+        cx.run_until_parked();
+        root.update(cx, |root, cx| root.close_focused_auxiliary_window(cx));
+        cx.run_until_parked();
+        assert!(root.read_with(cx, |root, _| root.compose_window_for_tests().is_some()));
+    }
+
+    #[gpui::test]
     fn an_attachment_being_read_counts_as_an_edit(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().expect("tempdir");
         let (root, compose, cx) = composing("First", &dir.path().join("mail.db"), cx);

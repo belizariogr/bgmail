@@ -2648,6 +2648,10 @@ impl RootView {
             self.close_settings_window(cx);
             return;
         }
+        // From the main window, it isn't the compose window behind it that gets closed.
+        if !self.compose_window_open_and_active(cx) {
+            return;
+        }
         let _ = self.with_compose_window(cx, |view, window, cx| {
             view.discard_draft(window, cx);
         });
