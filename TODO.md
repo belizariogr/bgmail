@@ -419,6 +419,10 @@
       still clicks its row; a quoted name with a comma stays one recipient, and the
       exact address comes first among suggestions; a secret shared with another
       account survives a removal; a search can't return to a removed account's folder.
+- ✅ Review round 7: a charset that isn't a plain token doesn't go back into a forward;
+      an attached `.eml` is that message rather than the one around it; other renderings
+      of a body aren't attachments; ids lose what a header can't carry; `mailto:` keeps
+      a quoted name next to an invalid address.
 - ✅ A search gives the mailbox's selection back; a complete typed address beats the
       suggestion on Enter and Tab; the Sent copy records the Bcc (user decisions).
 - ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user

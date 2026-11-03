@@ -183,7 +183,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 #### Types
 
 - **struct `ParsedMessage`**: `message_id`, `in_reply_to` (no `<>`), `references: Vec<String>`, `subject`, `from`/`sender: Option<Address>`, `to`/`cc`/`bcc`/`reply_to: Vec<Address>`, `date: Option<i64>` (unix UTC), `html`/`text: Option<String>`, `attachments: Vec<AttachmentInfo>`. Default, Clone, Eq.
-- **struct `AttachmentInfo { index, filename, mime_type, size, content_id, charset, inline }`**: serde. `size` and `attachment_content` give the part's bytes as sent (`part_bytes`, `original_bytes`): a text part is the raw body with only its Content-Transfer-Encoding reverted. **`html_body`** / **`text_body`** (private): every body part in order, the other kind converted; `None` when no part is of that kind.
+- **struct `AttachmentInfo { index, filename, mime_type, size, content_id, charset, inline }`**: serde. `size` and `attachment_content` give the part's bytes as sent (`part_bytes`, `original_bytes`): a text part is the raw body with only its Content-Transfer-Encoding reverted. `charset` only as a plain token, since forwarding writes it back into a header. **`other_body_versions`** (private): children of an `alternative` with a body that are another rendering (not named, not `text/calendar`), left out of the attachments. **`compose::header_id`** (crate): an id with whitespace and control characters removed, for parsing and `build_message`. **`html_body`** / **`text_body`** (private): every body part in order, the other kind converted; `None` when no part is of that kind.
 
 #### Functions
 
