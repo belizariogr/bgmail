@@ -29,6 +29,8 @@ pub struct PaintCache {
     gradients: HashMap<(String, u32, u32), Arc<RenderImage>>,
     /// Colour glyph bitmaps by (font blob, face index, glyph, strike ppem).
     color_glyphs: HashMap<(u64, u32, u32, u32), Option<ColorGlyphImage>>,
+    /// Bytes held by `images` and `gradients` (see [`MAX_CACHED_PIXEL_BYTES`]).
+    cached_pixel_bytes: u64,
     known_families: Option<HashSet<String>>,
     /// GPUI family of each registered web font file, by (blob id, face index).
     web_font_families: HashMap<(u64, u32), String>,
@@ -41,6 +43,17 @@ pub struct PaintCache {
 }
 
 impl PaintCache {
+    /// Accounts for `bytes` about to be cached, starting over if they don't fit. What the
+    /// current frame draws holds its own reference, so it stays valid.
+    fn make_room(&mut self, bytes: u64) {
+        if self.cached_pixel_bytes + bytes > MAX_CACHED_PIXEL_BYTES {
+            self.images.clear();
+            self.gradients.clear();
+            self.cached_pixel_bytes = 0;
+        }
+        self.cached_pixel_bytes += bytes;
+    }
+
     /// How long until an animated image painted by the last replay changes
     /// frame (`None`: nothing animates); the host repaints then.
     pub fn next_animation_frame(&self) -> Option<Duration> {
@@ -53,6 +66,7 @@ impl PaintCache {
     pub fn forget_document(&mut self) {
         self.images.clear();
         self.gradients.clear();
+        self.cached_pixel_bytes = 0;
         self.color_glyphs.clear();
         self.animations.clear();
         self.animation_starts.clear();
@@ -317,15 +331,36 @@ pub fn to_bgra_straight(brush: &ImageBrush) -> Vec<u8> {
     data
 }
 
+/// The largest image side uploaded. GPU atlases fail above their own limit, 16384 on Metal
+/// and DirectX, panicking in some paths; a message's image can declare 65535.
+const MAX_UPLOAD_SIDE: u32 = 8192;
+
+/// Most bytes of decoded and sampled pixels kept for a document; past them the cache starts
+/// over. Only what is visible gets here, so a screenful always fits.
+const MAX_CACHED_PIXEL_BYTES: u64 = 512 << 20;
+
 /// Size to pre-downscale an image to before upload, when it is drawn at less
 /// than half its size (`target` in device pixels). GPUI samples textures
 /// bilinearly without mipmaps, so larger reductions alias (moiré, jagged
-/// icons); browsers filter them.
+/// icons); browsers filter them. Sizes are the source's halved: it is what
+/// `shrinks` already accepts, and a message drawing an image at thousands of
+/// widths would otherwise keep a copy of each.
 pub fn downscaled_size(source: (u32, u32), target: (f64, f64)) -> Option<(u32, u32)> {
     let (w, h) = (target.0.ceil().max(1.0), target.1.ceil().max(1.0));
     let shrinks = |src: u32, dst: f64| src as f64 > 2.0 * dst;
-    (shrinks(source.0, w) || shrinks(source.1, h))
-        .then(|| ((w as u32).min(source.0), (h as u32).min(source.1)))
+    let halved = |src: u32, dst: f64| {
+        let mut size = src;
+        while (size / 2) as f64 >= dst && size / 2 >= 1 {
+            size /= 2;
+        }
+        while size > MAX_UPLOAD_SIDE {
+            size /= 2;
+        }
+        size
+    };
+    let oversized = source.0 > MAX_UPLOAD_SIDE || source.1 > MAX_UPLOAD_SIDE;
+    (oversized || shrinks(source.0, w) || shrinks(source.1, h))
+        .then(|| (halved(source.0, w), halved(source.1, h)))
 }
 
 /// Resizes straight-alpha 4-channel pixels with an area-averaging filter,
@@ -380,6 +415,7 @@ fn render_image(
     if upload != (image.width, image.height) {
         buffer = resize_straight(&buffer, upload.0, upload.1);
     }
+    cache.make_room(buffer.as_raw().len() as u64);
     let frame = image::Frame::new(buffer);
     let rendered = Arc::new(RenderImage::new(smallvec::smallvec![frame]));
     cache.images.insert(key, rendered.clone());
@@ -626,8 +662,22 @@ fn paint_sampled_gradient(
     if area.width() <= 0.0 || area.height() <= 0.0 {
         return;
     }
+    // Sampling is the costly part, and nothing has to be kept for what can't be seen.
+    let bounds = to_bounds(area, origin);
+    if !bounds.intersects(&window.content_mask().bounds) {
+        return;
+    }
     let (w, h) = gradient_texture_size(area, window.scale_factor());
-    let key = (format!("{gradient:?}{transform:?}{area:?}"), w, h);
+    // Relative to the box, so equal boxes share one texture wherever they are.
+    let box_transform = Affine::translate((-area.x0, -area.y0)) * *transform;
+    let key = (
+        format!(
+            "{gradient:?}{box_transform:?}{:?}",
+            (area.width(), area.height())
+        ),
+        w,
+        h,
+    );
     let image = match cache.gradients.get(&key) {
         Some(image) => image.clone(),
         None => {
@@ -635,6 +685,7 @@ fn paint_sampled_gradient(
             let Some(buffer) = image::RgbaImage::from_raw(w, h, pixels) else {
                 return;
             };
+            cache.make_room(buffer.as_raw().len() as u64);
             let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
                 buffer
             )]));
@@ -643,7 +694,7 @@ fn paint_sampled_gradient(
         }
     };
     window
-        .paint_image(to_bounds(area, origin), corner_radii, image, 0, false)
+        .paint_image(bounds, corner_radii, image, 0, false)
         .ok();
 }
 
@@ -879,11 +930,18 @@ mod tests {
 
     #[test]
     fn downscales_only_large_reductions() {
-        assert_eq!(downscaled_size((1180, 2048), (16.0, 26.0)), Some((16, 26)));
+        assert_eq!(downscaled_size((1180, 2048), (16.0, 26.0)), Some((18, 32)));
         assert_eq!(downscaled_size((600, 300), (400.0, 200.0)), None);
         // Never upscales a side when only the other one shrinks a lot.
-        assert_eq!(downscaled_size((1000, 10), (100.0, 20.0)), Some((100, 10)));
+        assert_eq!(downscaled_size((1000, 10), (100.0, 20.0)), Some((125, 10)));
         assert_eq!(downscaled_size((100, 100), (0.2, 0.2)), Some((1, 1)));
+        // An image past what GPUs take shrinks whatever it is drawn at, and the sizes of
+        // an image stay few however many widths a message asks for.
+        assert_eq!(downscaled_size((65535, 1), (65535.0, 1.0)), Some((8191, 1)));
+        let sizes: HashSet<_> = (1..4000)
+            .filter_map(|width| downscaled_size((8000, 8000), (width as f64, 100.0)))
+            .collect();
+        assert!(sizes.len() < 14, "{}", sizes.len());
     }
 
     #[test]

@@ -570,6 +570,11 @@ impl ElementCx<'_, '_> {
                 x: x.translate,
                 y: y.translate,
             });
+        // BGMail: as for gradients below; `space` draws each tile.
+        if x.count as u64 * y.count as u64 > 500 {
+            return;
+        }
+
         let tile_rect = Rect::new(0.0, 0.0, x.rect_len, y.rect_len);
 
         if let Some(animation) = &image_data.animation {

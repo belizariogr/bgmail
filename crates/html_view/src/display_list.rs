@@ -23,10 +23,11 @@ const PATH_TOLERANCE: f64 = 0.1;
 /// length of its borders at will, and the dashes are split on the CPU.
 const MAX_DASHES: f64 = 16384.0;
 
-/// Most path elements recorded for a document; what comes after them isn't drawn. The limit
-/// of one line or border alone is multiplied by however many a message has, and a real
-/// message is far below this. A shape counts as at least [`MIN_SHAPE_COST`], for its command.
-const MAX_PATH_ELEMENTS: usize = 8 << 20;
+/// Most path elements, gradient stops, shadows and layers recorded for a document; what comes
+/// after them isn't drawn. The limit of one line or border alone is multiplied by however many
+/// a message has, and a real message is far below this. A command counts as at least
+/// [`MIN_SHAPE_COST`].
+const MAX_PATH_ELEMENTS: usize = 2 << 20;
 const MIN_SHAPE_COST: usize = 4;
 
 /// Geometry of a filled shape, in document coordinates.
@@ -166,6 +167,8 @@ pub struct DisplayList {
     pub animations: HashMap<u64, Arc<blitz_dom::node::AnimationFrames>>,
     /// Path elements recorded so far (see [`MAX_PATH_ELEMENTS`]).
     path_elements: usize,
+    /// Layers refused by the budget still open, whose `Pop`s must not reach the list.
+    refused_layers: usize,
 }
 
 impl DisplayList {
@@ -173,13 +176,14 @@ impl DisplayList {
         Self::default()
     }
 
-    /// Takes a shape of `elements` from the budget, if it still fits.
+    /// Takes a command of `elements` from the budget, if it still fits. Once one doesn't
+    /// fit nothing does, so a document isn't drawn with holes further on.
     fn charge(&mut self, elements: usize) -> bool {
-        let total = self.path_elements + elements.max(MIN_SHAPE_COST);
+        let total = self
+            .path_elements
+            .saturating_add(elements.max(MIN_SHAPE_COST));
         let fits = total <= MAX_PATH_ELEMENTS;
-        if fits {
-            self.path_elements = total;
-        }
+        self.path_elements = if fits { total } else { MAX_PATH_ELEMENTS };
         fits
     }
 
@@ -202,7 +206,7 @@ impl DisplayList {
     /// Records a text run (called by the vendored text painter in place of
     /// `draw_glyphs`, whenever the source text is known).
     pub fn push_text(&mut self, run: TextRun) {
-        if !run.words.is_empty() {
+        if !run.words.is_empty() && self.refused_layers == 0 {
             self.commands.push(Command::Text(run));
         }
     }
@@ -430,6 +434,14 @@ pub fn is_finite_geometry(geometry: &Geometry) -> bool {
 }
 
 /// Whether every point of `path` is finite.
+/// What a brush costs on top of its shape: each command keeps its own copy of the stops.
+fn gradient_stops(brush: &Brush) -> usize {
+    match brush {
+        Brush::Gradient { gradient, .. } => gradient.stops.len(),
+        Brush::Solid(_) | Brush::Image { .. } => 0,
+    }
+}
+
 /// Whether `style`'s dashes on `path` are few enough to split. Written so NaN and infinite
 /// lengths don't dash either: `kurbo::dash` wouldn't return from them.
 fn should_dash(path: &BezPath, style: &kurbo::Stroke) -> bool {
@@ -486,6 +498,10 @@ impl PaintScene for DisplayList {
             .map(filter_effects)
             .unwrap_or((false, 1.0));
         let geometry = transform_geometry(clip, transform);
+        if self.refused_layers > 0 || !self.charge(0) {
+            self.refused_layers += 1;
+            return;
+        }
         self.commands.push(Command::PushLayer {
             clip: geometry.bounds(),
             radii: layer_radii(&geometry),
@@ -496,6 +512,10 @@ impl PaintScene for DisplayList {
 
     fn push_clip_layer(&mut self, _fill: Fill, transform: Affine, clip: &impl Shape) {
         let geometry = transform_geometry(clip, transform);
+        if self.refused_layers > 0 || !self.charge(0) {
+            self.refused_layers += 1;
+            return;
+        }
         self.commands.push(Command::PushLayer {
             clip: geometry.bounds(),
             radii: layer_radii(&geometry),
@@ -505,6 +525,10 @@ impl PaintScene for DisplayList {
     }
 
     fn pop_layer(&mut self) {
+        if self.refused_layers > 0 {
+            self.refused_layers -= 1;
+            return;
+        }
         self.commands.push(Command::Pop);
     }
 
@@ -524,7 +548,8 @@ impl PaintScene for DisplayList {
             );
         }
         path.apply_affine(transform);
-        if !is_finite_path(&path) || !self.charge(path.elements().len()) {
+        let brush = convert_paint(brush.into(), transform, brush_transform);
+        if !is_finite_path(&path) || !self.charge(path.elements().len() + gradient_stops(&brush)) {
             return;
         }
         let [a, b, c, d, _, _] = transform.as_coeffs();
@@ -533,7 +558,7 @@ impl PaintScene for DisplayList {
         self.commands.push(Command::Stroke {
             path,
             width: style.width * scale,
-            brush: convert_paint(brush.into(), transform, brush_transform),
+            brush,
         });
     }
 
@@ -553,7 +578,7 @@ impl PaintScene for DisplayList {
         let elements = match &geometry {
             Geometry::Path(path) => path.elements().len(),
             Geometry::Rect(_) | Geometry::RoundedRect(..) => 0,
-        };
+        } + gradient_stops(&brush);
         if is_finite_geometry(&geometry) && self.charge(elements) {
             self.commands.push(Command::Fill { geometry, brush });
         }
@@ -573,6 +598,10 @@ impl PaintScene for DisplayList {
         _glyph_transform: Option<Affine>,
         glyphs: impl Iterator<Item = Glyph> + Clone,
     ) {
+        // Drawn without the clip of a refused layer, it could land anywhere.
+        if self.refused_layers > 0 {
+            return;
+        }
         let color = match brush.into() {
             Paint::Solid(color) => color.multiply_alpha(brush_alpha),
             _ => Color::BLACK,
@@ -594,6 +623,9 @@ impl PaintScene for DisplayList {
         radius: f64,
         std_dev: f64,
     ) {
+        if self.refused_layers > 0 || !self.charge(0) {
+            return;
+        }
         let rect = transform.transform_rect_bbox(rect);
         self.commands.push(Command::BoxShadow {
             rect,
