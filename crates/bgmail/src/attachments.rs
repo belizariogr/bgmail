@@ -150,7 +150,14 @@ pub fn sanitize_filename(name: &str) -> String {
         return FALLBACK_NAME.to_string();
     }
     let (stem, extension) = split_extension(trimmed);
-    let mut stem: String = stem.chars().take(MAX_STEM_CHARS).collect();
+    let mut stem: String = stem
+        .chars()
+        .take(MAX_STEM_CHARS)
+        .collect::<String>()
+        // The cut may leave a dot or space at the end, which Windows drops, turning
+        // `x.exe.` into `x.exe` after `runs_code` read no extension.
+        .trim_end_matches(|c: char| c.is_whitespace() || c == '.')
+        .to_string();
     let device = stem.to_ascii_uppercase();
     let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || ((device.starts_with("COM") || device.starts_with("LPT"))
@@ -574,6 +581,8 @@ JVBERi0xLjQ=\r\n\
             "e.desktop",
             "f.sh",
             "g.ex\u{200b}e",
+            // Cut at the limit right after the `.exe`.
+            &format!("{}.exe.{}", "A".repeat(115), "B".repeat(20)),
             "h.msu",
             "i.diagcab",
             "j.xll",
