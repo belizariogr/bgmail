@@ -124,9 +124,9 @@ pub enum Appearance {
 /// hostile mail could crash the app. Real mail stays well under 100.
 pub const MAX_NESTING_DEPTH: usize = 256;
 
-/// Most tags and most attributes of a tag a document can have, by a scan that needs no parsing
-/// (see [`has_too_many_tags`]). The sanitizer has a stack entry per tag, about 30 KB per 1000,
-/// and removing attributes and rejecting duplicates are quadratic in a tag's.
+/// Most tags a document can have, by a scan that needs no parsing (see [`has_too_many_tags`]);
+/// the sanitizer has a stack entry per open tag, about 30 KB per 1000. And most attributes of a
+/// tag: removing them and rejecting duplicates are quadratic in a tag's.
 const MAX_OPENING_TAGS: usize = 500_000;
 pub const MAX_TAG_ATTRIBUTES: usize = 1024;
 
@@ -436,33 +436,19 @@ fn nesting_depth(doc: &BaseDocument, root: NodeId) -> usize {
     deepest
 }
 
-/// Whether `html` has more tags, or a tag more attributes, than hosts should sanitize and parse:
-/// a linear scan to run before both. Limits on nesting and text are the parser's, as only it
-/// knows them. Quotes count as the tokenizer counts them, only after a `=`, or `<a ">` would hide
-/// the rest of the message from the scan.
+/// Whether `html` has more tags, or an end tag more words, than hosts should sanitize and parse:
+/// a linear scan to run before both. It doesn't follow the tokenizer: no one scan has to agree
+/// with both parsers, and each attempt left holes to hide a tag in (`<a ">`, `<? <a b=">`, script
+/// data, ...). So it counts everything that could be a tag, and only overstates. Start tags with
+/// too many attributes are the sanitizer's to drop; it can't see those of end tags.
 pub fn has_too_many_tags(html: &str) -> bool {
-    enum State {
-        BeforeName,
-        Name,
-        AfterName,
-        BeforeValue,
-        Quoted(u8),
-        Unquoted,
-    }
     let bytes = html.as_bytes();
     let mut tags = 0;
     let mut at = 0;
     while let Some(found) = bytes[at..].iter().position(|&byte| byte == b'<') {
         at += found + 1;
-        if bytes[at..].starts_with(b"!--") {
-            // Past `!` too, as `<!-->` is a whole comment.
-            match html[at + 1..].find("-->") {
-                Some(end) => at += 1 + end + 3,
-                None => return false,
-            }
-            continue;
-        }
-        let name_at = at + usize::from(bytes.get(at) == Some(&b'/'));
+        let closing = bytes.get(at) == Some(&b'/');
+        let name_at = at + usize::from(closing);
         if !bytes.get(name_at).is_some_and(u8::is_ascii_alphabetic) {
             continue;
         }
@@ -470,43 +456,21 @@ pub fn has_too_many_tags(html: &str) -> bool {
         if tags > MAX_OPENING_TAGS {
             return true;
         }
-        at = name_at;
-        while bytes
-            .get(at)
-            .is_some_and(|&byte| !byte.is_ascii_whitespace() && byte != b'/' && byte != b'>')
-        {
-            at += 1;
-        }
-        // To the end of the tag, where the next one is looked for, or `<a <a <a...` would scan
-        // the rest of the message for each.
-        let mut attributes = 0;
-        let mut state = State::BeforeName;
-        while let Some(&byte) = bytes.get(at) {
-            at += 1;
-            let space = byte.is_ascii_whitespace();
-            state = match state {
-                State::Quoted(quote) if byte == quote => State::BeforeName,
-                State::Quoted(quote) => State::Quoted(quote),
-                _ if byte == b'>' => break,
-                State::BeforeName | State::AfterName if space => state,
-                State::BeforeName if byte == b'/' => state,
-                State::Name | State::AfterName if byte == b'/' => State::BeforeName,
-                State::Name | State::AfterName if byte == b'=' => State::BeforeValue,
-                State::Name if space => State::AfterName,
-                State::Name => State::Name,
-                State::BeforeName | State::AfterName => {
-                    attributes += 1;
-                    State::Name
-                }
-                State::BeforeValue if space => state,
-                State::BeforeValue if byte == b'"' || byte == b'\'' => State::Quoted(byte),
-                State::BeforeValue => State::Unquoted,
-                State::Unquoted if space => State::BeforeName,
-                State::Unquoted => State::Unquoted,
-            };
-            if attributes > MAX_TAG_ATTRIBUTES {
+        if closing {
+            // Past the `>` it stops at, or `</a </a </a...` would scan the rest per tag.
+            let rest = &bytes[name_at..];
+            let end = rest
+                .iter()
+                .position(|&byte| byte == b'>')
+                .unwrap_or(rest.len());
+            let words = rest[..end]
+                .split(u8::is_ascii_whitespace)
+                .filter(|word| !word.is_empty())
+                .count();
+            if words > MAX_TAG_ATTRIBUTES {
                 return true;
             }
+            at = name_at + end;
         }
     }
     false
@@ -2942,35 +2906,35 @@ mod hostile_tests {
     }
 
     #[test]
-    fn tags_and_attributes_are_counted_without_parsing() {
-        assert!(has_too_many_tags(&"<p>".repeat(MAX_OPENING_TAGS + 1)));
+    fn tags_and_end_tag_words_are_counted_without_parsing() {
+        let limit = MAX_OPENING_TAGS + 1;
+        assert!(has_too_many_tags(&"<p>".repeat(limit)));
+        assert!(has_too_many_tags(&"</i>".repeat(limit)));
         assert!(!has_too_many_tags(&"<p>".repeat(MAX_OPENING_TAGS)));
-        let attributes: String = (0..2000).map(|i| format!(" on{i}")).collect();
-        assert!(has_too_many_tags(&format!("<p{attributes}>")));
-        // In a quote it's one value, and no tag is found in text.
-        assert!(!has_too_many_tags(&format!("<p a=\"{attributes}\">")));
         assert!(!has_too_many_tags("a < b, é <é <"));
-        // Quotes only count after a `=`, so a stray one hides nothing.
-        assert!(has_too_many_tags(&format!(
-            "<a \">{}",
-            "<i>".repeat(MAX_OPENING_TAGS + 1)
-        )));
-        assert!(has_too_many_tags(&format!("<a \"><p{attributes}>")));
-        // End tags count, and comments are skipped, whatever they hold.
-        assert!(has_too_many_tags(&format!("<p></p{attributes}>")));
-        assert!(has_too_many_tags(&format!(
-            "<!-- <a b=\" --><p{attributes}>"
-        )));
-        assert!(has_too_many_tags(&format!("<!--><p{attributes}>")));
-        assert!(has_too_many_tags(&"</i>".repeat(MAX_OPENING_TAGS + 1)));
-        assert!(!has_too_many_tags("<!-- never closed <p>"));
-        // Linear on tags that never end.
+        let words: String = (0..2000).map(|i| format!(" a{i}")).collect();
+        // Nothing can hide a tag or an end tag from it.
+        for prefix in [
+            "",
+            "<a \">",
+            "<? <a b=\">",
+            "</ <a b=\">",
+            "<title><a b=\"</title>",
+            "<!-- --!>",
+        ] {
+            assert!(
+                has_too_many_tags(&format!("{prefix}{}", "<i>".repeat(limit))),
+                "{prefix}"
+            );
+            assert!(
+                has_too_many_tags(&format!("{prefix}<p>x</p{words}>")),
+                "{prefix}"
+            );
+        }
+        // Linear, also on tags that never end.
         let start = std::time::Instant::now();
+        assert!(has_too_many_tags(&"</a ".repeat(1_000_000)));
         assert!(has_too_many_tags(&"<a ".repeat(1_000_000)));
-        assert!(!has_too_many_tags(&format!(
-            "<a b=\"{}",
-            "<a ".repeat(1_000_000)
-        )));
         assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
     }
 
@@ -3220,5 +3184,77 @@ mod hostile_tests {
         let document = HtmlDocument::try_parse(&html, DocumentOptions::default());
         assert!(document.is_ok());
         assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_hoisted_list_is_cleared_when_its_box_becomes_a_leaf() {
+        let html = "<style>@media(min-width:401px){.a{position:absolute;display:flex}\
+            .a::after{content:'p'}}</style><p class=a><span class=a></span></p>";
+        let mut document = parse(html);
+        for width in [300.0, 640.0, 300.0] {
+            document.layout(width);
+            document.display_list();
+        }
+    }
+
+    #[test]
+    fn a_huge_line_height_doesnt_make_huge_paths() {
+        let start = std::time::Instant::now();
+        let mut document = parse(&format!(
+            "<style>div{{border-radius:50%;background:red;line-height:calc(1px*infinity)}}</style>{}x",
+            "<div>".repeat(20)
+        ));
+        document.layout(300.0);
+        document.display_list();
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_box_no_longer_out_of_flow_is_painted_by_its_parent() {
+        // It kept the containing block it had when absolute, whose list no longer holds it.
+        let html = "<style>@media(max-width:400px){table,tbody,tr,td{position:absolute}}</style>\
+            <table><tr><td>ShopNow</td></tr></table>";
+        let mut document = parse(html);
+        let shown = |document: &mut HtmlDocument| {
+            format!("{:?}", document.display_list().commands).contains("ShopNow")
+        };
+        assert!(shown(&mut document));
+        document.layout(300.0);
+        document.display_list();
+        document.layout(640.0);
+        assert!(shown(&mut document));
+    }
+
+    #[test]
+    fn nested_inline_tables_with_much_text_lay_out_in_bounded_time() {
+        let open = "<table style=\"display:inline-table;width:50%\"><td>a b c <img width=9 height=9>";
+        let html = format!("{}{}", open.repeat(8), "word ".repeat(2000));
+        let start = std::time::Instant::now();
+        let mut document = parse(&html);
+        document.layout(300.0);
+        assert!(start.elapsed().as_secs() < 20, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_row_group_with_display_contents_keeps_the_table() {
+        let html = "<table><tbody style=display:contents><tr><td>Kept</td></tr></tbody></table>";
+        let mut document = parse(html);
+        let list = format!("{:?}", document.display_list().commands);
+        assert!(list.contains("Kept"));
+    }
+
+    #[test]
+    fn a_click_through_a_label_doesnt_return_to_it() {
+        // `<input>` never reaches this document through the sanitizer; the event code still
+        // can't recurse until the stack runs out, which aborts.
+        for html in [
+            "<label>x<input type=file>y</label>",
+            "<label for=b id=a><label for=a id=b><input id=c type=file></label></label>",
+        ] {
+            let mut document = parse(html);
+            for (x, y) in [(5.0, 10.0), (20.0, 12.0), (40.0, 12.0)] {
+                drag(&mut document, x, y);
+            }
+        }
     }
 }
