@@ -76,15 +76,15 @@ pub fn build_message(draft: &Draft, message_id: &str, date_unix: i64) -> Vec<u8>
     if !draft.cc.is_empty() {
         builder = builder.cc(to_builder_list(&draft.cc));
     }
-    if let Some(id) = draft.in_reply_to.as_deref().map(strip_brackets) {
+    if let Some(id) = draft.in_reply_to.as_deref().map(header_id) {
         if !id.is_empty() {
-            builder = builder.in_reply_to(id.to_string());
+            builder = builder.in_reply_to(id);
         }
     }
     let references: Vec<String> = draft
         .references
         .iter()
-        .map(|r| strip_brackets(r).to_string())
+        .map(|r| header_id(r))
         .filter(|r| !r.is_empty())
         .collect();
     if !references.is_empty() {
@@ -210,6 +210,15 @@ pub(crate) fn extension_for_mime(mime: &str) -> Option<&'static str> {
         .map(|(ext, _)| *ext)
 }
 
+/// A message id as it can go in a header. Only what a header can carry: a CR left in
+/// the id of a message being answered could start a header of its sender's choosing.
+pub(crate) fn header_id(id: &str) -> String {
+    strip_brackets(id)
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .collect()
+}
+
 pub(crate) fn strip_brackets(id: &str) -> &str {
     let id = id.trim();
     id.strip_prefix('<')
@@ -229,6 +238,23 @@ fn to_builder_list(addresses: &[Address]) -> BuilderAddress<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_id_cannot_add_a_header_to_a_reply() {
+        let draft = Draft {
+            from: Address::new(None::<String>, "a@x.test"),
+            to: vec![Address::new(None::<String>, "b@x.test")],
+            in_reply_to: Some("a@b\rX-Evil: 1".into()),
+            references: vec!["r@b\rX-Evil: 2".into()],
+            ..Default::default()
+        };
+        let raw = build_message(&draft, "id@x.test", 0);
+        assert!(
+            !raw.windows(2).any(|w| w == b"\rX"),
+            "{}",
+            String::from_utf8_lossy(&raw)
+        );
+    }
 
     #[test]
     fn the_sent_copy_records_who_was_hidden() {

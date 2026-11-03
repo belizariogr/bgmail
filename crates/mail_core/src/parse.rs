@@ -7,7 +7,7 @@ use mail_parser::{Message, MessageParser, MessagePart, MimeHeaders, PartType};
 use serde::{Deserialize, Serialize};
 
 use crate::address::Address;
-use crate::compose::{extension_for_mime, strip_brackets};
+use crate::compose::extension_for_mime;
 
 /// The parts of a message the app needs, decoupled from `mail-parser`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -366,12 +366,106 @@ fn id_list(value: &mail_parser::HeaderValue<'_>) -> Vec<String> {
 }
 
 fn clean_id(id: &str) -> String {
-    strip_brackets(id).to_string()
+    crate::compose::header_id(id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn attached(part: &str) -> Vec<u8> {
+        multipart("mixed", &[&format!("{TEXT}See attached"), part])
+    }
+
+    #[test]
+    fn a_charset_that_could_add_headers_is_dropped() {
+        for charset in [
+            "charset*=utf-8''x%0d%0aContent-Disposition:%20inline%0d%0a%0d%0aPAY",
+            "charset==?utf-8?Q?x=0D=0AX-Evil:_1?=",
+            "charset=\"x; foo=bar\"",
+            "charset=\"x y\"",
+        ] {
+            let raw = attached(&format!(
+                "Content-Type: text/plain; {charset}; name=a.csv\r\nContent-Disposition: attachment; filename=a.csv\r\n\r\nreal"
+            ));
+            let parsed = parse_message(&raw).unwrap();
+            assert_eq!(parsed.attachments[0].charset, None, "{charset}");
+        }
+        let raw = attached(
+            "Content-Type: text/plain; charset=ISO-8859-1; name=a.csv\r\nContent-Disposition: attachment; filename=a.csv\r\n\r\nreal",
+        );
+        assert_eq!(
+            parse_message(&raw).unwrap().attachments[0]
+                .charset
+                .as_deref(),
+            Some("ISO-8859-1")
+        );
+    }
+
+    #[test]
+    fn an_attached_message_is_that_message_not_the_one_around_it() {
+        let inner = "From: inner@b.c\r\nSubject: Secret\r\n\r\nInner body";
+        let raw = attached(&format!(
+            "Content-Type: message/rfc822; name=note.eml\r\nContent-Disposition: attachment; filename=note.eml\r\n\r\n{inner}"
+        ));
+        let info = &parse_message(&raw).unwrap().attachments[0];
+        let content = attachment_content(&raw, info.index).unwrap();
+        assert_eq!(std::str::from_utf8(&content).unwrap().trim_end(), inner);
+        assert!(info.size < raw.len());
+
+        let digest = multipart(
+            "digest",
+            &[
+                "Content-Type: message/rfc822\r\n\r\nFrom: a@b.c\r\n\r\nBody one",
+                "Content-Type: message/rfc822\r\n\r\nFrom: a@b.c\r\n\r\nBody two",
+            ],
+        );
+        let parsed = parse_message(&digest).unwrap();
+        let bodies: Vec<_> = parsed
+            .attachments
+            .iter()
+            .map(|info| attachment_content(&digest, info.index).unwrap())
+            .collect();
+        assert!(bodies[0].ends_with(b"Body one") || bodies[0].ends_with(b"Body one\r\n"));
+        assert!(bodies[1].ends_with(b"Body two") || bodies[1].ends_with(b"Body two\r\n"));
+    }
+
+    #[test]
+    fn other_versions_of_the_body_are_not_attachments() {
+        let raw = multipart(
+            "alternative",
+            &[
+                &format!("{TEXT}plain"),
+                "Content-Type: text/x-amp-html\r\n\r\n<html amp></html>",
+                "Content-Type: text/watch-html\r\n\r\n<b>w</b>",
+                "Content-Type: text/calendar; name=invite.ics\r\n\r\nBEGIN:VCALENDAR",
+                &format!("{HTML}<p>h</p>"),
+            ],
+        );
+        let parsed = parse_message(&raw).unwrap();
+        let listed: Vec<_> = parsed
+            .attachments
+            .iter()
+            .map(|a| a.mime_type.as_str())
+            .collect();
+        assert_eq!(listed, ["text/calendar"]);
+
+        // With no other version it is all there is to read.
+        let raw = multipart(
+            "alternative",
+            &["Content-Type: text/x-amp-html\r\n\r\n<html amp></html>"],
+        );
+        assert_eq!(parse_message(&raw).unwrap().attachments.len(), 1);
+    }
+
+    #[test]
+    fn ids_lose_what_a_header_cannot_carry() {
+        let raw = b"From: a@b.c\r\nMessage-ID: <a@b\rX-Evil: 1>\r\n\r\nx";
+        assert_eq!(
+            parse_message(raw).unwrap().message_id.as_deref(),
+            Some("a@bX-Evil:1")
+        );
+    }
 
     fn multipart(kind: &str, parts: &[&str]) -> Vec<u8> {
         let mut raw = format!("From: a@b.c\r\nContent-Type: multipart/{kind}; boundary=X\r\n\r\n");
