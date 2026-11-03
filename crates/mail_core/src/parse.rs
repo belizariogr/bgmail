@@ -3,6 +3,8 @@
 //! `mail-parser` does the heavy lifting (MIME, charsets, RFC 2047); this
 //! module pins down *which* of its views we trust so storage and UI agree.
 
+use std::collections::HashSet;
+
 use mail_parser::{Message, MessageParser, MessagePart, MimeHeaders, PartType};
 use serde::{Deserialize, Serialize};
 
@@ -57,14 +59,44 @@ pub struct AttachmentInfo {
     pub inline: bool,
 }
 
+/// A parsed message that can be dropped at any nesting. Each `message/rfc822` part owns
+/// the next by value, and the generated `Drop` recursed once per level: a few MB of
+/// nested messages overflowed the stack of the sync thread on every start, before the
+/// user opened anything.
+struct Parsed<'x>(Message<'x>);
+
+impl<'x> std::ops::Deref for Parsed<'x> {
+    type Target = Message<'x>;
+
+    fn deref(&self) -> &Message<'x> {
+        &self.0
+    }
+}
+
+impl Drop for Parsed<'_> {
+    fn drop(&mut self) {
+        let mut parts = std::mem::take(&mut self.0.parts);
+        while let Some(mut part) = parts.pop() {
+            if let PartType::Message(nested) = &mut part.body {
+                parts.append(&mut nested.parts);
+            }
+        }
+    }
+}
+
+fn parse_raw(raw: &[u8]) -> Option<Parsed<'_>> {
+    MessageParser::default().parse(raw).map(Parsed)
+}
+
 /// Parses a full message or just its header block (bodies are then `None`).
 /// Returns `None` only when no headers can be found at all.
 pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
-    let message = MessageParser::default().parse(raw)?;
+    let message = parse_raw(raw)?;
     if message.headers().is_empty() {
         return None;
     }
     let html = html_body(&message);
+    let cids = referenced_cids(html.as_deref().unwrap_or_default());
     Some(ParsedMessage {
         body_size: body_size(&message),
         message_id: message.message_id().map(clean_id).filter(|i| !i.is_empty()),
@@ -81,7 +113,7 @@ pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
         reply_to: message.reply_to().map(addresses).unwrap_or_default(),
         date: message.date().map(|d| d.to_timestamp()),
         attachments: attachment_parts(&message)
-            .map(|(index, part)| describe(raw, index, part, html.as_deref().unwrap_or_default()))
+            .map(|(index, part)| describe(raw, index, part, &cids))
             .collect(),
         html,
         text: text_body(&message),
@@ -90,7 +122,7 @@ pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
 
 /// Decoded bytes of the part listed as `AttachmentInfo::index`.
 pub fn attachment_content(raw: &[u8], index: usize) -> Option<Vec<u8>> {
-    let message = MessageParser::default().parse(raw)?;
+    let message = parse_raw(raw)?;
     let part = message.parts.get(index)?;
     part_bytes(raw, part)
 }
@@ -108,7 +140,8 @@ const OTHER_RENDERINGS: &[&str] = &[
 /// also has: the same message, not attachments. Anything with a name is meant to be
 /// seen as one.
 fn other_body_versions(message: &Message<'_>) -> Vec<u32> {
-    let is_body = |id: &u32| message.text_body.contains(id) || message.html_body.contains(id);
+    let bodies = body_ids(message);
+    let is_body = |id: &u32| bodies.contains(id);
     let mut versions = Vec::new();
     for part in &message.parts {
         let PartType::Multipart(children) = &part.body else {
@@ -138,7 +171,7 @@ fn other_body_versions(message: &Message<'_>) -> Vec<u32> {
 /// `(content_id, mime_type, bytes)` for every image with a Content-ID, i.e.
 /// everything an HTML body can reference via `cid:`.
 pub fn inline_images(raw: &[u8]) -> Vec<(String, String, Vec<u8>)> {
-    let Some(message) = MessageParser::default().parse(raw) else {
+    let Some(message) = parse_raw(raw) else {
         return Vec::new();
     };
     attachment_parts(&message)
@@ -163,7 +196,9 @@ pub fn has_attachments(message: &ParsedMessage) -> bool {
 fn attachment_parts<'m>(
     message: &'m Message<'m>,
 ) -> impl Iterator<Item = (usize, &'m MessagePart<'m>)> + 'm {
-    let other_versions = other_body_versions(message);
+    let other_versions: HashSet<u32> = other_body_versions(message).into_iter().collect();
+    let attachments: HashSet<u32> = message.attachments.iter().copied().collect();
+    let bodies = body_ids(message);
     message
         .parts
         .iter()
@@ -176,18 +211,21 @@ fn attachment_parts<'m>(
             match part.body {
                 PartType::Multipart(_) => false,
                 PartType::Binary(_) | PartType::InlineBinary(_) | PartType::Message(_) => {
-                    message.attachments.contains(&id) || part.content_id().is_some()
+                    attachments.contains(&id) || part.content_id().is_some()
                 }
                 PartType::Text(_) | PartType::Html(_) => {
-                    message.attachments.contains(&id)
-                        && !message.text_body.contains(&id)
-                        && !message.html_body.contains(&id)
+                    attachments.contains(&id) && !bodies.contains(&id)
                 }
             }
         })
 }
 
-fn describe(raw: &[u8], index: usize, part: &MessagePart<'_>, html: &str) -> AttachmentInfo {
+fn describe(
+    raw: &[u8],
+    index: usize,
+    part: &MessagePart<'_>,
+    cids: &HashSet<String>,
+) -> AttachmentInfo {
     let mime_type = mime_type(part);
     let content_id = part.content_id().map(clean_id).filter(|c| !c.is_empty());
     let is_attachment_disposition = part
@@ -198,7 +236,7 @@ fn describe(raw: &[u8], index: usize, part: &MessagePart<'_>, html: &str) -> Att
     let shown_in_body = mime_type.starts_with("image/")
         && content_id
             .as_deref()
-            .is_some_and(|cid| html_references_cid(html, cid));
+            .is_some_and(|cid| cids.contains(&cid.to_ascii_lowercase()));
     let filename = part
         .attachment_name()
         .map(str::trim)
@@ -233,17 +271,24 @@ fn describe(raw: &[u8], index: usize, part: &MessagePart<'_>, html: &str) -> Att
 /// Whether the HTML refers to exactly this Content-ID, in any case and percent-encoded
 /// or not: `cid:part1` isn't `cid:part10`.
 pub fn html_references_cid(html: &str, cid: &str) -> bool {
+    referenced_cids(html).contains(&cid.to_ascii_lowercase())
+}
+
+/// Every Content-ID the HTML refers to, lowercase. Checking each part against the set
+/// instead of scanning the body per part keeps a message with many parts linear.
+pub fn referenced_cids(html: &str) -> HashSet<String> {
     let html = html.to_ascii_lowercase();
-    let cid = cid.to_ascii_lowercase();
-    html.match_indices("cid:").any(|(start, _)| {
-        let rest = &html[start + "cid:".len()..];
-        let end = rest
-            .find(|c: char| {
-                c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | '&' | ';')
-            })
-            .unwrap_or(rest.len());
-        percent_decoded(&rest[..end]) == cid
-    })
+    html.match_indices("cid:")
+        .map(|(start, _)| {
+            let rest = &html[start + "cid:".len()..];
+            let end = rest
+                .find(|c: char| {
+                    c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | '&' | ';')
+                })
+                .unwrap_or(rest.len());
+            percent_decoded(&rest[..end])
+        })
+        .collect()
 }
 
 fn percent_decoded(text: &str) -> String {
@@ -321,15 +366,20 @@ fn original_bytes(raw: &[u8], part: &MessagePart<'_>) -> Option<Vec<u8>> {
 }
 
 /// Bytes of the text and HTML body parts; an attachment doesn't count.
+/// The parts that make up the body, for lookups in a message of many parts.
+fn body_ids(message: &Message<'_>) -> HashSet<u32> {
+    (message.text_body.iter().chain(&message.html_body))
+        .copied()
+        .collect()
+}
+
 fn body_size(message: &Message<'_>) -> usize {
+    let bodies = body_ids(message);
     message
         .parts
         .iter()
         .enumerate()
-        .filter(|(index, _)| {
-            let id = *index as u32;
-            message.text_body.contains(&id) || message.html_body.contains(&id)
-        })
+        .filter(|(index, _)| bodies.contains(&(*index as u32)))
         .map(|(_, part)| match &part.body {
             PartType::Text(text) | PartType::Html(text) => text.len(),
             _ => 0,
@@ -876,5 +926,45 @@ amanh=E3.\r\n";
     #[test]
     fn garbage_is_none() {
         assert_eq!(parse_message(b""), None);
+    }
+
+    #[test]
+    fn messages_nested_past_the_stack_are_dropped_without_recursing() {
+        let mut raw = String::new();
+        for _ in 0..100_000 {
+            raw.push_str("Content-Type: message/rfc822\r\n\r\n");
+        }
+        raw.push_str("Subject: x\r\n\r\nbody");
+        // Test threads have 2 MiB, as the sync threads do.
+        assert!(parse_message(raw.as_bytes()).is_some());
+        let _ = inline_images(raw.as_bytes());
+        let _ = attachment_content(raw.as_bytes(), 0);
+    }
+
+    #[test]
+    fn a_message_of_many_parts_and_references_stays_linear() {
+        let mut raw = String::from(
+            "Content-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\n\
+            Content-Type: text/html\r\n\r\n",
+        );
+        raw.push_str(&"<img src=cid:x>".repeat(100_000));
+        for i in 0..20_000 {
+            raw.push_str(&format!(
+                "\r\n--B\r\nContent-Type: image/png\r\nContent-ID: <c{i}>\r\n\r\nA"
+            ));
+        }
+        raw.push_str("\r\n--B--\r\n");
+        let start = std::time::Instant::now();
+        assert_eq!(
+            parse_message(raw.as_bytes()).unwrap().attachments.len(),
+            20_000
+        );
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn referenced_cids_are_lowercase_and_decoded() {
+        let cids = referenced_cids("<img src='CID:A%40b'> <img src=cid:c>");
+        assert!(cids.contains("a@b") && cids.contains("c") && cids.len() == 2);
     }
 }

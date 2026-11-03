@@ -37,7 +37,7 @@ pub use folder::{
 pub use mailto::draft_from_mailto;
 pub use parse::{
     attachment_content, has_attachments, html_references_cid, inline_images, parse_message,
-    AttachmentInfo, ParsedMessage, MAX_BODY_BYTES,
+    referenced_cids, AttachmentInfo, ParsedMessage, MAX_BODY_BYTES,
 };
 pub use remote::{
     Capabilities, FolderStatus, IdleOutcome, MailConnector, MailRemote, MailSender, RemoteError,

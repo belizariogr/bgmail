@@ -1,6 +1,6 @@
 //! Downloaded raw message → what `storage::Database::store_body` keeps.
 
-use mail_core::{html_references_cid, inline_images, parse_message, readable_text};
+use mail_core::{inline_images, parse_message, readable_text, referenced_cids};
 use storage::{Database, NewAttachment};
 
 /// Upper bound of image bytes inlined as `data:` URIs into one stored HTML
@@ -53,6 +53,7 @@ pub fn body_content_within(raw: &[u8], limit: usize) -> Option<BodyContent> {
         (None, None) => (String::new(), "text", String::new()),
     };
     let plain_text = plain_text.replace("\r\n", "\n");
+    let shown_cids = referenced_cids(&content);
     Some(BodyContent {
         preview: preview_text(&plain_text, PREVIEW_CHARS),
         attachments: parsed
@@ -70,7 +71,7 @@ pub fn body_content_within(raw: &[u8], limit: usize) -> Option<BodyContent> {
                     && !a
                         .content_id
                         .as_deref()
-                        .is_some_and(|cid| html_references_cid(&content, cid)),
+                        .is_some_and(|cid| shown_cids.contains(&cid.to_ascii_lowercase())),
             })
             .collect(),
         content,
@@ -118,6 +119,14 @@ pub fn inline_cid_images(
     if images.is_empty() {
         return html.to_string();
     }
+    // A map, since a message can have thousands of parts and of references. The first
+    // of a repeated Content-ID wins.
+    let mut by_id = std::collections::HashMap::new();
+    for (id, mime, bytes) in images {
+        by_id
+            .entry(id.to_ascii_lowercase())
+            .or_insert((mime, bytes));
+    }
     // ASCII lowercasing keeps byte offsets identical to `html`.
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len());
@@ -136,12 +145,11 @@ pub fn inline_cid_images(
             .trim_end();
         let is_url = prefix.ends_with('=') || prefix.ends_with("url(");
         let cid = percent_decode(&html[value_start..value_end]);
-        let image = images
-            .iter()
-            .find(|(id, _, _)| id.eq_ignore_ascii_case(&cid))
-            .filter(|(_, _, bytes)| is_url && bytes.len() <= budget);
+        let image = by_id
+            .get(&cid.to_ascii_lowercase())
+            .filter(|(_, bytes)| is_url && bytes.len() <= budget);
         match image {
-            Some((_, mime, bytes)) => {
+            Some((mime, bytes)) => {
                 budget -= bytes.len();
                 out.push_str(&html[pos..start]);
                 out.push_str("data:");
