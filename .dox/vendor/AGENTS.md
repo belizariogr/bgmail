@@ -38,6 +38,8 @@ repository instead of living in someone's checkout.
   no scan of the raw message could bound it; this runs during sync. `parsers/message.rs`: past 8
   failed searches for a part's boundary, or with a boundary over 256 bytes, multiparts read as
   text (in the body if the message's own), as each failure read to the end of the message.
+- `taffy` (`compute/block.rs`): a float is only measured when only a size is wanted, as a full
+  layout has one cache entry and nested tables in floats doubled per level.
 - `taffy` (`compute/grid/track_sizing.rs`): `distribute_space_up_to_limits` only takes tracks with room
   past rounding, and stops when nothing moved; `MAX_GRID_TRACKS` is 1000.
 - `gpui` (`bounds_tree.rs`): inserting balances on the way up by rotation past a height difference of
@@ -108,6 +110,9 @@ repository instead of living in someone's checkout.
     rebuilds when a part changes display, and `vertical-align` rebuilds its inline layout.
   - `layout/construct.rs`: `flush_inline_pseudos_recursive` reads the child's display, so nested
     inlines keep their pseudo-elements.
+  - `net.rs` (`TRUSTED_FONT_HOST`): `@font-face` only loads from `fonts.gstatic.com`, as no font
+    engine here survives a hostile font (user-visible: other web fonts use the declared stack).
+  - `stylo_to_parley.rs`: at most 64 families per style.
   - `stylo.rs`: sibling walks use `Node::sibling_index`, a remembered position checked on use, and
     a pass takes at most `MAX_SIBLING_STEPS` (2^26) of them: past it selectors don't match, and a
     first layout gives up. `parse_color_attr` takes no color outside ASCII, as its cuts are by byte.

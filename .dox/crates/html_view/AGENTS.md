@@ -134,6 +134,8 @@ positions Blitz computed.
 - **Vendored painter** (`src/blitz_paint/`, MIT/Apache-2.0, Blitz `e42ee1f`):
   keep diffs minimal and marked `BGMail`; see its child doc.
 
+- **Web fonts** only load from `fonts.gstatic.com` (decided from Gmail dropping `@font-face` and
+  Thunderbird sanitizing fonts, which isn't available here; `vendor/blitz` `net.rs`).
 - Web fonts reach GPUI under a family unique to each file
   (`fonts::with_family_name` rewrites the `name` table): GPUI caches a family's
   faces on first use, so later faces of the same family would never be found

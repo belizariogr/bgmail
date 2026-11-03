@@ -476,6 +476,18 @@
   first recording is under the deadline; a damaged database that fails on first load is replaced
   too, keeping `accounts` and `outbox`; a nested multipart without its boundary is the body if none
   was found.
+- ✅ Review round 22 (110000 render seeds with no HTML panic, no sanitizer violation): web fonts only
+  load from `fonts.gstatic.com`, as a changed byte in a font aborted the app and another filled 3.8 GB;
+  decided from Gmail dropping `@font-face` and Thunderbird sanitizing fonts, which isn't available
+  here. Floats in tables no longer double per level (801 bytes: 11 s on resizing). Painters stop when
+  the budget is out. At most 64 font families per style. CSS animations are off, as nothing runs
+  their clock and they redid styles each pass. A subject that isn't text shows a replacement character
+  instead of losing the database, and recovery copies the columns both versions have.
+- ⬜ Known limits of round 22. Layouts after the first have no deadline: a cost that only shows on
+  resizing or clicking isn't stopped. Giving up there needs a last good frame kept, and a switch to
+  text from `HtmlView`, not done. An animation's final state doesn't show, as none runs. Recording has
+  no deadline, only its budget. Recovery of a damaged database doesn't work from a directory whose
+  name isn't UTF-8. Icon fonts that aren't Google's show as missing glyphs.
 - ⬜ Known limits of round 21. A database locked by another program, a full disk or no permission
   aborts with only a message on stderr (should be a dialog). `bgcolor` doesn't follow the standard's
   legacy parsing: `#FFFFF` is ignored instead of read as `#FFFFF0`. Past their budget, sibling selectors

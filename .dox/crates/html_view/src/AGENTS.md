@@ -313,6 +313,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `DisplayList::charge(elements)`: takes a command from `MAX_PATH_ELEMENTS` (2 M: path elements
   and gradient stops, each command counting at least 4). Once one doesn't fit nothing does;
   refused layers are counted (`refused_layers`) so their `Pop`s and contents stay out.
+- `DisplayList::exhausted()`: the budget ran out; painters that build a lot check it first.
 - `fn gradient_stops(brush)`: what a brush adds to a command's cost.
 - `fn path_cost(path)`: elements, plus for each curve the segments flattening takes (`sqrt(extent /
   tolerance)`), as triangles, not elements, are what fills memory.
