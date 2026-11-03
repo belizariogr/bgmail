@@ -33,9 +33,8 @@ pub struct PaintCache {
     cached_pixel_bytes: u64,
     /// Bytes of them the frame being painted has used.
     frame_pixel_bytes: u64,
-    /// Textures no longer cached, to leave the GPU's atlas at the next replay: the frame that
-    /// dropped them may still draw them.
-    evicted: Vec<Arc<RenderImage>>,
+    /// Image tiles the frame being painted has drawn (see [`MAX_FRAME_TILES`]).
+    frame_tiles: usize,
     known_families: Option<HashSet<String>>,
     /// GPUI family of each registered web font file, by (blob id, face index).
     web_font_families: HashMap<(u64, u32), String>,
@@ -49,10 +48,8 @@ pub struct PaintCache {
 
 impl PaintCache {
     fn evict_pixels(&mut self) {
-        self.evicted
-            .extend(self.images.drain().map(|(_, image)| image));
-        self.evicted
-            .extend(self.gradients.drain().map(|(_, image)| image));
+        self.images.clear();
+        self.gradients.clear();
         self.cached_pixel_bytes = 0;
     }
 
@@ -349,6 +346,10 @@ pub fn to_bgra_straight(brush: &ImageBrush) -> Vec<u8> {
 /// The largest image side uploaded. GPU atlases fail above their own limit, 16384 on Metal
 /// and DirectX, panicking in some paths; a message's image can declare 65535.
 const MAX_UPLOAD_SIDE: u32 = 8192;
+
+/// Most image tiles a frame draws, about 0.25 s of them; a 16 px tile fills a large window with
+/// 9000. Boxes stacked on each other multiply them: 3 took 43 s per frame.
+const MAX_FRAME_TILES: usize = 64_000;
 
 /// Most bytes of decoded and sampled pixels kept for a document, and drawn in a frame; past
 /// them the cache starts over, or a frame leaves out what doesn't fit.
@@ -757,8 +758,17 @@ fn paint_image_fill(
     // GPUI images have no opacity input in 0.2.2; layer alpha is not applied.
     let repeat_x = brush.sampler.x_extend == Extend::Repeat;
     let repeat_y = brush.sampler.y_extend == Extend::Repeat;
-    let xs = tile_starts(tile.x0, tile.width(), area.x0, area.x1, repeat_x);
-    let ys = tile_starts(tile.y0, tile.height(), area.y0, area.y1, repeat_y);
+    // Only what shows: a small tile on a large box is thousands of images per frame.
+    let mask = window.content_mask().bounds;
+    let visible = Rect::new(
+        f32::from(mask.left() - origin.x) as f64,
+        f32::from(mask.top() - origin.y) as f64,
+        f32::from(mask.right() - origin.x) as f64,
+        f32::from(mask.bottom() - origin.y) as f64,
+    )
+    .intersect(area);
+    let xs = tile_starts(tile.x0, tile.width(), visible.x0, visible.x1, repeat_x);
+    let ys = tile_starts(tile.y0, tile.height(), visible.y0, visible.y1, repeat_y);
     window.with_content_mask(
         Some(ContentMask {
             bounds: to_bounds(area, origin),
@@ -766,6 +776,10 @@ fn paint_image_fill(
         |window| {
             for &y in &ys {
                 for &x in &xs {
+                    if cache.frame_tiles >= MAX_FRAME_TILES {
+                        return;
+                    }
+                    cache.frame_tiles += 1;
                     let rect = Rect::new(x, y, x + tile.width(), y + tile.height());
                     // Rounded corners apply when the image covers the box (or the
                     // rounded clip it is drawn into, e.g. `<img>` with radius).
@@ -891,9 +905,7 @@ pub fn paint_display_list(
     cache.animations.clone_from(&list.animations);
     cache.next_frame = None;
     cache.frame_pixel_bytes = 0;
-    for image in cache.evicted.drain(..) {
-        window.drop_image(image).ok();
-    }
+    cache.frame_tiles = 0;
     let mut index = 0;
     while index < list.commands.len() {
         // A stray Pop at top level is skipped instead of ending the replay.
@@ -976,14 +988,6 @@ mod tests {
         cache.frame_pixel_bytes = 0;
         assert!(cache.make_room(1));
         assert_eq!(cache.cached_pixel_bytes, 1);
-        // What leaves the cache also leaves the GPU, at the next replay.
-        let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
-            image::RgbaImage::new(1, 1)
-        )]));
-        cache.gradients.insert((String::new(), 1, 1), image);
-        cache.forget_document();
-        assert!(cache.gradients.is_empty());
-        assert_eq!(cache.evicted.len(), 1);
         // An image past what GPUs take shrinks whatever it is drawn at, and the sizes of
         // an image stay few however many widths a message asks for.
         assert_eq!(downscaled_size((65535, 1), (65535.0, 1.0)), Some((8191, 1)));
