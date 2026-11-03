@@ -1794,24 +1794,27 @@ impl RootView {
             let mut to_wake = HashSet::new();
             let db = match storage::Database::open(&path) {
                 Ok(db) => db,
-                Err(error) => return (to_wake, Some(error)),
+                Err(error) => return (to_wake, Some(error), false),
             };
             let mut first_error = None;
+            let mut no_destination = false;
             for id in ids {
                 match action(&db, id) {
-                    Ok(outcome) if outcome.needs_sync => {
-                        to_wake.extend(accounts.get(&id).copied());
+                    Ok(outcome) => {
+                        no_destination |= outcome.no_destination;
+                        if outcome.needs_sync {
+                            to_wake.extend(accounts.get(&id).copied());
+                        }
                     }
-                    Ok(_) => {}
                     Err(error) => {
                         first_error.get_or_insert(error);
                     }
                 }
             }
-            (to_wake, first_error)
+            (to_wake, first_error, no_destination)
         });
         cx.spawn(async move |this, cx| {
-            let (to_wake, error) = work.await;
+            let (to_wake, error, no_destination) = work.await;
             this.update(cx, |this, cx| {
                 for account_id in to_wake {
                     this.after_action(
@@ -1819,6 +1822,7 @@ impl RootView {
                         ActionOutcome {
                             changed: true,
                             needs_sync: true,
+                            no_destination: false,
                         },
                     );
                 }
@@ -1829,6 +1833,8 @@ impl RootView {
                         format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
                         cx,
                     );
+                } else if no_destination {
+                    this.set_status_note(Key::StatusNoDestination.tr(cx.language()), cx);
                 }
                 this.sync_app_menus(cx);
                 cx.notify();
@@ -1869,11 +1875,19 @@ impl RootView {
         cx: &mut Context<Self>,
         action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
     ) {
-        if let Err(error) = self.apply_message_action(id, action) {
+        let no_destination = Cell::new(false);
+        let result = self.apply_message_action(id, |db, id| {
+            let outcome = action(db, id)?;
+            no_destination.set(outcome.no_destination);
+            Ok(outcome)
+        });
+        if let Err(error) = result {
             self.set_status_note(
                 format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
                 cx,
             );
+        } else if no_destination.get() {
+            self.set_status_note(Key::StatusNoDestination.tr(cx.language()), cx);
         }
         self.sync_app_menus(cx);
         self.last_reader_sig = None;
@@ -8311,6 +8325,30 @@ mod tests {
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
             assert_eq!(view.find_bar.as_ref().unwrap().current, 0);
+        });
+    }
+
+    #[gpui::test]
+    fn an_action_with_no_folder_to_go_to_says_so(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            let id = view.list_ids()[0];
+            view.run_action_on_message(id, cx, |_, _| {
+                Ok(ActionOutcome {
+                    no_destination: true,
+                    ..Default::default()
+                })
+            });
+            assert_eq!(
+                view.status_note.as_ref().map(|note| note.as_ref()),
+                Some(Key::StatusNoDestination.tr(Language::default()))
+            );
         });
     }
 

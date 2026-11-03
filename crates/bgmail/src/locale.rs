@@ -311,6 +311,7 @@ pub enum Key {
     StatusAttachmentOpenFailed,
     StatusAttachmentRunsCode,
     StatusActionFailed,
+    StatusNoDestination,
     StatusRemoveAccountFailed,
     UnsentTitle,
     UnsentNoSubject,
@@ -846,6 +847,8 @@ impl Key {
             }
             (StatusActionFailed, E) => "Could not complete the action",
             (StatusActionFailed, P) => "Não foi possível concluir a ação",
+            (StatusNoDestination, E) => "The server has no folder for this, so nothing was changed",
+            (StatusNoDestination, P) => "O servidor não tem uma pasta para isso, então nada foi alterado",
             (StatusRemoveAccountFailed, E) => "Could not remove the account",
             (StatusRemoveAccountFailed, P) => "Não foi possível remover a conta",
             (UnsentTitle, E) => "Unsent messages",
@@ -1038,7 +1041,7 @@ mod tests {
         assert_eq!(Language::from_code(""), Language::default());
     }
 
-    const ALL_KEYS: [Key; 249] = [
+    const ALL_KEYS: [Key; 250] = [
         Key::ViewZoomIn,
         Key::ViewZoomOut,
         Key::ViewZoomReset,
@@ -1277,6 +1280,7 @@ mod tests {
         Key::StatusAttachmentOpenFailed,
         Key::StatusAttachmentRunsCode,
         Key::StatusActionFailed,
+        Key::StatusNoDestination,
         Key::StatusRemoveAccountFailed,
         Key::UnsentTitle,
         Key::UnsentNoSubject,

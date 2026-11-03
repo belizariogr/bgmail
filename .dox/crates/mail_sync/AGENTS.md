@@ -120,6 +120,10 @@ that edit the database and queue those server ops.
 - **Archive with labels** (user decision): on an All Mail account a message with
   labels only leaves the Inbox and keeps them (`actions::archive_keeping_labels`); out
   of the Inbox, Archive does nothing (Spam and Trash aren't labels: it leaves them). Move, Trash and Junk still leave every label.
+- **Roles by name** (user decision): only at the top, under `INBOX` or under
+  `[Gmail]`/`[Google Mail]`, so `Projects/Trash` stays the user's. An action whose
+  destination doesn't exist reports `ActionOutcome::no_destination`, which the status bar
+  shows; nothing changes.
 - **Folder mapping** (`plan::folder_path_for`, order from `plan_folders`: declared
   SPECIAL-USE first, `\All` after the other declared, then by name nearest the top,
   a leading `INBOX` not counting): first folder per role takes the system path; Gmail `\All` becomes `sys:archive` only when no

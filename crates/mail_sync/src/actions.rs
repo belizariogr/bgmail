@@ -24,12 +24,15 @@ pub struct ActionOutcome {
     pub changed: bool,
     /// A server op was queued (send `Command::ProcessQueue`).
     pub needs_sync: bool,
+    /// Nothing happened: the server has no folder to move it to.
+    pub no_destination: bool,
 }
 
 impl ActionOutcome {
     const LOCAL: Self = Self {
         changed: true,
         needs_sync: false,
+        no_destination: false,
     };
 }
 
@@ -197,6 +200,7 @@ pub fn set_read(db: &Database, message_id: i64, read: bool) -> rusqlite::Result<
     Ok(ActionOutcome {
         changed: true,
         needs_sync,
+        no_destination: false,
     })
 }
 
@@ -225,6 +229,7 @@ pub fn set_starred(
     Ok(ActionOutcome {
         changed: true,
         needs_sync,
+        no_destination: false,
     })
 }
 
@@ -249,6 +254,7 @@ fn with_cas_retry(
     Ok(round()?.unwrap_or(ActionOutcome {
         changed: true,
         needs_sync: true,
+        no_destination: false,
     }))
 }
 
@@ -292,7 +298,10 @@ fn move_to_folder_round(
         .iter()
         .find(|f| f.path == target_path && f.remote_name.is_some())
     else {
-        return Ok(Some(ActionOutcome::default()));
+        return Ok(Some(ActionOutcome {
+            no_destination: true,
+            ..Default::default()
+        }));
     };
     let to = target.remote_name.clone().unwrap_or_default();
     let removes_everywhere = matches!(target_path, system::TRASH | system::JUNK);
@@ -401,6 +410,7 @@ fn move_to_folder_round(
     Ok(Some(ActionOutcome {
         changed: true,
         needs_sync,
+        no_destination: false,
     }))
 }
 
@@ -486,6 +496,7 @@ fn archive_keeping_labels(
     Ok(Some(ActionOutcome {
         changed: true,
         needs_sync: true,
+        no_destination: false,
     }))
 }
 
@@ -594,6 +605,7 @@ fn delete_permanently_round(
     Ok(Some(ActionOutcome {
         changed,
         needs_sync,
+        no_destination: false,
     }))
 }
 
@@ -698,6 +710,7 @@ mod tests {
     const QUEUED: ActionOutcome = ActionOutcome {
         changed: true,
         needs_sync: true,
+        no_destination: false,
     };
 
     #[test]
@@ -809,8 +822,10 @@ mod tests {
         let nothing = ActionOutcome::default();
         assert_eq!(move_to_folder(&fx.db, id, "user:Work").unwrap(), nothing);
         assert_eq!(move_to_folder(&fx.db, id, system::SENT).unwrap(), nothing);
-        assert_eq!(move_to_folder(&fx.db, id, "user:Nope").unwrap(), nothing);
-        assert_eq!(move_to_folder(&fx.db, id, "user:Local").unwrap(), nothing);
+        for target in ["user:Nope", "user:Local"] {
+            let outcome = move_to_folder(&fx.db, id, target).unwrap();
+            assert!(outcome.no_destination && !outcome.changed && !outcome.needs_sync);
+        }
         assert_eq!(
             move_to_folder(&fx.db, 9999, system::TRASH).unwrap(),
             nothing
@@ -935,6 +950,20 @@ mod tests {
         let id = message(&fx, junk.id, 5, "a");
         assert_eq!(archive(&fx.db, id).unwrap(), QUEUED);
         assert_eq!(csv(&fx, id), ",sys:archive,");
+    }
+
+    #[test]
+    fn a_missing_destination_is_reported_and_nothing_changes() {
+        let fx = fixture(PROVIDER_IMAP);
+        let id = message(&fx, fx.inbox, 5, "a");
+        fx.db
+            .conn()
+            .execute("DELETE FROM folders WHERE id = ?1", [fx.trash])
+            .unwrap();
+        let outcome = trash(&fx.db, id).unwrap();
+        assert!(outcome.no_destination);
+        assert!(!outcome.changed);
+        assert_eq!(csv(&fx, id), ",sys:inbox,");
     }
 
     #[test]

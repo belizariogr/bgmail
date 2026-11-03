@@ -437,6 +437,8 @@
       place; an abandoned build clears its crash marker.
 - ⬜ Search text of mail stored before round 9 keeps its line breaks: phrases across a
       line break are only found in newer mail (rebuilding needs a background pass).
+- ✅ A folder gets a system role by name only at the top, under `INBOX` or under Gmail's
+      own folder; an action with no folder to go to says so (user decisions).
 - ✅ A search gives the mailbox's selection back; a complete typed address beats the
       suggestion on Enter and Tab; the Sent copy records the Bcc (user decisions).
 - ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user
