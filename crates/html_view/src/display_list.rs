@@ -540,6 +540,9 @@ impl PaintScene for DisplayList {
         brush_transform: Option<Affine>,
         shape: &impl Shape,
     ) {
+        if self.path_elements >= MAX_PATH_ELEMENTS {
+            return;
+        }
         let mut path = shape.into_path(PATH_TOLERANCE);
         if should_dash(&path, style) {
             // GPUI strokes solid paths; split the dashes on the CPU instead.
@@ -570,6 +573,9 @@ impl PaintScene for DisplayList {
         brush_transform: Option<Affine>,
         shape: &impl Shape,
     ) {
+        if self.path_elements >= MAX_PATH_ELEMENTS {
+            return;
+        }
         let brush = convert_paint(brush.into(), transform, brush_transform);
         if matches!(brush, Brush::Solid(color) if color.components[3] == 0.0) {
             return;

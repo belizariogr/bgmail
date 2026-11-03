@@ -451,8 +451,12 @@ fn decoration_size(
         GenericTextDecorationLength::Auto => (css_font_size / 10.0).max(1.0) * scale,
     })
     .floor()
-    .max(1.0) as f32
+    .clamp(1.0, MAX_DECORATION_SIZE) as f32
 }
+
+/// BGMail: the thickest decoration. A circle's path grows with its radius: dots of `1e30px`
+/// took 149499 elements each, and 2 KB of them froze the window for minutes.
+const MAX_DECORATION_SIZE: f64 = 17_895_697.0;
 
 /// BGMail: the most marks (dots, dashes, half waves) of one decoration line.
 const MAX_DECORATION_MARKS: f64 = 16384.0;

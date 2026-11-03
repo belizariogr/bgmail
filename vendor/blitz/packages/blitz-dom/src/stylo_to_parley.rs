@@ -475,7 +475,8 @@ pub(crate) fn style(
     let itext_styles = style.get_inherited_text();
 
     // Convert font size and line height
-    let font_size = font_styles.font_size.used_size.0.px();
+    // BGMail: saturated like the lengths layout takes; see `MAX_LENGTH_PX`.
+    let font_size = stylo_taffy::convert::saturate_px(font_styles.font_size.used_size.0.px());
     let line_height = match font_styles.line_height {
         stylo::LineHeight::Normal => parley::LineHeight::NORMAL,
         stylo::LineHeight::Number(num) => parley::LineHeight::FontSizeRelative(num.0),

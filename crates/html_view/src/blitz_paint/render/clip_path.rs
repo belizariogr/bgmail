@@ -9,6 +9,12 @@ use style::values::generics::basic_shape::{
 };
 use style::values::generics::position::{GenericPosition, GenericPositionOrAuto};
 
+/// BGMail: a shape's path grows with its radius (149499 elements at `1e30px`), which a message
+/// sets at will; this is where layout's lengths saturate.
+fn max_shape_radius(radius: f64) -> f64 {
+    radius.min(17_895_697.0)
+}
+
 impl ElementCx<'_, '_> {
     /// Compute the rectangle (in scaled pixels, relative to the border box origin) described by
     /// the CSS 2 `clip` property, if it applies. `clip` only applies to absolutely positioned
@@ -116,13 +122,26 @@ impl ElementCx<'_, '_> {
         match shape {
             GenericBasicShape::Circle(circle) => {
                 let (cx, cy) = resolve_position(&circle.position, w, h, ox, oy);
-                let r = resolve_shape_radius(&circle.radius, w, h, cx - ox, cy - oy);
+                let r =
+                    max_shape_radius(resolve_shape_radius(&circle.radius, w, h, cx - ox, cy - oy));
                 Some(Circle::new(Point::new(cx, cy), r).into_path(0.1))
             }
             GenericBasicShape::Ellipse(ellipse) => {
                 let (cx, cy) = resolve_position(&ellipse.position, w, h, ox, oy);
-                let rx = resolve_shape_radius(&ellipse.semiaxis_x, w, h, cx - ox, cy - oy);
-                let ry = resolve_shape_radius(&ellipse.semiaxis_y, h, w, cy - oy, cx - ox);
+                let rx = max_shape_radius(resolve_shape_radius(
+                    &ellipse.semiaxis_x,
+                    w,
+                    h,
+                    cx - ox,
+                    cy - oy,
+                ));
+                let ry = max_shape_radius(resolve_shape_radius(
+                    &ellipse.semiaxis_y,
+                    h,
+                    w,
+                    cy - oy,
+                    cx - ox,
+                ));
                 Some(Ellipse::new(Point::new(cx, cy), (rx, ry), 0.0).into_path(0.1))
             }
             GenericBasicShape::Polygon(polygon) => {
