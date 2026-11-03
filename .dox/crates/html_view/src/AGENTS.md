@@ -447,6 +447,10 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   frame alone passes `MAX_CACHED_PIXEL_BYTES` (512 MiB), and what doesn't fit isn't drawn, instead
   of remaking the same textures on every repaint; otherwise clears images and gradients when the
   cache would pass it. Hits count toward the frame too (`frame_pixel_bytes`).
+- `PaintCache::evict_pixels()`: empties images and gradients into `evicted`, whose textures
+  `paint_display_list` drops from the atlas (`window.drop_image`) at the next replay, as the frame
+  that evicted them may still draw them. Used by `make_room` and `forget_document`.
+- `fn paint_image_fill`: leaves out images outside the content mask before decoding or counting.
 - `fn paint_sampled_gradient`: samples only boxes that intersect the content mask, keyed relative
   to the box so equal boxes share one texture.
 - `fn downscaled_size(source, target) -> Option<(u32, u32)>`: sizes are the source's halved (few

@@ -191,6 +191,9 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **struct `Parsed`** / **`parse_raw`** (private) — a parsed message whose `Drop` unnests `message/rfc822` parts iteratively: the generated one recursed per level and overflowed sync threads.
 - **`referenced_cids`** (pub) — `pub fn referenced_cids(html: &str) -> HashSet<String>`: lowercase, percent-decoded Content-IDs the HTML refers to; `html_references_cid` is its one-off form.
 - **`body_ids`** (private) — the parts of the text and HTML bodies, as a set.
+- **`cid_value_len`** / **`cid_skip_len`** (pub) — length of a `cid:` value within 998 bytes, and what to skip when it has none, so a body of markers stays linear.
+- **`parse_header_block`** (pub) — `parse_message` for a fetched header block, cut at the last line within 1 MiB; only sync uses it, and it arrives whatever the message's size.
+- **`attachment_contents`** (pub) — `pub fn attachment_contents(raw: &[u8], indexes: &[usize]) -> Vec<Option<Vec<u8>>>`: `attachment_content` for many parts, parsing once.
 - **`parse_message`** (pub) — `pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage>`
   - Behavior: `MessageParser::default()`; `None` when no headers. Works on header-only input (bodies `None`). Ids stripped of `<>`; In-Reply-To = first id; subject trimmed (RFC 2047 decoded); groups flattened; addresses without email skipped; date via `to_timestamp()` (tz-aware). `html` only from a real `text/html` part at `html_body[0]`, `text` only from a real text part at `text_body[0]`; empty bodies → `None`.
 - **`attachment_content`** (pub) — `pub fn attachment_content(raw: &[u8], index: usize) -> Option<Vec<u8>>` — decoded bytes of part `index`; `None` for missing or multipart parts; nested messages return their raw bytes.

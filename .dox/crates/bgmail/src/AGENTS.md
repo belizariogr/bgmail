@@ -734,7 +734,7 @@ overwrite (a ` (n)` suffix is added while a name is taken).
 - **`file_family(mime_type, filename)`** (pub): family from the (case-insensitive) MIME top/sub type (`image/*`, `audio/*`, `video/*`, `text/*`, `application/pdf`, archive and word-processor types); generic types fall back to `family_from_extension`.
 - **`family_from_extension(filename)`** (private): family from the lowercase extension; unknown → `Other`.
 - **`human_size(bytes, language)`** (pub): `"N B"` under 1 KB, else KB/MB/GB/TB base 1024 with one decimal under 10 (`"1.2 MB"`, `"15 KB"`); Portuguese uses a decimal comma.
-- **`sanitize_filename(name)`** (pub): last `/`- or `\`-separated segment only; control chars and `: * ? " < > |` → `_`; trims surrounding whitespace and dots (no hidden dotfiles); empty → `"attachment"`; stem cut to `MAX_STEM_CHARS`; Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) get a `_` prefix.
+- **`sanitize_filename(name)`** (pub): last `/`- or `\`-separated segment only; control chars and `: * ? " < > |` → `_`; trims surrounding whitespace and dots (no hidden dotfiles); empty → `"attachment"`; stem cut to `MAX_STEM_CHARS`; Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) get a `_` prefix. A device name is recognized before the first dot (`NUL.tar.gz`), and gets a leading `_`.
 - **`split_extension(name)`** (private): `(stem, ext)`; a leading dot or an "extension" over 16 chars is not an extension.
 - **`numbered_name(name, n)`** (private): `name` for 0, else `stem (n).ext`.
 - **`extract(raw, part_index)`** (pub): decoded bytes via `mail_core::attachment_content`; `NotFound` error when the part is missing.

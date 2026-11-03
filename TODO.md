@@ -460,8 +460,18 @@
   `BODYSTRUCTURE` parses recursively (16 MiB of stack covers what servers relay).
 - Renderer rule from round 14: a panic or abort, and any cost during sync, is always fixed. Cost in
   the renderer is fixed above 2 s on the UI thread for messages under 256 KB, or 30 s and 2 GB in
-  the background; below that it is recorded here with its number. A hostile server is recorded
-  unless the fix is a few lines.
+  the background; below that it is recorded here with its number. The same goes for cost on the
+  UI thread outside the renderer. A hostile server is recorded unless the fix is a few lines. The
+  review stops after two rounds in a row with no panic in at least 100000 fuzz seeds, nothing over
+  these limits and no regression from the round before.
+- ✅ Review round 15 (211000 fuzz seeds, one panic): a hidden box no longer runs the layout it had
+  when shown; radii saturate, so 2 KB of huge dotted decorations no longer freeze the window for
+  minutes; `<html a0><html a1>...` is bounded; the tag scan follows the tokenizer's quotes and
+  counts end tags, and the sanitizer drops tags over 1024 attributes; off-screen images use no
+  frame pixels, so long newsletters keep their last images, and evicted textures leave the GPU's
+  atlas; `repair_stale_previews` runs once per account (it rewrote matching messages at every
+  start); forwarding parses once, and replying to many addresses is linear; a fetched header block
+  is cut at 1 MiB; `NUL.tar.gz` is a device name for saving.
 - ✅ Review round 13: nested `message/rfc822` no longer overflow the sync thread's stack on
   every start; a table's `calc()` no longer reads freed styles; rules on `:hover` and other
   states keep only paint properties (from Gmail, which keeps hover for colors), so the pointer
@@ -476,8 +486,11 @@
 - ⬜ Parsing a reply's original (`reply_to_selected`) and sanitizing its quote still run on the
   UI thread; both are linear now, but a large message delays the window.
 - ⬜ Rendering in a child process would contain every renderer failure (panic, memory, hang),
-  at the cost of IPC for hover, selection, find and zoom. Reassess if the renderer keeps
-  failing on hostile input after these limits.
+  at the cost of IPC for hover, selection, find and zoom, and of moving fonts and pixels across
+  processes on three platforms. Build it if a review finds a panic of a new class, or a hang over
+  10 s on the UI thread under 256 KB that no generic budget can cover. Try first a non-incremental
+  layout pass on transitions (`mark_all_damaged` when a width crosses `@media`, on zoom and on
+  `<details>`), as most panics so far came from stale state after rebuilding boxes.
 - ✅ Review round 12 (hostile HTML, measured under a memory cap): a 113-byte GIF no longer
   allocates the canvas it declares (decoder limits, 256 MiB per image, 2 GiB per document);
   dotted/dashed borders and text decorations are bounded per line and per document, drawn
@@ -804,9 +817,7 @@
       in Zed), so the two no longer share a chord.
 - ✅ CSS `url(...)` is blanked only in `style` attributes and `<style>`
       contents (lol_html handlers), never in the message's text.
-- ⬜ GPUI's sprite atlas still keeps textures of past messages (needs
-      `window.drop_image` when the paint cache forgets them); `HtmlDocument::
-      layout` re-resolves and walks the tree for overflow on every frame.
+- ⬜ `HtmlDocument::layout` re-resolves and walks the tree for overflow on every frame.
 - ⬜ Upstream the `vendor/blitz` and `vendor/taffy` fixes (each is marked
       `BGMail`), then drop the vendored copies. Either way: behind a `crates/html_view` API, with
       "Open in browser" as the escape hatch.
