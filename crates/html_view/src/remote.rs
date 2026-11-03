@@ -48,9 +48,15 @@ impl RemoteLoads {
         self.in_flight.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Whether a load finished since [`Self::take_arrived`] last cleared it.
+    pub fn has_arrived(&self) -> bool {
+        self.arrived.load(Ordering::Acquire)
+    }
+
     fn finish(&self) {
-        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        // In this order: seeing nothing pending then means the arrival is already marked.
         self.arrived.store(true, Ordering::Release);
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -230,6 +236,19 @@ fn cache() -> &'static Mutex<BodyCache> {
 
 #[cfg(test)]
 mod tests {
+    use super::RemoteLoads;
+
+    #[test]
+    fn a_finished_load_shows_as_arrived_until_taken() {
+        let loads = RemoteLoads::default();
+        loads.start();
+        assert!(loads.pending() && !loads.has_arrived());
+        loads.finish();
+        assert!(!loads.pending() && loads.has_arrived());
+        assert!(loads.take_arrived());
+        assert!(!loads.has_arrived());
+    }
+
     use super::*;
 
     #[test]

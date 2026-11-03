@@ -279,7 +279,13 @@ impl Element for HtmlElement {
         });
         // Animated images (GIFs): repaint when the next frame is due; remote
         // images still loading: look again shortly.
-        let loading = self.document.borrow().remote_loads().pending();
+        // An arrival not yet applied counts: the last load can finish between the timer
+        // and this paint, which reused the cached list.
+        let loading = {
+            let document = self.document.borrow();
+            let loads = document.remote_loads();
+            loads.pending() || loads.has_arrived()
+        };
         let next_frame = self.cache.borrow().next_animation_frame();
         let next_frame = match (next_frame, loading) {
             (Some(delay), true) => Some(delay.min(REMOTE_POLL)),
