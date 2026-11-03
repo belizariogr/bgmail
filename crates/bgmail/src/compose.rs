@@ -512,6 +512,17 @@ impl ComposeView {
         }
     }
 
+    /// Replaces the accounts offered as From, keeping the chosen one: they can change while
+    /// the window stays open, and a reply needs the account it answers from.
+    pub(crate) fn set_accounts(&mut self, accounts: Vec<ComposeAccount>) {
+        let chosen = self
+            .accounts
+            .get(self.from_account)
+            .map(|account| account.id);
+        self.accounts = accounts;
+        self.from_account = account_index(&self.accounts, chosen);
+    }
+
     /// The unsent message this one was opened to edit.
     pub(crate) fn replaces_outgoing(&self) -> Option<i64> {
         self.replaces_outgoing
@@ -2112,6 +2123,20 @@ mod tests {
                 view.subject.read(cx).content().to_string()
             })
             .expect("open")
+    }
+
+    #[gpui::test]
+    fn the_accounts_offered_can_change_keeping_the_chosen_one(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_root, compose, cx) = composing("First", &dir.path().join("mail.db"), cx);
+        compose
+            .update(cx, |view, _, _| {
+                view.set_accounts(vec![account(1, true), account(2, true)]);
+                view.from_account = 1;
+                view.set_accounts(vec![account(3, true), account(1, true), account(2, true)]);
+                assert_eq!(view.accounts[view.from_account].id, 2);
+            })
+            .expect("open");
     }
 
     #[gpui::test]

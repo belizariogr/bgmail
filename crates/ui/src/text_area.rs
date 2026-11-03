@@ -1281,6 +1281,8 @@ impl TextArea {
         cx: &mut Context<Self>,
     ) {
         set_native_text_focus(window);
+        // What was toggled for the caret's old place, as moving it by keyboard does.
+        self.pending_style = None;
         window.focus(&self.focus_handle);
         cx.stop_propagation();
         self.is_selecting = true;
@@ -1845,6 +1847,23 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().size_full().child(self.0.clone())
         }
+    }
+
+    #[gpui::test]
+    fn clicking_elsewhere_forgets_what_was_toggled_for_the_caret(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
+        let area = area(cx, "one\ntwo");
+        let (_, cx) = cx.add_window_view(|_, _| DragHost(area.clone()));
+        cx.run_until_parked();
+        area.update(cx, |area, cx| area.toggle_bold(cx));
+        area.read_with(cx, |area, _| assert!(area.pending_style.is_some()));
+        cx.simulate_mouse_down(
+            point(px(1.0), px(1.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| assert!(area.pending_style.is_none()));
     }
 
     #[gpui::test]

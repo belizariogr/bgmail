@@ -38,6 +38,17 @@ impl CrashGuard {
         let _ = std::fs::write(&self.path, id.to_string());
     }
 
+    /// [`Self::finish`] for a build of message `id` that won't be shown, unless the marker
+    /// is by now that of another message, still being rendered.
+    pub fn finish_if(&self, id: i64) {
+        let current = std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|text| text.trim().parse().ok());
+        if current == Some(id) {
+            self.finish();
+        }
+    }
+
     /// Records that the rendering finished (a frame showing it was drawn).
     pub fn finish(&self) {
         let _ = std::fs::remove_file(&self.path);
@@ -56,6 +67,18 @@ mod tests {
         guard.begin(42);
         // The process "crashed" here: the next start sees message 42.
         assert_eq!(guard.take_unfinished(), Some(42));
+        assert_eq!(guard.take_unfinished(), None);
+    }
+
+    #[test]
+    fn an_abandoned_build_only_clears_its_own_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = CrashGuard::beside(&dir.path().join("mail.db"));
+        guard.begin(7);
+        guard.finish_if(8);
+        assert_eq!(guard.take_unfinished(), Some(7));
+        guard.begin(7);
+        guard.finish_if(7);
         assert_eq!(guard.take_unfinished(), None);
     }
 

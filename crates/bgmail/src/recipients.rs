@@ -76,6 +76,10 @@ fn with_known_name(address: Address, contacts: &[Contact]) -> Address {
     Address::new(name, address.email)
 }
 
+fn in_open_quotes(typed: &str) -> bool {
+    typed.matches('"').count() % 2 == 1
+}
+
 /// Whether Enter and Tab take what was typed rather than the highlighted suggestion:
 /// a complete address is what the user means, and swapping it for a longer one in the
 /// catalog would send the message elsewhere, with only a name on the card. Picking a
@@ -338,7 +342,10 @@ impl RecipientInput {
             "enter" if open => self.commit_typed(cx),
             "enter" if !self.typed(cx).trim().is_empty() => self.commit_typed(cx),
             // With Shift it is another character (`<`, `:`): a name being typed.
-            "," | ";" if !keystroke.modifiers.shift => self.commit_typed(cx),
+            // Nor inside quotes, where it belongs to the name.
+            "," | ";" if !keystroke.modifiers.shift && !in_open_quotes(&self.typed(cx)) => {
+                self.commit_typed(cx);
+            }
             _ => return,
         }
         cx.stop_propagation();
@@ -526,6 +533,13 @@ mod tests {
         ] {
             assert!(!typed_wins(partial, 0), "{partial}");
         }
+    }
+
+    #[test]
+    fn a_comma_inside_quotes_belongs_to_the_name() {
+        assert!(in_open_quotes("\"Silva"));
+        assert!(!in_open_quotes("\"Silva, João\" <j@x.test>"));
+        assert!(!in_open_quotes("ann@x.test"));
     }
 
     #[test]

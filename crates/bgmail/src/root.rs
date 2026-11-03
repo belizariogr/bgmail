@@ -25,7 +25,8 @@ use theme::ActiveTheme;
 use ui::prelude::*;
 use ui::{
     set_native_text_focus, Button, Color, FocusNext, FocusPrevious, Icon, IconButton, IconName,
-    IconSize, Label, LabelSize, ListItem, Scrollbar, ScrollbarState, TextInput, Tooltip,
+    IconSize, Label, LabelSize, ListItem, Scrollbar, ScrollbarState, TextInput, TextInputEvent,
+    Tooltip,
 };
 
 use crate::actions::{
@@ -3663,6 +3664,9 @@ impl RootView {
                     this.reader_preparing = false;
                     this.install_reader(built, guarded, window, cx);
                     cx.notify();
+                } else if guarded {
+                    // It finished without crashing, only nobody wants it now.
+                    this.crash_guard.finish_if(id);
                 }
             })
             .ok();
@@ -3772,11 +3776,14 @@ impl RootView {
             let input = cx.new(|cx| TextInput::new(placeholder, cx));
             // Defer: the input notifies while it is being updated.
             let root = cx.weak_entity();
-            let observation = cx.observe(&input, move |_, _, cx| {
-                let root = root.clone();
-                cx.defer(move |cx| {
-                    let _ = root.update(cx, |this, cx| this.run_find(cx));
-                });
+            // Not on every notification: moving the caret would restart the search.
+            let observation = cx.subscribe(&input, move |_, _, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Changed) {
+                    let root = root.clone();
+                    cx.defer(move |cx| {
+                        let _ = root.update(cx, |this, cx| this.run_find(cx));
+                    });
+                }
             });
             self.find_bar = Some(FindBar {
                 input,
@@ -4214,8 +4221,10 @@ impl RootView {
         if let Some(handle) = self.compose_window {
             let init_for_open = init.clone();
             let contacts_for_open = contacts.clone();
+            let accounts_for_open = self.compose_accounts();
             match handle.update(cx, |view, window, cx| {
                 view.set_contacts(contacts_for_open, cx);
+                view.set_accounts(accounts_for_open);
                 window.activate_window();
                 // A message being written is never replaced by another.
                 let busy = init_for_open.is_some() && view.has_edits();
@@ -8269,6 +8278,40 @@ mod tests {
         cx.executor().advance_clock(UNSENT_REFRESH);
         cx.run_until_parked();
         view.read_with(cx, |view, _| assert_eq!(view.unsent.len(), 1));
+    }
+
+    #[gpui::test]
+    fn the_find_bar_only_searches_again_when_the_text_changes(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+            html_view::init(cx);
+        });
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        view.update_in(cx, |view, window, cx| {
+            view.selected_message_id = Some(view.list_ids()[0]);
+            view.reload_selected_detail();
+            view.mark_content_ready(cx);
+            view.open_find_bar(window, cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _| view.find_bar.as_mut().unwrap().current = 3);
+        let input = view.read_with(cx, |view, _| view.find_bar.as_ref().unwrap().input.clone());
+        // A move of the caret only notifies.
+        input.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.reader_view.is_some(), "or `run_find` proves nothing");
+            assert_eq!(view.find_bar.as_ref().unwrap().current, 3);
+        });
+        input.update(cx, |_, cx| cx.emit(TextInputEvent::Changed));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.find_bar.as_ref().unwrap().current, 0);
+        });
     }
 
     #[gpui::test]
