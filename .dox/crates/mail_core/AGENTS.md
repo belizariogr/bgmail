@@ -26,7 +26,7 @@ cancellation (`CancelToken`).
 - **No GPUI, no network, no filesystem I/O, zero `unsafe`**
   (`#![forbid(unsafe_code)]`). Only the clock is read (`new_message_id`).
 - Dependencies: `mail-parser = "0.11"` (1.x needs Rust 1.98; toolchain is
-  1.95), `mail-builder = "~2.0"` with `default-features = false` (no
+  1.95; patched to `vendor/mail_parser`), `mail-builder = "~2.0"` with `default-features = false` (no
   `gethostname`; we always set Message-ID/Date), `serde` + `serde_json` (workspace; account JSON). Add nothing else without a real need.
 - Message-IDs are stored and passed **without** angle brackets everywhere;
   `build_message` adds them.

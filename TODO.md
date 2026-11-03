@@ -452,6 +452,15 @@
   refuses over 500k tags or 1024 attributes in one, also when printing; a frame past 512 MiB of
   pixels leaves the rest out instead of remaking textures; the sync thread has 16 MiB of stack; a
   hostile `COPYUID` isn't expanded.
+- ✅ Review round 18 (75000 render seeds, one panic; 1.2 M seeds on the sanitizer against the real tree
+  builder, no real violation): a group no longer clears its cells' construction damage, which kept
+  a stale inline layout and aborted, and `<tr style=display:contents>` keeps its text and place.
+  `mail-parser` is vendored, with continuations in linear time on every path, which removes the scan
+  of the raw message that kept being evaded. GPUI's `BoundsTree` balances identical bounds: stacked
+  boxes went from 7.7 s to 15 ms per frame, and tiles under a pixel stretch (20 s to under 1 ms). A
+  stray `=` no longer drops a tag that isn't rewritten, nor its content. `form` and `button` keep
+  what they hold, decided from Gmail and Thunderbird showing forms (caniemail); controls still don't
+  exist. Media types are read as browsers read them. Ids over 900 bytes stay out of replies.
 - ✅ Review round 17 (159000 render seeds with no panic, 4.3 M on the sanitizer): the sanitizer's output
   is read back with the parser's tokenizer, and what still has active content becomes text; a tag
   with `=` starting a later attribute goes; a tag left open at the end is closed before checking;
@@ -480,8 +489,8 @@
 - ⬜ Known limits of round 16. Textures of past messages stay in GPUI's sprite atlas until the
   window closes: `window.drop_image` destroys one with uploads pending, and freeing them safely
   takes a sync point in all three atlases, of which only Blade can be tested here. Tiles past 64000
-  in a frame aren't drawn (a 1x1 tile on a very large box). `display:contents` on a `<tr>` or `<td>`
-  loses its text.
+  in a frame aren't drawn (a 1x1 tile on a very large box). `display:contents` on a `<td>` loses its
+  text. `tr{display:block}` stacks its cells (a browser keeps them side by side).
 - ⬜ Known limits of round 14, by the rule below. Forwarding puts the whole body in the editor, which
   shapes every line (over 2 MiB should forward as `message/rfc822`, as Thunderbird). Text with
   negative spacing past its own width isn't drawn. `store_body` of 200 MB holds the write lock

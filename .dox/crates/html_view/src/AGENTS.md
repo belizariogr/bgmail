@@ -447,6 +447,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   of remaking the same textures on every repaint; otherwise clears images and gradients when the
   cache would pass it. Hits count toward the frame too (`frame_pixel_bytes`).
 - `PaintCache::evict_pixels()`: empties images and gradients. The atlas keeps their textures (⬜ in `TODO.md`): `window.drop_image` aborts on one with uploads pending.
+- `fn stretched_tile(repeat, tile, area, scale, horizontal)`: a tile under a device pixel on an axis stops repeating there and takes the area's length.
 - `fn paint_image_fill`: leaves out images outside the content mask before decoding or counting, and tiles only what shows (`tile_starts` starts where the window is), up to `MAX_FRAME_TILES` (64000) per frame.
 - `fn paint_sampled_gradient`: samples only boxes that intersect the content mask, keyed relative
   to the box so equal boxes share one texture.

@@ -16,6 +16,9 @@ repository instead of living in someone's checkout.
   - `vendor/taffy/` (DioxusLabs/taffy rev `c256056`, MIT), wired by
     `[patch."https://github.com/DioxusLabs/taffy"]` in the root `Cargo.toml`
     and in `vendor/blitz/Cargo.toml`.
+  - `vendor/mail_parser/` (mail-parser 0.11.9 from crates.io, Apache-2.0 OR MIT, without its tests,
+    examples and resources), wired by `[patch.crates-io]` in the root `Cargo.toml`; its own
+    workspace, listed in `[workspace] exclude`.
   - `vendor/gpui/` (gpui 0.2.2 from crates.io, Apache-2.0, without `examples/`,
     `tests/` and their manifest targets), wired by `[patch.crates-io]` in the root
     `Cargo.toml`; its own workspace, listed in `[workspace] exclude`.
@@ -30,6 +33,12 @@ repository instead of living in someone's checkout.
 - `serde_fmt`: upstream `impl From<serde_fmt::Error> for core::fmt::Error`
   removed. GPUI 0.2.2 enables `log/kv_unstable_serde`, which pulls
   `serde_fmt`; that foreign impl makes `?` ambiguous in Stylo's `ToCss` derive.
+- `mail_parser` (`parsers/fields/content_type.rs`): RFC 2231 continuations merge by a map and append
+  in place, and `-language` names are a set. Quadratic before, on parts the parser decodes too, so
+  no scan of the raw message could bound it; this runs during sync.
+- `gpui` (`bounds_tree.rs`): on a tie, inserting goes to the side with fewer leaves. Identical bounds
+  always went right, a list as deep as they are many (36000 stacked boxes: 7.7 s per frame, now
+  15 ms). Orders come from an exact search, so what draws over what doesn't change.
 - `gpui`: per-window content scale, for the zoom of the whole app (no public API
   can scale a window's rendering and input together). `Window::set_content_scale`
   multiplies the scale factor and divides the viewport and event positions
@@ -83,8 +92,9 @@ repository instead of living in someone's checkout.
   - `taffy/src/compute/oof.rs`: a box that became a leaf clears its hoisted list.
   - `events/pointer.rs`: a label passes a click on once (`in_label_click`), as its control's own
     click bubbles back to it.
-  - `layout/table.rs`: `display:contents` on a row group keeps its children in the table; what
-    isn't a row or cell directly in a table or row group gets an anonymous row and cell, captions
+  - `layout/table.rs`: `display:contents` on a row group keeps its children in the table, and a
+    cell with no row opens one; a group clears its own construction damage, not its children's, so
+    a cell rebuilds after being a block; what isn't a row or cell directly in a table or row group gets an anonymous row and cell, captions
     included (first column), rebuilding its subtree.
   - `document.rs` + `resolve.rs` (`rebuild_boxes_once`): a media query changing result rebuilds every
     box in the next pass, about 190 ms at 1 MB, once per crossing. `layout/damage.rs`: a table

@@ -125,7 +125,10 @@ wiring to `storage`.
   (2 MiB, cut at a line, with a notice; decided from Gmail clipping at about 102 KB and
   Thunderbird hanging on huge bodies); replying and forwarding use all of it. The sanitizer's
   output is read back with the parser's tokenizer (`mail_html::reads_as_safe`, the last check): if it
-  finds what the sanitizer removes, the body shows as text and the quote is left out. Documents build
+  finds what the sanitizer removes, the body shows as text and the quote is left out. `form` and
+  `button` go without what they hold (a whole ASP.NET message comes in a `<form>`; Gmail and
+  Thunderbird show it); other controls go with it. A later attribute name starting with `=` drops
+  the tag only if the tag would be rewritten. Documents build
   off the pool's stack (`with_render_stack`). The
   release profile keeps `panic = "abort"` (decided with two opposing
   reviews): unwinding through Blitz/GPUI state isn't safe and stack overflow
