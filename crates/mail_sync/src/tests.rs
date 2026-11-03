@@ -1547,6 +1547,43 @@ fn only_the_sent_copy_records_the_bcc() {
 }
 
 #[test]
+fn a_message_the_client_cannot_parse_does_not_stop_the_sync() {
+    let h = Harness::imap();
+    h.server.deliver("INBOX", &mail("a", 1), unread());
+    h.server.on_next_call("fetch_headers INBOX 1", {
+        let server = h.server.clone();
+        move || server.fail_next(RemoteErrorKind::Unreadable)
+    });
+    let h = h.started();
+    assert!(h
+        .server
+        .calls()
+        .iter()
+        .any(|call| call == "fetch_headers_plain INBOX 1"));
+    assert_eq!(h.subjects(system::INBOX), strings(&["a"]));
+}
+
+#[test]
+fn without_a_sent_folder_the_lost_copy_is_reported() {
+    let h = Harness::imap().started();
+    assert!(h.server.remove_folder("Sent"));
+    h.sync();
+    h.db.enqueue_outgoing(
+        h.account,
+        "me@example.com",
+        &strings(&["b@x.com"]),
+        &mail("outgoing", 9),
+        None,
+    )
+    .unwrap();
+    let events = h.run(Command::ProcessQueue);
+    assert_eq!(h.connector.sender().sent().len(), 1);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SyncEvent::SentCopyFailed { .. })));
+}
+
+#[test]
 fn a_sent_message_is_listed_in_sent_right_away() {
     let h = Harness::imap().started();
     h.db.enqueue_outgoing(

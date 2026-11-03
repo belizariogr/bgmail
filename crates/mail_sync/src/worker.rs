@@ -12,7 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mail_core::{
     parse_message, AccountConfig, CancelToken, IdleOutcome, MailConnector, MailRemote, MailSender,
-    MessageFlags, RemoteError, RemoteErrorKind, SendError, SendFailure, DEFAULT_SYNC_WINDOW,
+    MessageFlags, RemoteError, RemoteErrorKind, RemoteHeader, SendError, SendFailure,
+    DEFAULT_SYNC_WINDOW,
 };
 use storage::{
     system, Database, Folder, FolderSyncState, NewRemoteMessage, OutgoingRow, OutgoingState,
@@ -118,6 +119,7 @@ pub(crate) fn is_connection_error(kind: RemoteErrorKind) -> bool {
             | RemoteErrorKind::Network
             | RemoteErrorKind::Tls
             | RemoteErrorKind::Cancelled
+            | RemoteErrorKind::Unreadable
     )
 }
 
@@ -532,6 +534,39 @@ impl Worker {
         self.status(AccountStatus::Idle {
             last_sync: self.last_sync,
         });
+    }
+
+    /// The headers of `uids`, around a message whose structure the client can't parse: it
+    /// would otherwise fail its whole batch at every sync, and with it all the mail after.
+    /// Fetches without the structure, then one by one, skipping what still can't be read.
+    /// Each failure needs a new connection, as the rest of that answer stays unread.
+    fn fetch_readable_headers(
+        &mut self,
+        folder: &str,
+        uids: &[u32],
+    ) -> Result<Vec<RemoteHeader>, Abort> {
+        let unreadable = |error: &RemoteError| error.kind == RemoteErrorKind::Unreadable;
+        match self.rm()?.fetch_headers(folder, uids) {
+            Err(error) if unreadable(&error) => self.disconnect(false),
+            other => return Ok(other?),
+        }
+        self.ensure_connected()?;
+        match self.rm()?.fetch_headers_plain(folder, uids) {
+            Err(error) if unreadable(&error) => self.disconnect(false),
+            other => return Ok(other?),
+        }
+        let mut headers = Vec::new();
+        for uid in uids {
+            self.ensure_connected()?;
+            match self.rm()?.fetch_headers_plain(folder, &[*uid]) {
+                Err(error) if unreadable(&error) => {
+                    eprintln!("BGMail: skipping unreadable message {uid} of {folder}");
+                    self.disconnect(false);
+                }
+                other => headers.extend(other?),
+            }
+        }
+        Ok(headers)
     }
 
     /// Queue → outbox → folder list → every folder → orphan purge.
@@ -1275,6 +1310,11 @@ impl Worker {
         }
         let Some(sent) = sent else {
             self.db.complete_outgoing(row.id)?;
+            self.emit(SyncEvent::SentCopyFailed {
+                account_id: self.account_id,
+                outbox_id: row.id,
+                error: "no Sent folder on the server".into(),
+            });
             return Ok(());
         };
         let seen = MessageFlags {
@@ -1410,7 +1450,7 @@ impl Worker {
         let mut notices = Vec::new();
         for batch in plan.to_fetch.chunks(HEADER_BATCH) {
             self.check_interrupts()?;
-            let headers = self.rm()?.fetch_headers(&name, batch)?;
+            let headers = self.fetch_readable_headers(&name, batch)?;
             // Read after the fetch: the UI may have queued an edit meanwhile,
             // and these flags predate it.
             let flags_pending = messages_with_pending_flags(&self.db.pending_ops(self.account_id)?);
