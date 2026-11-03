@@ -356,6 +356,7 @@ fn percent_decoded(text: &str) -> String {
         let escaped = (bytes[i] == b'%')
             .then(|| text.get(i + 1..i + 3))
             .flatten()
+            .filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))
             .and_then(|hex| u8::from_str_radix(hex, 16).ok());
         if let Some(byte) = escaped {
             out.push(byte);
@@ -1090,8 +1091,18 @@ amanh=E3.\r\n";
             "-".repeat(1 << 20)
         );
         let start = std::time::Instant::now();
-        assert_eq!(parse_message(raw.as_bytes()).unwrap().subject, "kept");
+        let parsed = parse_message(raw.as_bytes()).unwrap();
+        assert_eq!(parsed.subject, "kept");
+        assert!(parsed.text.is_some() && parsed.attachments.is_empty());
         assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_multipart_without_its_boundary_reads_as_its_text() {
+        let raw = "Content-Type: multipart/mixed; boundary=none\r\n\r\nWhat it says\r\n";
+        let parsed = parse_message(raw.as_bytes()).unwrap();
+        assert!(parsed.text.unwrap().contains("What it says"));
+        assert!(parsed.attachments.is_empty());
     }
 
     #[test]

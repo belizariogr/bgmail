@@ -57,6 +57,7 @@ fn percent_decode(text: &str) -> String {
         let escape = (bytes[ix] == b'%')
             .then(|| text.get(ix + 1..ix + 3))
             .flatten()
+            .filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))
             .and_then(|hex| u8::from_str_radix(hex, 16).ok());
         match escape {
             Some(byte) => {

@@ -86,7 +86,7 @@ struct MessageParserState {
 }
 
 /// BGMail: see where they are checked in `parse_`.
-const MAX_MISSING_BOUNDARIES: usize = 64;
+const MAX_MISSING_BOUNDARIES: usize = 8;
 const MAX_BOUNDARY_BYTES: usize = 256;
 
 impl MessageParserState {
@@ -203,10 +203,14 @@ impl MessageParser {
                     state = new_state;
                     stream.skip_crlf();
                     continue;
-                } else {
-                    mime_type = MimeType::TextOther;
-                    is_text = true;
                 }
+            }
+            // BGMail: a multipart read no further is text, in the body if it is the message's
+            // own, or the reader would show an empty message with an attachment holding it.
+            if is_multipart {
+                mime_type = MimeType::TextOther;
+                is_text = true;
+                is_inline = state.parts == 1 && state.mime_type == MimeType::Message;
             }
 
             let (mut encoding, decode_fnc): (Encoding, DecodeFnc<'_>) = match part_headers

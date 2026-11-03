@@ -126,6 +126,8 @@ pub fn human_size(bytes: u64, language: Language) -> String {
     format!("{number} {}", UNITS[unit])
 }
 
+const MAX_NAME_BYTES: usize = 240;
+
 /// A file name safe to create on every platform: only the last path segment
 /// of `name`, with control characters and `/ \ : * ? " < > |` replaced by
 /// `_`, surrounding spaces and dots trimmed, Windows device names (`CON`,
@@ -160,6 +162,20 @@ pub fn sanitize_filename(name: &str) -> String {
         .to_string();
     // Windows takes a device by what comes before the first dot, ignoring spaces after it:
     // `NUL.tar.gz` and `NUL .txt` are NUL, and what is saved there is lost.
+    // What most file systems allow is 255 bytes, whatever the characters: 84 in CJK didn't save.
+    // Less, for the ` (n)` a name in use gets.
+    let room = MAX_NAME_BYTES.saturating_sub(extension.map_or(0, |ext| ext.len() + 1));
+    if stem.len() > room {
+        let mut end = room;
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        stem.truncate(end);
+        stem.truncate(
+            stem.trim_end_matches(|c: char| c.is_whitespace() || c == '.')
+                .len(),
+        );
+    }
     let device = stem
         .split('.')
         .next()
@@ -417,6 +433,14 @@ mod tests {
         assert_eq!(super::sanitize_filename("nul .tar.gz"), "_nul .tar.gz");
         assert_eq!(super::sanitize_filename("CONIN$.log"), "_CONIN$.log");
         assert_eq!(super::sanitize_filename("console.tar.gz"), "console.tar.gz");
+    }
+
+    #[test]
+    fn long_names_fit_in_bytes_at_a_character() {
+        let name = super::sanitize_filename(&format!("{}.pdf", "漢".repeat(84)));
+        assert!(name.len() <= 240 && name.ends_with(".pdf"), "{name}");
+        let name = super::sanitize_filename(&format!("{}.pdf", "😀".repeat(64)));
+        assert!(name.len() <= 240 && name.ends_with(".pdf"), "{name}");
     }
 
     use super::*;
