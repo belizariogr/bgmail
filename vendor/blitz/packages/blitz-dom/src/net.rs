@@ -1,4 +1,5 @@
 use blitz_traits::node_id::NodeId;
+use cssparser::ToCss;
 use selectors::context::QuirksMode;
 use std::sync::atomic::Ordering as Ao;
 use std::{
@@ -12,6 +13,7 @@ use std::{
 use style::{
     font_face::{FontFaceSourceFormat, FontFaceSourceFormatKeyword, FontStyleRange, Source},
     media_queries::MediaList,
+    properties::PropertyDeclarationBlock,
     servo_arc::Arc as ServoArc,
     shared_lock::SharedRwLock,
     shared_lock::{Locked, SharedRwLockReadGuard},
@@ -183,6 +185,7 @@ impl NetHandler for ResourceHandler<StylesheetHandler> {
             QuirksMode::NoQuirks,
             AllowImportRules::Yes,
         );
+        keep_only_paint_in_state_rules(&sheet, &self.data.guard);
 
         self.respond(
             resolved_url,
@@ -314,6 +317,7 @@ impl NetHandler for ResourceHandler<NestedStylesheetHandler> {
             QuirksMode::NoQuirks,
             AllowImportRules::Yes,
         ));
+        keep_only_paint_in_state_rules(&sheet, &self.data.lock);
 
         // Fetch @font-face fonts
         fetch_font_face(
@@ -631,6 +635,96 @@ pub(crate) fn decode_gif_animation(
     }
     let (width, height) = size?;
     (frames.len() > 1).then_some((width, height, crate::node::AnimationFrames { frames }))
+}
+
+/// BGMail: selector pieces whose match changes with what the user does.
+const STATE_PSEUDO_CLASSES: &[&str] = &[":hover", ":active", ":focus", ":checked", ":target"];
+
+/// BGMail: whether a declaration in a rule matching on [`STATE_PSEUDO_CLASSES`] only changes
+/// how boxes look. As Gmail keeps `:hover` for colors but strips what generates content.
+fn is_paint_property(name: &str) -> bool {
+    matches!(
+        name,
+        "color" | "opacity" | "cursor" | "box-shadow" | "text-shadow"
+    ) || name.starts_with("background-")
+        || name.starts_with("text-decoration-")
+        || name.ends_with("-color")
+}
+
+/// BGMail: reduces rules that apply on hover, focus and the like to paint properties, so no
+/// box is created or freed by moving the pointer. That path holds most of the renderer's
+/// crashes on hostile CSS, and past the first frame nothing protects the user from it.
+/// Mail keeps working: hover effects are nearly always colors, and a message must also
+/// read without them, as Outlook has none.
+pub(crate) fn keep_only_paint_in_state_rules(sheet: &Stylesheet, lock: &SharedRwLock) {
+    let mut blocks = Vec::new();
+    {
+        let guard = lock.read();
+        collect_state_blocks(
+            sheet.contents(&guard).rules(&guard).iter(),
+            false,
+            &guard,
+            &mut blocks,
+        );
+    }
+    let mut guard = lock.write();
+    for block in blocks {
+        let block = block.write_with(&mut guard);
+        let mut kept = PropertyDeclarationBlock::new();
+        for (declaration, importance) in block.declaration_importance_iter() {
+            if is_paint_property(&declaration.id().name()) {
+                kept.push(declaration.clone(), importance);
+            }
+        }
+        *block = kept;
+    }
+}
+
+fn collect_state_blocks<'a>(
+    rules: impl Iterator<Item = &'a CssRule>,
+    in_state_rule: bool,
+    guard: &'a SharedRwLockReadGuard,
+    blocks: &mut Vec<ServoArc<Locked<PropertyDeclarationBlock>>>,
+) {
+    for rule in rules {
+        let (nested, in_state_rule) = match rule {
+            CssRule::Style(rule) => {
+                let rule = rule.read_with(guard);
+                let selectors = rule.selectors.to_css_string();
+                let in_state_rule = in_state_rule
+                    || STATE_PSEUDO_CLASSES
+                        .iter()
+                        .any(|state| selectors.contains(state));
+                if in_state_rule {
+                    blocks.push(rule.block.clone());
+                }
+                (rule.rules.as_ref(), in_state_rule)
+            }
+            CssRule::NestedDeclarations(rule) => {
+                if in_state_rule {
+                    blocks.push(rule.read_with(guard).block.clone());
+                }
+                (None, in_state_rule)
+            }
+            CssRule::Media(rule) => (Some(&rule.rules), in_state_rule),
+            CssRule::Supports(rule) => (Some(&rule.rules), in_state_rule),
+            CssRule::Container(rule) => (Some(&rule.rules), in_state_rule),
+            CssRule::LayerBlock(rule) => (Some(&rule.rules), in_state_rule),
+            CssRule::Document(rule) => (Some(&rule.rules), in_state_rule),
+            CssRule::StartingStyle(rule) => (Some(&rule.rules), in_state_rule),
+            // Its bounds can match on state too, and nothing in mail needs it.
+            CssRule::Scope(rule) => (Some(&rule.rules), true),
+            _ => (None, in_state_rule),
+        };
+        if let Some(nested) = nested {
+            collect_state_blocks(
+                nested.read_with(guard).0.iter(),
+                in_state_rule,
+                guard,
+                blocks,
+            );
+        }
+    }
 }
 
 /// Handles HTML fetched for an `<iframe>` element's `src`

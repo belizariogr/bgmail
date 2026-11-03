@@ -1264,6 +1264,9 @@ impl BaseDocument {
             QuirksMode::NoQuirks,
             AllowImportRules::Yes,
         );
+        if origin == Origin::Author {
+            crate::net::keep_only_paint_in_state_rules(&data, &self.guard);
+        }
 
         DocumentStyleSheet(ServoArc::new(data))
     }
