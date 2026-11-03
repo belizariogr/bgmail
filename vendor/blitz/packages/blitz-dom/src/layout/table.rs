@@ -104,6 +104,14 @@ struct ColumnCursor {
     rowspans: Vec<u16>,
 }
 
+/// BGMail: the most a `colspan` or `<col span>` counts, as in the HTML standard.
+const MAX_COLSPAN: u16 = 1000;
+/// BGMail: the most columns of a table. A column costs about 55 bytes in every layout of
+/// the table, and grid lines are `i16`.
+const MAX_TABLE_COLUMNS: u16 = 8192;
+/// BGMail: the last row that gets its own grid line (`i16`); later ones overlap it.
+const MAX_TABLE_ROW: u16 = i16::MAX as u16;
+
 impl ColumnCursor {
     fn start_row(&mut self) {
         self.col = 0;
@@ -120,8 +128,18 @@ impl ColumnCursor {
         self.col
     }
 
+    /// BGMail: the column and span a cell at the next free column gets within
+    /// [`MAX_TABLE_COLUMNS`]. Cells that don't fit overlap the last column, as browsers let
+    /// cells overlap.
+    fn fit(&mut self, colspan: u16) -> (u16, u16) {
+        let col = self.next_free().min(MAX_TABLE_COLUMNS - 1);
+        self.col = col;
+        (col, colspan.clamp(1, MAX_TABLE_COLUMNS - col))
+    }
+
     fn place(&mut self, colspan: u16, rowspan: u16) {
-        let end = self.col + colspan;
+        // BGMail: `u16` wrapped around past 65535 columns, and the slice below panicked.
+        let end = (self.col as usize + colspan as usize).min(MAX_TABLE_COLUMNS as usize) as u16;
         if self.rowspans.len() < end as usize {
             self.rowspans.resize(end as usize, 0);
         }
@@ -540,7 +558,9 @@ fn collect_columns(
                 ),
                 _ => column,
             };
-            for _ in 0..span {
+            // BGMail: limited as `colspan`, or a short `<col>` costs 65535 columns.
+            let room = (MAX_TABLE_COLUMNS as usize).saturating_sub(columns.len());
+            for _ in 0..(span as usize).min(MAX_COLSPAN as usize).min(room) {
                 columns.push(TableColumn {
                     node_id,
                     group: None,
@@ -722,7 +742,7 @@ fn collect_table_cells(
         }
         DisplayInside::TableRow => {
             node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
-            *row += 1;
+            *row = row.saturating_add(1);
             cursor.start_row();
 
             let height = node.primary_styles().and_then(|style| {
@@ -776,16 +796,17 @@ fn collect_table_cells(
             let colspan: u16 = (!anonymous)
                 .then(|| node.attr(local_name!("colspan")))
                 .flatten()
-                .and_then(|val| val.parse().ok())
-                .unwrap_or(1);
+                .and_then(|val| val.parse::<u16>().ok())
+                .map_or(1, |v| v.clamp(1, MAX_COLSPAN));
             let rowspan: u16 = (!anonymous)
                 .then(|| node.attr(local_name!("rowspan")))
                 .flatten()
                 .and_then(|val| val.parse::<u16>().ok())
-                .map(|v| v.clamp(1, 65534))
+                // BGMail: 65534 as in the standard wraps the `i16` grid lines around.
+                .map(|v| v.clamp(1, MAX_TABLE_ROW.saturating_sub(*row).max(1)))
                 .unwrap_or(1);
             let mut style = table_taffy_style(stylo_style, wm);
-            let col = cursor.next_free();
+            let (col, colspan) = cursor.fit(colspan);
 
             // In the collapsed borders model the borders are laid out as gutters between
             // the cells (see the table's `gap`) rather than as part of the cells
@@ -912,7 +933,7 @@ fn collect_table_cells(
                 end: style_helpers::span(colspan),
             };
             style.grid_row = taffy::Line {
-                start: style_helpers::line(*row as i16),
+                start: style_helpers::line((*row).min(MAX_TABLE_ROW) as i16),
                 end: style_helpers::span(rowspan),
             };
             if rowspan == 1 && style.size.height.tag() == taffy::CompactLength::LENGTH_TAG {
