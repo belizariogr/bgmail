@@ -61,6 +61,11 @@ pub struct TableContext {
     /// Taffy stores calc values as raw pointers, so these must outlive the `style`.
     #[allow(dead_code)]
     calc_values: Vec<LengthPercentage>,
+    /// BGMail: `style` holds raw pointers to the `calc()` values of these styles, and a
+    /// restyle that compares equal keeps this context while replacing the styles. Without
+    /// them a hover or a window resize made layout read freed memory.
+    #[allow(dead_code)]
+    computed_style: ServoArc<ComputedValues>,
 }
 
 // #[derive(Debug, Clone, Eq, PartialEq)]
@@ -73,6 +78,9 @@ pub struct TableContext {
 pub struct TableCell {
     // kind: TableItemKind,
     pub node_id: NodeId,
+    /// BGMail: keeps the `calc()` values of `style` alive; see `TableContext::computed_style`.
+    #[allow(dead_code)]
+    computed_style: ServoArc<ComputedValues>,
     /// Index (into `TableContext::rows`) of the row the cell originates in
     pub row: u16,
     /// Index of the column the cell originates in
@@ -267,6 +275,7 @@ pub(crate) fn build_table_context(
         panic!("Ignoring table because it has no styles");
     };
 
+    let computed_style = ServoArc::clone(&stylo_styles);
     let mut style = table_taffy_style(&stylo_styles, wm);
     style.item_is_table = true;
     // BGMail: a table's `height` is a minimum: the table grows to fit its
@@ -488,6 +497,7 @@ pub(crate) fn build_table_context(
             border_style: first_cell_border,
             is_fixed,
             calc_values,
+            computed_style,
         },
         layout_children,
         anonymous_blocks,
@@ -974,6 +984,7 @@ fn collect_table_cells(
                 style.size.width = style_helpers::percent(1.0);
             }
             cells.push(TableCell {
+                computed_style: ServoArc::clone(stylo_style),
                 span: (colspan, rowspan),
                 span_width,
                 node_id,
