@@ -33,6 +33,9 @@ pub struct PaintCache {
     cached_pixel_bytes: u64,
     /// Bytes of them the frame being painted has used.
     frame_pixel_bytes: u64,
+    /// Textures no longer cached, to leave the GPU's atlas at the next replay: the frame that
+    /// dropped them may still draw them.
+    evicted: Vec<Arc<RenderImage>>,
     known_families: Option<HashSet<String>>,
     /// GPUI family of each registered web font file, by (blob id, face index).
     web_font_families: HashMap<(u64, u32), String>,
@@ -45,6 +48,14 @@ pub struct PaintCache {
 }
 
 impl PaintCache {
+    fn evict_pixels(&mut self) {
+        self.evicted
+            .extend(self.images.drain().map(|(_, image)| image));
+        self.evicted
+            .extend(self.gradients.drain().map(|(_, image)| image));
+        self.cached_pixel_bytes = 0;
+    }
+
     /// Accounts for `bytes` of new pixels the frame needs, starting over if they don't fit.
     /// `false` if the frame alone is past the limit: what comes after it isn't drawn, or each
     /// repaint would make the same textures again and fill the GPU with them.
@@ -54,10 +65,7 @@ impl PaintCache {
         }
         self.frame_pixel_bytes += bytes;
         if self.cached_pixel_bytes + bytes > MAX_CACHED_PIXEL_BYTES {
-            // What this frame already drew holds its own reference, so it stays valid.
-            self.images.clear();
-            self.gradients.clear();
-            self.cached_pixel_bytes = 0;
+            self.evict_pixels();
         }
         self.cached_pixel_bytes += bytes;
         true
@@ -73,9 +81,7 @@ impl PaintCache {
     /// gradients, colour glyphs, animations) so a long session doesn't keep
     /// every message's pixels. Font registrations stay: GPUI keeps the fonts.
     pub fn forget_document(&mut self) {
-        self.images.clear();
-        self.gradients.clear();
-        self.cached_pixel_bytes = 0;
+        self.evict_pixels();
         self.color_glyphs.clear();
         self.animations.clear();
         self.animation_starts.clear();
@@ -727,6 +733,11 @@ fn paint_image_fill(
     cache: &mut PaintCache,
     window: &mut Window,
 ) {
+    // Before anything is decoded or counted: what can't be seen needs neither, and a long
+    // message would use up the frame's pixels on its first screens.
+    if !to_bounds(area, origin).intersects(&window.content_mask().bounds) {
+        return;
+    }
     let tile = transform.transform_rect_bbox(Rect::new(
         0.0,
         0.0,
@@ -880,6 +891,9 @@ pub fn paint_display_list(
     cache.animations.clone_from(&list.animations);
     cache.next_frame = None;
     cache.frame_pixel_bytes = 0;
+    for image in cache.evicted.drain(..) {
+        window.drop_image(image).ok();
+    }
     let mut index = 0;
     while index < list.commands.len() {
         // A stray Pop at top level is skipped instead of ending the replay.
@@ -962,6 +976,14 @@ mod tests {
         cache.frame_pixel_bytes = 0;
         assert!(cache.make_room(1));
         assert_eq!(cache.cached_pixel_bytes, 1);
+        // What leaves the cache also leaves the GPU, at the next replay.
+        let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
+            image::RgbaImage::new(1, 1)
+        )]));
+        cache.gradients.insert((String::new(), 1, 1), image);
+        cache.forget_document();
+        assert!(cache.gradients.is_empty());
+        assert_eq!(cache.evicted.len(), 1);
         // An image past what GPUs take shrinks whatever it is drawn at, and the sizes of
         // an image stay few however many widths a message asks for.
         assert_eq!(downscaled_size((65535, 1), (65535.0, 1.0)), Some((8191, 1)));
