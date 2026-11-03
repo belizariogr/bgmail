@@ -903,7 +903,11 @@ impl RoundTree for LayoutPassState<'_> {
     }
 
     fn hoisted_child_count(&self, node_id: NodeId) -> usize {
-        self.node_from_id(node_id).hoisted_children.borrow().len()
+        // BGMail: a box laid out from cache keeps the list of its last layout, and a width
+        // crossing `@media` may have freed a pseudo-element in it since.
+        let mut children = self.node_from_id(node_id).hoisted_children.borrow_mut();
+        children.retain(|id| self.nodes.contains_key(*id));
+        children.len()
     }
 
     fn get_hoisted_child_id(&self, node_id: NodeId, index: usize) -> NodeId {
