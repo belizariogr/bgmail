@@ -77,9 +77,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   selection_color }`: parse options; extra UA CSS goes after Blitz's default
   sheet; `selection_color` is RGBA.
 - `const MAX_NESTING_DEPTH = 256`: deepest nesting `try_parse` accepts.
-- `fn has_too_many_open_tags(html) -> bool` (pub): linear scan for more than `MAX_OPEN_TAGS`
-  (16384) elements left open, by name; hosts run it before sanitizing and parsing, both
-  quadratic in them.
+- `fn has_too_many_tags(html) -> bool` (pub): linear scan for more than `MAX_OPENING_TAGS` (500k)
+  tags or `MAX_TAG_ATTRIBUTES` (1024) attributes in one, resuming after each tag's end; hosts run
+  it before sanitizing and parsing. Nesting and text are the parser's budgets.
 - `fn with_render_stack(build) -> T` (pub): runs `build` on a thread with 8 MiB of stack,
   what `MAX_NESTING_DEPTH` assumes; pool threads have less (512 KB on macOS).
 - `const MAX_TABLE_SPAN_AREA = 2_000_000`: most cells `colspan`/`rowspan`/`<col span>` add.
@@ -156,8 +156,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
     `document_mode(html)` is `NoQuirks`.
 - `with_depth()` (private): records the tree's nesting depth after parsing.
 - `HtmlDocument::try_parse(html, options) -> Result<Self, RenderError>`:
-  `parse`, then `TooComplex` at `blitz_dom::MAX_DOM_NODES` (where parsing stopped), `TooDeep`
-  above `MAX_NESTING_DEPTH`, and `TooComplex` above `MAX_TABLE_SPAN_AREA` (`table_span_area`,
+  `parse`, then `TooDeep` above `MAX_NESTING_DEPTH`, `TooComplex` if parsing stopped at a budget
+  (`parse_refused`), and `TooComplex` above `MAX_TABLE_SPAN_AREA` (`table_span_area`,
   any element, as a cell's display isn't known yet).
 - `HtmlDocument::depth()`: element nesting depth.
 - `HtmlDocument::layout(width) -> f32`: returns 0 without resolving a tree
@@ -443,8 +443,10 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `fn css_angle(start, end)`: CSS gradient angle (0° up, clockwise).
 - `fn to_bgra_straight(brush)`: RGBA/BGRA, premultiplied or straight → straight
   BGRA (GPUI's image format).
-- `PaintCache::make_room(bytes)`: accounts for pixels about to be cached, clearing images and
-  gradients past `MAX_CACHED_PIXEL_BYTES` (512 MiB).
+- `PaintCache::make_room(bytes) -> bool`: accounts for new pixels a frame needs. `false` if the
+  frame alone passes `MAX_CACHED_PIXEL_BYTES` (512 MiB), and what doesn't fit isn't drawn, instead
+  of remaking the same textures on every repaint; otherwise clears images and gradients when the
+  cache would pass it. Hits count toward the frame too (`frame_pixel_bytes`).
 - `fn paint_sampled_gradient`: samples only boxes that intersect the content mask, keyed relative
   to the box so equal boxes share one texture.
 - `fn downscaled_size(source, target) -> Option<(u32, u32)>`: sizes are the source's halved (few

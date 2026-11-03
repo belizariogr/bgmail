@@ -61,19 +61,23 @@ repository instead of living in someone's checkout.
     `MAX_IMPORTS` limits the total imports of a stylesheet.
   - `net.rs` (`keep_only_paint_in_state_rules`, also called by `make_stylesheet`): author rules
     matching on `:hover`, `:active`, `:focus*`, `:checked`, `:target` keep only paint properties,
-    so moving the pointer never creates or frees a box. Reconstruction still happens when a
-    width crosses `@media`, so stale-id tolerance stays.
-  - `blitz-html/src/html_sink.rs`: fed in 4 KiB pieces, stops at `MAX_DOM_NODES` (500k), since a
-    tag can make hundreds of nodes; hosts refuse the partial document by its node count.
+    never custom ones, so moving the pointer never creates or frees a box. Reconstruction still
+    happens when a width crosses `@media`, so stale-id tolerance stays (`hoisted_child_count` in
+    `layout/mod.rs` drops freed boxes from a cached list).
+  - `blitz-html/src/html_sink.rs`: fed in 4 KiB pieces, stops at `MAX_DOM_NODES` (500k, comments and
+    foster-parented text included), `MAX_PARSE_DEPTH` (1024, measured on append, as the tree
+    builder pops without telling the sink), `MAX_TEXT_BYTES` (4 MiB) or `MAX_MARKUP_BYTES` (64 MiB
+    of attributes and comments; past it elements are created without attributes, as a piece can
+    copy one thousands of times). `finish` sets `BaseDocument::parse_refused`; hosts refuse it.
   - `net.rs` + `document.rs`: WOFF1 tables sum at most 128 MiB (`woff1_table_bytes`), a
     document's fonts 512 MiB (`font_bytes`).
   - `layout/table.rs`: `TableContext` and `TableCell` keep the `ComputedValues` their `calc()`
     pointers point into (`computed_style`).
-  - `layout/inline/build.rs`: at most `MAX_INLINE_SPANS` (60k) style spans per inline context,
-    as Parley asserts on more than `u16::MAX`; past it text takes the open style and `<br>`
-    doesn't break.
-  - `layout/inline/layout.rs`: at most `MAX_FORCED_INLINE_LAYOUTS` (100k) full layouts per pass
-    for baselines (`forced_inline_layouts`), as nested inline tables were exponential.
+  - `layout/inline/build.rs`: at most `MAX_INLINE_SPANS` (30k) style spans per inline context,
+    as Parley asserts on more than `u16::MAX` styles and a `nowrap` span can take two; past it
+    text takes the open style and `<br>` doesn't break.
+  - `layout/inline/layout.rs`: full layouts for baselines stop after `MAX_LAYOUT_VISITS_FOR_BASELINES`
+    (4 M, `layout_visits`) node visits per pass, as nested inline tables were exponential.
   - `node/node.rs`: `containing_block` and the walks up skip freed boxes.
   - `net.rs`: GIF animations decode under `Limits` (2 × `MAX_ANIMATION_BYTES`), still images
     under `MAX_IMAGE_BYTES` (256 MiB), and a document's images share

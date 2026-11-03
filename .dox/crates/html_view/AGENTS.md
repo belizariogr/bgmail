@@ -122,8 +122,9 @@ positions Blitz computed.
   `MAX_NESTING_DEPTH` (256) with `RenderError::TooDeep`, and `layout`/paint
   never process such a tree (defense in depth). The Blitz document is not
   `Send`, so it can't move off the UI thread. Hostile markup is bounded by
-  `blitz_dom::MAX_DOM_NODES` and `MAX_TABLE_SPAN_AREA` (`RenderError::TooComplex`), by
-  `has_too_many_open_tags` before sanitizing, `PaintCache`'s `MAX_CACHED_PIXEL_BYTES` and
+  the parser's budgets (`blitz_dom::MAX_DOM_NODES` and siblings) and `MAX_TABLE_SPAN_AREA`
+  (`RenderError::TooComplex`), by `has_too_many_tags` before sanitizing, `PaintCache`'s
+  `MAX_CACHED_PIXEL_BYTES` per document and per frame and
   `MAX_UPLOAD_SIDE`, by the display
   list's `MAX_PATH_ELEMENTS` and `MAX_DASHES`, and by `MAX_DECORATION_MARKS`,
   `MAX_BORDER_DOTS` in the painters; what passes them is drawn solid or not at all.

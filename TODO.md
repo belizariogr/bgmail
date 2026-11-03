@@ -444,6 +444,24 @@
       the main window; discovery keeps its login; IME selection stays inside the text;
       pasting cleans line breaks; single-line fields scroll and clip; `EHLO` doesn't
       send the machine's name, as Thunderbird (decided from its behavior).
+- ✅ Review round 14: resizing across `@media` no longer rounds freed hoisted boxes; a body of
+  repeated `cid:` no longer copies itself per marker during sync; the parser also budgets comments,
+  text (4 MiB), attributes (64 MiB) and depth, so large HTML text opens clipped as text; custom
+  properties can't carry layout through a hover; 30k style spans per inline context; forced layouts
+  are limited by node visits; `lol_html` 3.0.1 stops the quadratic unmatched end tags, and a scan
+  refuses over 500k tags or 1024 attributes in one, also when printing; a frame past 512 MiB of
+  pixels leaves the rest out instead of remaking textures; the sync thread has 16 MiB of stack; a
+  hostile `COPYUID` isn't expanded.
+- ⬜ Known limits of round 14, by the rule below. Forwarding puts the whole body in the editor, which
+  shapes every line (over 2 MiB should forward as `message/rfc822`, as Thunderbird). Text with
+  negative spacing past its own width isn't drawn. `store_body` of 200 MB holds the write lock
+  10 s, and another connection can fail with `database is locked`. `References` has no cap (1.1 MB
+  replying to 50000). A hostile server: an IMAP line or `FETCH` is unbounded (6.7 GB in 3 s), and
+  `BODYSTRUCTURE` parses recursively (16 MiB of stack covers what servers relay).
+- Renderer rule from round 14: a panic or abort, and any cost during sync, is always fixed. Cost in
+  the renderer is fixed above 2 s on the UI thread for messages under 256 KB, or 30 s and 2 GB in
+  the background; below that it is recorded here with its number. A hostile server is recorded
+  unless the fix is a few lines.
 - ✅ Review round 13: nested `message/rfc822` no longer overflow the sync thread's stack on
   every start; a table's `calc()` no longer reads freed styles; rules on `:hover` and other
   states keep only paint properties (from Gmail, which keeps hover for colors), so the pointer
