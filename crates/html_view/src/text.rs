@@ -10,7 +10,7 @@
 use crate::display_list::{ColorGlyphRun, FaceSpec, TextRun, Word};
 use blitz_dom::node::TextBrush;
 use kurbo::{Affine, Point};
-use parley::layout::GlyphRun;
+use parley::layout::{GlyphRun, Run};
 use peniko::{Color, FontData};
 use skrifa::{string::StringId, MetadataProvider};
 use std::collections::HashMap;
@@ -144,18 +144,50 @@ pub fn is_blank(source: &str, range: std::ops::Range<usize>) -> bool {
         .is_none_or(|text| text.chars().all(|c| c.is_whitespace() || c.is_control()))
 }
 
-/// Clusters belonging to one glyph run.
+/// Clusters belonging to one glyph run, and where the next glyph run's start.
 ///
 /// Parley splits a shaped run into glyph runs wherever the style changes (a
 /// link's colour, say) without exposing which clusters each one covers. The
 /// glyph runs of a run partition its clusters contiguously in visual order, so
 /// the clusters inside `[offset, offset + advance)` are exactly this run's.
-pub fn clusters_in_span(clusters: &[ClusterSpan], offset: f32, advance: f32) -> Vec<ClusterSpan> {
+/// Continuing from `from` keeps a long run of many styles linear.
+pub fn clusters_in_span(
+    clusters: &[ClusterSpan],
+    from: usize,
+    offset: f32,
+    advance: f32,
+) -> (Vec<ClusterSpan>, usize) {
     const EPSILON: f32 = 0.01;
-    clusters
+    let rest = &clusters[from.min(clusters.len())..];
+    let skipped = rest.iter().take_while(|c| c.x < offset - EPSILON).count();
+    let span: Vec<ClusterSpan> = rest[skipped..]
         .iter()
-        .filter(|c| c.x >= offset - EPSILON && c.x < offset + advance - EPSILON)
+        .take_while(|c| c.x < offset + advance - EPSILON)
         .cloned()
+        .collect();
+    let next = from + skipped + span.len();
+    (span, next)
+}
+
+/// The clusters of a shaped run in visual order, placed from `run_start_x`. Done once per
+/// run, not per glyph run: a run can have tens of thousands of them.
+pub fn shaped_clusters(
+    run: &Run<'_, TextBrush>,
+    source: &str,
+    run_start_x: f32,
+) -> Vec<ClusterSpan> {
+    let mut x = run_start_x;
+    run.visual_clusters()
+        .map(|cluster| {
+            let span = ClusterSpan {
+                text_range: cluster.text_range(),
+                x,
+                advance: cluster.advance(),
+                is_space: cluster.is_space_or_nbsp() || is_blank(source, cluster.text_range()),
+            };
+            x += span.advance;
+            span
+        })
         .collect()
 }
 
@@ -226,7 +258,8 @@ pub fn color_glyph_run(glyph_run: &GlyphRun<'_, TextBrush>, transform: Affine) -
 /// Blitz would pass to `draw_glyphs`).
 pub fn text_run_from_glyph_run(
     glyph_run: &GlyphRun<'_, TextBrush>,
-    run_start_x: f32,
+    run_clusters: &[ClusterSpan],
+    next_cluster: &mut usize,
     source: &str,
     transform: Affine,
     color: Color,
@@ -254,21 +287,13 @@ pub fn text_run_from_glyph_run(
         synthesis.skew().is_some(),
     );
 
-    let mut x = run_start_x;
-    let clusters: Vec<ClusterSpan> = run
-        .visual_clusters()
-        .map(|cluster| {
-            let span = ClusterSpan {
-                text_range: cluster.text_range(),
-                x,
-                advance: cluster.advance(),
-                is_space: cluster.is_space_or_nbsp() || is_blank(source, cluster.text_range()),
-            };
-            x += span.advance;
-            span
-        })
-        .collect();
-    let clusters = clusters_in_span(&clusters, glyph_run.offset(), glyph_run.advance());
+    let (clusters, next) = clusters_in_span(
+        run_clusters,
+        *next_cluster,
+        glyph_run.offset(),
+        glyph_run.advance(),
+    );
+    *next_cluster = next;
     let baseline = transform * Point::new(glyph_run.offset() as f64, glyph_run.baseline() as f64);
     let [scale_x, ..] = transform.as_coeffs();
     let to_doc_x = |x: f32| (transform * Point::new(x as f64, 0.0)).x as f32;
@@ -403,13 +428,13 @@ mod tests {
                 (9..12, 30.0, false),
             ],
         );
-        let link = clusters_in_span(&all, 35.0, 40.0);
+        let (link, next) = clusters_in_span(&all, 0, 35.0, 40.0);
         let link_words = group_words(source, &link);
         assert_eq!(
             (link_words[0].text.as_str(), link_words[0].x),
             ("link", 35.0)
         );
-        let tail = clusters_in_span(&all, 75.0, 35.0);
+        let (tail, _) = clusters_in_span(&all, next, 75.0, 35.0);
         let tail_words = group_words(source, &tail);
         assert_eq!(
             (tail_words[0].text.as_str(), tail_words[0].x),

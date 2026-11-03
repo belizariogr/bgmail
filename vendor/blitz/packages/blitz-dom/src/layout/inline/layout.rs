@@ -34,6 +34,9 @@ use crate::stylo_to_parley;
 /// (e.g. 150.016px in a 150px column) still fits on one line in browsers.
 const LINE_FIT_TOLERANCE: f32 = 1.0 / 32.0;
 
+/// BGMail: the most full layouts a layout pass forces for baselines; see their use.
+const MAX_FORCED_INLINE_LAYOUTS: usize = 100_000;
+
 fn subtract_margins(mut child_inputs: LayoutInput, margin: taffy::Rect<f32>) -> LayoutInput {
     child_inputs.available_space = child_inputs
         .available_space
@@ -472,14 +475,19 @@ impl LayoutPassState<'_> {
                 && !contain_layout
                 && !is_table_element;
             let mut box_inputs = inline_box_inputs(style.size().width, margin, child_inputs);
+            drop(style);
             // BGMail: Taffy only reports baselines from a full layout. Measuring
             // the line (`ComputeSize`) with a baseline-less box would sit it on
             // its bottom edge and make the line taller than the final one (e.g.
             // a table row sized around an inline-block button).
-            if exports_baseline {
+            //
+            // A full layout skips Taffy's measure cache, so nested inline tables cost about
+            // 4x per level: a 600-byte message froze the app for seconds. Past the budget a
+            // box is measured, and may sit on its bottom edge instead of its baseline.
+            if exports_baseline && self.forced_inline_layouts < MAX_FORCED_INLINE_LAYOUTS {
+                self.forced_inline_layouts += 1;
                 box_inputs.run_mode = taffy::RunMode::PerformLayout;
             }
-            drop(style);
 
             if is_out_of_flow || is_floated {
                 ibox.width = 0.0;

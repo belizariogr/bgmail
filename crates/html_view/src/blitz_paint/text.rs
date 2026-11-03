@@ -802,7 +802,8 @@ pub(crate) fn stroke_text<'a>(
         // BGMail: start x of the shaped run the current glyph run belongs to
         // (glyph runs of one shaped run are consecutive on a line).
         let mut shaped_run: Option<(std::ops::Range<usize>, u64, u32)> = None;
-        let mut shaped_run_start_x = 0.0f32;
+        let mut run_clusters = Vec::new();
+        let mut next_cluster = 0;
 
         for item in line.items() {
             if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
@@ -813,7 +814,10 @@ pub(crate) fn stroke_text<'a>(
                 );
                 if shaped_run.as_ref() != Some(&key) {
                     shaped_run = Some(key);
-                    shaped_run_start_x = glyph_run.offset();
+                    run_clusters = source_text.map_or_else(Vec::new, |source| {
+                        crate::text::shaped_clusters(&glyph_run.run(), source, glyph_run.offset())
+                    });
+                    next_cluster = 0;
                 }
                 let run = glyph_run.run();
                 let font = run.font();
@@ -873,7 +877,8 @@ pub(crate) fn stroke_text<'a>(
                 let text_run = source_text.and_then(|source| {
                     crate::text::text_run_from_glyph_run(
                         &glyph_run,
-                        shaped_run_start_x,
+                        &run_clusters,
+                        &mut next_cluster,
                         source,
                         transform,
                         fill_color,
