@@ -1767,6 +1767,30 @@ mod tests {
     }
 
     #[test]
+    fn imports_and_images_that_do_not_resolve_are_ignored() {
+        for html in [
+            "<!DOCTYPE html><style>@import url();</style><p>x</p>",
+            "<!DOCTYPE html><style>@import \"\";</style><p>x</p>",
+            "<!DOCTYPE html><style>@import url(http://[);</style><p>x</p>",
+            "<!DOCTYPE html><style>@import \"data:text/css,@import 'x.css';\";</style><p>x</p>",
+            "<!DOCTYPE html><img src=\"ftp://\"><p>x</p>",
+            "<!DOCTYPE html><img src=\"https://x.test:99999/a.png\"><p>x</p>",
+        ] {
+            laid_out(html);
+        }
+    }
+
+    #[test]
+    fn a_stylesheet_importing_itself_runs_out_of_imports() {
+        let start = std::time::Instant::now();
+        laid_out(
+            "<!DOCTYPE html><style>@import \"data:text/css,@import '%23';@import '%23';@import '%23';\";</style><p>x</p>",
+        );
+        // Without a limit on the total, this doesn't finish in minutes.
+        assert!(start.elapsed() < std::time::Duration::from_secs(20));
+    }
+
+    #[test]
     fn hit_info_reports_a_protocol_relative_link_as_a_web_link() {
         const HTML: &str = "<!DOCTYPE html><body style=\"margin:0\"><p id=\"l\" style=\"margin:0\"><a href=\"//example.com/x\">link</a></p>";
         let doc = laid_out(HTML);

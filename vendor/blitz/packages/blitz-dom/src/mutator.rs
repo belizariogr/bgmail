@@ -1285,7 +1285,10 @@ impl<'doc> DocumentMutator<'doc> {
         let node = &self.doc.nodes[target_id];
         if let Some(raw_src) = node.attr(local_name!("src")) {
             if !raw_src.is_empty() {
-                let src = self.doc.resolve_url(raw_src);
+                // BGMail: a `src` that doesn't parse (`ftp://`) stays unloaded, not a panic.
+                let Some(src) = self.doc.url.resolve_relative(raw_src) else {
+                    return;
+                };
                 let src_string = src.as_str();
 
                 // Check cache first

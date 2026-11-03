@@ -337,6 +337,7 @@ impl BaseDocument {
             shell_provider: self.shell_provider.clone(),
             abort_signal: self.abort_signal.clone(),
             import_depth: 0,
+            import_budget: crate::net::new_import_budget(),
         }
     }
 

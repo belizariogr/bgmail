@@ -173,6 +173,7 @@ impl NetHandler for ResourceHandler<StylesheetHandler> {
                 shell_provider: self.shell_provider.clone(),
                 abort_signal: self.data.abort_signal.clone(),
                 import_depth: 0,
+                import_budget: new_import_budget(),
             }),
             None, // error_reporter
             QuirksMode::NoQuirks,
@@ -192,6 +193,14 @@ impl NetHandler for ResourceHandler<StylesheetHandler> {
 /// the URL growing geometrically at each level).
 const MAX_IMPORT_DEPTH: usize = 16;
 
+/// BGMail: maximum `@import`s of a stylesheet and all it imports. The depth alone lets a
+/// `data:` sheet importing itself through its fragment cost `k^16` parses in a message.
+const MAX_IMPORTS: usize = 64;
+
+pub(crate) fn new_import_budget() -> Arc<AtomicUsize> {
+    Arc::new(AtomicUsize::new(MAX_IMPORTS))
+}
+
 #[derive(Clone)]
 pub(crate) struct StylesheetLoader {
     pub(crate) tx: Sender<DocumentEvent>,
@@ -202,6 +211,8 @@ pub(crate) struct StylesheetLoader {
     /// Depth of `@import` nesting for the stylesheet this loader is parsing
     /// (0 for a top-level stylesheet)
     pub(crate) import_depth: usize,
+    /// BGMail: imports left; see [`MAX_IMPORTS`].
+    pub(crate) import_budget: Arc<AtomicUsize>,
 }
 impl ServoStylesheetLoader for StylesheetLoader {
     fn request_stylesheet(
@@ -213,7 +224,18 @@ impl ServoStylesheetLoader for StylesheetLoader {
         supports: Option<ImportSupportsCondition>,
         layer: ImportLayer,
     ) -> ServoArc<Locked<ImportRule>> {
-        if self.import_depth >= MAX_IMPORT_DEPTH || !supports.as_ref().is_none_or(|s| s.enabled) {
+        // BGMail: a URL that doesn't resolve (`@import url()`) is refused too, not a panic:
+        // messages are full of them, once stripped of what they'd load.
+        let spent = || {
+            self.import_budget
+                .fetch_update(Ao::AcqRel, Ao::Acquire, |left| left.checked_sub(1))
+                .is_err()
+        };
+        if self.import_depth >= MAX_IMPORT_DEPTH
+            || !supports.as_ref().is_none_or(|s| s.enabled)
+            || url.url().is_none()
+            || spent()
+        {
             return ServoArc::new(lock.wrap(ImportRule {
                 url,
                 stylesheet: ImportSheet::new_refused(),
@@ -231,7 +253,7 @@ impl ServoStylesheetLoader for StylesheetLoader {
             source_location: location,
         };
 
-        let url = import.url.url().unwrap().clone();
+        let url = import.url.url().expect("checked above").clone();
         let import = ServoArc::new(lock.wrap(import));
         self.net_provider.fetch(
             self.doc_id,
