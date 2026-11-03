@@ -165,8 +165,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `HtmlDocument::depth()`: element nesting depth.
 - `HtmlDocument::layout(width) -> f32`: returns 0 without resolving a tree
   deeper than the limit; otherwise sets the viewport when the width changes
-  (dropping the cached display list), resolves styles/layout (re-resolving while
-  critical resources are pending, max 4 passes), records content width =
+  (dropping the cached display list), resolves styles/layout (again while critical
+  resources are pending or resources just arrived, which also drops the cached list, max 4
+  passes), records content width =
   max(width, `overflow_right`) and returns content height =
   max(root height, root scrollHeight).
 - `HtmlDocument::set_zoom(zoom)` / `zoom()`: page zoom (clamped 25%–500%,
@@ -315,7 +316,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   refused layers are counted (`refused_layers`) so their `Pop`s and contents stay out.
 - `DisplayList::push_dots(transform, color, radius, centers)`: dotted borders as `Command::Dots`, drawn
   as a quad per visible dot, since in one path they took seconds to tessellate; a path under a
-  rotation or skew. Costs 4 per dot.
+  rotation, skew or a different scale per axis, as quads are round. Costs 4 per dot.
 - `DisplayList::exhausted()`: the budget ran out; painters that build a lot check it first.
 - `fn gradient_stops(brush)`: what a brush adds to a command's cost.
 - `fn path_cost(path)`: elements, plus for each curve the segments flattening takes (`sqrt(extent /
@@ -459,7 +460,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   of remaking the same textures on every repaint; otherwise clears images and gradients when the
   cache would pass it. Hits count toward the frame too (`frame_pixel_bytes`).
 - `PaintCache::evict_pixels()`: empties images and gradients. The atlas keeps their textures (⬜ in `TODO.md`): `window.drop_image` aborts on one with uploads pending.
-- `fn stretched_tile(repeat, tile, area, scale, horizontal)`: a tile under a device pixel on an axis stops repeating there and takes the area's length.
+- `fn stretched_tile(repeat, tile, source_pixels, area, scale, horizontal)`: a tile under a device pixel on an axis, or whose source is a pixel across there, stops repeating and takes the area's length.
 - `fn paint_image_fill`: leaves out images outside the content mask before decoding or counting, and tiles only what shows (`tile_starts` starts where the window is), up to `MAX_FRAME_TILES` (64000) per frame.
 - `fn paint_sampled_gradient`: samples only boxes that intersect the content mask, keyed relative
   to the box so equal boxes share one texture.

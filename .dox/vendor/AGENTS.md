@@ -63,11 +63,17 @@ repository instead of living in someone's checkout.
     (`distribute_auto_columns`, `TableTreeWrapper::auto_layout_column_style`:
     min/max content per column, colspans, percent → fixed → auto priority,
     table min/max-width); cell widths from every row; min/max-height ignored on
-    cells.
+    cells. A table without a width takes what its percentages ask for
+    (`preferred_columns_width`); a cell's `min-width` and `max-width` bound what it asks of its
+    column, not the cell (`TableCell::width_limits`); a caption wraps to the table, comes first
+    among the laid out, and asks only to fit (`is_caption`); text directly in a table or row gets
+    an anonymous cell (`wrap_table_text_runs`, `group_anonymous_cell_runs`).
   - `stylo.rs`: `<table align>` → auto margins/float; case-insensitive `align`;
-    legacy attributes as CSS (`legacy_presentational_css`): `cellspacing`,
+    legacy attributes as CSS (`legacy_presentational_css`, colors by the standard's rules in
+    `legacy_color`, and only ever as `#rrggbb` we wrote): `bgcolor` and `background` on `body`,
+    `table` and table parts only (`MAX_BACKGROUND_ATTRIBUTE`), `bordercolor`, `cellspacing`,
     `cellpadding`, table/cell `border` (incl. `border="0"`), `<font
-    color/size/face>`, `<body text>`, named/bare-hex `bgcolor`.
+    color/size/face>`, `<body text>`.
   - `html.rs` + `font_metrics.rs`: `HtmlParserProvider: Send + Sync` and a
     compile-time assertion that `BlitzFontMetricsProvider` is `Send`, so documents
     can be built off the UI thread (`html_view::DetachedDocument`).
@@ -90,9 +96,9 @@ repository instead of living in someone's checkout.
     document's fonts 512 MiB (`font_bytes`).
   - `layout/table.rs`: `TableContext` and `TableCell` keep the `ComputedValues` their `calc()`
     pointers point into (`computed_style`).
-  - `layout/inline/build.rs`: at most `MAX_INLINE_SPANS` (30k) style spans per inline context,
-    as Parley asserts on more than `u16::MAX` styles and a `nowrap` span can take two; past it
-    text takes the open style and `<br>` doesn't break.
+  - `layout/inline/build.rs`: at most `MAX_INLINE_SPANS` (64k) styles per inline context,
+    as Parley asserts on more than `u16::MAX`: a `<br>` takes one, any other span two, as a `nowrap`
+    one can; past it text takes the open style and `<br>` doesn't break.
   - `layout/inline/layout.rs`: full layouts for baselines stop after `MAX_LAYOUT_VISITS_FOR_BASELINES`
     (4 M, `layout_visits`) node visits and bytes of inline text per pass, as nested inline tables were exponential.
   - `node/node.rs`: `containing_block` and the walks up skip freed boxes.
@@ -119,7 +125,7 @@ repository instead of living in someone's checkout.
   - `stylo_to_parley.rs`: at most 64 families per style.
   - `stylo.rs`: sibling walks use `Node::sibling_index`, a remembered position checked on use, and
     a pass takes at most `MAX_SIBLING_STEPS` (2^26) of them: past it selectors don't match, and a
-    first layout gives up. `parse_color_attr` takes no color outside ASCII, as its cuts are by byte.
+    first layout gives up.
   - `document.rs` (`generated_text_left`): `content` and list markers share 256 KB per pass;
     `layout_deadline`/`layout_timed_out`: layout compares the deadline every 256 visits and then
     returns empty boxes, so hosts can discard the document.

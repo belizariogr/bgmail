@@ -492,6 +492,19 @@
 - Lesson of rounds 20 to 23: limits added against hostile mail broke legitimate mail, and only a
   comparison against Chromium found it. A new limit needs a legitimate case just past it, checked
   against a browser; the corpus should grow long tables, tall floats in cells, captions.
+- ✅ Review round 24 (161643 render seeds and 376001 sanitizer ones clean; fidelity against Chromium
+  over the template corpus and hand-written legitimate documents): legacy colors follow the standard (`#fff` drew almost black, since
+  `#rgb` wasn't expanded), and `bgcolor` and `background` reach only what takes them in a browser.
+  `background` and `bordercolor` now work, and a long message draws its local background images on
+  the first recording. Tables: percentages widen one without a width; a cell's `min-width` and
+  `max-width` bound its column's ask; captions wrap and come first; text directly in `display:table`
+  keeps its row (a call-to-action lost its label). A long log keeps its line breaks up to 64000.
+- ⬜ Known limits of round 24. `display:table-cell` runs outside a table don't sit together.
+  A closed `<details>` measures taller than in a browser. An `inline-block` around a float and a float
+  in a fixed-height `div` in a cell measure wrong. `text-overflow:ellipsis` only clips. `<body
+  bgcolor>` and `<body background>` lose to the reader's own page color (author-level CSS). A tile
+  of 2 px or more past 64000 per frame loses later rows. `<br>` past 64000 stops breaking. A selector
+  like `h2~p` or `tr:first-child~tr` past the sibling budget (12000 `<p>`, 9000 rows) opens as text.
 - ⬜ Known limits of round 22. Layouts after the first have no deadline: a cost that only shows on
   resizing or clicking isn't stopped. Giving up there needs a last good frame kept, and a switch to
   text from `HtmlView`, not done. An animation's final state doesn't show, as none runs. Recording has
