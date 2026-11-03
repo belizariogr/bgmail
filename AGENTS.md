@@ -221,6 +221,12 @@ When the user requests a durable behavior change, record it here or in the relev
   it, decide from that, and report the decision with its source. Only what the user
   alone can do (credentials, external access) goes to them.
 
+- **Fuzzers and hostile-input experiments:** run them in the background with a log, under
+  a memory cap (`systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0`), one at
+  a time, with builds out of `/tmp`. Check every 5 minutes whether it is still running
+  and advancing or has hung, and never wait on it blindly: a hung one is stopped and
+  reported with its last input, so a test can't abort with nothing to show.
+
 ## Child DOX Index
 
 | Scope | Doc | Owns |
