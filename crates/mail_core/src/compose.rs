@@ -8,7 +8,7 @@ use mail_builder::headers::message_id::MessageId;
 use mail_builder::MessageBuilder;
 use serde::{Deserialize, Serialize};
 
-use crate::address::{same_email, Address};
+use crate::address::Address;
 
 /// A file the user attached in the composer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,14 +127,17 @@ pub fn new_message_id(domain_from_email: &str, unique: u64) -> String {
 /// SMTP `RCPT TO` list: to + cc + bcc, de-duplicated case-insensitively
 /// (first spelling wins) so nobody receives two copies.
 pub fn envelope_recipients(draft: &Draft) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for address in draft.to.iter().chain(&draft.cc).chain(&draft.bcc) {
-        if address.email.is_empty() || out.iter().any(|e| same_email(e, &address.email)) {
-            continue;
-        }
-        out.push(address.email.clone());
-    }
-    out
+    let mut seen = std::collections::HashSet::new();
+    draft
+        .to
+        .iter()
+        .chain(&draft.cc)
+        .chain(&draft.bcc)
+        .filter(|address| {
+            !address.email.is_empty() && seen.insert(address.email.trim().to_lowercase())
+        })
+        .map(|address| address.email.clone())
+        .collect()
 }
 
 /// Extension ↔ MIME pairs. The first entry for a MIME type is its canonical

@@ -120,11 +120,41 @@ pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
     })
 }
 
+/// [`parse_message`] for a fetched header block, cut at [`MAX_HEADER_BLOCK_BYTES`]. It arrives on
+/// every sync whatever the message's size, and the parser is quadratic in some headers: 31 MB of
+/// `name*0=x; name*1=x` took 45 s.
+pub fn parse_header_block(raw: &[u8]) -> Option<ParsedMessage> {
+    if raw.len() <= MAX_HEADER_BLOCK_BYTES {
+        return parse_message(raw);
+    }
+    let head = &raw[..MAX_HEADER_BLOCK_BYTES];
+    let end = head
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(head.len(), |at| at + 1);
+    parse_message(&head[..end])
+}
+
+/// Far past the 998 bytes per line and the few dozen lines real headers have.
+const MAX_HEADER_BLOCK_BYTES: usize = 1 << 20;
+
 /// Decoded bytes of the part listed as `AttachmentInfo::index`.
 pub fn attachment_content(raw: &[u8], index: usize) -> Option<Vec<u8>> {
     let message = parse_raw(raw)?;
     let part = message.parts.get(index)?;
     part_bytes(raw, part)
+}
+
+/// Decoded bytes of the parts at `indexes`, parsing the message once: a forward can carry
+/// thousands of them.
+pub fn attachment_contents(raw: &[u8], indexes: &[usize]) -> Vec<Option<Vec<u8>>> {
+    let Some(message) = parse_raw(raw) else {
+        return vec![None; indexes.len()];
+    };
+    indexes
+        .iter()
+        .map(|&index| part_bytes(raw, message.parts.get(index)?))
+        .collect()
 }
 
 /// What only renders a body again. Listed so that anything unknown stays reachable as
@@ -987,6 +1017,28 @@ amanh=E3.\r\n";
             20_000
         );
         assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_huge_header_block_is_cut_at_a_line() {
+        let mut raw = String::from("Subject: kept\r\nContent-Type: text/plain; ");
+        for i in 0..2_000_000 {
+            raw.push_str(&format!("name*{i}=x;\r\n "));
+        }
+        let start = std::time::Instant::now();
+        assert_eq!(parse_header_block(raw.as_bytes()).unwrap().subject, "kept");
+        assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn contents_of_many_parts_match_each_on_its_own() {
+        let raw = b"Content-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\n\
+            Content-Type: text/plain\r\n\r\nhello\r\n--B\r\n\
+            Content-Type: application/x-a\r\n\r\nAA\r\n--B--\r\n";
+        let contents = attachment_contents(raw, &[2, 99]);
+        assert_eq!(contents[0], attachment_content(raw, 2));
+        assert!(contents[0].is_some());
+        assert_eq!(contents[1], None);
     }
 
     #[test]

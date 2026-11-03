@@ -11,8 +11,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mail_core::{
-    parse_message, AccountConfig, CancelToken, IdleOutcome, MailConnector, MailRemote, MailSender,
-    MessageFlags, RemoteError, RemoteErrorKind, RemoteHeader, SendError, SendFailure,
+    parse_header_block, AccountConfig, CancelToken, IdleOutcome, MailConnector, MailRemote,
+    MailSender, MessageFlags, RemoteError, RemoteErrorKind, RemoteHeader, SendError, SendFailure,
     DEFAULT_SYNC_WINDOW,
 };
 use storage::{
@@ -900,7 +900,7 @@ impl Worker {
         match self.rm()?.fetch_headers(&folder, &[uid]) {
             Ok(headers) => {
                 for header in headers {
-                    let parsed = parse_message(&header.header).unwrap_or_default();
+                    let parsed = parse_header_block(&header.header).unwrap_or_default();
                     let message = new_remote_message(&header, &parsed);
                     let insert = self.db.record_remote_message(
                         self.account_id,
@@ -1460,7 +1460,7 @@ impl Worker {
             // and these flags predate it.
             let flags_pending = messages_with_pending_flags(&self.db.pending_ops(self.account_id)?);
             for header in headers {
-                let parsed = parse_message(&header.header).unwrap_or_default();
+                let parsed = parse_header_block(&header.header).unwrap_or_default();
                 let message = new_remote_message(&header, &parsed);
                 let insert = self.db.record_remote_message(
                     self.account_id,

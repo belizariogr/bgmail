@@ -1058,20 +1058,21 @@ fn forwarded_attachments(
         Some(charset) => format!("{}; charset={charset}", info.mime_type),
         None => info.mime_type.clone(),
     };
-    let listed = |index: usize| {
-        shown
-            .iter()
-            .any(|row| usize::try_from(row.part_index) == Ok(index))
-    };
-    parsed
+    let listed: HashSet<i64> = shown.iter().map(|row| row.part_index as i64).collect();
+    let attachments: Vec<_> = parsed
         .attachments
         .iter()
-        .filter(|info| !info.inline || listed(info.index))
-        .filter_map(|info| {
+        .filter(|info| !info.inline || listed.contains(&(info.index as i64)))
+        .collect();
+    let indexes: Vec<usize> = attachments.iter().map(|info| info.index).collect();
+    attachments
+        .into_iter()
+        .zip(mail_core::attachment_contents(raw, &indexes))
+        .filter_map(|(info, data)| {
             Some(mail_core::OutgoingAttachment {
                 filename: info.filename.clone(),
                 mime_type: mime_type(info),
-                data: mail_core::attachment_content(raw, info.index)?,
+                data: data?,
             })
         })
         .collect()

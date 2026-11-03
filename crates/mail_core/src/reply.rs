@@ -279,17 +279,12 @@ fn quote_depth(line: &str) -> (usize, &str) {
 
 /// Keeps the first occurrence of each email, skipping those in `exclude`.
 fn unique(addresses: impl Iterator<Item = Address>, exclude: &[Address]) -> Vec<Address> {
-    let mut out: Vec<Address> = Vec::new();
-    for address in addresses {
-        let seen = out
-            .iter()
-            .chain(exclude)
-            .any(|a| same_email(&a.email, &address.email));
-        if !seen {
-            out.push(address);
-        }
-    }
-    out
+    let key = |email: &str| email.trim().to_lowercase();
+    let mut seen: std::collections::HashSet<String> =
+        exclude.iter().map(|a| key(&a.email)).collect();
+    addresses
+        .filter(|address| seen.insert(key(&address.email)))
+        .collect()
 }
 
 /// Crude HTML → plain text for quoting HTML-only mail: drops tags, scripts and
@@ -546,6 +541,23 @@ mod tests {
             to: "To".into(),
             formatted_date: "Mon, 3 Jun 2024".into(),
         }
+    }
+
+    #[test]
+    fn unique_keeps_the_first_spelling_and_skips_excluded() {
+        let address = |email: &str| Address::new(None::<&str>, email);
+        let out = unique(
+            [
+                address("A@x"),
+                address(" a@x"),
+                address("me@x"),
+                address("b@x"),
+            ]
+            .into_iter(),
+            &[address("ME@x")],
+        );
+        let emails: Vec<_> = out.iter().map(|a| a.email.as_str()).collect();
+        assert_eq!(emails, ["A@x", "b@x"]);
     }
 
     fn original() -> ParsedMessage {

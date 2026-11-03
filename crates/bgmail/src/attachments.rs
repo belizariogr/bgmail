@@ -158,11 +158,20 @@ pub fn sanitize_filename(name: &str) -> String {
         // `x.exe.` into `x.exe` after `runs_code` read no extension.
         .trim_end_matches(|c: char| c.is_whitespace() || c == '.')
         .to_string();
-    let device = stem.to_ascii_uppercase();
-    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ((device.starts_with("COM") || device.starts_with("LPT"))
-            && device.len() == 4
-            && device.as_bytes()[3].is_ascii_digit());
+    // Windows takes a device by what comes before the first dot, ignoring spaces after it:
+    // `NUL.tar.gz` and `NUL .txt` are NUL, and what is saved there is lost.
+    let device = stem
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    let reserved = matches!(
+        device.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ((device.starts_with("COM") || device.starts_with("LPT"))
+        && device.len() == 4
+        && device.as_bytes()[3].is_ascii_digit());
     if reserved {
         stem.insert(0, '_');
     }
@@ -401,6 +410,15 @@ pub fn remove_stale_files(dir: &Path, now: SystemTime, age: Duration) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn devices_are_recognized_before_the_first_dot() {
+        assert_eq!(super::sanitize_filename("NUL.tar.gz"), "_NUL.tar.gz");
+        assert_eq!(super::sanitize_filename("nul .txt"), "_nul.txt");
+        assert_eq!(super::sanitize_filename("nul .tar.gz"), "_nul .tar.gz");
+        assert_eq!(super::sanitize_filename("CONIN$.log"), "_CONIN$.log");
+        assert_eq!(super::sanitize_filename("console.tar.gz"), "console.tar.gz");
+    }
+
     use super::*;
 
     #[test]
