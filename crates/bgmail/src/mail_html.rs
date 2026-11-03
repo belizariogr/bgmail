@@ -742,6 +742,10 @@ fn neutralize_attributes(
             let is_remote = (RESOURCE_ATTRIBUTES.contains(&name.as_str()) && is_remote_url(&value))
                 || (name == "srcset" && !value.trim().is_empty());
             let remote_blocked = is_remote && !load_remote && !shown_here;
+            // A table's or the body's image, which the reader offers to show like any other.
+            if name == "background" && is_remote {
+                img_state.get_or_insert(!load_remote);
+            }
             // Nothing in an SVG reads outside the message: its images come inline.
             let svg_file = is_svg_image
                 && matches!(name.as_str(), "href" | "xlink:href")
@@ -1917,6 +1921,17 @@ mod tests {
         );
         assert!(has_remote);
         assert_eq!(blocked, 1);
+    }
+
+    #[test]
+    fn a_remote_background_attribute_is_counted_and_offered() {
+        let html = "<table background=http://x.test/a.png><tr><td>x</td></tr></table>";
+        let (clean, has_remote, blocked) = sanitize_html_inner(html, false, &HashSet::new());
+        assert!(has_remote && !clean.contains("background"));
+        assert_eq!(blocked, 1);
+        let (clean, has_remote, blocked) = sanitize_html_inner(html, true, &HashSet::new());
+        assert!(has_remote && clean.contains("background"));
+        assert_eq!(blocked, 0);
     }
 
     #[test]

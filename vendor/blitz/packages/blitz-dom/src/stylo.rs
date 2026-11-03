@@ -23,7 +23,6 @@ use style::animation::AnimationSetKey;
 use style::animation::AnimationState;
 use style::applicable_declarations::ApplicableDeclarationBlock;
 use style::bloom::each_relevant_element_hash;
-use style::color::AbsoluteColor;
 use style::data::{ElementDataMut, ElementDataRef};
 use style::global_style_data::STYLE_THREAD_POOL;
 
@@ -975,33 +974,6 @@ impl<'a> TElement for BlitzNode<'a> {
             ));
         };
 
-        fn parse_color_attr(value: &str) -> Option<(u8, u8, u8, f32)> {
-            if !value.starts_with('#') {
-                return None;
-            }
-
-            let value = &value[1..];
-            // BGMail: these cuts are by byte; `#日` aborted the app. No such color exists.
-            if !value.is_ascii() {
-                return None;
-            }
-            if value.len() == 3 {
-                let r = u8::from_str_radix(&value[0..1], 16).ok()?;
-                let g = u8::from_str_radix(&value[1..2], 16).ok()?;
-                let b = u8::from_str_radix(&value[2..3], 16).ok()?;
-                return Some((r, g, b, 1.0));
-            }
-
-            if value.len() == 6 {
-                let r = u8::from_str_radix(&value[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&value[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&value[4..6], 16).ok()?;
-                return Some((r, g, b, 1.0));
-            }
-
-            None
-        }
-
         /// The HTML "rules for parsing dimension values" -- Stylo's
         /// implementation of them -- packaged as a specified
         /// `<length-percentage>`. `ignoring_zero` selects the spec's separate
@@ -1286,15 +1258,6 @@ impl<'a> TElement for BlitzNode<'a> {
                             });
                         }
                     }
-                }
-            }
-
-            if *name == local_name!("bgcolor") {
-                use style::values::specified::Color;
-                if let Some((r, g, b, a)) = parse_color_attr(value) {
-                    push_style(PropertyDeclaration::BackgroundColor(
-                        Color::from_absolute_color(AbsoluteColor::srgb_legacy(r, g, b, a)),
-                    ));
                 }
             }
 
@@ -1703,23 +1666,65 @@ fn parse_legacy_integer(value: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// A legacy colour attribute value as CSS: `#rgb`/`#rrggbb`, colour names, and
-/// bare hex (`ffffff`) like browsers' legacy colour parsing.
-fn legacy_color_css(value: &str) -> Option<String> {
-    let value = value.trim();
+/// BGMail: the HTML "rules for parsing a legacy color value". They accept anything: what isn't a
+/// name or `#rgb` is cut into three runs of hex digits, so `fff` is `#0f0f0f`, as in a browser.
+fn legacy_color(value: &str) -> Option<[u8; 3]> {
+    let value = value.trim_matches(['\t', '\n', '\x0c', '\r', ' ']);
     if value.is_empty() || value.eq_ignore_ascii_case("transparent") {
         return None;
     }
-    if value.starts_with('#') {
-        return Some(value.to_string());
+    if let Ok((r, g, b)) = cssparser::color::parse_named_color(value) {
+        return Some([r, g, b]);
     }
-    if (value.len() == 3 || value.len() == 6) && value.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Some(format!("#{value}"));
+    if let Some(hex) = value.strip_prefix('#') {
+        if hex.len() == 3 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let digit = |at: usize| {
+                u8::from_str_radix(&hex[at..at + 1], 16)
+                    .ok()
+                    .map(|d| d * 17)
+            };
+            return Some([digit(0)?, digit(1)?, digit(2)?]);
+        }
     }
-    value
-        .chars()
-        .all(|c| c.is_ascii_alphabetic())
-        .then(|| value.to_ascii_lowercase())
+    let mut digits: Vec<char> = Vec::new();
+    for c in value.chars().take(128) {
+        if c > '\u{ffff}' {
+            digits.extend(['0', '0']);
+        } else {
+            digits.push(c);
+        }
+    }
+    digits.truncate(128);
+    if digits.first() == Some(&'#') {
+        digits.remove(0);
+    }
+    for digit in &mut digits {
+        if !digit.is_ascii_hexdigit() {
+            *digit = '0';
+        }
+    }
+    while digits.is_empty() || digits.len() % 3 != 0 {
+        digits.push('0');
+    }
+    let length = digits.len() / 3;
+    let run = |index: usize| &digits[index * length..(index + 1) * length];
+    let mut start = length.saturating_sub(8);
+    while length - start > 2 && (0..3).all(|index| run(index)[start] == '0') {
+        start += 1;
+    }
+    let channel = |index: usize| {
+        let end = (start + 2).min(length);
+        let text: String = run(index)[start..end].iter().collect();
+        u8::from_str_radix(&text, 16).ok()
+    };
+    Some([channel(0)?, channel(1)?, channel(2)?])
+}
+
+/// A legacy colour attribute value as CSS, always written by us: the attribute's text never
+/// reaches the declaration block, where a `;` would start declarations of its own.
+fn legacy_color_css(value: &str) -> Option<String> {
+    let [r, g, b] = legacy_color(value)?;
+    Some(format!("#{r:02x}{g:02x}{b:02x}"))
 }
 
 /// `<font size>`: 1–7 (or ±n relative to 3) → the legacy keyword sizes in px.
@@ -1768,6 +1773,9 @@ fn legacy_valign_css(value: &str) -> Option<&'static str> {
     }
 }
 
+/// BGMail: the longest `background` attribute taken as an image.
+const MAX_BACKGROUND_ATTRIBUTE: usize = 8 * 1024 * 1024;
+
 /// CSS equivalent of the legacy table/cell/font attributes of `node`.
 fn legacy_presentational_css(node: BlitzNode<'_>, elem: &crate::node::ElementData) -> String {
     let tag = &elem.name.local;
@@ -1785,10 +1793,12 @@ fn legacy_presentational_css(node: BlitzNode<'_>, elem: &crate::node::ElementDat
             .attr(local_name!("border"))
             .and_then(parse_legacy_integer)
         {
-            if px > 0 {
-                css.push_str(&format!("border:{px}px outset grey;"));
-            } else {
+            if px == 0 {
                 css.push_str("border-width:0;");
+            } else if elem.attr(LocalName::from("bordercolor")).is_some() {
+                css.push_str(&format!("border:{px}px solid;"));
+            } else {
+                css.push_str(&format!("border:{px}px outset grey;"));
             }
         }
     } else if *tag == local_name!("td") || *tag == local_name!("th") {
@@ -1804,7 +1814,13 @@ fn legacy_presentational_css(node: BlitzNode<'_>, elem: &crate::node::ElementDat
                 .and_then(parse_legacy_integer)
                 .is_some_and(|px| px > 0)
             {
-                css.push_str("border:1px inset grey;");
+                match table
+                    .attr(LocalName::from("bordercolor"))
+                    .and_then(legacy_color_css)
+                {
+                    Some(color) => css.push_str(&format!("border:1px solid {color};")),
+                    None => css.push_str("border:1px inset grey;"),
+                }
             }
         }
     } else if *tag == local_name!("font") {
@@ -1820,7 +1836,7 @@ fn legacy_presentational_css(node: BlitzNode<'_>, elem: &crate::node::ElementDat
                 .split(',')
                 .map(|f| f.trim().trim_matches(['"', '\'']))
                 .filter(|f| !f.is_empty())
-                .map(|f| format!("\"{}\"", f.replace('"', "")))
+                .map(|f| format!("\"{}\"", f.replace(['"', '\\', '\n', '\r', '\x0c'], "")))
                 .collect();
             if !families.is_empty() {
                 css.push_str(&format!("font-family:{};", families.join(",")));
@@ -1922,12 +1938,27 @@ fn legacy_presentational_css(node: BlitzNode<'_>, elem: &crate::node::ElementDat
             css.push_str(&format!("vertical-align:{align};"));
         }
     }
-    // Named / bare-hex `bgcolor` (the `#hex` form is handled as a typed hint).
-    if let Some(value) = elem.attr(local_name!("bgcolor")) {
-        if !value.trim().starts_with('#') {
-            if let Some(color) = legacy_color_css(value) {
-                css.push_str(&format!("background-color:{color};"));
+    // BGMail: these and no others, as in a browser: a `<div bgcolor>` stays unpainted.
+    if *tag == local_name!("body") || *tag == local_name!("table") || table_part.contains(tag) {
+        if let Some(color) = elem.attr(local_name!("bgcolor")).and_then(legacy_color_css) {
+            css.push_str(&format!("background-color:{color};"));
+        }
+        if let Some(url) = elem.attr(local_name!("background")).map(str::trim) {
+            // Hints are read again at each restyle, unlike a `style` attribute, and a `cid:`
+            // image comes here whole as a `data:` URL.
+            if !url.is_empty() && url.len() <= MAX_BACKGROUND_ATTRIBUTE {
+                css.push_str("background-image:url(");
+                let _ = cssparser::serialize_string(url, &mut css);
+                css.push_str(");");
             }
+        }
+    }
+    if *tag == local_name!("table") || table_part.contains(tag) {
+        if let Some(color) = elem
+            .attr(LocalName::from("bordercolor"))
+            .and_then(legacy_color_css)
+        {
+            css.push_str(&format!("border-color:{color};"));
         }
     }
     css
@@ -1970,11 +2001,32 @@ mod legacy_attr_tests {
 
     #[test]
     fn legacy_colors_accept_names_and_bare_hex() {
-        assert_eq!(legacy_color_css("#fff").as_deref(), Some("#fff"));
+        assert_eq!(legacy_color_css("#fff").as_deref(), Some("#ffffff"));
+        assert_eq!(legacy_color_css("#eee").as_deref(), Some("#eeeeee"));
         assert_eq!(legacy_color_css("ffffff").as_deref(), Some("#ffffff"));
-        assert_eq!(legacy_color_css("White").as_deref(), Some("white"));
+        assert_eq!(legacy_color_css("White").as_deref(), Some("#ffffff"));
         assert_eq!(legacy_color_css("transparent"), None);
-        assert_eq!(legacy_color_css("rgb(1,2,3)"), None);
+    }
+
+    #[test]
+    fn legacy_colors_follow_the_standard_for_whatever_else_comes() {
+        assert_eq!(legacy_color("fff"), Some([15, 15, 15]));
+        assert_eq!(legacy_color("chucknorris"), Some([0xc0, 0, 0]));
+        assert_eq!(legacy_color("rgb(1,2,3)"), Some([0, 0x10, 0x30]));
+        assert_eq!(legacy_color("#12345678"), Some([0x12, 0x45, 0x78]));
+        assert_eq!(legacy_color("#"), Some([0, 0, 0]));
+        assert_eq!(legacy_color("#日"), Some([0, 0, 0]));
+        assert_eq!(legacy_color("😀"), Some([0, 0, 0]));
+        assert_eq!(legacy_color(&"0".repeat(500)), Some([0, 0, 0]));
+        assert_eq!(legacy_color(" \t "), None);
+    }
+
+    #[test]
+    fn a_legacy_color_writes_nothing_of_the_attribute() {
+        assert_eq!(
+            legacy_color_css("#000;background:url(http://t/x)").as_deref(),
+            Some("#0bd000")
+        );
     }
 
     #[test]

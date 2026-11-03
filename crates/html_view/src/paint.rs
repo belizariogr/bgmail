@@ -769,8 +769,8 @@ fn paint_image_fill(
     .intersect(area);
     // A tile under a pixel is drawn once, stretched: tiles this small all land on one pixel,
     // which covered nothing and took 20 s per frame.
-    let (repeat_x, tile) = stretched_tile(repeat_x, tile, area, scale, true);
-    let (repeat_y, tile) = stretched_tile(repeat_y, tile, area, scale, false);
+    let (repeat_x, tile) = stretched_tile(repeat_x, tile, brush.image.width, area, scale, true);
+    let (repeat_y, tile) = stretched_tile(repeat_y, tile, brush.image.height, area, scale, false);
     let xs = tile_starts(tile.x0, tile.width(), visible.x0, visible.x1, repeat_x);
     let ys = tile_starts(tile.y0, tile.height(), visible.y0, visible.y1, repeat_y);
     window.with_content_mask(
@@ -815,6 +815,7 @@ fn paint_image_fill(
 fn stretched_tile(
     repeat: bool,
     tile: Rect,
+    source_pixels: u32,
     area: Rect,
     scale: f64,
     horizontal: bool,
@@ -824,7 +825,7 @@ fn stretched_tile(
     } else {
         tile.height()
     };
-    if !repeat || length * scale >= 1.0 {
+    if !repeat || (length * scale >= 1.0 && source_pixels > 1) {
         return (repeat, tile);
     }
     let stretched = if horizontal {
@@ -1176,16 +1177,23 @@ mod tests {
             vec![5000.0, 5008.0]
         );
         assert_eq!(tile_starts(0.0, 1.0, 0.0, 600.0, true).len(), 600);
-        // Under a pixel it stretches, per axis; a tile of a pixel still repeats.
+        // Under a pixel it stretches, per axis; a tile of a device pixel still repeats.
         let area = Rect::new(0.0, 0.0, 800.0, 600.0);
         let small = Rect::new(0.0, 0.0, 0.01, 0.01);
-        let (repeat, wide) = stretched_tile(true, small, area, 1.0, true);
+        let (repeat, wide) = stretched_tile(true, small, 8, area, 1.0, true);
         assert!(!repeat && wide.width() == 800.0 && wide.height() == 0.01);
-        let (repeat, both) = stretched_tile(true, wide, area, 1.0, false);
+        let (repeat, both) = stretched_tile(true, wide, 8, area, 1.0, false);
         assert!(!repeat && both == area);
         let pixel = Rect::new(0.0, 0.0, 1.0, 1.0);
-        assert_eq!(stretched_tile(true, pixel, area, 1.0, true), (true, pixel));
-        assert!(stretched_tile(true, Rect::new(0.0, 0.0, 0.5, 1.0), area, 2.0, true).0);
+        assert_eq!(
+            stretched_tile(true, pixel, 8, area, 1.0, true),
+            (true, pixel)
+        );
+        assert!(stretched_tile(true, Rect::new(0.0, 0.0, 0.5, 1.0), 8, area, 2.0, true).0);
+        // A source a pixel across is the same stretched as repeated, at any size.
+        let line = Rect::new(0.0, 0.0, 1.0, 40.0);
+        let (repeat, wide) = stretched_tile(true, line, 1, area, 1.0, true);
+        assert!(!repeat && wide.width() == 800.0 && wide.height() == 40.0);
     }
 
     fn brush(format: ImageFormat, alpha_type: ImageAlphaType, px: [u8; 4]) -> ImageBrush {

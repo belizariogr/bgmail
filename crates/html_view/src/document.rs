@@ -1023,7 +1023,11 @@ impl HtmlDocument {
         // Resolve until resources delivered during resolution are applied.
         for _ in 0..4 {
             self.inner.resolve(0.0);
-            if !self.inner.has_pending_critical_resources() {
+            // Styles ask for background images when resolved, and those of the message itself
+            // are already here: recorded without them, a long message never showed them.
+            if self.inner.handle_messages() {
+                self.display_list = None;
+            } else if !self.inner.has_pending_critical_resources() {
                 break;
             }
         }
@@ -3707,6 +3711,118 @@ mod hostile_tests {
             .filter(|command| matches!(command, Command::Dots { .. }))
             .count();
         assert_eq!(dots, 1500);
+    }
+
+    /// The solid colors that something is filled or stroked with, in `html`.
+    fn solid_colors(html: &str) -> Vec<[u8; 3]> {
+        parse(html)
+            .display_list()
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Fill {
+                    brush: crate::display_list::Brush::Solid(color),
+                    ..
+                }
+                | Command::Stroke {
+                    brush: crate::display_list::Brush::Solid(color),
+                    ..
+                } => {
+                    let color = color.to_rgba8();
+                    Some([color.r, color.g, color.b])
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn legacy_background_colors_are_a_browsers() {
+        let table = "<table width=300 bgcolor=VALUE cellpadding=8><tr><td>x</td></tr></table>";
+        for (value, expected) in [
+            ("#abc", [0xaa, 0xbb, 0xcc]),
+            ("abc", [0x0a, 0x0b, 0x0c]),
+            ("#aabbcc", [0xaa, 0xbb, 0xcc]),
+            ("Red", [255, 0, 0]),
+        ] {
+            let colors = solid_colors(&table.replace("VALUE", value));
+            assert!(colors.contains(&expected), "{value}: {colors:?}");
+        }
+        for tag in ["div", "p", "span"] {
+            let colors = solid_colors(&format!("<{tag} bgcolor=#abcdef>x</{tag}>"));
+            assert!(!colors.contains(&[0xab, 0xcd, 0xef]), "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_legacy_attribute_adds_no_declarations() {
+        for html in [
+            "<font color=\"#000;background-color:red\">x</font>",
+            "<font face=\"a\n;background-color:red\">x</font>",
+            "<font face=\"a\\\">x</font><font style=background-color:inherit>y</font>",
+        ] {
+            assert!(!solid_colors(html).contains(&[255, 0, 0]), "{html}");
+        }
+    }
+
+    #[test]
+    fn a_table_border_takes_its_color() {
+        let colors = solid_colors(
+            "<table border=1 bordercolor=#ff0000 width=300><tr><td bordercolor=#0000ff>b</td></tr></table>",
+        );
+        assert!(colors.contains(&[0, 0, 255]), "{colors:?}");
+        assert!(colors.contains(&[255, 0, 0]), "{colors:?}");
+    }
+
+    #[test]
+    fn a_background_attribute_paints_where_a_browser_does() {
+        const PIXEL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAoCAIAAAADnC86AAAAMElEQVR4nO3NQQkAAAgEsItjRCMayxKCn8H+S/W8iFgsFovFYrFYLBaLxWKxWHxnAZEyynm2D49kAAAAAElFTkSuQmCC";
+        let has_image = |html: String| {
+            let mut document = parse(&html);
+            let list = document.display_list();
+            let drawn = list.commands.iter().any(|command| {
+                matches!(
+                    command,
+                    Command::Fill {
+                        brush: crate::display_list::Brush::Image { .. },
+                        ..
+                    }
+                )
+            });
+            drawn
+        };
+        assert!(has_image(format!(
+            "<table><tr><td background=\"{PIXEL}\" width=50 height=50>x</td></tr></table>"
+        )));
+        assert!(has_image(format!(
+            "<table background=\"{PIXEL}\" width=50 height=50><tr><td>x</td></tr></table>"
+        )));
+        assert!(!has_image(format!(
+            "<div background=\"{PIXEL}\" style=width:50px;height:50px>x</div>"
+        )));
+        // A quote doesn't leave the URL, and nothing is fetched for a relative one.
+        for value in ["x.png", "a&quot;);color:red;x:url(&quot;b", ""] {
+            assert!(!has_image(format!(
+                "<table><tr><td background=\"{value}\" width=50 height=50>x</td></tr></table>"
+            )));
+        }
+    }
+
+    #[test]
+    fn a_long_message_shows_its_background_images_at_once() {
+        const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg==";
+        let mut document = parse(&format!(
+            "<div style=\"background:url({PNG});height:9000px\">x</div>"
+        ));
+        // Painted at its own height, the first recording is the one kept.
+        let list = document.display_list_for_height(100.0);
+        assert!(list.commands.iter().any(|command| matches!(
+            command,
+            Command::Fill {
+                brush: crate::display_list::Brush::Image { .. },
+                ..
+            }
+        )));
     }
 
     #[test]

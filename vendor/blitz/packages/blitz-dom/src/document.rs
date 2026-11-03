@@ -1365,17 +1365,21 @@ impl BaseDocument {
         }
     }
 
-    pub fn handle_messages(&mut self) {
+    /// BGMail: whether there were any, as what they load changes what was drawn.
+    pub fn handle_messages(&mut self) -> bool {
         // Remove event Reciever from the Document so that we can process events
         // without holding a borrow to the Document
         let rx = self.rx.take().unwrap();
 
+        let mut handled = false;
         while let Ok(msg) = rx.try_recv() {
             self.handle_message(msg);
+            handled = true;
         }
 
         // Put Reciever back
         self.rx = Some(rx);
+        handled
     }
 
     pub fn handle_message(&mut self, msg: DocumentEvent) {
