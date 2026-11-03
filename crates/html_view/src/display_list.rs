@@ -179,6 +179,12 @@ impl DisplayList {
         Self::default()
     }
 
+    /// Whether the budget ran out, so that nothing else would be recorded. Painters building a lot
+    /// to be refused check it first.
+    pub fn exhausted(&self) -> bool {
+        self.path_elements >= MAX_PATH_ELEMENTS
+    }
+
     /// Takes a command of `elements` from the budget, if it still fits. Once one doesn't
     /// fit nothing does, so a document isn't drawn with holes further on.
     fn charge(&mut self, elements: usize) -> bool {

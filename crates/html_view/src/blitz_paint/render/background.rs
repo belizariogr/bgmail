@@ -146,6 +146,9 @@ impl ElementCx<'_, '_> {
         self.draw_solid_bg(scene, &background_clip_path);
 
         for idx in (0..layer_count).rev() {
+            if scene.exhausted() {
+                break;
+            }
             let layer = ImageLayerStyles::from_background(bg_styles, image_data, idx);
             if layer.text_clip != text_run {
                 if text_run {

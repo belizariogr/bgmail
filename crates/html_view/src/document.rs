@@ -589,7 +589,9 @@ fn table_span_area(doc: &BaseDocument) -> u64 {
     area
 }
 
-/// Chromium UA rules Blitz's default sheet lacks:
+/// Chromium UA rules Blitz's default sheet lacks, and with no animations: nothing here runs
+/// their clock, so they never end, and each style pass redid every element with one (8000 of them
+/// took 2.3 s per pass). A message must read without them, as many clients have none:
 /// - a plain `<hr>` is painted as a light #9a9a9a/#eeeeee bevel whatever its
 ///   color (`noshade` and `color` rules come from presentational hints);
 /// - form control metrics (its UA sheet and theme), which the controls of
@@ -597,7 +599,9 @@ fn table_span_area(doc: &BaseDocument) -> u64 {
 ///   text inputs with 3px of border + padding around their text, closed
 ///   drop-downs with room for the arrow at their end, 13px check boxes and
 ///   radio buttons.
-const CHROMIUM_UA_CSS: &str = "input, select, textarea, button { \
+const CHROMIUM_UA_CSS: &str = "*, *::before, *::after { animation: none !important; \
+     transition: none !important; } \
+     input, select, textarea, button { \
      font: 13.333px sans-serif; letter-spacing: normal; word-spacing: normal; \
      text-transform: none; text-indent: 0; text-shadow: none; } \
      input:not([type]), input[type=text i], input[type=password i], input[type=email i], \
@@ -3612,5 +3616,65 @@ mod hostile_tests {
         document.layout(300.0);
         document.display_list();
         assert!(start.elapsed().as_millis() < 500, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn fonts_from_a_message_arent_loaded() {
+        // One changed byte aborted the app; with no fetch the bytes never reach the text system.
+        let font: String = blitz_dom::BULLET_FONT
+            .iter()
+            .map(|b| format!("%{b:02X}"))
+            .collect();
+        let html = format!(
+            "<style>@font-face{{font-family:Z;src:url(data:font/otf,{font})}}p{{font-family:Z}}</style><p>x"
+        );
+        let mut document = parse(&html);
+        assert_eq!(document.inner.web_font_bytes(), 0);
+        assert!(format!("{:?}", document.display_list().commands).contains('x'));
+    }
+
+    #[test]
+    fn floats_in_tables_dont_double_per_level() {
+        let table = "<table><tr><td>".repeat(22);
+        let html = format!(
+            "<style>table{{width:100%}}@media(max-width:400px){{table{{float:left}}}}</style>{table}x"
+        );
+        let mut document = parse(&html);
+        let start = std::time::Instant::now();
+        document.layout(300.0);
+        assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn budgeted_painters_stop_early() {
+        let html = format!(
+            "<style>i{{position:absolute;left:0;top:0;width:600px;height:30000px;border:3px dotted #123;\
+             border-radius:50%}}</style>{}",
+            "<i></i>".repeat(8000)
+        );
+        let mut document = HtmlDocument::parse(&html, DocumentOptions::default());
+        document.layout(640.0);
+        let start = std::time::Instant::now();
+        document.display_list();
+        assert!(start.elapsed().as_secs() < 3, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_long_list_of_families_is_cut() {
+        let families = vec!["a"; 60_000].join(",");
+        let html = format!(
+            "<style>p{{font-family:{families}}}</style>{}",
+            "<p>x y".repeat(4000)
+        );
+        let start = std::time::Instant::now();
+        parse(&html);
+        assert!(start.elapsed().as_secs() < 3, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn animations_dont_start_invisible() {
+        let html = "<style>@keyframes a{from{opacity:0}}p{animation:a 1s}</style><p>Seen</p>";
+        let mut document = parse(html);
+        assert!(format!("{:?}", document.display_list().commands).contains("Seen"));
     }
 }

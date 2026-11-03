@@ -132,6 +132,9 @@ fn sample_points_along_path(path: &BezPath, spacing: f64, count: usize) -> Vec<P
 impl ElementCx<'_, '_> {
     /// Draw all borders for a node
     pub(crate) fn draw_border(&self, scene: &mut crate::display_list::DisplayList) {
+        if scene.exhausted() {
+            return;
+        }
         let style = &*self.style;
         let border = style.get_border();
         let current_color = style.clone_color();
@@ -651,6 +654,9 @@ impl ElementCx<'_, '_> {
     /// ✅ none - Defines no border
     /// ✅ hidden - Defines a hidden border
     pub(crate) fn draw_outline(&self, scene: &mut crate::display_list::DisplayList) {
+        if scene.exhausted() {
+            return;
+        }
         let outline = self.style.get_outline();
 
         let current_color = self.style.clone_color();
