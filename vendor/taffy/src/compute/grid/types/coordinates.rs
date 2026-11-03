@@ -10,8 +10,7 @@ use core::ops::{Add, AddAssign, Sub};
 /// the positive limit). Grids larger than this limit are clamped.
 ///
 /// See: <https://www.w3.org/TR/css-grid-1/#overlarge-grids>
-// BGMail: 1000, as Blink had it: mail uses a dozen, and a grid costs its tracks times its items.
-pub(crate) const MAX_GRID_TRACKS: u16 = 1000;
+pub(crate) const MAX_GRID_TRACKS: u16 = 10_000;
 
 /// The lowest valid grid line in OriginZero coordinates
 pub(crate) const MIN_OZ_LINE: i16 = -(MAX_GRID_TRACKS as i16);

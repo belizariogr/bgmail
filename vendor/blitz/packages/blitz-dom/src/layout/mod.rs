@@ -631,14 +631,15 @@ impl LayoutPassState<'_> {
                         }
                     }
 
-                    // HACK: Cap scrollable overflow at node size to prevent scrolling
+                    // HACK: Cap scrollable overflow at node size to prevent scrolling. BGMail: only
+                    // across. Capped down too, text past a cell's fixed height couldn't be reached.
                     let overflow = output.scrollable_overflow_rect;
                     output.scrollable_overflow_rect = taffy::ScrollableOverflow::new(
                         taffy::Rect {
                             left: 0.0,
                             top: 0.0,
                             right: overflow.right().min(output.size.width),
-                            bottom: overflow.bottom().min(output.size.height),
+                            bottom: overflow.bottom(),
                         },
                         output.scrollable_overflow_rect.is_reversed(),
                     );
@@ -853,6 +854,28 @@ impl taffy::LayoutBlockContainer for LayoutPassState<'_> {
         inputs: taffy::LayoutInput,
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::LayoutOutput {
+        #[cfg(feature = "floats")]
+        {
+            // BGMail: a result that placed floats in the formatting context it was given isn't
+            // kept: coming from the cache it wouldn't place them, and the height they add to a cell
+            // measured again was lost, sending an image into the next row. As the cache already
+            // does for margins.
+            let Some(block_ctx) = block_ctx else {
+                return compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
+                    tree.compute_child_layout_internal(node_id, inputs, None)
+                });
+            };
+            if let Some(cached) = taffy::CacheTree::cache_get(self, node_id, &inputs) {
+                return cached;
+            }
+            let mark = block_ctx.float_mark();
+            let output = self.compute_child_layout_internal(node_id, inputs, Some(&mut *block_ctx));
+            if block_ctx.floats_placed_since(mark).next().is_none() {
+                taffy::CacheTree::cache_store(self, node_id, &inputs, output.clone());
+            }
+            output
+        }
+        #[cfg(not(feature = "floats"))]
         compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
             tree.compute_child_layout_internal(node_id, inputs, block_ctx)
         })
