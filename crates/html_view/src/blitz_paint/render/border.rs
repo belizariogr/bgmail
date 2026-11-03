@@ -15,6 +15,10 @@ use crate::blitz_paint::{
     render::{ElementCx, PhysicalTracks},
 };
 
+/// BGMail: the most dots of one border edge, whose length a message sets at will; past it
+/// the edge is drawn as dashes, whose limit is the display list's.
+const MAX_BORDER_DOTS: f64 = 16384.0;
+
 /// A darker version of a colour (mirrors WebKit/Blink's `Color::Dark`): the
 /// brightest channel is reduced by a fixed amount and the others scaled to match,
 /// preserving hue.
@@ -452,6 +456,9 @@ impl ElementCx<'_, '_> {
                 return;
             }
             let count = (perimeter / (2.0 * thickness)).round().max(1.0);
+            if count > MAX_BORDER_DOTS {
+                return self.draw_dashed_border_edge(scene, edge, color);
+            }
             let spacing = perimeter / count;
             for center in sample_points_along_path(&centerline, spacing, count as usize) {
                 path.extend(Circle::new(center, radius).path_elements(0.1));
@@ -485,7 +492,11 @@ impl ElementCx<'_, '_> {
             } else {
                 // Aim for a centre-to-centre spacing of about two dot diameters,
                 // then adjust it so the first and last dots land in the corners.
-                let gaps = (span / (2.0 * thickness)).round().max(1.0) as usize;
+                let gaps = (span / (2.0 * thickness)).round().max(1.0);
+                if gaps > MAX_BORDER_DOTS {
+                    return self.draw_dashed_border_edge(scene, edge, color);
+                }
+                let gaps = gaps as usize;
                 let spacing = span / gaps as f64;
                 for i in 0..=gaps {
                     let center = dot_center(radius + i as f64 * spacing);

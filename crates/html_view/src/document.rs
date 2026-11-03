@@ -124,11 +124,22 @@ pub enum Appearance {
 /// hostile mail could crash the app. Real mail stays well under 100.
 pub const MAX_NESTING_DEPTH: usize = 256;
 
+/// Most tags (`<`) of a document. Each costs a DOM node with its styles, about 1 KB, and a
+/// message may have 256 MB of them.
+pub const MAX_MARKUP_TAGS: usize = 2_000_000;
+
+/// Most table cells that `colspan`, `rowspan` and `<col span>` can add to a document. A few
+/// bytes declare them, and each costs memory in the layout's grid.
+pub const MAX_TABLE_SPAN_AREA: u64 = 2_000_000;
+
 /// Why a document can't be rendered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderError {
     /// Elements nest deeper than [`MAX_NESTING_DEPTH`].
     TooDeep { depth: usize },
+    /// The document costs too much memory to lay out, whatever its size in bytes: past
+    /// [`MAX_MARKUP_TAGS`] or [`MAX_TABLE_SPAN_AREA`].
+    TooComplex,
 }
 
 impl std::fmt::Display for RenderError {
@@ -138,6 +149,7 @@ impl std::fmt::Display for RenderError {
                 f,
                 "elements nest {depth} levels deep (limit {MAX_NESTING_DEPTH})"
             ),
+            Self::TooComplex => write!(f, "the document is too complex to lay out"),
         }
     }
 }
@@ -420,6 +432,39 @@ fn nesting_depth(doc: &BaseDocument, root: NodeId) -> usize {
         }
     }
     deepest
+}
+
+/// The cells the spans of `doc`'s tables add (see [`MAX_TABLE_SPAN_AREA`]).
+fn table_span_area(doc: &BaseDocument) -> u64 {
+    let mut area = 0u64;
+    let mut stack = vec![doc.root_node().id];
+    while let Some(id) = stack.pop() {
+        let Some(node) = doc.get_node(id) else {
+            continue;
+        };
+        stack.extend(node.children.iter().copied());
+        let Some(element) = node.element_data() else {
+            continue;
+        };
+        let span = |name: &str| {
+            element
+                .attrs()
+                .iter()
+                .find(|attr| &*attr.name.local == name)
+                .and_then(|attr| attr.value.trim().parse::<u64>().ok())
+                .unwrap_or(1)
+                .clamp(1, u16::MAX as u64)
+        };
+        let cells = match &*element.name.local {
+            "td" | "th" => span("colspan") * span("rowspan"),
+            "col" | "colgroup" => span("span"),
+            _ => 1,
+        };
+        if cells > 1 {
+            area += cells;
+        }
+    }
+    area
 }
 
 /// Chromium UA rules Blitz's default sheet lacks:
@@ -776,11 +821,17 @@ impl HtmlDocument {
     /// Like [`Self::parse`], but refuses documents that can't be rendered
     /// safely (see [`RenderError`]).
     pub fn try_parse(html: &str, options: DocumentOptions) -> Result<Self, RenderError> {
+        if html.bytes().filter(|&byte| byte == b'<').count() > MAX_MARKUP_TAGS {
+            return Err(RenderError::TooComplex);
+        }
         let document = Self::parse(html, options);
         if document.depth > MAX_NESTING_DEPTH {
             return Err(RenderError::TooDeep {
                 depth: document.depth,
             });
+        }
+        if table_span_area(&document.inner) > MAX_TABLE_SPAN_AREA {
+            return Err(RenderError::TooComplex);
         }
         Ok(document)
     }
@@ -2631,5 +2682,169 @@ mod tests {
         let frames = list.animations.values().next().unwrap();
         assert_eq!(frames.frames.len(), 2);
         assert_eq!(frames.duration_ms(), 200);
+    }
+}
+
+/// Markup a message can send to attack the renderer: none of it may panic, hang or take
+/// gigabytes, since a panic or an allocation failure takes the whole app down.
+#[cfg(test)]
+mod hostile_tests {
+    use super::*;
+    use crate::display_list::{Command, Geometry};
+
+    fn parse(html: &str) -> HtmlDocument {
+        let mut document = HtmlDocument::parse(html, DocumentOptions::default());
+        document.prepare(640.0);
+        document
+    }
+
+    fn hover(document: &mut HtmlDocument, x: f32, y: f32) {
+        document.pointer(PointerInput {
+            x,
+            y,
+            phase: PointerPhase::Move,
+            button: PointerButton::Primary,
+            primary_pressed: false,
+            modifiers: Default::default(),
+        });
+        document.layout(640.0);
+        document.display_list();
+    }
+
+    fn path_elements(document: &mut HtmlDocument) -> usize {
+        document
+            .display_list()
+            .commands
+            .iter()
+            .map(|command| match command {
+                Command::Fill {
+                    geometry: Geometry::Path(path),
+                    ..
+                } => path.elements().len(),
+                Command::Fill { .. } => 1,
+                Command::Stroke { path, .. } => path.elements().len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn colspans_past_the_limits_dont_wrap_around() {
+        // `u16` sums of the column cursor used to wrap and panic slicing.
+        parse("<table><tr><td>x<td colspan=65535>y</table>");
+        parse(&format!(
+            "<table><tr>{}</table>",
+            "<td colspan=1000>x".repeat(66)
+        ));
+        parse("<table><col span=65535 width=1><tr><td>x</table>");
+        parse("<table><tr><td rowspan=65534 colspan=65535>x</table>");
+    }
+
+    #[test]
+    fn a_table_past_the_row_limit_still_lays_out() {
+        parse(&format!(
+            "<table>{}<tr><td rowspan=65534>y</table>",
+            "<tr><td>x".repeat(32_800)
+        ));
+    }
+
+    #[test]
+    fn huge_lengths_dont_trip_line_breaking() {
+        // Line and layout widths rounded apart, tripping an assert also active in release.
+        parse("<p style=\"padding:100000000px\">hello</p>");
+        parse("<p style=\"padding:calc(infinity*1px)\">hello</p>");
+        parse("<p style=\"float:left;padding:1e30px\">a</p><p style=\"padding:1e30px\">hello</p>");
+    }
+
+    #[test]
+    fn a_contents_pseudo_of_a_table_isnt_a_layout_child() {
+        parse("<style>table::before{display:contents;content:'y'}</style><table><tr><td>a</table>");
+        parse("<style>table::after{display:contents;content:'y'}</style><table><tr><td>a</table>");
+    }
+
+    #[test]
+    fn a_replaced_element_keeps_its_image_when_styled_as_a_table() {
+        parse("<style>img::after{content:'x'}</style><img style=\"display:table\">");
+        parse(
+            "<style>img::before{content:'x'}</style><img width=1 style=\"display:inline-table\">",
+        );
+    }
+
+    #[test]
+    fn boxes_freed_by_hover_arent_painted() {
+        // Box reconstruction left the freed ids in lists whose owners saw no damage.
+        for html in [
+            "<style>::after{display:flex;content:'y'}p:hover{display:flex}</style></p><img>",
+            "<style>::before{content:'x';display:block}*:hover{display:inline}</style>hello",
+        ] {
+            let mut document = parse(html);
+            for y in (0..60).step_by(4) {
+                for x in (0..120).step_by(8) {
+                    hover(&mut document, x as f32, y as f32);
+                }
+                document.set_zoom(1.5);
+                document.layout(640.0);
+                document.display_list();
+                hover(&mut document, 500.0, 500.0);
+                document.set_zoom(1.0);
+                document.layout(640.0);
+                document.display_list();
+            }
+        }
+    }
+
+    #[test]
+    fn a_selection_older_than_its_text_is_left_out() {
+        let mut document =
+            parse("<style>*:hover::before{content:'x'}</style>&nbsp;&shy;&#8203;&#x202e;");
+        document.select_all();
+        for (x, y) in [(8.0, 8.0), (4.0, 12.0), (500.0, 500.0), (8.0, 8.0)] {
+            hover(&mut document, x, y);
+            let _ = document.selected_text();
+        }
+    }
+
+    #[test]
+    fn long_marked_borders_and_lines_are_bounded() {
+        for html in [
+            "<div style=\"width:100000000px;border-top:1px dotted red\">x</div>",
+            "<div style=\"width:100000000px;border-top:1px dashed red\">x</div>",
+            "<legend style=\"min-width:1e30px;border:5px dashed red\">x</legend>",
+            "<mark style=\"padding:1e30px;border:5px dashed red;border-radius:50%\">x</mark>",
+            "<mark style=\"padding:1e30px;border:5px dotted red;border-radius:50%\">x</mark>",
+            "<u style=\"text-decoration-style:wavy;letter-spacing:1e8px\">xx</u>",
+            "<u style=\"text-decoration-style:dotted;letter-spacing:1e30px\">xx</u>",
+            "<u style=\"text-decoration-style:dashed;letter-spacing:1e30px\">xx</u>",
+        ] {
+            let mut document = parse(html);
+            let elements = path_elements(&mut document);
+            assert!(elements < 1 << 20, "{html}: {elements}");
+        }
+    }
+
+    #[test]
+    fn marks_of_ordinary_size_are_kept() {
+        let mut document = parse("<div style=\"width:400px;border-top:2px dashed red\">x</div>");
+        assert!(path_elements(&mut document) > 40);
+        let mut document = parse("<u style=\"text-decoration-style:wavy\">wavy text</u>");
+        assert!(path_elements(&mut document) > 4);
+    }
+
+    #[test]
+    fn documents_too_costly_to_lay_out_are_refused() {
+        let refused = |html: &str| {
+            matches!(
+                HtmlDocument::try_parse(html, DocumentOptions::default()),
+                Err(RenderError::TooComplex)
+            )
+        };
+        assert!(refused(
+            "<table><tr><td colspan=1000 rowspan=32767>x</table>"
+        ));
+        assert!(refused(
+            &"<table><tr><td colspan=1000>x</table>".repeat(2001)
+        ));
+        assert!(refused(&"<".repeat(MAX_MARKUP_TAGS + 1)));
+        assert!(!refused(&"<table><tr><td colspan=2>x</table>".repeat(100)));
     }
 }

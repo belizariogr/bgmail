@@ -454,6 +454,9 @@ fn decoration_size(
     .max(1.0) as f32
 }
 
+/// BGMail: the most marks (dots, dashes, half waves) of one decoration line.
+const MAX_DECORATION_MARKS: f64 = 16384.0;
+
 /// Draws a single decoration line of the given `text-decoration-style` spanning
 /// `[x0, x0 + width]`. `baseline` is the line's baseline and `offset` positions the line
 /// relative to it (`y = baseline - offset + size / 2`, growing downward). Geometry is built
@@ -488,6 +491,17 @@ fn draw_decoration_line(
     let y = (baseline - offset + size / 2.0) as f64;
     let size = size as f64;
     let butt_stroke = Stroke::new(size).with_caps(Cap::Butt);
+    // BGMail: the marks of a line are geometry in proportion to its width, which a message
+    // sets at will; a line no one can see as marks is drawn solid. (`size` is at least 1, so
+    // no style has more marks than this.)
+    let deco_style = match deco_style {
+        TextDecorationStyle::Dotted | TextDecorationStyle::Dashed | TextDecorationStyle::Wavy
+            if w.is_nan() || w / size > MAX_DECORATION_MARKS =>
+        {
+            TextDecorationStyle::Solid
+        }
+        style => style,
+    };
 
     match deco_style {
         TextDecorationStyle::None => {
@@ -513,11 +527,10 @@ fn draw_decoration_line(
         TextDecorationStyle::Dotted => {
             let radius = size / 2.0;
             let step = 2.0 * size;
-            let mut cx = x + radius;
-            while cx <= x + w - radius {
-                let dot = Circle::new((cx, y), radius);
+            let dots = ((w - 2.0 * radius) / step).floor() + 1.0;
+            for i in 0..dots.max(0.0) as usize {
+                let dot = Circle::new((x + radius + i as f64 * step, y), radius);
                 scene.fill(Fill::NonZero, transform, brush, None, &dot);
-                cx += step;
             }
         }
         // Dashes as filled rectangles. Dash/gap lengths are relative to the
@@ -533,12 +546,11 @@ fn draw_decoration_line(
             } else {
                 nominal_gap
             };
-            let mut dx = x;
-            while dx < x + w {
+            for i in 0..(w / (dash + gap)).ceil() as usize {
+                let dx = x + i as f64 * (dash + gap);
                 let end = (dx + dash).min(x + w);
                 let rect = Rect::new(dx, y - size / 2.0, end, y + size / 2.0);
                 scene.fill(Fill::NonZero, transform, brush, None, &rect);
-                dx += dash + gap;
             }
         }
         // A squiggle built from alternating quadratic Béziers.
@@ -547,9 +559,9 @@ fn draw_decoration_line(
             let half_wave = (2.0 * size).max(1.0);
             let mut path = BezPath::new();
             path.move_to((x, y));
-            let mut px = x;
             let mut up = true;
-            while px < x + w {
+            for i in 0..(w / half_wave).ceil() as usize {
+                let px = x + i as f64 * half_wave;
                 let nx = (px + half_wave).min(x + w);
                 // A quad Bézier reaches half the control-point offset at its
                 // midpoint, so use `2 * amplitude` to hit the target peak.
@@ -559,7 +571,6 @@ fn draw_decoration_line(
                     y + 2.0 * amplitude
                 };
                 path.quad_to(((px + nx) / 2.0, ctrl_y), (nx, y));
-                px = nx;
                 up = !up;
             }
             let stroke = Stroke::new(size).with_caps(Cap::Round);

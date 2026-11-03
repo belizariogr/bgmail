@@ -19,6 +19,16 @@ use std::sync::Arc;
 /// Flattening tolerance (CSS px) used when a shape has to become a path.
 const PATH_TOLERANCE: f64 = 0.1;
 
+/// Most dashes of one stroked path; past it the path is drawn solid. A message sets the
+/// length of its borders at will, and the dashes are split on the CPU.
+const MAX_DASHES: f64 = 16384.0;
+
+/// Most path elements recorded for a document; what comes after them isn't drawn. The limit
+/// of one line or border alone is multiplied by however many a message has, and a real
+/// message is far below this. A shape counts as at least [`MIN_SHAPE_COST`], for its command.
+const MAX_PATH_ELEMENTS: usize = 8 << 20;
+const MIN_SHAPE_COST: usize = 4;
+
 /// Geometry of a filled shape, in document coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Geometry {
@@ -154,11 +164,23 @@ pub struct DisplayList {
     /// Animated images, by the id of their first frame's data (what the
     /// commands draw): replay shows the current frame instead.
     pub animations: HashMap<u64, Arc<blitz_dom::node::AnimationFrames>>,
+    /// Path elements recorded so far (see [`MAX_PATH_ELEMENTS`]).
+    path_elements: usize,
 }
 
 impl DisplayList {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Takes a shape of `elements` from the budget, if it still fits.
+    fn charge(&mut self, elements: usize) -> bool {
+        let total = self.path_elements + elements.max(MIN_SHAPE_COST);
+        let fits = total <= MAX_PATH_ELEMENTS;
+        if fits {
+            self.path_elements = total;
+        }
+        fits
     }
 
     /// Notes that images drawing `first_frame` animate through `frames`.
@@ -408,6 +430,17 @@ pub fn is_finite_geometry(geometry: &Geometry) -> bool {
 }
 
 /// Whether every point of `path` is finite.
+/// Whether `style`'s dashes on `path` are few enough to split. Written so NaN and infinite
+/// lengths don't dash either: `kurbo::dash` wouldn't return from them.
+fn should_dash(path: &BezPath, style: &kurbo::Stroke) -> bool {
+    if style.dash_pattern.is_empty() {
+        return false;
+    }
+    let period: f64 = style.dash_pattern.iter().sum();
+    let dashes = path.perimeter(PATH_TOLERANCE) / period;
+    period > 0.0 && dashes <= MAX_DASHES
+}
+
 pub fn is_finite_path(path: &BezPath) -> bool {
     let ok = |p: &Point| p.x.is_finite() && p.y.is_finite();
     path.elements().iter().all(|el| match el {
@@ -484,14 +517,14 @@ impl PaintScene for DisplayList {
         shape: &impl Shape,
     ) {
         let mut path = shape.into_path(PATH_TOLERANCE);
-        if !style.dash_pattern.is_empty() {
+        if should_dash(&path, style) {
             // GPUI strokes solid paths; split the dashes on the CPU instead.
             path = BezPath::from_vec(
                 kurbo::dash(path.iter(), style.dash_offset, &style.dash_pattern).collect(),
             );
         }
         path.apply_affine(transform);
-        if !is_finite_path(&path) {
+        if !is_finite_path(&path) || !self.charge(path.elements().len()) {
             return;
         }
         let [a, b, c, d, _, _] = transform.as_coeffs();
@@ -517,7 +550,11 @@ impl PaintScene for DisplayList {
             return;
         }
         let geometry = transform_geometry(shape, transform);
-        if is_finite_geometry(&geometry) {
+        let elements = match &geometry {
+            Geometry::Path(path) => path.elements().len(),
+            Geometry::Rect(_) | Geometry::RoundedRect(..) => 0,
+        };
+        if is_finite_geometry(&geometry) && self.charge(elements) {
             self.commands.push(Command::Fill { geometry, brush });
         }
     }

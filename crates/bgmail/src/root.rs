@@ -657,7 +657,7 @@ impl ReaderJob {
         let rendered = email_document(self.colors, &shown, self.remote);
         let mut document = match HtmlDocument::try_parse(&rendered.html, options()) {
             Ok(document) => document,
-            Err(RenderError::TooDeep { .. }) => {
+            Err(RenderError::TooDeep { .. } | RenderError::TooComplex) => {
                 notice = Some(ReaderNotice::Unrenderable);
                 let fallback = email_document(self.colors, &as_plain(), false);
                 HtmlDocument::parse(&fallback.html, options())
@@ -7387,6 +7387,16 @@ mod tests {
         let mut document = built.document.into_inner();
         assert!(document.content_height() > 0.0);
         assert_eq!(document.find("hello"), 1);
+    }
+
+    #[test]
+    fn a_message_too_costly_to_lay_out_is_built_as_plain_text() {
+        let built = job(
+            "<table><tr><td colspan=1000 rowspan=32767>Hi</table>",
+            false,
+        )
+        .build();
+        assert_eq!(built.notice, Some(ReaderNotice::Unrenderable));
     }
 
     #[test]
