@@ -161,7 +161,12 @@ fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &MessageDelete, cx| {
         let main = cx.global::<MainWindow>().0;
         cx.defer(move |cx| {
-            let _ = main.update(cx, |view, window, cx| view.request_delete(window, cx));
+            // From another window, it wouldn't be the message in front of the user.
+            let _ = main.update(cx, |view, window, cx| {
+                if window.is_window_active() {
+                    view.request_delete(window, cx);
+                }
+            });
         });
     });
     cx.on_action(|_: &MessageDeletePermanent, cx| {
