@@ -239,7 +239,9 @@ fn part_bytes(raw: &[u8], part: &MessagePart<'_>) -> Option<Vec<u8>> {
         PartType::Text(text) | PartType::Html(text) => {
             original_bytes(raw, part).or_else(|| Some(text.as_bytes().to_vec()))
         }
-        PartType::Message(message) => Some(message.raw_message.to_vec()),
+        // Not `raw_message`: without an encoding, mail-parser leaves the whole outer
+        // message there.
+        PartType::Message(_) => original_bytes(raw, part),
         PartType::Multipart(_) => None,
     }
 }
