@@ -313,6 +313,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `DisplayList::charge(elements)`: takes a command from `MAX_PATH_ELEMENTS` (2 M: path elements
   and gradient stops, each command counting at least 4). Once one doesn't fit nothing does;
   refused layers are counted (`refused_layers`) so their `Pop`s and contents stay out.
+- `DisplayList::push_dots(transform, color, radius, centers)`: dotted borders as `Command::Dots`, drawn
+  as a quad per visible dot, since in one path they took seconds to tessellate; a path under a
+  rotation or skew. Costs 4 per dot.
 - `DisplayList::exhausted()`: the budget ran out; painters that build a lot check it first.
 - `fn gradient_stops(brush)`: what a brush adds to a command's cost.
 - `fn path_cost(path)`: elements, plus for each curve the segments flattening takes (`sqrt(extent /

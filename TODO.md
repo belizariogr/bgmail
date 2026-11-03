@@ -462,7 +462,7 @@
   and for `form` were incomplete.
 - ✅ Review round 20 (202000 render seeds with no panic, 690000 on the sanitizer with no violation):
   a first layout past 2 s on the UI thread or 30 s in the background opens as text, a last resort for
-  what no limit caught. Grid tracks stop on rounding (297 bytes took 3 s), and at 1000. `content` and
+  what no limit caught. Grid tracks stop on rounding (297 bytes took 3 s). `content` and
   markers share 256 KB per pass (61 KB took over 8 GB). Curves cost their segments, as 112 KB of round
   borders made 7.5 GB of triangles. `BoundsTree` rotates with slack, as at every level it slowed
   grids down. `form` and `button` are written out by hand, as renaming also renamed the parent's end
@@ -483,11 +483,23 @@
   the budget is out. At most 64 font families per style. CSS animations are off, as nothing runs
   their clock and they redid styles each pass. A subject that isn't text shows a replacement character
   instead of losing the database, and recovery copies the columns both versions have.
+- ✅ Review round 23 (140000 render seeds with no panic, no sanitizer violation; the first checked
+  against Chromium): undid round 20's 1000-track grid limit, which piled up rows of long tables, and
+  round 22's lost float height in cells (results that place floats aren't cached). Dotted borders are
+  quads: 500 rows went from 884 ms to 13 ms per frame, and 20000 px from 5 s. Captions span the table.
+  Text past a cell's fixed height can be reached. Stopping animations is only paid for where they
+  can be.
+- Lesson of rounds 20 to 23: limits added against hostile mail broke legitimate mail, and only a
+  comparison against Chromium found it. A new limit needs a legitimate case just past it, checked
+  against a browser; the corpus should grow long tables, tall floats in cells, captions.
 - ⬜ Known limits of round 22. Layouts after the first have no deadline: a cost that only shows on
   resizing or clicking isn't stopped. Giving up there needs a last good frame kept, and a switch to
   text from `HtmlView`, not done. An animation's final state doesn't show, as none runs. Recording has
   no deadline, only its budget. Recovery of a damaged database doesn't work from a directory whose
   name isn't UTF-8. Icon fonts that aren't Google's show as missing glyphs.
+- ⬜ Known limits of round 23. Over 10000 rows pile up. `caption-side` isn't in this Stylo, so captions
+  are always on top, inside the table's border and background. `body` with 1750 dotted rows passes the
+  budget, and later ones lose their dots.
 - ⬜ Known limits of round 21. A database locked by another program, a full disk or no permission
   aborts with only a message on stderr (should be a dialog). `bgcolor` doesn't follow the standard's
   legacy parsing: `#FFFFF` is ignored instead of read as `#FFFFF0`. Past their budget, sibling selectors

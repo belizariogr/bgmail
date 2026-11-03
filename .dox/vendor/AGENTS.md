@@ -41,7 +41,7 @@ repository instead of living in someone's checkout.
 - `taffy` (`compute/block.rs`): a float is only measured when only a size is wanted, as a full
   layout has one cache entry and nested tables in floats doubled per level.
 - `taffy` (`compute/grid/track_sizing.rs`): `distribute_space_up_to_limits` only takes tracks with room
-  past rounding, and stops when nothing moved; `MAX_GRID_TRACKS` is 1000.
+  past rounding, and stops when nothing moved.
 - `gpui` (`bounds_tree.rs`): inserting balances on the way up by rotation past a height difference of
   16 (at every level, rotating ignores area and makes grids slow), as boxes that stack or
   shrink made a list as deep as they are many (85000: 16 s per frame), walked recursively. Orders
@@ -110,6 +110,10 @@ repository instead of living in someone's checkout.
     rebuilds when a part changes display, and `vertical-align` rebuilds its inline layout.
   - `layout/construct.rs`: `flush_inline_pseudos_recursive` reads the child's display, so nested
     inlines keep their pseudo-elements.
+  - `layout/mod.rs` (`compute_block_child_layout`): a result that placed floats in the formatting
+    context it was given isn't cached, as a hit wouldn't place them. The scrollable overflow of a
+    table root is capped across only, so text past a cell's height can be reached.
+  - `layout/table.rs`: captions are collected last, span the table and move to the top.
   - `net.rs` (`TRUSTED_FONT_HOST`): `@font-face` only loads from `fonts.gstatic.com`, as no font
     engine here survives a hostile font (user-visible: other web fonts use the declared stack).
   - `stylo_to_parley.rs`: at most 64 families per style.
