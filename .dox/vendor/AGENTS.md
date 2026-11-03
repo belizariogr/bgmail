@@ -35,10 +35,13 @@ repository instead of living in someone's checkout.
   `serde_fmt`; that foreign impl makes `?` ambiguous in Stylo's `ToCss` derive.
 - `mail_parser` (`parsers/fields/content_type.rs`): RFC 2231 continuations merge by a map and append
   in place, and `-language` names are a set. Quadratic before, on parts the parser decodes too, so
-  no scan of the raw message could bound it; this runs during sync. `parsers/message.rs`: past 64
+  no scan of the raw message could bound it; this runs during sync. `parsers/message.rs`: past 8
   failed searches for a part's boundary, or with a boundary over 256 bytes, multiparts read as
-  text, as each failure read to the end of the message.
-- `gpui` (`bounds_tree.rs`): inserting balances on the way up by rotation, as boxes that stack or
+  text (in the body if the message's own), as each failure read to the end of the message.
+- `taffy` (`compute/grid/track_sizing.rs`): `distribute_space_up_to_limits` only takes tracks with room
+  past rounding, and stops when nothing moved; `MAX_GRID_TRACKS` is 1000.
+- `gpui` (`bounds_tree.rs`): inserting balances on the way up by rotation past a height difference of
+  16 (at every level, rotating ignores area and makes grids slow), as boxes that stack or
   shrink made a list as deep as they are many (85000: 16 s per frame), walked recursively. Orders
   come from the search, exact to an ulp, so what draws over what doesn't change. Its own tests don't
   run in this workspace: check with a copy of the module (order against brute force).
@@ -105,6 +108,9 @@ repository instead of living in someone's checkout.
     rebuilds when a part changes display, and `vertical-align` rebuilds its inline layout.
   - `layout/construct.rs`: `flush_inline_pseudos_recursive` reads the child's display, so nested
     inlines keep their pseudo-elements.
+  - `document.rs` (`generated_text_left`): `content` and list markers share 256 KB per pass;
+    `layout_deadline`/`layout_timed_out`: layout compares the deadline every 256 visits and then
+    returns empty boxes, so hosts can discard the document.
   - `net.rs`: GIF animations decode under `Limits` (2 × `MAX_ANIMATION_BYTES`), still images
     under `MAX_IMAGE_BYTES` (256 MiB), and a document's images share
     `MAX_DOCUMENT_IMAGE_BYTES` (2 GiB, `BaseDocument::image_budget`): past it they stay

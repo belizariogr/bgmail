@@ -154,6 +154,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
     quirks), and enables Blitz's line height quirk unless
     `document_mode(html)` is `NoQuirks`.
 - `with_depth()` (private): records the tree's nesting depth after parsing.
+- `HtmlDocument::prepare_within(width, limit) -> bool`: `prepare` that gives up on a layout past
+  `limit`, returning `false` with the document incomplete, for hosts to show text instead. Hangs
+  can't be stopped from outside, and a partial message would hide its end.
 - `HtmlDocument::try_parse(html, options) -> Result<Self, RenderError>`:
   `parse`, then `TooDeep` above `MAX_NESTING_DEPTH`, `TooComplex` if parsing stopped at a budget
   (`parse_refused`), and `TooComplex` above `MAX_TABLE_SPAN_AREA` (`table_span_area`,
@@ -310,6 +313,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   and gradient stops, each command counting at least 4). Once one doesn't fit nothing does;
   refused layers are counted (`refused_layers`) so their `Pop`s and contents stay out.
 - `fn gradient_stops(brush)`: what a brush adds to a command's cost.
+- `fn path_cost(path)`: elements, plus for each curve the segments flattening takes (`sqrt(extent /
+  tolerance)`), as triangles, not elements, are what fills memory.
 - `fn should_dash(path, stroke)`: dashes only up to `MAX_DASHES` (16384) per path, finite
   lengths only (`kurbo::dash` wouldn't return); otherwise the stroke is solid.
 - `fn curve_fits(points)`: a curve within `MAX_CURVE_EXTENT` (16384 px) on each axis, as its

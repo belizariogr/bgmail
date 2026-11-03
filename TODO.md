@@ -460,7 +460,21 @@
   a first cell's filled the whole row; a `<tr style=display:contents>` is a row of its own; `form`
   and `button` become `div` and `span`, so what they hide stays hidden. Round 18's fixes for ties
   and for `form` were incomplete.
-- ⬜ Known limits of round 19. `form{display:none}` no longer matches, as the tag is a `div`. An
+- ✅ Review round 20 (202000 render seeds with no panic, 690000 on the sanitizer with no violation):
+  a first layout past 2 s on the UI thread or 30 s in the background opens as text, a last resort for
+  what no limit caught. Grid tracks stop on rounding (297 bytes took 3 s), and at 1000. `content` and
+  markers share 256 KB per pass (61 KB took over 8 GB). Curves cost their segments, as 112 KB of round
+  borders made 7.5 GB of triangles. `BoundsTree` rotates with slack, as at every level it slowed
+  grids down. `form` and `button` are written out by hand, as renaming also renamed the parent's end
+  tag. Rows of `contents` in separate groups stay apart. Searches stop at 1024 characters, and only 2
+  MiB of a body is indexed (128 MB took 21 s during sync). A damaged `mail.db` is kept aside instead
+  of aborting at every start. Long names fit 240 bytes. A multipart read no further is text in
+  the body. Past 8 failed boundaries it stops searching. Bad percent escapes stay as written.
+- ⬜ Known limits of round 20. The deadline only covers a first layout: later ones (resizing, hover)
+  and painting aren't bound by time. A message opening as text on a very loaded machine is possible
+  at the 2 s limit. `<button><div hidden>x</button><p>` still hides what follows, as `</span>` doesn't
+  close a block. A replaced `mail.db` starts empty, including accounts, as `.corrupt` stays beside it.
+- ⬜ Known limits of round 19. `form{display:none}` no longer matches, as the tag is a `section`. An
   image with both `style` and a stray `=` attribute loses the tag once allowed.
 - ✅ Review round 18 (75000 render seeds, one panic; 1.2 M seeds on the sanitizer against the real tree
   builder, no real violation): a group no longer clears its cells' construction damage, which kept
