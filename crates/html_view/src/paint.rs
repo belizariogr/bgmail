@@ -31,6 +31,8 @@ pub struct PaintCache {
     color_glyphs: HashMap<(u64, u32, u32, u32), Option<ColorGlyphImage>>,
     /// Bytes held by `images` and `gradients` (see [`MAX_CACHED_PIXEL_BYTES`]).
     cached_pixel_bytes: u64,
+    /// Bytes of them the frame being painted has used.
+    frame_pixel_bytes: u64,
     known_families: Option<HashSet<String>>,
     /// GPUI family of each registered web font file, by (blob id, face index).
     web_font_families: HashMap<(u64, u32), String>,
@@ -43,15 +45,22 @@ pub struct PaintCache {
 }
 
 impl PaintCache {
-    /// Accounts for `bytes` about to be cached, starting over if they don't fit. What the
-    /// current frame draws holds its own reference, so it stays valid.
-    fn make_room(&mut self, bytes: u64) {
+    /// Accounts for `bytes` of new pixels the frame needs, starting over if they don't fit.
+    /// `false` if the frame alone is past the limit: what comes after it isn't drawn, or each
+    /// repaint would make the same textures again and fill the GPU with them.
+    fn make_room(&mut self, bytes: u64) -> bool {
+        if self.frame_pixel_bytes + bytes > MAX_CACHED_PIXEL_BYTES {
+            return false;
+        }
+        self.frame_pixel_bytes += bytes;
         if self.cached_pixel_bytes + bytes > MAX_CACHED_PIXEL_BYTES {
+            // What this frame already drew holds its own reference, so it stays valid.
             self.images.clear();
             self.gradients.clear();
             self.cached_pixel_bytes = 0;
         }
         self.cached_pixel_bytes += bytes;
+        true
     }
 
     /// How long until an animated image painted by the last replay changes
@@ -335,8 +344,8 @@ pub fn to_bgra_straight(brush: &ImageBrush) -> Vec<u8> {
 /// and DirectX, panicking in some paths; a message's image can declare 65535.
 const MAX_UPLOAD_SIDE: u32 = 8192;
 
-/// Most bytes of decoded and sampled pixels kept for a document; past them the cache starts
-/// over. Only what is visible gets here, so a screenful always fits.
+/// Most bytes of decoded and sampled pixels kept for a document, and drawn in a frame; past
+/// them the cache starts over, or a frame leaves out what doesn't fit.
 const MAX_CACHED_PIXEL_BYTES: u64 = 512 << 20;
 
 /// Size to pre-downscale an image to before upload, when it is drawn at less
@@ -407,15 +416,18 @@ fn render_image(
         upload.0,
         upload.1,
     );
-    if let Some(found) = cache.images.get(&key) {
-        return Some(found.clone());
+    if let Some(found) = cache.images.get(&key).cloned() {
+        cache.frame_pixel_bytes += upload.0 as u64 * upload.1 as u64 * 4;
+        return Some(found);
+    }
+    if !cache.make_room(upload.0 as u64 * upload.1 as u64 * 4) {
+        return None;
     }
     let mut buffer =
         image::RgbaImage::from_raw(image.width, image.height, to_bgra_straight(brush))?;
     if upload != (image.width, image.height) {
         buffer = resize_straight(&buffer, upload.0, upload.1);
     }
-    cache.make_room(buffer.as_raw().len() as u64);
     let frame = image::Frame::new(buffer);
     let rendered = Arc::new(RenderImage::new(smallvec::smallvec![frame]));
     cache.images.insert(key, rendered.clone());
@@ -678,14 +690,20 @@ fn paint_sampled_gradient(
         w,
         h,
     );
-    let image = match cache.gradients.get(&key) {
-        Some(image) => image.clone(),
+    let bytes = w as u64 * h as u64 * 4;
+    let image = match cache.gradients.get(&key).cloned() {
+        Some(image) => {
+            cache.frame_pixel_bytes += bytes;
+            image
+        }
         None => {
+            if !cache.make_room(bytes) {
+                return;
+            }
             let pixels = crate::gradient::rasterize(gradient, transform, area, w, h);
             let Some(buffer) = image::RgbaImage::from_raw(w, h, pixels) else {
                 return;
             };
-            cache.make_room(buffer.as_raw().len() as u64);
             let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
                 buffer
             )]));
@@ -861,6 +879,7 @@ pub fn paint_display_list(
 ) {
     cache.animations.clone_from(&list.animations);
     cache.next_frame = None;
+    cache.frame_pixel_bytes = 0;
     let mut index = 0;
     while index < list.commands.len() {
         // A stray Pop at top level is skipped instead of ending the replay.
@@ -935,6 +954,14 @@ mod tests {
         // Never upscales a side when only the other one shrinks a lot.
         assert_eq!(downscaled_size((1000, 10), (100.0, 20.0)), Some((125, 10)));
         assert_eq!(downscaled_size((100, 100), (0.2, 0.2)), Some((1, 1)));
+        // Past the limit a frame leaves pixels out instead of clearing what it used.
+        let mut cache = PaintCache::default();
+        assert!(cache.make_room(MAX_CACHED_PIXEL_BYTES));
+        assert!(!cache.make_room(1));
+        assert_eq!(cache.cached_pixel_bytes, MAX_CACHED_PIXEL_BYTES);
+        cache.frame_pixel_bytes = 0;
+        assert!(cache.make_room(1));
+        assert_eq!(cache.cached_pixel_bytes, 1);
         // An image past what GPUs take shrinks whatever it is drawn at, and the sizes of
         // an image stay few however many widths a message asks for.
         assert_eq!(downscaled_size((65535, 1), (65535.0, 1.0)), Some((8191, 1)));

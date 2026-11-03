@@ -198,7 +198,7 @@ impl DisplayList {
 
     /// Records colour-bitmap glyphs (emoji).
     pub fn push_color_glyphs(&mut self, run: ColorGlyphRun) {
-        if !run.glyphs.is_empty() {
+        if !run.glyphs.is_empty() && self.refused_layers == 0 {
             self.commands.push(Command::ColorGlyphs(run));
         }
     }
