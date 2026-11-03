@@ -95,6 +95,38 @@ impl Database {
         Ok(db)
     }
 
+    /// [`Self::open`] that survives a damaged file: it is kept beside as `<name>.corrupt`, with
+    /// its journals, so it can still be recovered, and a new one starts in its place; the second
+    /// value says so. Aborting would leave the app unable to start, with no message, for good.
+    /// Thunderbird rebuilds its damaged index files the same way. Other errors (a full disk, no
+    /// permission) aren't about the file, which stays untouched.
+    pub fn open_or_replace_corrupt(path: impl AsRef<Path>) -> rusqlite::Result<(Self, bool)> {
+        use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
+        let path = path.as_ref();
+        match Self::open(path) {
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(error.code, NotADatabase | DatabaseCorrupt) =>
+            {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                let free = (0..)
+                    .map(|n| match n {
+                        0 => format!("{name}.corrupt"),
+                        n => format!("{name}.corrupt-{n}"),
+                    })
+                    .find(|kept| !path.with_file_name(kept).exists())
+                    .unwrap_or_default();
+                for suffix in ["", "-wal", "-shm"] {
+                    let _ = std::fs::rename(
+                        path.with_file_name(format!("{name}{suffix}")),
+                        path.with_file_name(format!("{free}{suffix}")),
+                    );
+                }
+                Ok((Self::open(path)?, true))
+            }
+            opened => opened.map(|db| (db, false)),
+        }
+    }
+
     /// Opens the default database path.
     pub fn open_default() -> rusqlite::Result<Self> {
         Self::open(database_path())
@@ -322,6 +354,9 @@ fn search_filter(query: &str) -> Option<(&'static str, Vec<Value>)> {
     if folded.is_empty() {
         return None;
     }
+    // A phrase costs its trigrams: 64 KB pasted here took 12 s and 2 GB. What starts with this
+    // is still found, among the few things that also do.
+    let folded: String = folded.chars().take(MAX_QUERY_CHARS).collect();
     if folded.chars().count() >= FTS_MIN_CHARS {
         Some((
             "id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1)",
@@ -334,6 +369,9 @@ fn search_filter(query: &str) -> Option<(&'static str, Vec<Value>)> {
         ))
     }
 }
+
+/// Longest search looked for.
+const MAX_QUERY_CHARS: usize = 1024;
 
 /// Wraps `text` as one FTS5 string (phrase), escaping embedded quotes, so user
 /// input is never parsed as FTS query syntax.
@@ -772,5 +810,26 @@ mod tests {
         worker.join().unwrap();
         assert_eq!(ui.message_count_all().unwrap(), 50);
         assert_eq!(ui.pending_ops(fx.account).unwrap().len(), 50);
+    }
+
+    #[test]
+    fn a_damaged_database_is_kept_aside_and_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        std::fs::write(&path, vec![b'x'; 4096]).unwrap();
+        let (_, replaced) = Database::open_or_replace_corrupt(&path).unwrap();
+        assert!(replaced);
+        assert_eq!(
+            std::fs::read(dir.path().join("mail.db.corrupt")).unwrap(),
+            vec![b'x'; 4096]
+        );
+        // A good one stays, and a second damaged one keeps the first copy.
+        let (_, replaced) = Database::open_or_replace_corrupt(&path).unwrap();
+        assert!(!replaced);
+        std::fs::remove_file(dir.path().join("mail.db-wal")).ok();
+        std::fs::remove_file(dir.path().join("mail.db-shm")).ok();
+        std::fs::write(&path, vec![b'y'; 4096]).unwrap();
+        assert!(Database::open_or_replace_corrupt(&path).unwrap().1);
+        assert!(dir.path().join("mail.db.corrupt-1").exists());
     }
 }

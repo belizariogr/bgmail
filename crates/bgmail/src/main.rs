@@ -358,6 +358,11 @@ fn main() {
                         RootView::new(settings)
                     });
                     view.update(cx, |view, cx| {
+                        if view.database_replaced {
+                            use crate::locale::ActiveLanguage;
+                            let note = locale::Key::StatusDatabaseReplaced.tr(cx.language());
+                            view.set_status_note(note, cx);
+                        }
                         // Sync starts after the window exists; it never
                         // blocks the first frame (threads + async keychain).
                         view.start_mail(cx);

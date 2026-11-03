@@ -606,6 +606,10 @@ struct ReaderSignature {
 /// avoids flashing the placeholder at every message.
 const BACKGROUND_BUILD_BYTES: usize = 256 * 1024;
 
+/// Longest a first layout can take before the message opens as text.
+const UI_LAYOUT_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+const BACKGROUND_LAYOUT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Most of a plain-text body the reader shows. Text costs over 100 times its size to lay
 /// out, and a body can have 256 MB. Gmail clips bodies at about 102 KB; Thunderbird shows
 /// everything and hangs for minutes. Replying and forwarding use the whole body.
@@ -707,7 +711,18 @@ impl ReaderJob {
                 HtmlDocument::parse(&fallback.html, options())
             }
         };
-        document.prepare(self.width);
+        // A last resort, as nothing else stops a hang: longer where it blocks nothing.
+        let limit = if self.runs_in_background() {
+            BACKGROUND_LAYOUT_LIMIT
+        } else {
+            UI_LAYOUT_LIMIT
+        };
+        if !document.prepare_within(self.width, limit) {
+            notice = Some(ReaderNotice::Unrenderable);
+            let fallback = email_document(self.colors, &clip(as_plain()).0, false);
+            document = HtmlDocument::parse(&fallback.html, options());
+            document.prepare(self.width);
+        }
         BuiltReader {
             document: DetachedDocument::new(document),
             blocked_images: if notice.is_some() {
@@ -959,6 +974,8 @@ pub struct RootView {
     /// Whether [`Self::crash_guard`]'s marker exists, so an empty reader isn't a disk
     /// access on every frame.
     reader_guarded: bool,
+    /// The database was damaged and started over, which the first frame reports.
+    pub(crate) database_replaced: bool,
     /// Inputs that last produced the reader document (selected message and the
     /// colors it was themed with). Used to skip re-parsing the body on every
     /// render when nothing that affects the document has changed.
@@ -1324,7 +1341,8 @@ impl RootView {
         let crash_guard = CrashGuard::beside(db_path.as_ref());
         let quote_guard = CrashGuard::beside_for_quotes(db_path.as_ref());
         let db_path = db_path.as_ref().to_path_buf();
-        let db = storage::Database::open(&db_path).expect("failed to open mail database");
+        let (db, database_replaced) = storage::Database::open_or_replace_corrupt(&db_path)
+            .expect("failed to open mail database");
         if seed {
             let mut seed_messages = db_seed::seed_messages();
             if let Some(dir) = std::env::var_os("BGMAIL_SAMPLE_DIR") {
@@ -1442,6 +1460,7 @@ impl RootView {
             crash_guard,
             quote_guard,
             reader_guarded: false,
+            database_replaced,
             last_reader_sig: None,
             reader_preparing: false,
             reader_build_token: 0,
@@ -2223,7 +2242,11 @@ impl RootView {
     }
 
     /// Shows `note` in the status bar for a few seconds.
-    fn set_status_note(&mut self, note: impl Into<SharedString>, cx: &mut Context<Self>) {
+    pub(crate) fn set_status_note(
+        &mut self,
+        note: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
         self.status_note = Some(note.into());
         self.status_note_seq += 1;
         let token = self.status_note_seq;

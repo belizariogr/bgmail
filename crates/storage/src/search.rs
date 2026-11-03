@@ -26,6 +26,8 @@ pub fn search_like_pattern(query: &str) -> Option<String> {
     }
 }
 
+const MAX_INDEXED_TEXT_BYTES: usize = 2 << 20;
+
 /// Concatenates searchable fields into one folded blob stored on each message.
 pub fn build_search_text(
     sender: &str,
@@ -33,6 +35,14 @@ pub fn build_search_text(
     subject: &str,
     plain_text: &str,
 ) -> String {
+    // As much as the reader shows. Trigrams take about 3 times the text, and all of it while
+    // holding the write lock: 128 MB of text took 21 s and 2 GB during sync. Thunderbird also
+    // indexes only the start of very long bodies.
+    let mut end = plain_text.len().min(MAX_INDEXED_TEXT_BYTES);
+    while !plain_text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let plain_text = &plain_text[..end];
     collapse_spaces(&fold_for_search(&format!(
         "{sender} {sender_email} {subject} {plain_text}"
     )))
@@ -62,5 +72,13 @@ mod tests {
             search_like_pattern("a_%\\").as_deref(),
             Some("%a\\_\\%\\\\%")
         );
+    }
+
+    #[test]
+    fn only_the_start_of_a_very_long_body_is_indexed() {
+        let text = "é".repeat(2 << 20);
+        let indexed = build_search_text("a", "b", "c", &text);
+        assert!(indexed.len() < 3 << 20);
+        assert!(build_search_text("a", "b", "c", "word").ends_with("word"));
     }
 }

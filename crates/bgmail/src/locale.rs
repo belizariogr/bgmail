@@ -313,6 +313,7 @@ pub enum Key {
     StatusAttachmentFailed,
     StatusAttachmentOpenFailed,
     StatusAttachmentRunsCode,
+    StatusDatabaseReplaced,
     StatusActionFailed,
     StatusNoDestination,
     StatusRemoveAccountFailed,
@@ -848,6 +849,12 @@ impl Key {
             (StatusAttachmentFailed, P) => "Não foi possível salvar o anexo",
             (StatusAttachmentOpenFailed, E) => "Could not open the attachment",
             (StatusAttachmentOpenFailed, P) => "Não foi possível abrir o anexo",
+            (StatusDatabaseReplaced, E) => {
+                "The mail database was damaged. It was kept aside as mail.db.corrupt, and a new one started."
+            }
+            (StatusDatabaseReplaced, P) => {
+                "O banco de e-mails estava danificado. Ele foi guardado como mail.db.corrupt, e um novo foi iniciado."
+            }
             (StatusAttachmentRunsCode, E) => {
                 "This type of file can run programs, so it won't open from here. Save it if you trust it."
             }
@@ -1050,7 +1057,8 @@ mod tests {
         assert_eq!(Language::from_code(""), Language::default());
     }
 
-    const ALL_KEYS: [Key; 253] = [
+    const ALL_KEYS: [Key; 254] = [
+        Key::StatusDatabaseReplaced,
         Key::ViewZoomIn,
         Key::ViewZoomOut,
         Key::ViewZoomReset,
