@@ -441,6 +441,9 @@ impl FontFaceHandler {
     }
 }
 
+/// BGMail: where web fonts can come from, also protocol-relative.
+const TRUSTED_FONT_HOST: &str = "https://fonts.gstatic.com/";
+
 /// Fetch the fonts of all `@font-face` rules in `sheet`
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_font_face(
@@ -510,6 +513,16 @@ pub(crate) fn fetch_font_face_rules<'a>(
                     Source::Local(_) => None,
                 })
                 .find_map(|url_source| {
+                    // BGMail: a font comes in the message, and no font engine here survives a
+                    // hostile one: one changed byte aborted the app, another filled 3.8 GB for a
+                    // glyph. Gmail drops `@font-face`; Thunderbird keeps it behind a sanitizer we
+                    // don't have. Only what Google Fonts serves, not what a sender does.
+                    let url = url_source.url.as_str();
+                    if !url.starts_with(TRUSTED_FONT_HOST)
+                        && !url.starts_with(&TRUSTED_FONT_HOST[6..])
+                    {
+                        return None;
+                    }
                     let mut format = match &url_source.format_hint {
                         Some(FontFaceSourceFormat::Keyword(fmt)) => *fmt,
                         Some(FontFaceSourceFormat::String(str)) => match str.as_str() {

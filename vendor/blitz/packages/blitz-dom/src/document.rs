@@ -969,6 +969,11 @@ impl BaseDocument {
     /// Remove a node from the node tree, clearing any interaction state
     /// (hover/active/focus/mousedown/selection/drag/scrollbar) that references
     /// it so that stale NodeIds are never dereferenced after the slot is freed.
+    /// BGMail: bytes of web fonts this document holds.
+    pub fn web_font_bytes(&self) -> u64 {
+        self.font_bytes
+    }
+
     /// BGMail: takes `bytes` of generated text from this pass's budget, if it still has them.
     pub(crate) fn take_generated_text(&self, bytes: usize) -> bool {
         let left = self.generated_text_left.get();
