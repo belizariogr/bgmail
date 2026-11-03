@@ -7,7 +7,7 @@
 use kurbo::Rect;
 use peniko::Color;
 
-use crate::display_list::{Brush, Command, DisplayList};
+use crate::display_list::{Brush, Command, DisplayList, Geometry};
 
 /// Colors of the dark page text is adapted for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,6 +27,8 @@ const NEUTRAL_SATURATION: f32 = 0.2;
 const OPAQUE_ALPHA: f32 = 0.5;
 /// A fill this thin is a line (an underline), drawn like text, not a background.
 const LINE_THICKNESS: f64 = 3.0;
+/// Largest size of what is taken for a list bullet.
+const MARKER_SIZE: f64 = 8.0;
 
 /// What is behind a point of the page.
 #[derive(Clone, Copy)]
@@ -44,7 +46,7 @@ pub(crate) fn adapt_text_contrast(list: &mut DisplayList, page: DarkPage) {
     let text = Color::from_rgba8(r, g, b, a);
 
     let mut clips: Vec<Rect> = Vec::new();
-    let mut painted: Vec<(Rect, Behind)> = Vec::new();
+    let mut painted: Vec<Painted> = Vec::new();
     for command in &mut list.commands {
         match command {
             Command::PushLayer { clip, .. } => clips.push(*clip),
@@ -56,16 +58,28 @@ pub(crate) fn adapt_text_contrast(list: &mut DisplayList, page: DarkPage) {
                 let visible = clips
                     .iter()
                     .fold(bounds, |rect, clip| rect.intersect(*clip));
+                let outline = match geometry {
+                    Geometry::Path(path) => Some(path.clone()),
+                    _ => None,
+                };
                 match brush {
-                    Brush::Solid(color) if is_line(bounds) => {
+                    Brush::Solid(color) if is_line(bounds) || is_marker(bounds) => {
                         adapt(color, behind(&painted, bounds.center(), background), text);
                     }
                     Brush::Solid(color) if color.components[3] >= OPAQUE_ALPHA => {
-                        painted.push((visible, Behind::Color(*color)));
+                        painted.push(Painted {
+                            rect: visible,
+                            outline,
+                            behind: Behind::Color(*color),
+                        });
                     }
                     Brush::Solid(_) => {}
                     Brush::Gradient { .. } | Brush::Image { .. } => {
-                        painted.push((visible, Behind::Unknown));
+                        painted.push(Painted {
+                            rect: visible,
+                            outline,
+                            behind: Behind::Unknown,
+                        });
                     }
                 }
             }
@@ -86,13 +100,37 @@ fn is_line(bounds: Rect) -> bool {
     bounds.height() <= LINE_THICKNESS && bounds.width() > bounds.height() * 2.0
 }
 
+/// A list bullet: text in all but name, and much too small to be a background.
+fn is_marker(bounds: Rect) -> bool {
+    bounds.width() <= MARKER_SIZE && bounds.height() <= MARKER_SIZE
+}
+
+/// Something painted that text could be on.
+struct Painted {
+    rect: Rect,
+    /// The shape, when its box says little: borders in one path enclose what they don't
+    /// cover.
+    outline: Option<kurbo::BezPath>,
+    behind: Behind,
+}
+
+impl Painted {
+    fn covers(&self, point: kurbo::Point) -> bool {
+        self.rect.contains(point)
+            && self
+                .outline
+                .as_ref()
+                .is_none_or(|outline| kurbo::Shape::winding(outline, point) != 0)
+    }
+}
+
 /// The last thing painted at `point`.
-fn behind(painted: &[(Rect, Behind)], point: kurbo::Point, page: Color) -> Behind {
+fn behind(painted: &[Painted], point: kurbo::Point, page: Color) -> Behind {
     painted
         .iter()
         .rev()
-        .find(|(rect, _)| rect.contains(point))
-        .map_or(Behind::Color(page), |(_, behind)| *behind)
+        .find(|painted| painted.covers(point))
+        .map_or(Behind::Color(page), |painted| painted.behind)
 }
 
 fn adapt(color: &mut Color, behind: Behind, page_text: Color) {
@@ -191,6 +229,20 @@ fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_border_is_not_the_background_of_what_it_surrounds() {
+        for html in [
+            "<!DOCTYPE html><body><div style=\"color:#000;border-top:1px solid #ccc;border-bottom:1px solid #ccc\">Total</div>",
+            "<!DOCTYPE html><body><a style=\"color:#333;border:1px solid #ddd;padding:8px\">Botao</a>",
+        ] {
+            let colors = text_colors(html);
+            assert!(!colors.is_empty(), "{html}");
+            for (text, [r, g, b]) in colors {
+                assert!(r > 150 && g > 150 && b > 150, "{text} {r} {g} {b}");
+            }
+        }
+    }
 
     #[test]
     fn transparent_text_stays_invisible_and_alpha_is_kept() {
@@ -292,7 +344,11 @@ mod tests {
     fn text_on_an_image_is_left_alone() {
         let page = Color::from_rgb8(30, 30, 30);
         let point = kurbo::Point::new(5.0, 5.0);
-        let painted = [(Rect::new(0.0, 0.0, 10.0, 10.0), Behind::Unknown)];
+        let painted = [Painted {
+            rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+            outline: None,
+            behind: Behind::Unknown,
+        }];
         let mut color = Color::BLACK;
         adapt(&mut color, behind(&painted, point, page), Color::WHITE);
         assert_eq!(color, Color::BLACK);
