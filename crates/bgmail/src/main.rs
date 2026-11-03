@@ -93,6 +93,20 @@ fn schedule_menu_command(id: CommandId, cx: &mut App) {
     });
 }
 
+/// [`schedule_menu_command`] for what acts on the selected messages: from another window,
+/// they aren't what is in front of the user.
+fn schedule_message_command(id: CommandId, cx: &mut App) {
+    let main = cx.global::<MainWindow>().0;
+    cx.defer(move |cx| {
+        let _ = main.update(cx, |view, window, cx| {
+            let ctx = view.command_context();
+            if window.is_window_active() && commands::command_enabled(&id, &ctx) {
+                view.execute_command(&id, window, cx);
+            }
+        });
+    });
+}
+
 fn schedule_compose_action(
     cx: &mut App,
     action: impl FnOnce(&mut ComposeView, &mut gpui::Window, &mut gpui::Context<ComposeView>) + 'static,
@@ -170,26 +184,28 @@ fn register_global_menu_actions(cx: &mut App) {
         });
     });
     cx.on_action(|_: &MessageDeletePermanent, cx| {
-        schedule_menu_command(CommandId::MessageDeletePermanent, cx);
+        schedule_message_command(CommandId::MessageDeletePermanent, cx);
     });
-    cx.on_action(|_: &MessageRestore, cx| schedule_menu_command(CommandId::MessageRestore, cx));
-    cx.on_action(|_: &MessageArchive, cx| schedule_menu_command(CommandId::MessageArchive, cx));
-    cx.on_action(|_: &MessageMarkJunk, cx| schedule_menu_command(CommandId::MessageMarkJunk, cx));
-    cx.on_action(|_: &MessagePrint, cx| schedule_menu_command(CommandId::MessagePrint, cx));
+    cx.on_action(|_: &MessageRestore, cx| schedule_message_command(CommandId::MessageRestore, cx));
+    cx.on_action(|_: &MessageArchive, cx| schedule_message_command(CommandId::MessageArchive, cx));
+    cx.on_action(|_: &MessageMarkJunk, cx| {
+        schedule_message_command(CommandId::MessageMarkJunk, cx)
+    });
+    cx.on_action(|_: &MessagePrint, cx| schedule_message_command(CommandId::MessagePrint, cx));
     cx.on_action(|_: &MessageToggleFlag, cx| {
-        schedule_menu_command(CommandId::MessageToggleFlag, cx);
+        schedule_message_command(CommandId::MessageToggleFlag, cx);
     });
-    cx.on_action(|_: &MessageReply, cx| schedule_menu_command(CommandId::MessageReply, cx));
+    cx.on_action(|_: &MessageReply, cx| schedule_message_command(CommandId::MessageReply, cx));
     cx.on_action(|_: &MessageReplyAll, cx| {
-        schedule_menu_command(CommandId::MessageReplyAll, cx);
+        schedule_message_command(CommandId::MessageReplyAll, cx);
     });
-    cx.on_action(|_: &MessageForward, cx| schedule_menu_command(CommandId::MessageForward, cx));
+    cx.on_action(|_: &MessageForward, cx| schedule_message_command(CommandId::MessageForward, cx));
     cx.on_action(|_: &MessageToggleRead, cx| {
-        schedule_menu_command(CommandId::MessageToggleRead, cx);
+        schedule_message_command(CommandId::MessageToggleRead, cx);
     });
     cx.on_action(|_: &GetNewMail, cx| schedule_menu_command(CommandId::SyncNow, cx));
     cx.on_action(|action: &MoveMessageToFolder, cx| {
-        schedule_menu_command(CommandId::MoveToFolder(action.path.clone()), cx);
+        schedule_message_command(CommandId::MoveToFolder(action.path.clone()), cx);
     });
     cx.on_action(|_: &ComposeSend, cx| {
         schedule_compose_action(cx, |view, _, cx| view.send_message(cx));
