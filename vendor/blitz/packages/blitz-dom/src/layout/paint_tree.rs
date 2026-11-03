@@ -308,9 +308,11 @@ impl BaseDocument {
                 .iter()
                 .copied()
                 .filter(|&id| {
-                    self.nodes
-                        .get(id)
-                        .is_some_and(|n| n.layout_parent.get() != Some(node_id))
+                    self.nodes.get(id).is_some_and(|n| {
+                        n.layout_parent.get() != Some(node_id)
+                            // BGMail: a list can be older than the box's return to flow.
+                            && n.out_of_flow.load(std::sync::atomic::Ordering::Relaxed)
+                    })
                 })
                 .map(|id| {
                     let anchor = self

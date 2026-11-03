@@ -230,12 +230,14 @@ impl LayoutPassState<'_> {
         let font_styles = node.primary_styles().map(|style| {
             use style::values::computed::font::LineHeight;
 
-            let font_size = style.slow_clone_font_size().used_size().px();
-            let line_height = match style.clone_line_height() {
+            // BGMail: saturated, as a box this tall generates huge corner paths.
+            let font_size =
+                stylo_taffy::convert::saturate_px(style.slow_clone_font_size().used_size().px());
+            let line_height = stylo_taffy::convert::saturate_px(match style.clone_line_height() {
                 LineHeight::Normal => font_size * 1.2,
                 LineHeight::Number(num) => font_size * num.0,
                 LineHeight::Length(value) => value.0.px(),
-            };
+            });
 
             (font_size, line_height)
         });
@@ -917,7 +919,11 @@ impl RoundTree for LayoutPassState<'_> {
         // BGMail: a box laid out from cache keeps the list of its last layout, and a width
         // crossing `@media` may have freed a pseudo-element in it since.
         let mut children = self.node_from_id(node_id).hoisted_children.borrow_mut();
-        children.retain(|id| self.nodes.contains_key(*id));
+        children.retain(|id| {
+            self.nodes
+                .get(*id)
+                .is_some_and(|node| node.out_of_flow.load(core::sync::atomic::Ordering::Relaxed))
+        });
         children.len()
     }
 

@@ -1286,8 +1286,13 @@ impl Node {
     /// Record in [`Node::out_of_flow`] whether `style` (the node's new primary style)
     /// makes its box out of flow.
     pub(crate) fn record_out_of_flow(&self, style: &ComputedValues) {
-        self.out_of_flow
-            .store(style_is_out_of_flow(style), Ordering::Relaxed);
+        let out_of_flow = style_is_out_of_flow(style);
+        self.out_of_flow.store(out_of_flow, Ordering::Relaxed);
+        // BGMail: no one rewrites this for a box back in flow, and painting would still
+        // leave it to the containing block it had, whose list no longer holds it.
+        if !out_of_flow {
+            self.oof_containing_block.set(None);
+        }
     }
 
     pub fn text_content(&self) -> String {

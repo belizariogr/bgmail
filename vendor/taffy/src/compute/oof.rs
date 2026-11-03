@@ -342,13 +342,18 @@ impl OofAxis {
 /// This should be called once per `RunMode::PerformLayout` container layout, after the layout
 /// algorithm (block/flexbox/grid) has run, and *inside* any layout caching wrapper (such as
 /// [`compute_cached_layout`](crate::compute_cached_layout)) so that cache hits do not re-run the
-/// pass. It is a no-op when `output.oof_positioning_area` is `None` (leaf and size-only outputs).
+/// pass. When `output.oof_positioning_area` is `None` (leaf and size-only outputs) it only clears
+/// the node's list.
 ///
 /// Which candidates the node claims is determined by the node's style via
 /// [`CoreStyle::is_containing_block`]. `position: fixed` boxes unclaimed by every ancestor are
 /// claimed by the final root positioning pass in [`compute_root_layout`](crate::compute_root_layout).
 pub fn compute_oof_layout(tree: &mut impl LayoutContainingBlock, node_id: NodeId, output: &mut LayoutOutput) {
-    let Some(area) = output.oof_positioning_area else { return };
+    // BGMail: cleared too, or a box that became a leaf keeps listing boxes that may be freed.
+    let Some(area) = output.oof_positioning_area else {
+        tree.clear_hoisted_children(node_id);
+        return;
+    };
     if output.oof_candidates.is_empty() {
         tree.clear_hoisted_children(node_id);
         return;
