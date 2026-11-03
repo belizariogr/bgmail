@@ -3400,4 +3400,55 @@ mod hostile_tests {
             "{first:?} {second:?}"
         );
     }
+
+    #[test]
+    fn a_cells_color_stays_in_the_cell_without_a_row() {
+        let html = "<div style=\"display:table;width:400px\"><div style=\"display:table-cell;\
+            background:#ff0000;width:100px\">Menu</div><div style=\"display:table-cell\">Body</div></div>";
+        let mut document = parse(html);
+        let reds = format!("{:?}", document.display_list().commands)
+            .matches("components: [1.0, 0.0, 0.0, 1.0]")
+            .count();
+        assert_eq!(reds, 1);
+    }
+
+    #[test]
+    fn a_contents_row_stays_a_row_of_its_own() {
+        let html = "<table><tr><td>A</td></tr><tr style=display:contents><td>B</td></tr><tr><td>C</td></tr></table>";
+        let mut document = parse(html);
+        let baselines: Vec<u32> = document
+            .display_list()
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Text(run) => Some(run.baseline as u32),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(baselines.len(), 3);
+        assert!(
+            baselines[0] < baselines[1] && baselines[1] < baselines[2],
+            "{baselines:?}"
+        );
+    }
+
+    #[test]
+    fn huge_curves_arent_recorded() {
+        for html in [
+            "<div style=\"transform:scale(1e20);border:1px dashed red;border-radius:9px\">x",
+            "<div style=\"transform:matrix(1e16,0,0,1e16,0,0);border:1px solid red;border-radius:9px\">x",
+        ] {
+            let mut document = parse(html);
+            for command in &document.display_list().commands {
+                let path = match command {
+                    Command::Fill { geometry: Geometry::Path(path), .. } | Command::Stroke { path, .. } => path,
+                    _ => continue,
+                };
+                assert!(path.elements().iter().all(|el| !matches!(
+                    el,
+                    kurbo::PathEl::CurveTo(a, ..) if a.x.abs() > 1e12
+                )), "{html}");
+            }
+        }
+    }
 }

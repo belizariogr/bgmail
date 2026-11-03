@@ -308,7 +308,7 @@ impl ElementCx<'_, '_> {
             .map(|row| {
                 [
                     row.group.and_then(background_color),
-                    background_color(row.node_id),
+                    row.node_id.and_then(background_color),
                 ]
             })
             .collect();

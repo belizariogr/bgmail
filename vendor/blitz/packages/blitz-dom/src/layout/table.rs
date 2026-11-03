@@ -172,7 +172,8 @@ pub struct TableColumn {
 #[derive(Debug, Clone)]
 pub struct TableRow {
     // kind: TableItemKind,
-    pub node_id: NodeId,
+    /// BGMail: `None` for an anonymous row, which has no style of its own to paint.
+    pub node_id: Option<NodeId>,
     /// The row group (if any) that contains the row
     pub group: Option<NodeId>,
     /// The row's specified `height`, if it is a length
@@ -743,7 +744,8 @@ fn collect_table_cells(
                     columns,
                     first_cell_border,
                     percent_columns,
-                    false,
+                    // BGMail: `contents` in a row is still in that row.
+                    in_row,
                     anonymous_blocks,
                 );
             }
@@ -764,7 +766,7 @@ fn collect_table_cells(
                 (height.tag() == taffy::CompactLength::LENGTH_TAG).then(|| height.value())
             });
             rows.push(TableRow {
-                node_id,
+                node_id: Some(node_id),
                 group: None,
                 height,
                 is_constrained: height.is_some(),
@@ -797,13 +799,14 @@ fn collect_table_cells(
             doc.nodes[node_id].children = children;
         }
         DisplayInside::TableCell => {
-            // BGMail: a cell with no row yet (its `<tr>` is `display:contents`) opens one. On
-            // grid line 0, which doesn't exist, it would land after the rows that follow it.
-            if *row == 0 {
-                *row = 1;
+            // BGMail: a cell outside a row (its `<tr>` is `display:contents`) opens an anonymous
+            // one, unless the one before is anonymous too, as siblings in `display:table` share
+            // it. On grid line 0, which doesn't exist, it would land after the rows following it.
+            if !in_row && rows.last().is_none_or(|last| last.node_id.is_some()) {
+                *row = row.saturating_add(1);
                 cursor.start_row();
                 rows.push(TableRow {
-                    node_id,
+                    node_id: None,
                     group: None,
                     height: None,
                     is_constrained: false,
@@ -1040,7 +1043,7 @@ fn collect_table_cells(
             *row = row.saturating_add(1);
             cursor.start_row();
             rows.push(TableRow {
-                node_id,
+                node_id: None,
                 group: None,
                 height: None,
                 is_constrained: false,
