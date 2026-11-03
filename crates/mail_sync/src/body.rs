@@ -82,8 +82,13 @@ pub fn body_content_within(raw: &[u8], limit: usize) -> Option<BodyContent> {
 
 /// Re-derives the plain text and preview of stored bodies written before
 /// HTML in text parts and named entities were handled, so their list rows
-/// stop showing markup. Failures only leave a row as it was.
+/// stop showing markup. Failures only leave a row as it was. Once per account: the query also
+/// takes text that merely has `&` and `;`, which stays as it is and would come back each start.
 pub fn repair_stale_previews(db: &Database, account_id: i64) -> rusqlite::Result<()> {
+    let flag = format!("previews_repaired_{account_id}");
+    if db.meta_flag(&flag)? {
+        return Ok(());
+    }
     for id in db.messages_with_markup_preview(account_id)? {
         let Some(raw) = db.message_raw(id)? else {
             continue;
@@ -91,7 +96,7 @@ pub fn repair_stale_previews(db: &Database, account_id: i64) -> rusqlite::Result
         let body = body_content(&raw);
         db.update_body_text(id, &body.plain_text, &body.preview)?;
     }
-    Ok(())
+    db.set_meta_flag(&flag)
 }
 
 /// Whitespace collapsed to single spaces, cut at `max_chars` characters.
@@ -216,6 +221,16 @@ fn base64_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_are_repaired_once_per_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("mail.db")).unwrap();
+        // The flag stays: later starts don't run the query at all.
+        repair_stale_previews(&db, 7).unwrap();
+        assert!(db.meta_flag("previews_repaired_7").unwrap());
+        assert!(!db.meta_flag("previews_repaired_8").unwrap());
+    }
 
     #[test]
     fn a_body_over_the_limit_is_refused_and_attachments_do_not_count() {
