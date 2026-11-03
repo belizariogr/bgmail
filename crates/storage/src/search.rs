@@ -32,7 +32,15 @@ pub fn build_search_text(
     subject: &str,
     plain_text: &str,
 ) -> String {
-    fold_for_search(&format!("{sender} {sender_email} {subject} {plain_text}"))
+    collapse_spaces(&fold_for_search(&format!(
+        "{sender} {sender_email} {subject} {plain_text}"
+    )))
+}
+
+/// Any run of spaces and line breaks as one space, in what is stored and what is searched:
+/// a phrase can cross where a plain text message breaks its lines.
+pub(crate) fn collapse_spaces(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

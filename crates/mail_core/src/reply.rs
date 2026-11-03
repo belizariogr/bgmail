@@ -326,8 +326,13 @@ pub fn html_to_text(html: &str) -> String {
                 .to_ascii_lowercase();
             if !closing && matches!(name.as_str(), "script" | "style" | "title") {
                 let close = format!("</{name}");
-                let lower = rest.to_ascii_lowercase();
-                rest = match lower.find(&close) {
+                // Without lowercasing the rest of the document at every tag: a sender
+                // repeating `<style></style>` would make that quadratic.
+                let found = rest
+                    .as_bytes()
+                    .windows(close.len())
+                    .position(|window| window.eq_ignore_ascii_case(close.as_bytes()));
+                rest = match found {
                     Some(pos) => rest[pos..].find('>').map_or("", |e| &rest[pos + e + 1..]),
                     None => "",
                 };
@@ -487,6 +492,15 @@ mod tests {
             html_to_text("<html><head><title>T</title><style>a{}</style></head><p>x</p>"),
             "x"
         );
+    }
+
+    #[test]
+    fn many_skipped_blocks_take_linear_time() {
+        let html = "<style></style>".repeat(200_000);
+        let start = std::time::Instant::now();
+        assert_eq!(html_to_text(&html), "");
+        // Quadratic, this size takes well over a minute.
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
     }
 
     #[test]
