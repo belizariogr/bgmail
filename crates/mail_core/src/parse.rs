@@ -164,6 +164,14 @@ fn describe(raw: &[u8], index: usize, part: &MessagePart<'_>, html: &str) -> Att
         charset: part
             .content_type()
             .and_then(|ct| ct.attribute("charset"))
+            // It comes decoded and goes back into a header when forwarding: anything but
+            // a plain token could add headers or take over the part.
+            .filter(|charset| {
+                !charset.is_empty()
+                    && charset
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._:+-".contains(&b))
+            })
             .map(str::to_string),
         inline: shown_in_body && !is_attachment_disposition,
         content_id,
