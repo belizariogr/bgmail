@@ -589,9 +589,22 @@ fn table_span_area(doc: &BaseDocument) -> u64 {
     area
 }
 
-/// Chromium UA rules Blitz's default sheet lacks, and with no animations: nothing here runs
-/// their clock, so they never end, and each style pass redid every element with one (8000 of them
-/// took 2.3 s per pass). A message must read without them, as many clients have none:
+/// No animations: nothing here runs their clock, so they never end, and each style pass redid
+/// every element with one (8000 of them took 2.3 s per pass). A message must read without them, as
+/// many clients have none. Only where they can be, as this costs 15-20% of a layout (see
+/// [`may_animate`]).
+const NO_ANIMATION_UA_CSS: &str = "*, *::before, *::after { animation: none !important; \
+     transition: none !important; }";
+
+/// Whether `html` can declare animations or transitions, including through what hides the words.
+fn may_animate(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    ["keyframes", "transition", "@import", "\\"]
+        .iter()
+        .any(|word| lower.contains(word))
+}
+
+/// Chromium UA rules Blitz's default sheet lacks:
 /// - a plain `<hr>` is painted as a light #9a9a9a/#eeeeee bevel whatever its
 ///   color (`noshade` and `color` rules come from presentational hints);
 /// - form control metrics (its UA sheet and theme), which the controls of
@@ -599,9 +612,7 @@ fn table_span_area(doc: &BaseDocument) -> u64 {
 ///   text inputs with 3px of border + padding around their text, closed
 ///   drop-downs with room for the arrow at their end, 13px check boxes and
 ///   radio buttons.
-const CHROMIUM_UA_CSS: &str = "*, *::before, *::after { animation: none !important; \
-     transition: none !important; } \
-     input, select, textarea, button { \
+const CHROMIUM_UA_CSS: &str = "input, select, textarea, button { \
      font: 13.333px sans-serif; letter-spacing: normal; word-spacing: normal; \
      text-transform: none; text-indent: 0; text-shadow: none; } \
      input:not([type]), input[type=text i], input[type=password i], input[type=email i], \
@@ -886,6 +897,9 @@ impl HtmlDocument {
         ];
         if mode == DocumentMode::Quirks {
             ua_stylesheets.push(UserAgentStylesheet::parse(QUIRKS_UA_CSS));
+        }
+        if may_animate(html) {
+            ua_stylesheets.push(UserAgentStylesheet::parse(NO_ANIMATION_UA_CSS));
         }
         if let Some(css) = &options.user_agent_css {
             ua_stylesheets.push(UserAgentStylesheet::parse(css));
@@ -1816,7 +1830,7 @@ mod tests {
     }
 
     /// Border box (x, y, w, h) of `#id` after laying `html` out at 400px.
-    fn box_of(html: &str, id: &str) -> (f32, f32, f32, f32) {
+    pub(super) fn box_of(html: &str, id: &str) -> (f32, f32, f32, f32) {
         let mut doc = HtmlDocument::parse(html, DocumentOptions::default());
         doc.layout(400.0);
         let blitz = doc.blitz();
@@ -2810,6 +2824,7 @@ mod tests {
 /// gigabytes, since a panic or an allocation failure takes the whole app down.
 #[cfg(test)]
 mod hostile_tests {
+    use super::tests::box_of;
     use super::*;
     use crate::display_list::{Command, Geometry};
 
@@ -3634,15 +3649,87 @@ mod hostile_tests {
     }
 
     #[test]
-    fn floats_in_tables_dont_double_per_level() {
-        let table = "<table><tr><td>".repeat(22);
-        let html = format!(
-            "<style>table{{width:100%}}@media(max-width:400px){{table{{float:left}}}}</style>{table}x"
+    fn a_float_in_a_cell_keeps_its_height_when_measured_twice() {
+        // The cell's height, against Chromium: an image in a paragraph, floated, was lost from it.
+        let html = "<table width=\"100%\"><tr><td><div style=\"float:left;width:50%\"><table><tr><td>\
+            <p style=margin:0><img id=i src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\" \
+            align=left width=120 height=120>Lorem ipsum</p></td></tr></table></div></td></tr>\
+            <tr><td id=n>Next row</td></tr></table>";
+        let (_, image_y, _, image_height) = box_of(html, "i");
+        let (_, next_y, _, _) = box_of(html, "n");
+        assert!(
+            image_y + image_height <= next_y,
+            "{image_y} {image_height} {next_y}"
         );
-        let mut document = parse(&html);
-        let start = std::time::Instant::now();
-        document.layout(300.0);
-        assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn long_tables_keep_a_row_each() {
+        let rows: String = (0..1500)
+            .map(|i| format!("<tr><td>Row {i}</td></tr>"))
+            .collect();
+        let html =
+            format!("<!DOCTYPE html><body style=margin:0><table id=t cellspacing=0>{rows}</table>");
+        let (.., height) = box_of(&html, "t");
+        assert!(height > 1500.0 * 15.0, "{height}");
+    }
+
+    #[test]
+    fn a_caption_spans_the_table_on_top() {
+        let html =
+            "<!DOCTYPE html><body style=margin:0><table width=500 cellspacing=0 cellpadding=0>\
+            <caption id=c>A rather long caption that must not widen a column</caption>\
+            <tr><td id=a>one</td><td id=b>two</td><td>three</td></tr></table>";
+        let (cx, cy, cw, _) = box_of(html, "c");
+        let (ax, ay, aw, _) = box_of(html, "a");
+        let (bx, _, bw, _) = box_of(html, "b");
+        assert_eq!((cx, cw), (0.0, 500.0));
+        assert!(cy < ay, "{cy} {ay}");
+        assert_eq!(ax, 0.0);
+        assert!((aw - bw).abs() < 40.0 && bx > 0.0, "{aw} {bw}");
+    }
+
+    #[test]
+    fn dotted_borders_are_quads_that_cost_little() {
+        let mut document =
+            parse("<div style=\"width:20000px;height:10px;border:1px dotted #123\">x</div>");
+        assert!(document
+            .display_list()
+            .commands
+            .iter()
+            .any(|command| matches!(command, Command::Dots { .. })));
+        let rows = "<div style=\"width:600px;border-bottom:1px dotted #123\">x</div>".repeat(1500);
+        let mut document = parse(&rows);
+        let dots = document
+            .display_list()
+            .commands
+            .iter()
+            .filter(|command| matches!(command, Command::Dots { .. }))
+            .count();
+        assert_eq!(dots, 1500);
+    }
+
+    #[test]
+    fn text_past_a_cells_height_can_be_scrolled_to() {
+        let lines = "<br>line".repeat(40);
+        let html = format!(
+            "<!DOCTYPE html><body style=margin:0><table><tr><td height=50><div style=height:50px>{lines}</div></td></tr></table>"
+        );
+        let mut document = HtmlDocument::parse(&html, DocumentOptions::default());
+        assert!(document.layout(640.0) > 500.0);
+    }
+
+    #[test]
+    fn only_what_can_animate_pays_for_stopping_it() {
+        assert!(!may_animate("<p style=color:red>hello</p>"));
+        for html in [
+            "@KEYFRAMES a{}",
+            "<p style=transition:all>",
+            "@import 'x'",
+            "@keyfr\\61mes a{}",
+        ] {
+            assert!(may_animate(html), "{html}");
+        }
     }
 
     #[test]

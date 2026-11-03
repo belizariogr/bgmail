@@ -448,7 +448,7 @@ impl ElementCx<'_, '_> {
         }
         let radius = thickness / 2.0;
 
-        let mut path = BezPath::new();
+        let mut centers = Vec::new();
         if self.frame.has_border_radius() {
             // Rounded corners: dots spaced evenly around the rounded centre line so
             // the ring wraps seamlessly around the corners.
@@ -464,7 +464,7 @@ impl ElementCx<'_, '_> {
             }
             let spacing = perimeter / count;
             for center in sample_points_along_path(&centerline, spacing, count as usize) {
-                path.extend(Circle::new(center, radius).path_elements(0.1));
+                centers.push(center);
             }
         } else {
             // Square corners: a dot is anchored in each corner (both ends of the
@@ -491,7 +491,7 @@ impl ElementCx<'_, '_> {
             if span <= 0.0 {
                 // Edge too short to fit two dots; place a single centred dot.
                 let center = dot_center(length / 2.0);
-                path.extend(Circle::new(center, radius).path_elements(0.1));
+                centers.push(center);
             } else {
                 // Aim for a centre-to-centre spacing of about two dot diameters,
                 // then adjust it so the first and last dots land in the corners.
@@ -503,14 +503,14 @@ impl ElementCx<'_, '_> {
                 let spacing = span / gaps as f64;
                 for i in 0..=gaps {
                     let center = dot_center(radius + i as f64 * spacing);
-                    path.extend(Circle::new(center, radius).path_elements(0.1));
+                    centers.push(center);
                 }
             }
         }
 
         let clip = self.frame.border_edge_shape(edge);
         scene.push_clip_layer(Fill::NonZero, self.transform, &clip);
-        scene.fill(Fill::NonZero, self.transform, color, None, &path);
+        scene.push_dots(self.transform, color, radius, &centers);
         scene.pop_layer();
     }
 

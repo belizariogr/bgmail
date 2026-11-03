@@ -150,6 +150,13 @@ pub enum Command {
         width: f64,
         brush: Brush,
     },
+    /// Round dots, drawn each as a quad; see [`DisplayList::push_dots`].
+    Dots {
+        bounds: Rect,
+        radius: f64,
+        color: Color,
+        centers: Vec<Point>,
+    },
     BoxShadow {
         rect: Rect,
         color: Color,
@@ -177,6 +184,41 @@ pub struct DisplayList {
 impl DisplayList {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Records round dots of `radius` at `centers`, as a dotted border is. Dots in one path took
+    /// seconds to tessellate per frame, with all of them on a scanline: a border 20000 px wide took
+    /// 5 s, and 500 ordinary dotted rows 0.9 s. Under a rotation or skew they stay a path.
+    pub fn push_dots(&mut self, transform: Affine, color: Color, radius: f64, centers: &[Point]) {
+        if self.exhausted() || centers.is_empty() {
+            return;
+        }
+        if !is_axis_aligned(&transform) {
+            let mut path = BezPath::new();
+            for center in centers {
+                path.extend(kurbo::Circle::new(*center, radius).path_elements(PATH_TOLERANCE));
+            }
+            return self.fill(Fill::NonZero, transform, color, None, &path);
+        }
+        let [scale, ..] = transform.as_coeffs();
+        let centers: Vec<Point> = centers.iter().map(|center| transform * *center).collect();
+        let radius = radius * scale.abs();
+        let finite =
+            radius.is_finite() && centers.iter().all(|p| p.x.is_finite() && p.y.is_finite());
+        if !finite || !self.charge(centers.len().saturating_mul(MIN_SHAPE_COST)) {
+            return;
+        }
+        let bounds = centers
+            .iter()
+            .fold(Rect::from_points(centers[0], centers[0]), |all, p| {
+                all.union_pt(*p)
+            });
+        self.commands.push(Command::Dots {
+            bounds: bounds.inflate(radius, radius),
+            radius,
+            color,
+            centers,
+        });
     }
 
     /// Whether the budget ran out, so that nothing else would be recorded. Painters building a lot

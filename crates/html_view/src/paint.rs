@@ -896,6 +896,38 @@ fn paint_commands(
                     window.paint_path(path, color);
                 }
             }
+            Command::Dots {
+                bounds,
+                radius,
+                color,
+                centers,
+            } => {
+                let mask = window.content_mask().bounds;
+                if !to_bounds(*bounds, origin).intersects(&mask) {
+                    continue;
+                }
+                let corner = Corners::all(px(*radius as f32));
+                let color = to_hsla(*color, layer.alpha);
+                for center in centers {
+                    let dot = Rect::new(
+                        center.x - radius,
+                        center.y - radius,
+                        center.x + radius,
+                        center.y + radius,
+                    );
+                    let dot = to_bounds(dot, origin);
+                    if dot.intersects(&mask) {
+                        window.paint_quad(PaintQuad {
+                            bounds: dot,
+                            corner_radii: corner,
+                            background: color.into(),
+                            border_widths: Edges::default(),
+                            border_color: gpui::transparent_black(),
+                            border_style: BorderStyle::default(),
+                        });
+                    }
+                }
+            }
             Command::BoxShadow {
                 rect,
                 color,
