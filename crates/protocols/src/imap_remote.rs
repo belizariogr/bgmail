@@ -865,6 +865,17 @@ pub fn has_attachments(structure: &BodyStructure<'_>) -> bool {
     }
 }
 
+/// How many UIDs `members` stand for.
+fn uid_set_len(members: &[UidSetMember]) -> u64 {
+    members
+        .iter()
+        .map(|member| match member {
+            UidSetMember::Uid(_) => 1,
+            UidSetMember::UidRange(range) => u64::from(range.start().abs_diff(*range.end())) + 1,
+        })
+        .sum()
+}
+
 /// Expands `1:3,5` members into UIDs.
 fn expand_uid_set(members: &[UidSetMember]) -> Vec<u32> {
     members
@@ -879,6 +890,9 @@ fn expand_uid_set(members: &[UidSetMember]) -> Vec<u32> {
         .collect()
 }
 
+/// Most UIDs of a `COPYUID` code; far more than a batched command holds.
+const MAX_COPYUID_LEN: u64 = 1 << 20;
+
 /// `source → destination` UID pairs from every `COPYUID` code (RFC 4315) in
 /// the responses; `None` when the server sent none (no UIDPLUS).
 fn copy_uids(responses: &[Response<'_>]) -> Option<Vec<(u32, u32)>> {
@@ -891,6 +905,11 @@ fn copy_uids(responses: &[Response<'_>]) -> Option<Vec<(u32, u32)>> {
         };
         if let Some(ResponseCode::CopyUid(_, source, dest)) = code {
             found = true;
+            // Not expanded past what a command can have moved: `1:4294967295` is 16 GB. What
+            // doesn't fit is treated as a server without the code for those messages.
+            if uid_set_len(source).max(uid_set_len(dest)) > MAX_COPYUID_LEN {
+                continue;
+            }
             let source = expand_uid_set(source);
             let dest = expand_uid_set(dest);
             if source.len() == dest.len() {
@@ -1955,6 +1974,9 @@ mod tests {
         assert_eq!(copy_uids(&responses), Some(vec![(1, 10), (2, 11)]));
         let responses = parse_responses(b"A1 OK done\r\n");
         assert_eq!(copy_uids(&responses), None);
+        // A hostile range isn't expanded: it would take 16 GB.
+        let responses = parse_responses(b"A1 OK [COPYUID 1 1:4294967295 1:4294967295] done\r\n");
+        assert_eq!(copy_uids(&responses), Some(Vec::new()));
     }
 
     #[test]

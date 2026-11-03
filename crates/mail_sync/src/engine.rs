@@ -136,6 +136,9 @@ impl Engine {
         };
         let spawned = std::thread::Builder::new()
             .name(format!("bgmail-sync-{account_id}"))
+            // The IMAP crate parses BODYSTRUCTURE recursively, and a message nested about 300
+            // levels overflowed the default 2 MiB; servers cap nesting well below this stack.
+            .stack_size(16 << 20)
             .spawn(move || run_worker(setup));
         if let Ok(thread) = spawned {
             self.accounts().insert(
