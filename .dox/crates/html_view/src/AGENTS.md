@@ -341,12 +341,15 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `FaceSpec` with variable weight, synthetic bold (≥700) and italic.
 - `struct ClusterSpan { text_range, x, advance, is_space }`.
 - `fn is_blank(source, range)`: whitespace/control text (or out of range).
-- `fn clusters_in_span(clusters, offset, advance)`: clusters of one glyph run
+- `fn shaped_clusters(run, source, run_start_x)`: a shaped run's clusters in visual order, once per
+  run, not per glyph run.
+- `fn clusters_in_span(clusters, from, offset, advance)`: continuing at `from`, and returning the
+  next index, so a run of many styles stays linear; clusters of one glyph run
   (Parley splits shaped runs by style without exposing cluster ranges).
 - `fn group_words(source, clusters) -> Vec<Word>`: words (x of first visual
   cluster, width, per-cluster ranges); whitespace splits; line breaks → spaces.
 - `fn color_glyph_run(glyph_run, transform)`: glyph ids + document positions.
-- `fn text_run_from_glyph_run(glyph_run, run_start_x, source, transform, color,
+- `fn text_run_from_glyph_run(glyph_run, run_clusters, next_cluster, source, transform, color,
   faces) -> Option<TextRun>`: GPUI-facing run (face, CSS-px size, document
   baseline, words in document x with widths/clusters).
 - Tests: word grouping (+widths/clusters), RTL logical words, blank detection,
@@ -440,7 +443,12 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `fn css_angle(start, end)`: CSS gradient angle (0° up, clockwise).
 - `fn to_bgra_straight(brush)`: RGBA/BGRA, premultiplied or straight → straight
   BGRA (GPUI's image format).
-- `fn downscaled_size(source, target) -> Option<(u32, u32)>`: upload size when
+- `PaintCache::make_room(bytes)`: accounts for pixels about to be cached, clearing images and
+  gradients past `MAX_CACHED_PIXEL_BYTES` (512 MiB).
+- `fn paint_sampled_gradient`: samples only boxes that intersect the content mask, keyed relative
+  to the box so equal boxes share one texture.
+- `fn downscaled_size(source, target) -> Option<(u32, u32)>`: sizes are the source's halved (few
+  per image), at most `MAX_UPLOAD_SIDE` (8192) even if not shrunk; upload size when
   an image is drawn at less than half its size on either side (never above
   the source size).
 - `fn resize_straight(buffer, width, height)`: area (triangle) resize in
