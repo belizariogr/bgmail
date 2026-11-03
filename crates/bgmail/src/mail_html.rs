@@ -446,6 +446,18 @@ fn sanitize_html_inner(
     // and emit it once, stripped, at the end of the text node.
     let style_text = RefCell::new(String::new());
     let settings = RewriteStrSettings::new()
+        // A `<` the tokenizer took for text is written back as it came, and what is removed
+        // after it can leave it next to a name: `<<script></script>script>` came out as
+        // `<script>`. As an entity, it stays text for whoever reads the output.
+        .append_document_content_handler(lol_html::doc_text!(|chunk| {
+            if chunk.text_type() == lol_html::html_content::TextType::Data
+                && chunk.as_str().contains('<')
+            {
+                let escaped = chunk.as_str().replace('<', "&lt;");
+                chunk.replace(&escaped, ContentType::Html);
+            }
+            Ok(())
+        }))
         .append_element_content_handler(element!(DISALLOWED_ELEMENTS, |el| {
             el.remove();
             Ok(())
@@ -554,9 +566,10 @@ fn neutralize_attributes(
     shown: &HashSet<String>,
 ) -> Option<bool> {
     // Removing them by name is quadratic in lol_html: 300000 took 89 s, on the UI thread when
-    // replying. No such tag is meant to be read.
+    // replying. No such tag is meant to be read. With its content, which keeping would turn
+    // the text of a `<xmp>` into markup after it was checked.
     if el.attributes().len() > html_view::MAX_TAG_ATTRIBUTES {
-        el.remove_and_keep_content();
+        el.remove();
         return None;
     }
     let is_img = el.tag_name() == "img";
@@ -1553,5 +1566,105 @@ mod tests {
         assert_eq!(doc.blocked_images, 1);
         assert!(!doc.html.contains(" src=\"https://"));
         assert!(colors.is_dark());
+    }
+
+    /// Tags and attributes `html` has for the tokenizer of the parser that will read it.
+    fn tags_as_parsed(html: &str) -> Vec<(String, Vec<String>)> {
+        use html5ever::tendril::StrTendril;
+        use html5ever::tokenizer::{
+            states::RawKind, BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer,
+            TokenizerOpts,
+        };
+
+        #[derive(Default)]
+        struct Tags(std::cell::RefCell<Vec<(String, Vec<String>)>>);
+        impl TokenSink for Tags {
+            type Handle = ();
+            fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
+                if let Token::TagToken(tag) = token {
+                    if tag.kind == TagKind::StartTag {
+                        let attrs = tag.attrs.iter().map(|a| a.name.local.to_string()).collect();
+                        self.0.borrow_mut().push((tag.name.to_string(), attrs));
+                        // As the tree builder does, or the text of these would read as tags.
+                        return match &*tag.name {
+                            "title" | "textarea" => TokenSinkResult::RawData(RawKind::Rcdata),
+                            "style" | "xmp" | "iframe" | "noembed" | "noframes" => {
+                                TokenSinkResult::RawData(RawKind::Rawtext)
+                            }
+                            "script" => TokenSinkResult::RawData(RawKind::ScriptData),
+                            "plaintext" => TokenSinkResult::Plaintext,
+                            _ => TokenSinkResult::Continue,
+                        };
+                    }
+                }
+                TokenSinkResult::Continue
+            }
+        }
+        let tokenizer = Tokenizer::new(Tags::default(), TokenizerOpts::default());
+        let input = BufferQueue::default();
+        input.push_back(StrTendril::from_slice(html));
+        let _ = tokenizer.feed(&input);
+        tokenizer.end();
+        tokenizer.sink.0.into_inner()
+    }
+
+    /// What comes out of the sanitizer is read by another parser: what it leaves or removes
+    /// can't join with what is around it into something it was there to remove.
+    #[test]
+    fn nothing_removed_by_the_sanitizer_can_join_into_active_content() {
+        const FORBIDDEN: &[&str] = &[
+            "script", "iframe", "frame", "object", "embed", "form", "input", "textarea", "select",
+            "button", "meta", "link", "base", "svg", "math",
+        ];
+        let many: String = (0..1100).map(|i| format!(" a{i}")).collect();
+        let prefixes = [
+            "",
+            "<",
+            "<?",
+            "</ ",
+            "<!-- --!>",
+            "<title>",
+            "<a \">",
+            "<!x>",
+        ];
+        let removed = [
+            "<script></script>".to_string(),
+            "<svg></svg>".to_string(),
+            "<iframe></iframe>".to_string(),
+            "<body>".to_string(),
+            "<html>".to_string(),
+            "<head></head>".to_string(),
+            "<img src=cid:x>".to_string(),
+            "<!doctype b>".to_string(),
+            format!("<p{many}>"),
+        ];
+        for prefix in prefixes {
+            for gap in &removed {
+                for name in ["script", "iframe", "input", "form", "meta", "object"] {
+                    for html in [
+                        format!("{prefix}<{gap}{name} onclick=x>b<{gap}/{name}>"),
+                        format!("{prefix}<{gap}{gap}{name} onclick=x>"),
+                        format!("{prefix}<xmp{many}><{name} onclick=x></xmp>"),
+                        format!("{prefix}<title{many}><{name} onclick=x></title>"),
+                        format!("{prefix}<noembed{many}><{name} onclick=x></noembed>"),
+                        format!("<?a> <{gap}{name} onclick=x> ?><!doctype b>"),
+                    ] {
+                        let sanitized = sanitize_html_inner(&html, false, &HashSet::new()).0;
+                        let quoted = quotable_html(&html);
+                        for output in [&sanitized, &quoted] {
+                            for (tag, attrs) in tags_as_parsed(output) {
+                                assert!(!FORBIDDEN.contains(&tag.as_str()), "{html}\n{output}");
+                                assert!(
+                                    !attrs.iter().any(|a| a.starts_with("on")),
+                                    "{html}\n{output}"
+                                );
+                            }
+                        }
+                        let again = sanitize_html_inner(&sanitized, false, &HashSet::new()).0;
+                        assert_eq!(again, sanitized, "{html}");
+                    }
+                }
+            }
+        }
     }
 }

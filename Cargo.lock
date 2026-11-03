@@ -584,6 +584,7 @@ dependencies = [
  "embed-resource",
  "gpui",
  "html-escape",
+ "html5ever",
  "html_view",
  "lol_html",
  "mail_core",

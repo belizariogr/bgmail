@@ -73,6 +73,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 
 [dev-dependencies]
 tempfile = "3"
+# The sanitizer's output is read back with the tokenizer `html_view`'s parser uses.
+html5ever = "0.40"
 # Simulated windows, to test what only happens with real input (drags).
 gpui = { workspace = true, features = ["test-support"] }
 
