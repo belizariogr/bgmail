@@ -908,6 +908,11 @@ pub struct RootView {
     crashed_messages: HashSet<i64>,
     /// Marker of the message being rendered (crash-loop protection).
     crash_guard: CrashGuard,
+    /// Marks the formatted quote a reply window renders (see [`QuotedOriginal`]).
+    quote_guard: CrashGuard,
+    /// Whether [`Self::crash_guard`]'s marker exists, so an empty reader isn't a disk
+    /// access on every frame.
+    reader_guarded: bool,
     /// Inputs that last produced the reader document (selected message and the
     /// colors it was themed with). Used to skip re-parsing the body on every
     /// render when nothing that affects the document has changed.
@@ -1270,6 +1275,7 @@ impl RootView {
             px(settings.compose_height.max(compose::COMPOSE_MIN_HEIGHT)),
         );
         let crash_guard = CrashGuard::beside(db_path.as_ref());
+        let quote_guard = CrashGuard::beside_for_quotes(db_path.as_ref());
         let db_path = db_path.as_ref().to_path_buf();
         let db = storage::Database::open(&db_path).expect("failed to open mail database");
         if seed {
@@ -1381,8 +1387,14 @@ impl RootView {
             reader_menu: None,
             find_bar: None,
             reader_notice: None,
-            crashed_messages: crash_guard.take_unfinished().into_iter().collect(),
+            crashed_messages: crash_guard
+                .take_unfinished()
+                .into_iter()
+                .chain(quote_guard.take_unfinished())
+                .collect(),
             crash_guard,
+            quote_guard,
+            reader_guarded: false,
             last_reader_sig: None,
             reader_preparing: false,
             reader_build_token: 0,
@@ -3616,6 +3628,7 @@ impl RootView {
             self.reader_notice = None;
             self.reader_preparing = false;
             self.reader_build_token += 1;
+            self.set_reader_guard(None);
             return;
         };
         let scale = if self.multi_selection.is_empty() {
@@ -3659,19 +3672,17 @@ impl RootView {
             selection_color: reader_selection_color(colors.accent, background),
             width: f32::from(self.reader_segment_width()),
         };
-        // A crash rendering formatted HTML must not repeat on every start:
-        // mark the message before parsing it (parsing can crash too) until a
-        // frame showing it was drawn.
+        // A crash rendering formatted HTML must not repeat on every start: mark
+        // the message before parsing it (parsing can crash too) for as long as it
+        // shows.
         let guarded = !job.crashed && matches!(job.body, MessageBody::Html(_));
-        if guarded {
-            self.crash_guard.begin(id);
-        }
+        self.set_reader_guard(guarded.then_some(id));
         self.reader_build_token += 1;
         self.last_reader_sig = Some(signature);
         self.reader_menu = None;
         if !job.runs_in_background() {
             self.reader_preparing = false;
-            self.install_reader(job.build(), guarded, window, cx);
+            self.install_reader(job.build(), cx);
             return;
         }
         self.reader_preparing = true;
@@ -3681,15 +3692,12 @@ impl RootView {
         let built = cx.background_spawn(async move { job.build() });
         cx.spawn_in(window, async move |this, cx| {
             let built = built.await;
-            this.update_in(cx, |this, window, cx| {
+            this.update_in(cx, |this, _, cx| {
                 // The user may have moved on while this one was being built.
                 if this.reader_build_token == token {
                     this.reader_preparing = false;
-                    this.install_reader(built, guarded, window, cx);
+                    this.install_reader(built, cx);
                     cx.notify();
-                } else if guarded {
-                    // It finished without crashing, only nobody wants it now.
-                    this.crash_guard.finish_if(id);
                 }
             })
             .ok();
@@ -3697,20 +3705,26 @@ impl RootView {
         .detach();
     }
 
+    /// Marks message `id` as the one being rendered, or none.
+    fn set_reader_guard(&mut self, id: Option<i64>) {
+        match id {
+            Some(id) => self.crash_guard.begin(id),
+            None if self.reader_guarded => self.crash_guard.finish(),
+            None => {}
+        }
+        self.reader_guarded = id.is_some();
+    }
+
+    /// The app is quitting on its own: nothing it was rendering made it crash.
+    pub(crate) fn clear_render_guards(&mut self) {
+        self.set_reader_guard(None);
+        self.quote_guard.finish();
+    }
+
     /// Hands a built document to the reader view.
-    fn install_reader(
-        &mut self,
-        built: BuiltReader,
-        guarded: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn install_reader(&mut self, built: BuiltReader, cx: &mut Context<Self>) {
         self.content_blocked_count = built.blocked_images;
         self.reader_notice = built.notice;
-        if guarded {
-            let guard = self.crash_guard.clone();
-            window.on_next_frame(move |_, _| guard.finish());
-        }
         let document = built.document.into_inner();
         match &self.reader_view {
             Some(view) => view.update(cx, |view, cx| view.set_document(document, cx)),
@@ -4131,6 +4145,8 @@ impl RootView {
             attribution: labels.attribution.clone(),
             html,
             load_remote: self.remote_allowed_for(detail.id),
+            render_guard: (!self.crashed_messages.contains(&detail.id))
+                .then(|| (self.quote_guard.clone(), detail.id)),
         });
         if kind == ReplyKind::Forward {
             if let Some(raw) = raw.as_deref() {

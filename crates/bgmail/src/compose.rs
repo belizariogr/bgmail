@@ -37,6 +37,7 @@ use ui::{
 use crate::actions::{ComposeAttach, ComposeClose, ComposeDiscard, ComposeSend};
 use crate::app_menus;
 use crate::attachments::{file_family, human_size};
+use crate::crash_guard::CrashGuard;
 use crate::locale::{ActiveLanguage, Key, Language};
 use crate::root::RootView;
 
@@ -159,6 +160,18 @@ pub struct QuotedOriginal {
     pub html: String,
     /// Whether the user allows remote images for the original.
     pub load_remote: bool,
+    /// What marks the original while its formatted HTML renders, as in the reader; `None`
+    /// when rendering it already closed the app, and it shows as text.
+    pub render_guard: Option<(CrashGuard, i64)>,
+}
+
+/// Keeps a quote's render marker for as long as the formatted quote exists.
+struct QuoteGuard(CrashGuard, i64);
+
+impl Drop for QuoteGuard {
+    fn drop(&mut self) {
+        self.0.finish_if(self.1);
+    }
 }
 
 /// The recipient fields that are validated as address lists.
@@ -295,6 +308,7 @@ pub struct ComposeView {
     /// The quoted original, parsed the first time it is shown.
     quote_view: Option<Entity<HtmlView>>,
     _quote_task: Option<Task<()>>,
+    _quote_guard: Option<QuoteGuard>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -382,6 +396,7 @@ impl ComposeView {
             format_menu: None,
             quote_view: None,
             _quote_task: None,
+            _quote_guard: None,
             _subscriptions: subscriptions,
         };
         view.apply_init(init, window, cx);
@@ -422,6 +437,7 @@ impl ComposeView {
         self.quote_expanded = false;
         self.quote_view = None;
         self._quote_task = None;
+        self._quote_guard = None;
         self.errors = ComposeErrors::default();
         self.from_menu_open = false;
         self.format_menu = None;
@@ -477,10 +493,19 @@ impl ComposeView {
                 accent: theme.accent,
             }
         };
+        self._quote_guard = quoted.render_guard.clone().map(|(guard, id)| {
+            guard.begin(id);
+            QuoteGuard(guard, id)
+        });
         let build = cx.background_spawn(async move {
-            let body = MessageBody::Html(quoted.html.into());
+            let text = MessageBody::Text(quoted.block.into());
+            let body = if quoted.render_guard.is_some() {
+                MessageBody::Html(quoted.html.into())
+            } else {
+                text.clone()
+            };
             let rendered = email_document(colors, &body, quoted.load_remote);
-            let options = DocumentOptions {
+            let options = || DocumentOptions {
                 appearance: if colors.is_dark() {
                     PageAppearance::Dark
                 } else {
@@ -490,7 +515,12 @@ impl ComposeView {
                 dark_page: colors.dark_page(),
                 ..Default::default()
             };
-            let mut document = HtmlDocument::parse(&rendered.html, options);
+            // What the reader would refuse shows as text here too.
+            let mut document =
+                HtmlDocument::try_parse(&rendered.html, options()).unwrap_or_else(|_| {
+                    let fallback = email_document(colors, &text, false);
+                    HtmlDocument::parse(&fallback.html, options())
+                });
             document.prepare(QUOTE_FIRST_LAYOUT_WIDTH);
             DetachedDocument::new(document)
         });
@@ -2389,6 +2419,18 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_guard_clears_only_its_own_marker_when_it_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = CrashGuard::beside_for_quotes(&dir.path().join("mail.db"));
+        guard.begin(1);
+        drop(QuoteGuard(guard.clone(), 1));
+        assert_eq!(guard.take_unfinished(), None);
+        guard.begin(2);
+        drop(QuoteGuard(guard.clone(), 1));
+        assert_eq!(guard.take_unfinished(), Some(2));
+    }
+
+    #[test]
     fn a_reply_is_sent_with_the_quote_kept_out_of_the_editor() {
         let reply = ReplyHeaders {
             in_reply_to: Some("parent@x".into()),
@@ -2397,6 +2439,7 @@ mod tests {
                 attribution: "Ann wrote:".into(),
                 html: "<b>Hello</b>".into(),
                 load_remote: false,
+                render_guard: None,
             }),
             ..Default::default()
         };
