@@ -75,13 +75,26 @@ fn keep_private(path: &Path) {
 fn keep_private(_: &Path) {}
 
 /// What a new database takes from a damaged one.
-const RECOVERED_TABLES: [&str; 2] = ["accounts", "outbox"];
+const RECOVERED_TABLES: [(&str, &str); 2] = [
+    ("accounts", ""),
+    (
+        "outbox",
+        "WHERE account_id IN (SELECT id FROM main.accounts)",
+    ),
+];
 
 /// Whether `error` says the database file is damaged.
 pub fn is_corrupt(error: &rusqlite::Error) -> bool {
+    use rusqlite::Error::{
+        FromSqlConversionFailure, InvalidColumnType, SqlInputError, SqliteFailure,
+    };
     use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
-    matches!(error, rusqlite::Error::SqliteFailure(failure, _)
-        if matches!(failure.code, NotADatabase | DatabaseCorrupt))
+    match error {
+        SqliteFailure(failure, _) => matches!(failure.code, NotADatabase | DatabaseCorrupt),
+        // Fixed queries can only fail these on a schema or values damaged in the file.
+        SqlInputError { .. } | FromSqlConversionFailure(..) | InvalidColumnType(..) => true,
+        _ => false,
+    }
 }
 
 impl Database {
@@ -152,9 +165,19 @@ impl Database {
             return;
         }
         let _ = self.conn.execute_batch("PRAGMA foreign_keys = OFF;");
-        for table in RECOVERED_TABLES {
+        for (table, only) in RECOVERED_TABLES {
+            // The columns both have: the damaged file may be from another version.
+            let columns = self.conn.prepare(&format!(
+                "SELECT group_concat(name) FROM pragma_table_info('{table}') \
+                 WHERE name IN (SELECT name FROM pragma_table_info('{table}', 'old'))"
+            ));
+            let Ok(Some(columns)) = columns.and_then(|mut statement| {
+                statement.query_row([], |row| row.get::<_, Option<String>>(0))
+            }) else {
+                continue;
+            };
             let _ = self.conn.execute_batch(&format!(
-                "INSERT OR IGNORE INTO {table} SELECT * FROM old.{table};"
+                "INSERT OR IGNORE INTO {table} ({columns}) SELECT {columns} FROM old.{table} {only};"
             ));
         }
         let _ = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
@@ -413,15 +436,27 @@ fn fts_phrase(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\"\""))
 }
 
+/// A text column, whatever it holds: only damage or another tool can leave anything but valid
+/// text there, and a replacement character beats losing the database to one subject.
+pub(crate) fn lossy_text(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
+    use rusqlite::types::ValueRef;
+    Ok(match row.get_ref(index)? {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => String::new(),
+    })
+}
+
 /// Maps a row selected with [`LIST_COLUMNS`].
 fn list_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageListItem> {
     Ok(MessageListItem {
         id: row.get(0)?,
         account_id: row.get(1)?,
-        sender: row.get(2)?,
-        sender_email: row.get(3)?,
-        subject: row.get(4)?,
-        preview: row.get(5)?,
+        sender: lossy_text(row, 2)?,
+        sender_email: lossy_text(row, 3)?,
+        subject: lossy_text(row, 4)?,
+        preview: lossy_text(row, 5)?,
         received_at: row.get(6)?,
         date_ts: row.get(7)?,
         thread_id: row.get(8)?,
@@ -882,6 +917,34 @@ mod tests {
         let db = Database::replace_corrupt(&path).unwrap();
         assert_eq!(db.list_accounts().unwrap().len(), 1);
         assert!(dir.path().join("mail.db.corrupt").exists());
+    }
+
+    #[test]
+    fn a_replaced_database_takes_the_columns_it_can() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let old = rusqlite::Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT, email TEXT);
+             INSERT INTO accounts VALUES (1, 'Ann', 'ann@x.test');",
+        )
+        .unwrap();
+        drop(old);
+        let db = Database::replace_corrupt(&path).unwrap();
+        assert_eq!(db.list_accounts().unwrap()[0].email, "ann@x.test");
+    }
+
+    #[test]
+    fn a_subject_that_isnt_text_doesnt_stop_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("mail.db")).unwrap();
+        let row = db
+            .conn()
+            .query_row("SELECT CAST(x'41ff42' AS TEXT)", [], |row| {
+                lossy_text(row, 0)
+            })
+            .unwrap();
+        assert_eq!(row, "A\u{fffd}B");
     }
 
     #[test]

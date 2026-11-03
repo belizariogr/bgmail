@@ -12,11 +12,11 @@ const FOLDER_COLUMNS: &str = "id, account_id, path, display_name, remote_name, r
 fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
     Ok(Account {
         id: row.get(0)?,
-        name: row.get(1)?,
-        email: row.get(2)?,
-        provider: row.get(3)?,
-        config_json: row.get(4)?,
-        sender_name: row.get(5)?,
+        name: crate::database::lossy_text(row, 1)?,
+        email: crate::database::lossy_text(row, 2)?,
+        provider: crate::database::lossy_text(row, 3)?,
+        config_json: crate::database::lossy_text(row, 4)?,
+        sender_name: crate::database::lossy_text(row, 5)?,
     })
 }
 
@@ -24,8 +24,8 @@ fn folder_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Folder> {
     Ok(Folder {
         id: row.get(0)?,
         account_id: row.get(1)?,
-        path: row.get(2)?,
-        display_name: row.get(3)?,
+        path: crate::database::lossy_text(row, 2)?,
+        display_name: crate::database::lossy_text(row, 3)?,
         remote_name: row.get(4)?,
         role: row.get(5)?,
     })
