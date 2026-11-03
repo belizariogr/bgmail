@@ -88,6 +88,38 @@ pub fn attachment_content(raw: &[u8], index: usize) -> Option<Vec<u8>> {
     part_bytes(raw, part)
 }
 
+/// Parts of a `multipart/alternative` that are only another rendering of a body it
+/// also has, like `text/x-amp-html`: the same message, not attachments. An invitation
+/// (`text/calendar`) or anything with a name is meant to be seen as one.
+fn other_body_versions(message: &Message<'_>) -> Vec<u32> {
+    let is_body = |id: &u32| message.text_body.contains(id) || message.html_body.contains(id);
+    let mut versions = Vec::new();
+    for part in &message.parts {
+        let PartType::Multipart(children) = &part.body else {
+            continue;
+        };
+        let alternative = part.content_type().is_some_and(|ct| {
+            ct.subtype()
+                .is_some_and(|sub| sub.eq_ignore_ascii_case("alternative"))
+        });
+        if !alternative || !children.iter().any(is_body) {
+            continue;
+        }
+        versions.extend(children.iter().copied().filter(|id| {
+            !is_body(id)
+                && message.parts.get(*id as usize).is_some_and(|child| {
+                    matches!(child.body, PartType::Text(_) | PartType::Html(_))
+                        && child.attachment_name().is_none()
+                        && !mime_type(child).starts_with("text/calendar")
+                        && !child
+                            .content_disposition()
+                            .is_some_and(|d| d.ctype().eq_ignore_ascii_case("attachment"))
+                })
+        }));
+    }
+    versions
+}
+
 /// `(content_id, mime_type, bytes)` for every image with a Content-ID, i.e.
 /// everything an HTML body can reference via `cid:`.
 pub fn inline_images(raw: &[u8]) -> Vec<(String, String, Vec<u8>)> {
@@ -116,12 +148,16 @@ pub fn has_attachments(message: &ParsedMessage) -> bool {
 fn attachment_parts<'m>(
     message: &'m Message<'m>,
 ) -> impl Iterator<Item = (usize, &'m MessagePart<'m>)> + 'm {
+    let other_versions = other_body_versions(message);
     message
         .parts
         .iter()
         .enumerate()
         .filter(move |(index, part)| {
             let id = *index as u32;
+            if other_versions.contains(&id) {
+                return false;
+            }
             match part.body {
                 PartType::Multipart(_) => false,
                 PartType::Binary(_) | PartType::InlineBinary(_) | PartType::Message(_) => {
