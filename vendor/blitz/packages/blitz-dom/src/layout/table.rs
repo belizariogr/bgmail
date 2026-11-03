@@ -88,6 +88,11 @@ pub struct TableCell {
     /// BGMail: a non-cell row child (e.g. `<td style="display:block">`) laid out
     /// as if wrapped in an anonymous table cell.
     pub anonymous: bool,
+    /// BGMail: a caption, which spans the table.
+    pub is_caption: bool,
+    /// BGMail: the cell's `min-width` and `max-width` in an automatic table, with its padding and
+    /// borders.
+    pub width_limits: (Option<f32>, Option<f32>),
     /// The anonymously wrapped block's own vertical margins (px, lengths only).
     pub own_margins: (f32, f32),
     /// BGMail: (colspan, rowspan), for painting collapsed borders.
@@ -309,6 +314,7 @@ pub(crate) fn build_table_context(
 
     drop(stylo_styles);
 
+    let items = wrap_table_text_runs(doc, table_root_node_id, &children, &mut anonymous_blocks);
     let mut columns: Vec<TableColumn> = Vec::new();
     let mut column_sizes: Vec<taffy::TrackSizingFunction> = Vec::new();
     for child_id in children.iter().copied() {
@@ -337,7 +343,7 @@ pub(crate) fn build_table_context(
         }
     };
     for order in 0..4 {
-        for child_id in children.iter().copied() {
+        for child_id in items.iter().copied() {
             if row_group_order(doc, child_id) != order {
                 continue;
             }
@@ -410,6 +416,8 @@ pub(crate) fn build_table_context(
                     style_helpers::line((row + 1).min(MAX_TABLE_ROW) as i16);
             }
         }
+        // First as well among what is laid out, which is the order text is selected in.
+        cells.sort_by_key(|cell| !is_caption(doc, cell));
     }
     if is_fixed {
         // In the fixed table layout algorithm, percentage column widths resolve against
@@ -677,13 +685,59 @@ fn group_anonymous_cell_runs(
         items.push(wrapper);
     };
     for &child_id in children {
-        if needs_anonymous_cell(doc, child_id) {
+        // Text directly in a row is in that cell too, like any box that isn't a cell.
+        if needs_anonymous_cell(doc, child_id)
+            || (doc.nodes[child_id].is_text_node() && !doc.nodes[child_id].is_whitespace_node())
+        {
             run.push(child_id);
         } else if !doc.nodes[child_id].is_element() || generates_no_box(doc, child_id) {
             // Neither text (rows lay out none; whitespace between cells is
             // insignificant) nor `display:none` boxes break a run. Responsive
             // mail hides cells between the ones it stacks.
             continue;
+        } else {
+            flush(doc, &mut run, &mut items);
+            items.push(child_id);
+        }
+    }
+    flush(doc, &mut run, &mut items);
+    items
+}
+
+/// BGMail: `children` of table `table_id` with each run of what isn't part of a table holding any
+/// text replaced by one anonymous block (CSS 2.2 §17.2.1), which then gets a row and cell. An HTML
+/// table can't have text, as the parser moves it out, but `<a style="display:table">Call to
+/// action</a>` can, and lost its label. Boxes without text around keep rows of their own.
+fn wrap_table_text_runs(
+    doc: &mut BaseDocument,
+    table_id: NodeId,
+    children: &[NodeId],
+    anonymous_blocks: &mut Vec<NodeId>,
+) -> Vec<NodeId> {
+    let mut items = Vec::with_capacity(children.len());
+    let mut run: Vec<NodeId> = Vec::new();
+    let mut flush = |doc: &mut BaseDocument, run: &mut Vec<NodeId>, items: &mut Vec<NodeId>| {
+        let has_text = run
+            .iter()
+            .any(|&id| doc.nodes[id].is_text_node() && !doc.nodes[id].is_whitespace_node());
+        if has_text {
+            let wrapper = super::construct::create_anonymous_block_node(doc, table_id);
+            doc.nodes[wrapper].children = std::mem::take(run).into();
+            anonymous_blocks.push(wrapper);
+            items.push(wrapper);
+        } else {
+            items.append(run);
+        }
+    };
+    for &child_id in children {
+        let node = &doc.nodes[child_id];
+        let caption = node
+            .display_style()
+            .is_some_and(|display| display.outside() == DisplayOutside::TableCaption);
+        if node.is_text_node() || (!caption && needs_anonymous_cell(doc, child_id)) {
+            run.push(child_id);
+        } else if !node.is_element() || generates_no_box(doc, child_id) {
+            items.push(child_id);
         } else {
             flush(doc, &mut run, &mut items);
             items.push(child_id);
@@ -898,6 +952,29 @@ fn collect_table_cells(
                 style.min_size.width = style_helpers::length(0.0);
             }
 
+            // BGMail: in an automatic table these bound what a cell asks of its column, and not
+            // the cell, which is as wide as the column.
+            let mut width_limits = (None, None);
+            if !is_fixed && !anonymous {
+                let extra = match style.box_sizing {
+                    taffy::BoxSizing::ContentBox => {
+                        let padding = style.padding.resolve_or_zero(None, resolve_calc_value);
+                        let border = style.border.resolve_or_zero(None, resolve_calc_value);
+                        padding.left + padding.right + border.left + border.right
+                    }
+                    taffy::BoxSizing::BorderBox => 0.0,
+                };
+                let limit = |raw: taffy::CompactLength| {
+                    (raw.tag() == taffy::CompactLength::LENGTH_TAG).then(|| raw.value() + extra)
+                };
+                width_limits = (
+                    limit(style.min_size.width.into_raw()),
+                    limit(style.max_size.width.into_raw()),
+                );
+                style.min_size.width = style_helpers::auto();
+                style.max_size.width = style_helpers::auto();
+            }
+
             // Column widths from `<col>` elements take precedence over cell widths
             let col_needs_width =
                 (col as usize) >= columns.len() || columns[col as usize].max.is_auto();
@@ -1054,6 +1131,8 @@ fn collect_table_cells(
                 row: row.saturating_sub(1),
                 column: col,
                 anonymous,
+                is_caption: display.outside() == DisplayOutside::TableCaption,
+                width_limits,
                 own_margins,
                 style,
             });
@@ -1402,6 +1481,32 @@ fn distribute_span_excess(
     }
 }
 
+/// BGMail: the width a table without one would like for its columns (min, max, fixed, percent):
+/// enough for each one's content, and for each percentage to hold its share of the total. A
+/// percentage leaves the rest for the other columns; with nothing left, they take all there is.
+fn preferred_columns_width(columns: &[(f32, f32, Option<f32>, Option<f32>)]) -> f32 {
+    const ALL_THERE_IS: f32 = 1e6;
+    let col_max = |c: &(f32, f32, Option<f32>, Option<f32>)| c.2.map_or(c.1, |f| f.max(c.0));
+    let sum: f32 = columns.iter().map(col_max).sum();
+    let percents: f32 = columns.iter().filter_map(|c| c.3).sum::<f32>().min(1.0);
+    if percents <= 0.0 {
+        return sum;
+    }
+    let others: f32 = columns.iter().filter(|c| c.3.is_none()).map(col_max).sum();
+    let for_others = if percents < 1.0 {
+        others / (1.0 - percents)
+    } else if others > 0.0 {
+        ALL_THERE_IS
+    } else {
+        0.0
+    };
+    let for_percents = columns
+        .iter()
+        .filter_map(|c| c.3.filter(|percent| *percent > 0.0).map(|p| c.1 / p))
+        .fold(0.0, f32::max);
+    sum.max(for_others).max(for_percents).min(ALL_THERE_IS)
+}
+
 impl TableTreeWrapper<'_, '_> {
     /// BGMail: the table's container style with explicit column widths from the
     /// browsers' automatic table layout. Taffy's grid would otherwise grow auto
@@ -1456,6 +1561,7 @@ impl TableTreeWrapper<'_, '_> {
             .collect();
 
         let mut spanning = Vec::new();
+        let mut caption_min = 0.0f32;
         for idx in 0..ctx.cells.len() {
             let cell = &ctx.cells[idx];
             let col = cell.column as usize;
@@ -1489,8 +1595,18 @@ impl TableTreeWrapper<'_, '_> {
                 .width
             };
             let span_width = ctx.cells[idx].span_width.unwrap_or(0.0);
-            let min = measure(AvailableSpace::MinContent).max(span_width);
-            let max = measure(AvailableSpace::MaxContent).max(min);
+            let (least, most) = ctx.cells[idx].width_limits;
+            let bound = |width: f32| {
+                let width = most.map_or(width, |most| width.min(most));
+                least.map_or(width, |least| width.max(least))
+            };
+            let min = bound(measure(AvailableSpace::MinContent)).max(span_width);
+            // A caption wraps to the table's width, and asks only that it fits, not its columns.
+            if ctx.cells[idx].is_caption {
+                caption_min = caption_min.max(min);
+                continue;
+            }
+            let max = bound(measure(AvailableSpace::MaxContent)).max(min);
             if span == 1 {
                 if let Some(c) = columns.get_mut(col) {
                     c.0 = c.0.max(min);
@@ -1525,9 +1641,9 @@ impl TableTreeWrapper<'_, '_> {
             }
         }
 
-        let col_max = |c: &(f32, f32, Option<f32>, Option<f32>)| c.2.map_or(c.1, |f| f.max(c.0));
         let sum_min: f32 = columns.iter().map(|c| c.0).sum();
-        let sum_max: f32 = columns.iter().map(col_max).sum();
+        let sum_min = sum_min.max(caption_min - gap * (n as f32 - 1.0));
+        let sum_max = preferred_columns_width(&columns);
         // The table's own min/max-width bound whatever width it would take.
         let min_width = style
             .min_size
@@ -1712,6 +1828,7 @@ fn distribute_rowspan_height(rows: &mut [f32], origins: &[bool], constrained: &[
 mod auto_table_tests {
     use super::{
         ColumnCursor, distribute_auto_columns, distribute_rowspan_height, distribute_span_excess,
+        preferred_columns_width,
     };
 
     #[test]
@@ -1806,6 +1923,20 @@ mod auto_table_tests {
 
     fn close(a: &[f32], b: &[f32]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.01)
+    }
+
+    #[test]
+    fn percentages_ask_for_room_in_a_table_without_a_width() {
+        let columns = [(10.0, 30.0, None, Some(0.3)), (10.0, 40.0, None, Some(0.7))];
+        assert!((preferred_columns_width(&columns) - 100.0).abs() < 0.01);
+        let rest = [(10.0, 20.0, None, Some(0.5)), (10.0, 60.0, None, None)];
+        assert!((preferred_columns_width(&rest) - 120.0).abs() < 0.01);
+        let all = [(10.0, 20.0, None, Some(1.0)), (10.0, 60.0, None, None)];
+        assert_eq!(preferred_columns_width(&all), 1e6);
+        let alone = [(10.0, 20.0, None, Some(1.0))];
+        assert_eq!(preferred_columns_width(&alone), 20.0);
+        let none = [(10.0, 20.0, None, None), (10.0, 60.0, Some(70.0), None)];
+        assert_eq!(preferred_columns_width(&none), 90.0);
     }
 
     #[test]

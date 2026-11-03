@@ -242,7 +242,7 @@ pub(crate) fn build_inline_layout_into(
                                 ),
                             ]
                         });
-                        let span = quirk.take_span();
+                        let span = quirk.take_span(2);
                         if span {
                             builder.push_style_modification_span(
                                 whitespace
@@ -290,7 +290,7 @@ pub(crate) fn build_inline_layout_into(
                         } else if *tag_name == local_name!("br") {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             // TODO: update span id for br spans
-                            if quirk.take_span() {
+                            if quirk.take_span(1) {
                                 match style.filter(|_| quirk.enabled && quirk.line_empty) {
                                     // BGMail: under the line height quirk a break
                                     // alone on its line is text: its own span gives
@@ -327,7 +327,7 @@ pub(crate) fn build_inline_layout_into(
                                     ..Default::default()
                                 });
 
-                            let span = quirk.take_span();
+                            let span = quirk.take_span(2);
                             if span {
                                 builder.push_style_span(style);
                             }
@@ -433,17 +433,20 @@ pub(crate) fn build_inline_layout_into(
     }
 }
 
-/// BGMail: the most style spans of an inline context. Parley asserts there are at most
-/// `u16::MAX` styles, also in release, and a long log with a `<br>` per line reaches them;
-/// a `nowrap` span can take two.
+/// BGMail: the most styles the spans of an inline context may take. Parley asserts there are at
+/// most `u16::MAX`, also in release, and a long log with a `<br>` per line reaches them. A `<br>`
+/// takes one, as it has no collapsible space of its own, and any other span up to two, when it
+/// is `nowrap`. The rest is for the root, a marker and the spans kept open around them.
 /// Past this limit an element's text takes the style already open, and a `<br>` stops
 /// breaking the line.
-const MAX_INLINE_SPANS: u32 = 30_000;
+const MAX_INLINE_SPANS: u32 = 64_000;
 
 impl LineHeightQuirk {
-    fn take_span(&mut self) -> bool {
-        let available = self.spans_left > 0;
-        self.spans_left = self.spans_left.saturating_sub(1);
+    fn take_span(&mut self, styles: u32) -> bool {
+        let available = self.spans_left >= styles;
+        if available {
+            self.spans_left -= styles;
+        }
         available
     }
 }

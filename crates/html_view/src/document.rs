@@ -3826,6 +3826,105 @@ mod hostile_tests {
     }
 
     #[test]
+    fn text_directly_in_a_css_table_stays() {
+        // Chromium: 133 x 44, centered.
+        let html = "<!DOCTYPE html><body style=margin:0><a id=a href=x \
+            style=\"display:table;padding:10px 20px;margin:0 auto\">Call to action</a>";
+        let (_, _, width, height) = box_of(html, "a");
+        assert!(width > 100.0 && height > 30.0, "{width} {height}");
+        let mut document = parse(html);
+        document.select_all();
+        assert_eq!(document.selected_text().unwrap().trim(), "Call to action");
+        // With a box of its own beside it, in one cell, and as text of a row.
+        let mut document = parse(
+            "<div style=display:table><div style=float:left>f</div>z <b>b</b></div>\
+             <div style=display:table><div style=display:table-row>row</div></div>",
+        );
+        document.select_all();
+        let text = document.selected_text().unwrap();
+        for word in ["f", "z", "b", "row"] {
+            assert!(text.contains(word), "{word}: {text}");
+        }
+    }
+
+    #[test]
+    fn percentages_widen_a_table_without_a_width() {
+        // Chromium: 152 x 34, where each column's text stays in a line.
+        let html = "<!DOCTYPE html><body style=margin:0><table id=t border=1><tr>\
+            <td id=a width=\"30%\">Label</td><td id=b width=\"70%\">Value</td></tr></table>";
+        let (_, _, width, height) = box_of(html, "t");
+        assert!((140.0..=170.0).contains(&width), "{width}");
+        assert!(height < 40.0, "{height}");
+        // A column of 100% leaves nothing for the other, which takes all there is.
+        let html = "<!DOCTYPE html><body style=margin:0><table id=t><tr>\
+            <td width=\"100%\">a</td><td>b</td></tr></table>";
+        assert!(box_of(html, "t").2 > 390.0);
+    }
+
+    #[test]
+    fn a_cells_limits_bound_its_columns_ask() {
+        let table = |attributes: &str, cells: &str| {
+            format!(
+                "<!DOCTYPE html><body style=margin:0><table id=t {attributes} border=1><tr>{cells}</tr></table>"
+            )
+        };
+        // Chromium: 300, and the column takes the table's width past `max-width`.
+        let long = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod.";
+        let html = table(
+            "width=300",
+            &format!(
+                "<td style=\"max-width:100px;overflow:hidden;white-space:nowrap\">{long}</td>"
+            ),
+        );
+        assert_eq!(box_of(&html, "t").2, 300.0);
+        let html = table(
+            "width=300",
+            &format!("<td id=c style=max-width:100px>{long}</td><td>b</td>"),
+        );
+        assert!(box_of(&html, "c").2 > 200.0);
+        // Chromium: 316 and 510.
+        let html = table(
+            "",
+            "<td style=min-width:200px>a</td><td style=min-width:100px>b</td>",
+        );
+        assert!((box_of(&html, "t").2 - 316.0).abs() <= 2.0);
+        let html = table("width=300", "<td style=min-width:500px>a</td>");
+        assert!((box_of(&html, "t").2 - 510.0).abs() <= 2.0);
+    }
+
+    #[test]
+    fn every_line_of_a_long_log_keeps_its_break() {
+        let height = |lines: usize| {
+            let html = format!(
+                "<!DOCTYPE html><body style=margin:0>{}",
+                "l<br>".repeat(lines)
+            );
+            parse(&html).layout(640.0)
+        };
+        let (short, long) = (height(1000), height(31000));
+        assert!((long / short - 31.0).abs() < 0.01, "{short} {long}");
+        // Past the limit, and with spans costing more each, without aborting.
+        parse(&"<span style=white-space:nowrap> x </span><br>".repeat(40000));
+    }
+
+    #[test]
+    fn a_caption_wraps_to_its_table_and_comes_first() {
+        // Chromium: 111 x 328.
+        let html =
+            "<!DOCTYPE html><body style=margin:0><table id=t><caption>A rather long caption \
+            that must not make the table wider than a word of it</caption>\
+            <tr><td id=a>one</td></tr></table>";
+        assert!(box_of(html, "t").2 < 120.0);
+        let mut document = parse(html);
+        document.select_all();
+        let text = document.selected_text().unwrap();
+        assert!(
+            text.find("rather").unwrap() < text.find("one").unwrap(),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn text_past_a_cells_height_can_be_scrolled_to() {
         let lines = "<br>line".repeat(40);
         let html = format!(
