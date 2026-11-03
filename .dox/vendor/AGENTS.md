@@ -83,7 +83,14 @@ repository instead of living in someone's checkout.
   - `taffy/src/compute/oof.rs`: a box that became a leaf clears its hoisted list.
   - `events/pointer.rs`: a label passes a click on once (`in_label_click`), as its control's own
     click bubbles back to it.
-  - `layout/table.rs`: `display:contents` on a row group keeps its children in the table.
+  - `layout/table.rs`: `display:contents` on a row group keeps its children in the table; what
+    isn't a row or cell directly in a table or row group gets an anonymous row and cell, captions
+    included (first column), rebuilding its subtree.
+  - `document.rs` + `resolve.rs` (`rebuild_boxes_once`): a media query changing result rebuilds every
+    box in the next pass, about 190 ms at 1 MB, once per crossing. `layout/damage.rs`: a table
+    rebuilds when a part changes display, and `vertical-align` rebuilds its inline layout.
+  - `layout/construct.rs`: `flush_inline_pseudos_recursive` reads the child's display, so nested
+    inlines keep their pseudo-elements.
   - `net.rs`: GIF animations decode under `Limits` (2 × `MAX_ANIMATION_BYTES`), still images
     under `MAX_IMAGE_BYTES` (256 MiB), and a document's images share
     `MAX_DOCUMENT_IMAGE_BYTES` (2 GiB, `BaseDocument::image_budget`): past it they stay

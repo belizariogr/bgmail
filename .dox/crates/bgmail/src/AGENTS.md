@@ -1207,6 +1207,7 @@ Message dates in the local zone (chrono `clock`); the formatting core takes expl
 - **`document_css`** (private): Theme stylesheet (color scheme, page colors/padding/font, links in accent, blocked-image placeholder, code/pre/blockquote/hr styles).
 - **`css_color`** / **`css_color_alpha`** / **`channel`** (private): Theme colors → CSS `rgb()`/`rgba()`; channel clamps and rounds to 0–255.
 - **`sanitize_html`** (private, test-only): `sanitize_html_inner` without the remote-image report.
+- **`reads_as_safe(html)`** (pub): tokenizes `html` with `html5ever`, followed by what closes a page, entering raw text as the tree builder does. `false` on a start tag in `DISALLOWED_ELEMENTS`, `svg`, `math`, an `on*` attribute or a dangerous URL. `email_document` then shows `plain_text` (`RenderedEmail::refused`, `ReaderNotice::Unrenderable`) and `quotable_html` returns empty.
 - **`sanitize_html_inner`** (private)
   - Signature: `fn sanitize_html_inner(html: &str, load_remote: bool, shown: &HashSet<String>) -> (String, bool, usize)`
   - Purpose: Streaming `lol_html` sanitizer; returns (html, has remote `<img>`, blocked count).

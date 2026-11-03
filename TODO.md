@@ -452,6 +452,21 @@
   refuses over 500k tags or 1024 attributes in one, also when printing; a frame past 512 MiB of
   pixels leaves the rest out instead of remaking textures; the sync thread has 16 MiB of stack; a
   hostile `COPYUID` isn't expanded.
+- ✅ Review round 17 (159000 render seeds with no panic, 4.3 M on the sanitizer): the sanitizer's output
+  is read back with the parser's tokenizer, and what still has active content becomes text; a tag
+  with `=` starting a later attribute goes; a tag left open at the end is closed before checking;
+  quotes remove doctypes by the tokenizer, and keep a body after an unclosed `<head>`; print adds
+  `form-action` and `base-uri`. Form controls no longer exist in any document (user decision). What
+  isn't a row or cell in a table gets an anonymous row and cell, so `tbody{display:block}` in a media
+  query no longer blanks a message, and a media query changing result rebuilds every box once.
+  RFC 2231 limits only touch those headers, so a body keeps its `2*3=6`. End tags are read as the
+  tokenizer reads them. Repeated backgrounds start where the window is. `vertical-align` lays out
+  again, and nested inlines keep `::before`/`::after`.
+- ⬜ Known limits of round 17. Links in print and in a sent quote only refuse `javascript`, `vbscript`
+  and `data` (`file:` and the like remain, needing a click). `strip_css_urls` is textual: `url&#40;`
+  and `\\75rl(` survive it, and only `Resources` and print's CSP stop the fetch. A caption sits in the
+  first column instead of spanning; text directly in `display:table` is lost. Resizing with no
+  `@media` can lose a word (`<label style="transform:scale(2)">`, cause unproven).
 - ✅ Review round 16 (590000 fuzz seeds, one panic, one abort): text the tokenizer kept as `<` is
   written back as `&lt;`, since `<<script></script>script>` came out of the sanitizer as `<script>`
   (it predates this review), and a tag over 1024 attributes goes with its content; a property test

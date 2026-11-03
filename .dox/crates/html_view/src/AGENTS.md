@@ -77,7 +77,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   selection_color }`: parse options; extra UA CSS goes after Blitz's default
   sheet; `selection_color` is RGBA.
 - `const MAX_NESTING_DEPTH = 256`: deepest nesting `try_parse` accepts.
-- `fn has_too_many_tags(html) -> bool` (pub): linear count of what could be a tag anywhere, over `MAX_OPENING_TAGS` (500k), and of the words of an end tag, over `MAX_TAG_ATTRIBUTES` (1024). It follows no tokenizer, so nothing hides a tag from it; it only overstates. The sanitizer drops start tags over that limit.
+- `fn has_too_many_tags(html) -> bool` (pub): linear count of what could be a tag anywhere, over `MAX_OPENING_TAGS` (500k), and of each end tag's attributes as the tokenizer reads them (`end_tag_attributes`), over `MAX_TAG_ATTRIBUTES` (1024). Each end tag is read on its own, with a budget of bytes, so nothing hides one from it; it only overstates. The sanitizer drops start tags over that limit.
+- `fn remove_form_controls(doc)`: removes `input`, `textarea`, `select`, `button`, `form` after parsing.
 - `fn with_render_stack(build) -> T` (pub): runs `build` on a thread with 8 MiB of stack,
   what `MAX_NESTING_DEPTH` assumes; pool threads have less (512 KB on macOS).
 - `const MAX_TABLE_SPAN_AREA = 2_000_000`: most cells `colspan`/`rowspan`/`<col span>` add.
@@ -446,7 +447,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   of remaking the same textures on every repaint; otherwise clears images and gradients when the
   cache would pass it. Hits count toward the frame too (`frame_pixel_bytes`).
 - `PaintCache::evict_pixels()`: empties images and gradients. The atlas keeps their textures (⬜ in `TODO.md`): `window.drop_image` aborts on one with uploads pending.
-- `fn paint_image_fill`: leaves out images outside the content mask before decoding or counting, tiles only what shows, up to `MAX_FRAME_TILES` (64000) per frame.
+- `fn paint_image_fill`: leaves out images outside the content mask before decoding or counting, and tiles only what shows (`tile_starts` starts where the window is), up to `MAX_FRAME_TILES` (64000) per frame.
 - `fn paint_sampled_gradient`: samples only boxes that intersect the content mask, keyed relative
   to the box so equal boxes share one texture.
 - `fn downscaled_size(source, target) -> Option<(u32, u32)>`: sizes are the source's halved (few

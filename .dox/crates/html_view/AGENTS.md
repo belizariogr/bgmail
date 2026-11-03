@@ -45,9 +45,9 @@ positions Blitz computed.
   parsing into Chromium's broken-image rendering (alt text after an icon, or
   framed boxes; see `replace_unavailable_images`), so layouts match a browser
   that couldn't load them.
-- **Form controls** are inert pictures with Chromium's metrics: `<select>`
-  shows its selected option with a ▾ and is as wide as its widest option;
-  text inputs are `size` characters wide.
+- **Form controls don't exist** (user decision): `HtmlDocument::parse` removes `input`, `textarea`,
+  `select`, `button` and `form` right after parsing, whatever reached it, and with their content.
+  Hosts sanitize them away too; this holds if that ever fails. Blitz's code for them stays, unreachable.
 - **Base URL:** defaults to `bgmail://message/` (Blitz panics resolving
   relative URLs against `about:blank`); that scheme resolves to "missing",
   except protocol-relative references (`//host/…` → `bgmail://host/…`),
