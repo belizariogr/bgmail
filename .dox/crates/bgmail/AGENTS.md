@@ -125,9 +125,10 @@ wiring to `storage`.
   (2 MiB, cut at a line, with a notice; decided from Gmail clipping at about 102 KB and
   Thunderbird hanging on huge bodies); replying and forwarding use all of it. A first layout past
   2 s on the UI thread (`UI_LAYOUT_LIMIT`) or 30 s in the background also opens as text, the last
-  resort for what no other limit caught. A damaged `mail.db` is kept beside as `mail.db.corrupt`, and
-  a new one starts (`Database::open_or_replace_corrupt`), with a status note: accounts are in it, so
-  they have to be added again. The sanitizer's
+  resort for what no other limit caught. A `mail.db` that can't be opened or give the first frame what
+  it needs is kept beside as `mail.db.corrupt`, and a new one starts with what could be read of
+  `accounts` and `outbox` (`Database::replace_corrupt`), with a status note. A page lost elsewhere
+  shows as missing mail, as moving everything for it isn't proportional. The sanitizer's
   output is read back with the parser's tokenizer (`mail_html::reads_as_safe`, the last check): if it
   finds what the sanitizer removes, the body shows as text and the quote is left out. `form` and
   `button` are written out as `section` and `span`, keeping what they hold and its style (a whole ASP.NET message

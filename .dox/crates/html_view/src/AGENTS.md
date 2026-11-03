@@ -155,8 +155,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
     `document_mode(html)` is `NoQuirks`.
 - `with_depth()` (private): records the tree's nesting depth after parsing.
 - `HtmlDocument::prepare_within(width, limit) -> bool`: `prepare` that gives up on a layout past
-  `limit`, returning `false` with the document incomplete, for hosts to show text instead. Hangs
-  can't be stopped from outside, and a partial message would hide its end.
+  `limit`, or a recording past `MAX_RECORDING_TIME` (2 s), returning `false` with the document
+  incomplete, for hosts to show text instead. Hangs can't be stopped from outside, and a partial
+  message would hide its end.
 - `HtmlDocument::try_parse(html, options) -> Result<Self, RenderError>`:
   `parse`, then `TooDeep` above `MAX_NESTING_DEPTH`, `TooComplex` if parsing stopped at a budget
   (`parse_refused`), and `TooComplex` above `MAX_TABLE_SPAN_AREA` (`table_span_area`,

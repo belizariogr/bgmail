@@ -470,6 +470,20 @@
   MiB of a body is indexed (128 MB took 21 s during sync). A damaged `mail.db` is kept aside instead
   of aborting at every start. Long names fit 240 bytes. A multipart read no further is text in
   the body. Past 8 failed boundaries it stops searching. Bad percent escapes stay as written.
+- ✅ Review round 21 (179000 render seeds, one panic, no sanitizer violation): `<p bgcolor="#日">` no
+  longer aborts; sibling selectors walk once per pass, with a budget, as 24 KB of `x~p` took 16 s
+  before layout could give up; inline padding saturates (77 bytes made 1.4 GB of corners), and a
+  first recording is under the deadline; a damaged database that fails on first load is replaced
+  too, keeping `accounts` and `outbox`; a nested multipart without its boundary is the body if none
+  was found.
+- ⬜ Known limits of round 21. A database locked by another program, a full disk or no permission
+  aborts with only a message on stderr (should be a dialog). `bgcolor` doesn't follow the standard's
+  legacy parsing: `#FFFFF` is ignored instead of read as `#FFFFF0`. Past their budget, sibling selectors
+  don't match, so such a message may lose styles when resized. 2800 big dotted round boxes pass the
+  path budget, and the last ones lose their borders.
+- ⬜ A panic while rendering aborts, and a message opens as text only at the next start. Unwinding with
+  `catch_unwind` around the document would make it text at once, but reverses a past decision (`panic
+  = "abort"`, above), so it's left to the owner.
 - ⬜ Known limits of round 20. The deadline only covers a first layout: later ones (resizing, hover)
   and painting aren't bound by time. A message opening as text on a very loaded machine is possible
   at the 2 s limit. `<button><div hidden>x</button><p>` still hides what follows, as `</span>` doesn't

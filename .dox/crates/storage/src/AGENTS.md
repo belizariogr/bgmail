@@ -337,6 +337,7 @@ These edit `folders_csv` directly and work for every message. For a remote messa
 
 ##### Context: `module`
 
+- **`Database::replace_corrupt(path)`** (pub): keeps a damaged file as `<name>.corrupt` with its journals, opens a new one and copies what it can read of `accounts` and `outbox`. **`Database::open_or_replace_corrupt(path)`** (pub): `open`, using it if the file is damaged. **`is_corrupt(error)`** (pub).
 - **`fold_for_search`** (pub, L6)
   - Signature: `pub fn fold_for_search(text: &str) -> String`
   - Purpose: Normalizes text for accent-insensitive, case-insensitive matching.

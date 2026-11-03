@@ -108,6 +108,9 @@ repository instead of living in someone's checkout.
     rebuilds when a part changes display, and `vertical-align` rebuilds its inline layout.
   - `layout/construct.rs`: `flush_inline_pseudos_recursive` reads the child's display, so nested
     inlines keep their pseudo-elements.
+  - `stylo.rs`: sibling walks use `Node::sibling_index`, a remembered position checked on use, and
+    a pass takes at most `MAX_SIBLING_STEPS` (2^26) of them: past it selectors don't match, and a
+    first layout gives up. `parse_color_attr` takes no color outside ASCII, as its cuts are by byte.
   - `document.rs` (`generated_text_left`): `content` and list markers share 256 KB per pass;
     `layout_deadline`/`layout_timed_out`: layout compares the deadline every 256 visits and then
     returns empty boxes, so hosts can discard the document.
