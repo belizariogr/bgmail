@@ -52,8 +52,8 @@ use crate::mail_service::{self, MailService, OverallStatus, StartError};
 use crate::settings::SettingsView;
 use crate::shortcuts;
 use html_view::{
-    has_too_many_open_tags, Appearance as PageAppearance, DetachedDocument, DocumentOptions,
-    HitInfo, HtmlDocument, HtmlView, HtmlViewEvent, RenderError,
+    has_too_many_tags, Appearance as PageAppearance, DetachedDocument, DocumentOptions, HitInfo,
+    HtmlDocument, HtmlView, HtmlViewEvent, RenderError,
 };
 use mail_core::{AccountConfig, Address, Draft, ParsedMessage, QuoteLabels, ReplyKind};
 use mail_sync::{actions as mail_actions, ActionOutcome, Command, SyncEvent};
@@ -612,7 +612,7 @@ const BACKGROUND_BUILD_BYTES: usize = 256 * 1024;
 const MAX_SHOWN_TEXT_BYTES: usize = 2 << 20;
 
 /// What the reader shows of a plain-text body: up to the last line that fits, or to the
-/// limit if a single line passes it. `None` when it all fits.
+/// limit if the last line is long. `None` when it all fits.
 pub(crate) fn clipped_text(text: &str) -> Option<&str> {
     if text.len() <= MAX_SHOWN_TEXT_BYTES {
         return None;
@@ -621,9 +621,11 @@ pub(crate) fn clipped_text(text: &str) -> Option<&str> {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
+    // A line break far back isn't worth losing the rest: `ok` before a line of 3 MB.
+    const NEAR_THE_END: usize = 64 << 10;
     Some(match text[..end].rfind('\n') {
-        Some(line_end) => &text[..line_end],
-        None => &text[..end],
+        Some(line_end) if end - line_end <= NEAR_THE_END => &text[..line_end],
+        _ => &text[..end],
     })
 }
 
@@ -679,7 +681,7 @@ impl ReaderJob {
             MessageBody::Html(_) => (body, false),
         };
         let too_many_tags =
-            matches!(&self.body, MessageBody::Html(html) if has_too_many_open_tags(html));
+            matches!(&self.body, MessageBody::Html(html) if has_too_many_tags(html));
         let mut notice = match (&self.body, self.crashed, too_many_tags) {
             (MessageBody::Html(_), true, _) => Some(ReaderNotice::Crashed),
             (_, _, true) => Some(ReaderNotice::Unrenderable),
@@ -4180,8 +4182,8 @@ impl RootView {
         let quoted_html = parsed
             .html
             .as_deref()
-            // Sanitizing it would freeze the window (see `has_too_many_open_tags`).
-            .filter(|html| !has_too_many_open_tags(html))
+            // Sanitizing it would freeze the window.
+            .filter(|html| !has_too_many_tags(html))
             .map(quotable_html)
             .or_else(|| parsed.text.as_deref().map(quotable_text))
             .filter(|html| kind != ReplyKind::Forward && !html.trim().is_empty());
@@ -7457,6 +7459,38 @@ mod tests {
             false,
         )
         .build();
+        assert_eq!(built.notice, Some(ReaderNotice::Unrenderable));
+    }
+
+    #[test]
+    fn too_deep_markup_is_built_as_plain_text() {
+        let built = job(&"<i>".repeat(20_000), false).build();
+        assert_eq!(built.notice, Some(ReaderNotice::Unrenderable));
+    }
+
+    #[test]
+    fn long_text_is_clipped_at_a_line_with_a_notice() {
+        assert_eq!(clipped_text("short"), None);
+        let lines = "line\n".repeat(MAX_SHOWN_TEXT_BYTES / 4);
+        let shown = clipped_text(&lines).unwrap();
+        assert!(shown.len() <= MAX_SHOWN_TEXT_BYTES && shown.ends_with("line"));
+        let word = "é".repeat(MAX_SHOWN_TEXT_BYTES);
+        assert!(clipped_text(&word).unwrap().len() <= MAX_SHOWN_TEXT_BYTES);
+        // A break far back isn't worth losing the rest.
+        let long_line = format!("ok\n{}", "x".repeat(3 << 20));
+        assert!(clipped_text(&long_line).unwrap().len() > MAX_SHOWN_TEXT_BYTES / 2);
+
+        let built = ReaderJob {
+            body: MessageBody::Text(lines.into()),
+            ..job("", false)
+        }
+        .build();
+        assert_eq!(built.notice, Some(ReaderNotice::Clipped));
+    }
+
+    #[test]
+    fn large_html_text_opens_clipped_as_plain_text() {
+        let built = job(&format!("<p>{}", "x".repeat(5 << 20)), false).build();
         assert_eq!(built.notice, Some(ReaderNotice::Unrenderable));
     }
 

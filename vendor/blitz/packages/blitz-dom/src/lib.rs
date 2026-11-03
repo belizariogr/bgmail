@@ -28,9 +28,15 @@
 //  - `default`: Enables the features listed below.
 //  - `tracing`: Enables tracing support.
 
-/// BGMail: the most nodes a document's markup can create; parsing stops there. At about 3-5 KB
-/// each once styled, this keeps a document within a few GB whatever its markup does.
+/// BGMail: what a document's markup can create before parsing stops and hosts refuse it.
+///
+/// Nodes, at about 3-5 KB each once styled. Elements open at once, past what ever renders, as
+/// parsing is quadratic in them. Text, which costs over 100 times its size to lay out. Bytes
+/// of attributes and comments, since each reopened formatting element copies its attributes.
 pub const MAX_DOM_NODES: usize = 500_000;
+pub const MAX_PARSE_DEPTH: usize = 1024;
+pub const MAX_TEXT_BYTES: usize = 4 << 20;
+pub const MAX_MARKUP_BYTES: usize = 64 << 20;
 
 pub const DEFAULT_CSS: &str = include_str!("../assets/default.css");
 pub const BULLET_FONT: &[u8] = include_bytes!("../assets/moz-bullet-font.otf");

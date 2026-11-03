@@ -124,10 +124,11 @@ pub enum Appearance {
 /// hostile mail could crash the app. Real mail stays well under 100.
 pub const MAX_NESTING_DEPTH: usize = 256;
 
-/// Most elements a document can leave open, by a scan that needs no parsing (see
-/// [`has_too_many_open_tags`]). Far past any depth that renders; it only keeps the
-/// quadratic cost of open elements in the sanitizer and the parser from being paid.
-const MAX_OPEN_TAGS: u32 = 16_384;
+/// Most tags and most attributes of a tag a document can have, by a scan that needs no parsing
+/// (see [`has_too_many_tags`]). The sanitizer has a stack entry per tag, about 30 KB per 1000,
+/// and removing attributes and rejecting duplicates are quadratic in a tag's.
+const MAX_OPENING_TAGS: usize = 500_000;
+const MAX_TAG_ATTRIBUTES: usize = 1024;
 
 /// Most table cells that `colspan`, `rowspan` and `<col span>` can add to a document. A few
 /// bytes declare them, and each costs memory in the layout's grid.
@@ -139,7 +140,7 @@ pub enum RenderError {
     /// Elements nest deeper than [`MAX_NESTING_DEPTH`].
     TooDeep { depth: usize },
     /// The document costs too much memory to lay out, whatever its size in bytes: past
-    /// [`blitz_dom::MAX_DOM_NODES`] or [`MAX_TABLE_SPAN_AREA`].
+    /// a budget of the parser (see [`blitz_dom::MAX_DOM_NODES`]) or [`MAX_TABLE_SPAN_AREA`].
     TooComplex,
 }
 
@@ -435,40 +436,43 @@ fn nesting_depth(doc: &BaseDocument, root: NodeId) -> usize {
     deepest
 }
 
-/// Whether `html` leaves more elements open than any document that renders, by a linear scan
-/// to run before sanitizing and parsing, which are quadratic in them. Counts by tag name, so
-/// closing another tag doesn't hide an open one, and leaves out tags that need no closing.
-/// Tags in comments count too, which can only overstate.
-pub fn has_too_many_open_tags(html: &str) -> bool {
-    const UNCLOSED: &[&str] = &[
-        "area", "base", "br", "caption", "col", "colgroup", "dd", "dt", "embed", "hr", "img",
-        "input", "li", "link", "meta", "optgroup", "option", "p", "param", "rp", "rt", "source",
-        "tbody", "td", "tfoot", "th", "thead", "tr", "track", "wbr",
-    ];
-    let mut open = std::collections::HashMap::new();
-    let mut total = 0u32;
-    let mut rest = html;
-    while let Some(start) = rest.find('<') {
-        rest = &rest[start + 1..];
-        let closing = rest.starts_with('/');
-        let name = rest.trim_start_matches('/');
-        let end = name
-            .find(|c: char| !c.is_ascii_alphanumeric())
-            .unwrap_or(name.len());
-        let name = name[..end].to_ascii_lowercase();
-        if name.is_empty() || UNCLOSED.contains(&name.as_str()) {
+/// Whether `html` has more tags, or a tag more attributes, than hosts should sanitize and parse:
+/// a linear scan to run before both. Limits on nesting and text are the parser's, as only it
+/// knows them.
+pub fn has_too_many_tags(html: &str) -> bool {
+    let bytes = html.as_bytes();
+    let mut tags = 0;
+    let mut at = 0;
+    while let Some(found) = bytes[at..].iter().position(|&byte| byte == b'<') {
+        at += found + 1;
+        if !bytes.get(at).is_some_and(u8::is_ascii_alphabetic) {
             continue;
         }
-        let count = open.entry(name).or_insert(0u32);
-        if !closing {
-            *count += 1;
-            total += 1;
-        } else if *count > 0 {
-            *count -= 1;
-            total -= 1;
-        }
-        if total > MAX_OPEN_TAGS {
+        tags += 1;
+        if tags > MAX_OPENING_TAGS {
             return true;
+        }
+        // To the end of the tag, where the next one is looked for, or `<a <a <a...` would scan
+        // the rest of the message for each.
+        let mut attributes = 0;
+        let mut quote = None;
+        let mut in_space = false;
+        while let Some(&byte) = bytes.get(at) {
+            at += 1;
+            match quote {
+                Some(open) if byte == open => quote = None,
+                Some(_) => {}
+                None if byte == b'>' => break,
+                None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+                None if byte.is_ascii_whitespace() => in_space = true,
+                None => {
+                    attributes += usize::from(in_space);
+                    in_space = false;
+                }
+            }
+            if attributes > MAX_TAG_ATTRIBUTES {
+                return true;
+            }
         }
     }
     false
@@ -873,13 +877,13 @@ impl HtmlDocument {
     /// safely (see [`RenderError`]).
     pub fn try_parse(html: &str, options: DocumentOptions) -> Result<Self, RenderError> {
         let document = Self::parse(html, options);
-        if document.inner.tree().len() >= blitz_dom::MAX_DOM_NODES {
-            return Err(RenderError::TooComplex);
-        }
         if document.depth > MAX_NESTING_DEPTH {
             return Err(RenderError::TooDeep {
                 depth: document.depth,
             });
+        }
+        if document.inner.parse_refused {
+            return Err(RenderError::TooComplex);
         }
         if table_span_area(&document.inner) > MAX_TABLE_SPAN_AREA {
             return Err(RenderError::TooComplex);
@@ -2043,7 +2047,8 @@ mod tests {
         let html = deep(8_000);
         assert!(matches!(
             HtmlDocument::try_parse(&html, DocumentOptions::default()),
-            Err(RenderError::TooDeep { depth }) if depth > 8_000
+            // The parser stops well before the end of it.
+            Err(RenderError::TooDeep { depth }) if depth > MAX_NESTING_DEPTH
         ));
         let mut doc = HtmlDocument::parse(&html, DocumentOptions::default());
         assert_eq!(doc.layout(400.0), 0.0);
@@ -2903,13 +2908,91 @@ mod hostile_tests {
     }
 
     #[test]
-    fn open_tags_are_counted_without_parsing() {
-        assert!(has_too_many_open_tags(&"<i>".repeat(20_000)));
-        assert!(has_too_many_open_tags(&"<div></b>".repeat(20_000)));
-        // Tags that need no closing, and closed ones, however many.
-        assert!(!has_too_many_open_tags(&"<p>x<br><td>".repeat(20_000)));
-        assert!(!has_too_many_open_tags(&"<span>x</span>".repeat(20_000)));
-        assert!(!has_too_many_open_tags("a < b, é <é"));
+    fn tags_and_attributes_are_counted_without_parsing() {
+        assert!(has_too_many_tags(&"<p>".repeat(MAX_OPENING_TAGS + 1)));
+        assert!(!has_too_many_tags(&"<p>".repeat(MAX_OPENING_TAGS)));
+        let attributes: String = (0..2000).map(|i| format!(" on{i}")).collect();
+        assert!(has_too_many_tags(&format!("<p{attributes}>")));
+        // In a quote it's one value, and no tag is found in text.
+        assert!(!has_too_many_tags(&format!("<p a=\"{attributes}\">")));
+        assert!(!has_too_many_tags("a < b, é <é <"));
+        // Linear on tags that never end.
+        let start = std::time::Instant::now();
+        assert!(has_too_many_tags(&"<a ".repeat(1_000_000)));
+        assert!(!has_too_many_tags(&format!(
+            "<a \"{}",
+            "<a ".repeat(1_000_000)
+        )));
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn the_parser_stops_at_its_budgets() {
+        let refused = |html: &str| {
+            let start = std::time::Instant::now();
+            let result = HtmlDocument::try_parse(html, DocumentOptions::default());
+            assert!(start.elapsed().as_secs() < 20, "{:?}", start.elapsed());
+            result.map(|_| ()).err()
+        };
+        // Comments, text, and attributes copied by each reopened formatting element.
+        assert_eq!(
+            refused(&format!("<p>x{}", "<!>".repeat(600_000))),
+            Some(RenderError::TooComplex)
+        );
+        assert_eq!(
+            refused(&format!("<p>{}", "x".repeat(5 << 20))),
+            Some(RenderError::TooComplex)
+        );
+        let attribute = "a".repeat(125_000);
+        let html = format!("<p><b a0=\"{attribute}\">{}", "<p>x".repeat(1000));
+        assert_eq!(refused(&html), Some(RenderError::TooComplex));
+        // Nesting closed in a way the parser ignores stops early, and is still too deep.
+        let html = "<span><div></span></div>".repeat(100_000);
+        assert!(matches!(refused(&html), Some(RenderError::TooDeep { .. })));
+        assert_eq!(refused("<p>hello</p><!-- ok -->"), None);
+    }
+
+    #[test]
+    fn hoisted_boxes_freed_by_a_media_query_arent_rounded() {
+        let html = "<style>@media(min-width:401px){::before{position:fixed;content:'x'}}</style>\
+            <p style=\"filter:contrast(1)\"><mark>";
+        let mut document = parse(html);
+        for width in [300.0, 640.0, 300.0] {
+            document.layout(width);
+            document.display_list();
+        }
+        document.set_zoom(2.5);
+        document.layout(800.0);
+        document.display_list();
+    }
+
+    #[test]
+    fn a_custom_property_cant_carry_layout_through_a_hover() {
+        let html = "<style>body:hover{--x-color:none} p{display:var(--x-color,block)}</style>\
+            <body style=margin:0><p>hello</p><p style=\"height:300px\">b</p>";
+        let mut document = parse(html);
+        let height = document.layout(640.0);
+        hover(&mut document, 10.0, 20.0);
+        assert_eq!(document.layout(640.0), height);
+    }
+
+    #[test]
+    fn nowrap_spans_past_the_limit_dont_trip_parley() {
+        parse(&format!(
+            "<style>b{{white-space:nowrap}}</style><p>{}",
+            "<b>x </b> y".repeat(70_000)
+        ));
+    }
+
+    #[test]
+    fn a_large_table_in_nested_inline_tables_lays_out_in_bounded_time() {
+        let open = "<table style=display:inline-table><tr><td>".repeat(8);
+        let start = std::time::Instant::now();
+        parse(&format!(
+            "{open}<table><tr>{}</table>",
+            "<td>x".repeat(1000)
+        ));
+        assert!(start.elapsed().as_secs() < 20, "{:?}", start.elapsed());
     }
 
     #[test]

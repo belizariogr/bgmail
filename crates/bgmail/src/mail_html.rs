@@ -134,7 +134,14 @@ pub fn print_document(
     nonce: &str,
     load_remote: bool,
 ) -> String {
-    let rendered = email_document(PRINT_COLORS, body, load_remote);
+    // As in the reader, what is too costly to sanitize prints as text.
+    let as_text = match body {
+        MessageBody::Html(html) if html_view::has_too_many_tags(html) => {
+            Some(MessageBody::Text(plain_text(html).into()))
+        }
+        _ => None,
+    };
+    let rendered = email_document(PRINT_COLORS, as_text.as_ref().unwrap_or(body), load_remote);
     // Remote images the user allowed for this message print too.
     let images = if load_remote {
         "data: http: https:"

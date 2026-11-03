@@ -426,8 +426,11 @@ pub struct BaseDocument {
     pub(crate) image_budget: Arc<std::sync::atomic::AtomicU64>,
     /// BGMail: a node was freed since the last paint tree, whose lists may still hold it.
     pub(crate) paint_tree_stale: bool,
-    /// BGMail: full layouts forced this pass to measure inline boxes' baselines.
-    pub(crate) forced_inline_layouts: usize,
+    /// BGMail: nodes visited by this layout pass.
+    pub(crate) layout_visits: usize,
+    /// BGMail: the parser stopped at a budget, so the document is partial (see
+    /// `blitz_html`'s sink); hosts refuse it.
+    pub parse_refused: bool,
     /// BGMail: bytes of web fonts this document has registered.
     font_bytes: u64,
 
@@ -570,7 +573,8 @@ impl BaseDocument {
             pending_style_image_nodes: Vec::new(),
             image_budget: crate::net::new_image_budget(),
             paint_tree_stale: false,
-            forced_inline_layouts: 0,
+            layout_visits: 0,
+            parse_refused: false,
             font_bytes: 0,
             pending_critical_resources: HashSet::new(),
             line_height_quirk: false,

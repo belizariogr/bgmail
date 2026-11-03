@@ -58,8 +58,42 @@ pub struct DocumentHtmlParser<'m, 'doc> {
     /// The document's quirks mode.
     pub quirks_mode: Cell<QuirksMode>,
     pub is_xml: bool,
-    /// BGMail: nodes created, shared with the loop feeding the parser.
-    nodes_created: Rc<Cell<usize>>,
+    /// BGMail: shared with the loop feeding the parser.
+    budget: Rc<ParseBudget>,
+}
+
+/// BGMail: what the markup has created so far (see [`blitz_dom::MAX_DOM_NODES`]).
+#[derive(Default)]
+struct ParseBudget {
+    nodes: Cell<usize>,
+    text_bytes: Cell<usize>,
+    markup_bytes: Cell<usize>,
+    too_deep: Cell<bool>,
+}
+
+impl ParseBudget {
+    fn exhausted(&self) -> bool {
+        self.nodes.get() >= blitz_dom::MAX_DOM_NODES
+            || self.text_bytes.get() >= blitz_dom::MAX_TEXT_BYTES
+            || self.markup_bytes.get() >= blitz_dom::MAX_MARKUP_BYTES
+            || self.too_deep.get()
+    }
+
+    fn add_node(&self) {
+        self.nodes.set(self.nodes.get() + 1);
+    }
+
+    fn add_text(&self, bytes: usize) {
+        self.text_bytes.set(self.text_bytes.get() + bytes);
+    }
+
+    /// Takes `bytes` of attributes or comments, if the budget still has them. Checking between
+    /// pieces isn't enough here: a long attribute can be copied thousands of times in one.
+    fn take_markup(&self, bytes: usize) -> bool {
+        let total = self.markup_bytes.get().saturating_add(bytes);
+        self.markup_bytes.set(total);
+        total < blitz_dom::MAX_MARKUP_BYTES
+    }
 }
 
 impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
@@ -77,7 +111,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
             errors: RefCell::new(Vec::new()),
             quirks_mode: Cell::new(QuirksMode::NoQuirks),
             is_xml: false,
-            nodes_created: Rc::default(),
+            budget: Rc::default(),
         }
     }
 
@@ -119,15 +153,15 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
                     quirks_mode: QuirksMode::NoQuirks,
                 },
             };
-            // BGMail: fed in small pieces to stop at `MAX_DOM_NODES`: a tag can make hundreds
-            // of nodes (the formatting elements it reopens), so counting tags up front isn't
-            // enough, and the parser can't stop by itself. The document stays partial, and
-            // hosts refuse it by its node count.
-            let nodes_created = Rc::clone(&sink.nodes_created);
+            // BGMail: fed in small pieces to stop at a budget: a tag can make hundreds of nodes
+            // (the formatting elements it reopens), so counting up front isn't enough, and the
+            // parser can't stop by itself. The document stays partial, and `finish` marks it
+            // for hosts to refuse.
+            let budget = Rc::clone(&sink.budget);
             let mut parser = html5ever::parse_document(sink, opts).from_utf8();
             for piece in html.as_bytes().chunks(PARSE_PIECE_BYTES) {
                 parser.process(html5ever::tendril::ByteTendril::from_slice(piece));
-                if nodes_created.get() >= blitz_dom::MAX_DOM_NODES {
+                if budget.exhausted() {
                     break;
                 }
             }
@@ -195,6 +229,7 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
         Self: 'a;
 
     fn finish(self) -> Self::Output {
+        self.mutr().doc.parse_refused = self.budget.exhausted();
         #[cfg(feature = "tracing")]
         for error in self.errors.borrow().iter() {
             tracing::error!("{error}");
@@ -222,25 +257,53 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
         attrs: Vec<html5ever::Attribute>,
         _flags: ElementFlags,
     ) -> Self::Handle {
-        let attrs = attrs.into_iter().map(html5ever_to_blitz_attr).collect();
-        self.nodes_created.set(self.nodes_created.get() + 1);
+        self.budget.add_node();
+        let bytes = attrs.iter().map(|attr| attr.value.len()).sum();
+        let attrs = if self.budget.take_markup(bytes) {
+            attrs.into_iter().map(html5ever_to_blitz_attr).collect()
+        } else {
+            Vec::new()
+        };
         self.mutr().create_element(name, attrs)
     }
 
     fn create_comment(&self, text: StrTendril) -> Self::Handle {
-        self.mutr().create_comment_node(&text)
+        self.budget.add_node();
+        let text = if self.budget.take_markup(text.len()) {
+            &*text
+        } else {
+            ""
+        };
+        self.mutr().create_comment_node(text)
     }
 
     fn create_pi(&self, _target: StrTendril, _data: StrTendril) -> Self::Handle {
+        self.budget.add_node();
         self.mutr().create_comment_node("")
     }
 
     fn append(&self, parent_id: &Self::Handle, child: NodeOrText<Self::Handle>) {
         match child {
-            NodeOrText::AppendNode(id) => self.mutr().append_children(*parent_id, &[id]),
+            NodeOrText::AppendNode(id) => {
+                // BGMail: walks at most `MAX_PARSE_DEPTH` nodes, and stops the parser if it gets
+                // there. Not by counting pops: the tree builder pops without telling the sink.
+                let mutr = self.mutr();
+                let mut depth = 0;
+                let mut ancestor = Some(*parent_id);
+                while let Some(id) = ancestor.filter(|_| depth < blitz_dom::MAX_PARSE_DEPTH) {
+                    depth += 1;
+                    ancestor = mutr.doc.get_node(id).and_then(|node| node.parent);
+                }
+                if ancestor.is_some() {
+                    self.budget.too_deep.set(true);
+                }
+                drop(mutr);
+                self.mutr().append_children(*parent_id, &[id]);
+            }
             // If content to append is text, first attempt to append it to the last child of parent.
             // Else create a new text node and append it to the parent
             NodeOrText::AppendText(text) => {
+                self.budget.add_text(text.len());
                 let last_child_id = self.mutr().last_child_id(*parent_id);
                 let has_appended = if let Some(id) = last_child_id {
                     self.mutr().append_text_to_node(id, &text).is_ok()
@@ -248,7 +311,7 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
                     false
                 };
                 if !has_appended {
-                    self.nodes_created.set(self.nodes_created.get() + 1);
+                    self.budget.add_node();
                     let new_child_id = self.mutr().create_text_node(&text);
                     self.mutr().append_children(*parent_id, &[new_child_id]);
                 }
@@ -264,6 +327,7 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
             // If content to append is text, first attempt to append it to the node before sibling_node
             // Else create a new text node and insert it before sibling_node
             NodeOrText::AppendText(text) => {
+                self.budget.add_text(text.len());
                 let previous_sibling_id = self.mutr().previous_sibling_id(*sibling_id);
                 let has_appended = if let Some(id) = previous_sibling_id {
                     self.mutr().append_text_to_node(id, &text).is_ok()
@@ -271,6 +335,7 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
                     false
                 };
                 if !has_appended {
+                    self.budget.add_node();
                     let new_child_id = self.mutr().create_text_node(&text);
                     self.mutr()
                         .insert_nodes_before(*sibling_id, &[new_child_id]);

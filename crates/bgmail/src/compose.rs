@@ -17,7 +17,7 @@ use gpui::{
     Subscription, Task, WeakEntity, Window, WindowBounds,
 };
 use html_view::{
-    has_too_many_open_tags, with_render_stack, Appearance as PageAppearance, DetachedDocument,
+    has_too_many_tags, with_render_stack, Appearance as PageAppearance, DetachedDocument,
     DocumentOptions, HtmlDocument, HtmlView, Resources,
 };
 use mail_core::{Address, Draft, OutgoingAttachment};
@@ -504,8 +504,7 @@ impl ComposeView {
                 // Text costs the same as in the reader, so it is clipped the same way.
                 let block = clipped_text(&quoted.block).unwrap_or(&quoted.block);
                 let text = MessageBody::Text(block.to_string().into());
-                let body = if quoted.render_guard.is_some() && !has_too_many_open_tags(&quoted.html)
-                {
+                let body = if quoted.render_guard.is_some() && !has_too_many_tags(&quoted.html) {
                     MessageBody::Html(quoted.html.into())
                 } else {
                     text.clone()
