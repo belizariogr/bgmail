@@ -5,6 +5,7 @@ use html5ever::tokenizer::TokenizerOpts;
 use html5ever::tree_builder::TreeBuilderOpts;
 use std::borrow::Cow;
 use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::rc::Rc;
 
 use blitz_dom::node::Attribute;
 use blitz_dom::{DocumentMutator, HtmlParserProvider, NodeId};
@@ -16,6 +17,9 @@ use html5ever::{
 
 /// Convert an html5ever Attribute which uses tendril for its value to a blitz Attribute
 /// which uses String.
+/// BGMail: bytes fed to the parser between checks of the nodes it created.
+const PARSE_PIECE_BYTES: usize = 4096;
+
 fn html5ever_to_blitz_attr(attr: html5ever::Attribute) -> Attribute {
     Attribute {
         name: attr.name,
@@ -54,6 +58,8 @@ pub struct DocumentHtmlParser<'m, 'doc> {
     /// The document's quirks mode.
     pub quirks_mode: Cell<QuirksMode>,
     pub is_xml: bool,
+    /// BGMail: nodes created, shared with the loop feeding the parser.
+    nodes_created: Rc<Cell<usize>>,
 }
 
 impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
@@ -71,6 +77,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
             errors: RefCell::new(Vec::new()),
             quirks_mode: Cell::new(QuirksMode::NoQuirks),
             is_xml: false,
+            nodes_created: Rc::default(),
         }
     }
 
@@ -112,10 +119,19 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
                     quirks_mode: QuirksMode::NoQuirks,
                 },
             };
-            html5ever::parse_document(sink, opts)
-                .from_utf8()
-                .read_from(&mut html.as_bytes())
-                .unwrap();
+            // BGMail: fed in small pieces to stop at `MAX_DOM_NODES`: a tag can make hundreds
+            // of nodes (the formatting elements it reopens), so counting tags up front isn't
+            // enough, and the parser can't stop by itself. The document stays partial, and
+            // hosts refuse it by its node count.
+            let nodes_created = Rc::clone(&sink.nodes_created);
+            let mut parser = html5ever::parse_document(sink, opts).from_utf8();
+            for piece in html.as_bytes().chunks(PARSE_PIECE_BYTES) {
+                parser.process(html5ever::tendril::ByteTendril::from_slice(piece));
+                if nodes_created.get() >= blitz_dom::MAX_DOM_NODES {
+                    break;
+                }
+            }
+            parser.finish();
         }
     }
 
@@ -207,6 +223,7 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
         _flags: ElementFlags,
     ) -> Self::Handle {
         let attrs = attrs.into_iter().map(html5ever_to_blitz_attr).collect();
+        self.nodes_created.set(self.nodes_created.get() + 1);
         self.mutr().create_element(name, attrs)
     }
 
@@ -231,6 +248,7 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
                     false
                 };
                 if !has_appended {
+                    self.nodes_created.set(self.nodes_created.get() + 1);
                     let new_child_id = self.mutr().create_text_node(&text);
                     self.mutr().append_children(*parent_id, &[new_child_id]);
                 }

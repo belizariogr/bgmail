@@ -28,6 +28,10 @@
 //  - `default`: Enables the features listed below.
 //  - `tracing`: Enables tracing support.
 
+/// BGMail: the most nodes a document's markup can create; parsing stops there. At about 3-5 KB
+/// each once styled, this keeps a document within a few GB whatever its markup does.
+pub const MAX_DOM_NODES: usize = 500_000;
+
 pub const DEFAULT_CSS: &str = include_str!("../assets/default.css");
 pub const BULLET_FONT: &[u8] = include_bytes!("../assets/moz-bullet-font.otf");
 
