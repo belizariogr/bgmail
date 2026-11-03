@@ -9,7 +9,7 @@ use rusqlite::{
 };
 
 use crate::folder::{folder_csv_needle, system};
-use crate::search::{fold_for_search, search_like_pattern};
+use crate::search::{collapse_spaces, fold_for_search, search_like_pattern};
 use crate::types::{MailListQuery, MessageDetail, MessageListItem};
 
 /// Default database path: `~/.config/BGMail/mail.db`.
@@ -47,6 +47,33 @@ pub struct Database {
     conn: Connection,
 }
 
+/// All of the user's mail is in there: other users of the machine can't read it. SQLite
+/// gives its `-wal` and `-shm` files the mode of the database. Best effort: nothing to do
+/// about a file system that doesn't allow it.
+#[cfg(unix)]
+fn keep_private(path: &Path) {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let private = std::fs::Permissions::from_mode(0o600);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path);
+    let _ = std::fs::set_permissions(path, private.clone());
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        let _ = std::fs::set_permissions(&sidecar, private.clone());
+    }
+    if path.parent() == Some(config_dir().as_path()) {
+        let _ = std::fs::set_permissions(config_dir(), std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+#[cfg(not(unix))]
+fn keep_private(_: &Path) {}
+
 impl Database {
     /// Opens (or creates) the database at `path` and applies migrations.
     ///
@@ -56,6 +83,7 @@ impl Database {
         if let Some(parent) = path.as_ref().parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        keep_private(path.as_ref());
         let conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
@@ -290,7 +318,7 @@ fn query_filter(query: &MailListQuery) -> Option<(&'static str, Vec<Value>)> {
 /// (a quoted phrase is a substring match there); shorter ones fall back to
 /// `LIKE`, which trigrams cannot answer.
 fn search_filter(query: &str) -> Option<(&'static str, Vec<Value>)> {
-    let folded = fold_for_search(query.trim());
+    let folded = collapse_spaces(&fold_for_search(query));
     if folded.is_empty() {
         return None;
     }
@@ -595,6 +623,52 @@ mod tests {
             "user:x,sys:trash"
         ));
         assert!(!crate::message_has_folder(&message.folders_csv, "user:x"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_its_owner_can_read_the_database() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let mode = |file: &Path| std::fs::metadata(file).unwrap().permissions().mode() & 0o777;
+        drop(Database::open(&path).unwrap());
+        assert_eq!(mode(&path), 0o600);
+
+        // One created before this keeps nothing open to others either.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let db = Database::open(&path).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir.path().join("mail.db-wal")), 0o600);
+        drop(db);
+    }
+
+    #[test]
+    fn a_phrase_is_found_across_a_line_break() {
+        let (_file, db, fx) = crate::test_support::remote_db();
+        let id = db
+            .insert_remote_message(
+                fx.account,
+                fx.inbox,
+                1,
+                &crate::test_support::remote_message("s", None),
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "UPDATE messages SET search_text = ?1 WHERE id = ?2",
+                params![
+                    crate::search::build_search_text("", "", "", "encontro na reuniao\nde amanha"),
+                    id
+                ],
+            )
+            .unwrap();
+        for query in ["reuniao de amanha", "reuniao   de\tamanha"] {
+            let found = db
+                .list_messages(&MailListQuery::Search(query.into()))
+                .unwrap();
+            assert_eq!(found.len(), 1, "{query}");
+        }
     }
 
     #[test]
