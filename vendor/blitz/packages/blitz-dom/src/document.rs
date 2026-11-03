@@ -938,6 +938,7 @@ impl BaseDocument {
     /// it so that stale NodeIds are never dereferenced after the slot is freed.
     pub(crate) fn remove_node_from_tree(&mut self, node_id: NodeId) -> Option<Node> {
         self.clear_interaction_state_for_removed_node(node_id);
+        self.paint_tree_stale = true;
         self.nodes.remove(node_id)
     }
 
@@ -2758,14 +2759,16 @@ impl BaseDocument {
             let element_data = node.element_data()?;
             let inline_layout = element_data.inline_layout_data.as_ref()?;
 
-            if *end > inline_layout.text.len() {
+            // BGMail: the offsets can be older than the text (`:hover` can change it), so
+            // they may be past its end or inside a character.
+            let Some(text) = inline_layout.text.get(*start..*end) else {
                 continue;
-            }
+            };
 
             if !result.is_empty() {
                 result.push(' ');
             }
-            result.push_str(&inline_layout.text[*start..*end]);
+            result.push_str(text);
         }
 
         if result.is_empty() {

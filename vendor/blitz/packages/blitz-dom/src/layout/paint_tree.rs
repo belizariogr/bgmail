@@ -32,8 +32,11 @@ use taffy::{Point, Rect};
 /// hoisted by Taffy, otherwise `layout_parent`, which is set for every layout
 /// child by `resolve_layout_children`, anonymous blocks included).
 pub fn hoisted_child_position(tree: &NodeTree, sc_root_id: NodeId, child_id: NodeId) -> Point<f32> {
-    let child = &tree[child_id];
     let mut position = Point::ZERO;
+    // BGMail: a freed box has nowhere to be; it isn't painted either.
+    let Some(child) = tree.get(child_id) else {
+        return position;
+    };
     let mut current = child.containing_block();
 
     // A fixed-position box whose containing block is the root element is
@@ -215,6 +218,7 @@ impl BaseDocument {
     /// enclosing stacking context are replayed from `Node::sc_contribution_cache`.
     pub(crate) fn build_paint_tree(&mut self, root_id: NodeId) {
         self.build_paint_tree_impl(root_id, None);
+        self.paint_tree_stale = false;
     }
 
     /// `stacking_context` is the entry list of the nearest ancestor stacking
@@ -238,7 +242,10 @@ impl BaseDocument {
             // node itself, so the role the caller resolved must match the one
             // this node was last built with.
             let role_unchanged = node.stacking_context.is_some() == stacking_context.is_none();
+            // BGMail: damage doesn't tell which lists still hold a node freed by box
+            // reconstruction, and painting one aborts the process.
             let clean = role_unchanged
+                && !self.paint_tree_stale
                 && !node
                     .damage()
                     .unwrap_or(ALL_DAMAGE)

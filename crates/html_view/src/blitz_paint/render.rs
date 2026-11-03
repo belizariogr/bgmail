@@ -729,7 +729,11 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         parent_style_transform: Affine,
         clip_rect: Rect,
     ) {
-        let node = &self.dom.as_ref().tree()[node_id];
+        // BGMail: a list may still hold a box freed since it was built, and a panic here
+        // takes the whole app down.
+        let Some(node) = self.dom.as_ref().tree().get(node_id) else {
+            return;
+        };
 
         match &node.data {
             NodeData::Element(_) | NodeData::AnonymousBlock(_) => {
@@ -1294,7 +1298,9 @@ impl ElementCx<'_, '_> {
                 // the viewport and do not scroll with it, so cancel out the viewport
                 // scroll (applied in `paint_scene`). A fixed box contained by a
                 // transformed ancestor scrolls with it like any out-of-flow box.
-                let child = &self.context.dom.as_ref().tree()[*child_id];
+                let Some(child) = self.context.dom.as_ref().tree().get(*child_id) else {
+                    continue;
+                };
                 let child_transform = if child.taffy_position() == taffy::Position::Fixed
                     && Some(self.node.id) == self.context.root_element_id
                 {

@@ -532,8 +532,11 @@ impl BaseDocument {
         }
 
         for node_id in anon_nodes {
-            if let Some(parent_id) = *(self.nodes[node_id].layout_parent.get_mut()) {
-                self.nodes[parent_id].insert_damage(ALL_DAMAGE);
+            if let Some(parent_id) = *(self.nodes[node_id].layout_parent.get_mut())
+                // BGMail: the parent may have been freed by a box reconstruction.
+                && let Some(parent) = self.nodes.get_mut(parent_id)
+            {
+                parent.insert_damage(ALL_DAMAGE);
             }
         }
     }

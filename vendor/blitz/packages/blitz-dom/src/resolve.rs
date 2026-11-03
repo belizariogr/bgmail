@@ -325,13 +325,11 @@ impl BaseDocument {
     /// anonymous boxes.
     #[cfg(debug_assertions)]
     fn assert_layout_parents_consistent(&self) {
-        use crate::node::NodeFlags;
-
-        for (parent_id, node) in self.nodes.iter() {
-            if !node.flags.contains(NodeFlags::IS_IN_DOCUMENT) {
-                continue;
-            }
-            let Some(children) = node.layout_children.borrow().clone() else {
+        // BGMail: walks the box tree instead of every node: a box that became inline keeps
+        // the list it had as a block, which nothing reads since no walk reaches it.
+        let mut stack = vec![self.root_node().id];
+        while let Some(parent_id) = stack.pop() {
+            let Some(children) = self.nodes[parent_id].layout_children.borrow().clone() else {
                 continue;
             };
             for child_id in children {
@@ -343,6 +341,7 @@ impl BaseDocument {
                     Some(parent_id),
                     "layout_parent of {child_id:?} does not point at its layout container {parent_id:?}"
                 );
+                stack.push(child_id);
             }
         }
     }
