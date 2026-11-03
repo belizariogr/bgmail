@@ -999,17 +999,55 @@ fn collect_table_cells(
 
             cursor.place(colspan, rowspan);
         }
+        // BGMail: what isn't a row or cell directly in a table or row group gets an anonymous
+        // row and cell (CSS 2.2 §17.2.1). `tbody{display:block}` in a media query for narrow
+        // screens left the whole message blank. Captions come here too: display outside, not
+        // inside, makes them one.
         DisplayInside::Flow
         | DisplayInside::FlowRoot
         | DisplayInside::Flex
         | DisplayInside::Grid
         | DisplayInside::GridLanes => {
-            node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
-            // Probably a table caption: ignore
-            // println!(
-            //     "Warning: ignoring non-table typed descendent of table ({:?})",
-            //     display.inside()
-            // );
+            // Its row group took this off, expecting a row. Everything inside too: as parts of a
+            // table, its descendants may never have had boxes of their own.
+            let mut pending = vec![node_id];
+            while let Some(id) = pending.pop() {
+                let descendant = &mut doc.nodes[id];
+                descendant.insert_damage(CONSTRUCT_BOX);
+                descendant.invalidate_layout_cache();
+                descendant
+                    .flags
+                    .remove(crate::node::NodeFlags::IS_TABLE_CELL);
+                descendant
+                    .flags
+                    .remove(crate::node::NodeFlags::IS_COLLAPSED_BORDER_CELL);
+                pending.extend(descendant.children.iter().copied());
+            }
+            *row = row.saturating_add(1);
+            cursor.start_row();
+            rows.push(TableRow {
+                node_id,
+                group: None,
+                height: None,
+                is_constrained: false,
+            });
+            collect_table_cells(
+                doc,
+                node_id,
+                wm,
+                is_fixed,
+                border_collapse,
+                row,
+                cursor,
+                cells,
+                oof_children,
+                rows,
+                columns,
+                first_cell_border,
+                percent_columns,
+                true,
+                anonymous_blocks,
+            );
         }
         DisplayInside::TableColumnGroup | DisplayInside::TableColumn | DisplayInside::Table => {
             node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);

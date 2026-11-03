@@ -87,7 +87,7 @@ impl BaseDocument {
         // Non-incremental mode is "every node is damaged every frame": mark the
         // whole tree and let the same damage pipeline reconstruct and relayout
         // everything.
-        if !self.incremental_layout {
+        if !self.incremental_layout || std::mem::take(&mut self.rebuild_boxes_once) {
             self.mark_all_damaged();
             timer.record_time("mark_all");
         }

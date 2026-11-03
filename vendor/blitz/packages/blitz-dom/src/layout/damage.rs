@@ -100,6 +100,12 @@ impl BaseDocument {
                 DisplayInside::Flex | DisplayInside::Grid
             );
         damage_from_children.remove(REORDER_CHILDREN);
+        // BGMail: what becomes or stops being a row or cell only shows in the table's context.
+        // `tbody{display:block}` at a narrow width left the message blank.
+        if self.nodes[node_id].flags.is_table_root() && damage_from_children.contains(CONSTRUCT_BOX)
+        {
+            damage.insert(CONSTRUCT_BOX);
+        }
         damage |= damage_from_children;
 
         // Put children back
@@ -418,6 +424,12 @@ pub(crate) fn compute_layout_damage(old: &ComputedValues, new: &ComputedValues) 
     let text_shaping_needs_recollect = || {
         if old.clone_direction() != new.clone_direction()
             || old.clone_unicode_bidi() != new.clone_unicode_bidi()
+        {
+            return true;
+        }
+        // BGMail: `vertical-align` is written into the inline layout when it is built.
+        if old.slow_clone_alignment_baseline() != new.slow_clone_alignment_baseline()
+            || old.get_box().baseline_shift != new.get_box().baseline_shift
         {
             return true;
         }
