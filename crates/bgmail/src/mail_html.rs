@@ -267,7 +267,7 @@ pub fn reads_as_safe(html: &str) -> bool {
                 || name == "math"
                 || DISALLOWED_ELEMENTS
                     .split(',')
-                    .chain(UNWRAPPED_ELEMENTS.split(','))
+                    .chain(WRAPPING_CONTROLS.split(','))
                     .any(|element| element.trim() == name);
             if unsafe_attribute || unsafe_element {
                 self.0.set(true);
@@ -414,9 +414,10 @@ fn channel(value: f32) -> u8 {
 /// decision). The SVG parts stay listed for a stray tag outside one: `foreignobject`
 /// (hosts arbitrary HTML) and the SMIL animation family (`animate`, `animatetransform`,
 /// `animatemotion`, `set`), which can assign event-handler attributes at runtime.
-/// Form controls that only wrap what a message says: they go, what they hold stays. A whole
-/// ASP.NET message comes in a `<form>`, and Gmail and Thunderbird show its content.
-const UNWRAPPED_ELEMENTS: &str = "form, button";
+/// Form controls that only wrap what a message says: they become plain boxes, so what they hold
+/// stays, and stays as hidden or styled as they made it. A whole ASP.NET message comes in a
+/// `<form>`, and Gmail and Thunderbird show its content.
+const WRAPPING_CONTROLS: &str = "form, button";
 
 const DISALLOWED_ELEMENTS: &str = "script, object, embed, applet, \
      iframe, frame, frameset, \
@@ -555,8 +556,13 @@ fn sanitize_html_inner(
             el.remove();
             Ok(())
         }))
-        .append_element_content_handler(element!(UNWRAPPED_ELEMENTS, |el| {
-            el.remove_and_keep_content();
+        .append_element_content_handler(element!(WRAPPING_CONTROLS, |el| {
+            let tag = if el.tag_name() == "button" {
+                "span"
+            } else {
+                "div"
+            };
+            el.set_tag_name(tag)?;
             Ok(())
         }))
         .append_element_content_handler(element!("*", |el| {
@@ -739,7 +745,7 @@ fn neutralize_attributes(
         } else {
             el.remove_and_keep_content();
         }
-        return None;
+        return img_state;
     }
     for name in doomed {
         el.remove_attribute(&name);
@@ -1843,5 +1849,33 @@ mod tests {
         assert!(is_dangerous_url("data:image/svg+\nxml;base64,AA"));
         assert!(is_dangerous_url("data:image/svg+\txml;base64,AA"));
         assert!(!is_dangerous_url("data:image/png;base64,AA"));
+    }
+
+    #[test]
+    fn a_hidden_form_or_button_stays_hidden() {
+        for (html, expected) in [
+            (
+                "<form style=\"display:none\">Hidden</form>",
+                "<div style=\"display:none\">Hidden</div>",
+            ),
+            ("<form hidden>Hidden</form>", "<div hidden>Hidden</div>"),
+            (
+                "<button class=x>Hidden</button>",
+                "<span class=x>Hidden</span>",
+            ),
+        ] {
+            assert_eq!(sanitize_html_inner(html, true, &HashSet::new()).0, expected);
+        }
+    }
+
+    #[test]
+    fn a_remote_image_with_a_stray_equals_sign_is_still_counted() {
+        let (_, has_remote, blocked) = sanitize_html_inner(
+            "<img src=http://x.test/a.png onclick=x width=1 =\"\">",
+            false,
+            &HashSet::new(),
+        );
+        assert!(has_remote);
+        assert_eq!(blocked, 1);
     }
 }
