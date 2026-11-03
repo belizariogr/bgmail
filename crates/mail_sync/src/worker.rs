@@ -566,6 +566,8 @@ impl Worker {
                 other => headers.extend(other?),
             }
         }
+        // The last one may have cost the connection, and the sync goes on after this.
+        self.ensure_connected()?;
         Ok(headers)
     }
 

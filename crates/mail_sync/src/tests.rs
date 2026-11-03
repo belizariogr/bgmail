@@ -1584,6 +1584,25 @@ fn without_a_sent_folder_the_lost_copy_is_reported() {
 }
 
 #[test]
+fn a_message_unreadable_every_way_is_skipped_and_the_rest_syncs() {
+    let h = Harness::imap();
+    h.server.deliver("INBOX", &mail("a", 1), unread());
+    for call in [
+        "fetch_headers INBOX 1",
+        "fetch_headers_plain INBOX 1",
+        "fetch_headers_plain INBOX 1",
+    ] {
+        h.server.on_next_call(call, {
+            let server = h.server.clone();
+            move || server.fail_next(RemoteErrorKind::Unreadable)
+        });
+    }
+    h.server.deliver("Archive", &mail("b", 2), unread());
+    let h = h.started();
+    assert_eq!(h.subjects(system::ARCHIVE), strings(&["b"]));
+}
+
+#[test]
 fn a_sent_message_is_listed_in_sent_right_away() {
     let h = Harness::imap().started();
     h.db.enqueue_outgoing(
