@@ -346,6 +346,25 @@ impl NetHandler for ResourceHandler<FontFaceHandler> {
         self.respond(resolved_url, result)
     }
 }
+/// BGMail: most bytes a compressed web font may expand to (WOFF2's own limit), and most a
+/// document's web fonts may take.
+const MAX_FONT_BYTES: u64 = 128 << 20;
+pub(crate) const MAX_DOCUMENT_FONT_BYTES: u64 = 512 << 20;
+
+/// BGMail: the total original length of a WOFF1 file's tables, from its directory.
+#[cfg(feature = "woff")]
+fn woff1_table_bytes(bytes: &[u8]) -> Option<u64> {
+    const HEADER: usize = 44;
+    const ENTRY: usize = 20;
+    let tables = u16::from_be_bytes(bytes.get(12..14)?.try_into().ok()?) as usize;
+    (0..tables).try_fold(0u64, |total, table| {
+        // tag, offset, compLength, origLength, origChecksum
+        let at = HEADER + table * ENTRY + 12;
+        let length = u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?);
+        Some(total + length as u64)
+    })
+}
+
 impl FontFaceHandler {
     fn parse(&mut self, bytes: Bytes) -> Result<Resource, String> {
         if self.format == FontFaceSourceFormatKeyword::None && bytes.len() >= 4 {
@@ -380,6 +399,11 @@ impl FontFaceHandler {
             FontFaceSourceFormatKeyword::Woff => {
                 #[cfg(feature = "tracing")]
                 tracing::info!("Decompressing woff1 font");
+
+                // BGMail: table entries may overlap, so a small file can claim gigabytes.
+                if woff1_table_bytes(&bytes).is_none_or(|total| total > MAX_FONT_BYTES) {
+                    return Ok(Resource::None);
+                }
 
                 // Use wuff crate to decompress font
                 let decompressed = wuff::decompress_woff1(&bytes).ok();
@@ -593,6 +617,15 @@ const MAX_ANIMATION_BYTES: usize = 64 << 20;
 const MAX_IMAGE_BYTES: u64 = 256 << 20;
 const MAX_DOCUMENT_IMAGE_BYTES: u64 = 2 << 30;
 
+/// BGMail: what an image takes as RGBA, if within [`MAX_IMAGE_BYTES`].
+fn rgba_bytes(width: u32, height: u32) -> Result<u64, String> {
+    let bytes = width as u64 * height as u64 * 4;
+    if bytes > MAX_IMAGE_BYTES {
+        return Err("the image takes too much memory".to_string());
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn new_image_budget() -> Arc<AtomicU64> {
     Arc::new(AtomicU64::new(MAX_DOCUMENT_IMAGE_BYTES))
 }
@@ -797,8 +830,10 @@ impl ImageHandler {
             Ok(image) => {
                 let width = image.width();
                 let height = image.height();
+                // BGMail: charged before converting: the limit above only saw the decoded
+                // format, and a grayscale image takes four times that as RGBA.
+                self.charge(rgba_bytes(width, height)?)?;
                 let raw_rgba8_data = image.into_rgba8().into_raw();
-                self.charge(raw_rgba8_data.len() as u64)?;
                 return Ok(Resource::Image(
                     self.kind,
                     width,
@@ -863,6 +898,29 @@ mod tests {
         assert!(decode_gif_animation(&huge_canvas_gif()).is_none());
         let handler = ImageHandler::new(ImageType::Image, new_image_budget());
         assert!(handler.parse(Bytes::from(huge_canvas_gif())).is_err());
+    }
+
+    #[cfg(feature = "woff")]
+    #[test]
+    fn woff1_tables_are_summed_from_the_directory() {
+        let mut file = vec![0u8; 44];
+        file[12..14].copy_from_slice(&2u16.to_be_bytes());
+        for length in [7u32, 8] {
+            let mut entry = [0u8; 20];
+            entry[12..16].copy_from_slice(&length.to_be_bytes());
+            file.extend_from_slice(&entry);
+        }
+        assert_eq!(woff1_table_bytes(&file), Some(15));
+        // A directory past the end of the file isn't a font.
+        file.truncate(60);
+        assert_eq!(woff1_table_bytes(&file), None);
+    }
+
+    #[test]
+    fn images_are_measured_as_the_rgba_they_become() {
+        // A grayscale image passes the decoder's limit at a quarter of this.
+        assert_eq!(rgba_bytes(16, 2), Ok(128));
+        assert!(rgba_bytes(16000, 16000).is_err());
     }
 
     #[test]

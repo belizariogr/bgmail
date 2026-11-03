@@ -1428,6 +1428,11 @@ impl BaseDocument {
                 self.apply_iframe_html(node_id, res.request_id, res.resolved_url, &html);
             }
             Resource::Font(bytes, overrides) => {
+                // BGMail: past the document's budget a font is left to its fallbacks.
+                if self.font_bytes + bytes.len() as u64 > crate::net::MAX_DOCUMENT_FONT_BYTES {
+                    return;
+                }
+                self.font_bytes += bytes.len() as u64;
                 let font = Blob::new(Arc::new(bytes));
 
                 // Build a `FontInfoOverride` from the `@font-face` descriptors
