@@ -556,15 +556,6 @@ fn sanitize_html_inner(
             el.remove();
             Ok(())
         }))
-        .append_element_content_handler(element!(WRAPPING_CONTROLS, |el| {
-            let tag = if el.tag_name() == "button" {
-                "span"
-            } else {
-                "div"
-            };
-            el.set_tag_name(tag)?;
-            Ok(())
-        }))
         .append_element_content_handler(element!("*", |el| {
             if let Some(is_blocked) = neutralize_attributes(el, load_remote, shown) {
                 has_remote.set(true);
@@ -583,6 +574,46 @@ fn sanitize_html_inner(
                     el.set_attribute("style", &strip_css_urls(&style))?;
                 }
             }
+            Ok(())
+        }))
+        // After the handlers above, which clean the attributes this copies. Written out, as
+        // renaming the element in place also renames whichever end tag comes next: in
+        // `<table><form>x</table>` the table's own, leaving it open with all that follows inside.
+        // An element left open stays so: it ends where its parent does, as the `<form>` would.
+        .append_element_content_handler(element!(WRAPPING_CONTROLS, |el| {
+            if el.removed() {
+                return Ok(());
+            }
+            let control = el.tag_name();
+            let plain = if control == "button" {
+                "span"
+            } else {
+                "section"
+            };
+            let attributes: String = el
+                .attributes()
+                .iter()
+                .filter(|attr| {
+                    attr.name()
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                })
+                .map(|attr| {
+                    let value = escape_html(&decoded_attribute(&attr.value()));
+                    format!(" {}=\"{value}\"", attr.name())
+                })
+                .collect();
+            el.before(&format!("<{plain}{attributes}>"), ContentType::Html);
+            el.remove_and_keep_content();
+            el.on_end_tag(lol_html::end_tag!(move |end| {
+                let closing = if end.name() == control {
+                    plain.to_string()
+                } else {
+                    end.name()
+                };
+                end.before(&format!("</{closing}>"), ContentType::Html);
+                Ok(())
+            }))?;
             Ok(())
         }))
         .append_element_content_handler(text!("style", |chunk| {
@@ -1026,8 +1057,14 @@ fn decode_entities(text: &str) -> String {
             _ => entity
                 .strip_prefix("#x")
                 .or_else(|| entity.strip_prefix("#X"))
+                .filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))
                 .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-                .or_else(|| entity.strip_prefix('#').and_then(|dec| dec.parse().ok()))
+                .or_else(|| {
+                    entity
+                        .strip_prefix('#')
+                        .filter(|dec| dec.bytes().all(|b| b.is_ascii_digit()))
+                        .and_then(|dec| dec.parse().ok())
+                })
                 .and_then(char::from_u32),
         };
         match decoded {
@@ -1856,12 +1893,15 @@ mod tests {
         for (html, expected) in [
             (
                 "<form style=\"display:none\">Hidden</form>",
-                "<div style=\"display:none\">Hidden</div>",
+                "<section style=\"display:none\">Hidden</section>",
             ),
-            ("<form hidden>Hidden</form>", "<div hidden>Hidden</div>"),
+            (
+                "<form hidden>Hidden</form>",
+                "<section hidden=\"\">Hidden</section>",
+            ),
             (
                 "<button class=x>Hidden</button>",
-                "<span class=x>Hidden</span>",
+                "<span class=\"x\">Hidden</span>",
             ),
         ] {
             assert_eq!(sanitize_html_inner(html, true, &HashSet::new()).0, expected);
@@ -1877,5 +1917,15 @@ mod tests {
         );
         assert!(has_remote);
         assert_eq!(blocked, 1);
+    }
+
+    #[test]
+    fn a_form_left_open_doesnt_swallow_what_follows() {
+        let html = "<div style=\"display:none\">x<form>y</div><p>Seen</p>";
+        let sanitized = sanitize_html_inner(html, true, &HashSet::new()).0;
+        assert_eq!(
+            sanitized,
+            "<div style=\"display:none\">x<section>y</div><p>Seen</p>"
+        );
     }
 }
