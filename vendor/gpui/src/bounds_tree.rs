@@ -47,12 +47,14 @@ where
             left,
             right,
             bounds: node_bounds,
+            leaves,
             ..
         } = &mut self.nodes[index]
         {
             let left = *left;
             let right = *right;
             *node_bounds = node_bounds.union(&new_bounds);
+            *leaves += 1;
             self.stack.push(index);
 
             // Descend to the best-fit child, based on which one would increase
@@ -63,7 +65,12 @@ where
             let right_cost = new_bounds
                 .union(self.nodes[right].bounds())
                 .half_perimeter();
-            if left_cost < right_cost {
+            // BGMail: on a tie, the smaller side. Always going right made identical bounds a
+            // list as deep as they are many: 36000 stacked boxes took 7.7 s per frame.
+            let go_left = left_cost < right_cost
+                || (left_cost == right_cost
+                    && self.nodes[left].leaves() < self.nodes[right].leaves());
+            if go_left {
                 max_intersecting_ordering =
                     self.find_max_ordering(right, &new_bounds, max_intersecting_ordering);
                 index = left;
@@ -172,11 +179,13 @@ where
         let right_node = &self.nodes[right];
         let new_bounds = left_node.bounds().union(right_node.bounds());
         let max_ordering = cmp::max(left_node.max_ordering(), right_node.max_ordering());
+        let leaves = left_node.leaves() + right_node.leaves();
         self.nodes.push(Node::Internal {
             bounds: new_bounds,
             left,
             right,
             max_order: max_ordering,
+            leaves,
         });
         self.nodes.len() - 1
     }
@@ -209,6 +218,8 @@ where
         right: usize,
         bounds: Bounds<U>,
         max_order: u32,
+        /// BGMail: how many leaves are under it.
+        leaves: u32,
     },
 }
 
@@ -216,6 +227,13 @@ impl<U> Node<U>
 where
     U: Clone + Debug + Default + PartialEq,
 {
+    fn leaves(&self) -> u32 {
+        match self {
+            Node::Leaf { .. } => 1,
+            Node::Internal { leaves, .. } => *leaves,
+        }
+    }
+
     fn bounds(&self) -> &Bounds<U> {
         match self {
             Node::Leaf { bounds, .. } => bounds,
