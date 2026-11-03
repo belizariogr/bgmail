@@ -1672,7 +1672,7 @@ impl Node {
                 return Some(node);
             }
             let id = node.layout_parent.get()?;
-            node = self.with(id);
+            node = self.tree().get(id)?;
         }
     }
 
@@ -1738,9 +1738,11 @@ impl Node {
     /// `oof_containing_block` for a hoisted out-of-flow box, otherwise the
     /// `layout_parent`.
     pub fn containing_block(&self) -> Option<NodeId> {
+        // BGMail: between a restyle and the next layout these can name a freed box.
         self.oof_containing_block
             .get()
             .or_else(|| self.layout_parent.get())
+            .filter(|id| self.tree().contains_key(*id))
     }
 
     /// Computes the Document-relative coordinates of the `Node`
@@ -1817,7 +1819,8 @@ impl Node {
                 if id == inline_root_id {
                     return false;
                 }
-                match self.with(id).parent {
+                // BGMail: a laid out run can name a box freed since.
+                match self.tree().get(id).and_then(|node| node.parent) {
                     Some(parent) => id = parent,
                     None => return false,
                 }

@@ -2351,7 +2351,10 @@ impl BaseDocument {
                 return Some(CursorIcon::Pointer);
             }
 
-            maybe_node = node.layout_parent.get().map(|node_id| node.with(node_id));
+            maybe_node = node
+                .layout_parent
+                .get()
+                .and_then(|node_id| self.nodes.get(node_id));
         }
 
         // Return text cursor for text nodes
