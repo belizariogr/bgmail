@@ -114,6 +114,7 @@ _(Types only, all `Clone + Debug + PartialEq + Eq`.)_
 
 - **const `MAX_INLINE_BYTES`**: 5 MiB of images inlined per body. **const `PREVIEW_CHARS`**: 200.
 - **struct `BodyContent`**: `content`, `format` (`"html"`/`"text"`), `plain_text` (`\n` endings), `preview`, `attachments: Vec<storage::NewAttachment>`.
+- **`body_content_within`** (pub) — `pub fn body_content_within(raw: &[u8], limit: usize) -> Option<BodyContent>`: `None` for a body over `limit`, attachments apart, else as `body_content`.
 - **`body_content`** (pub) — `pub fn body_content(raw: &[u8]) -> BodyContent`: an image whose `cid:` stayed in the stored body (over the embedding budget) is listed as an attachment; `parse_message`; HTML preferred (with `cid:` images inlined via `inline_images` + `inline_cid_images` when the HTML mentions `cid:`), plain text from the text part or `html_to_text`; text-only → content = text (`\n`); nothing parseable → empty text. Attachments mapped from `AttachmentInfo` (part index, filename, mime, size, content id, inline).
 - **`contacts`** (private module): `contacts_in`, `record_message`, `backfill`: fills the contact catalog from synced mail.
 - **`repair_stale_previews`** (pub) — `pub fn repair_stale_previews(db: &Database, account_id: i64) -> rusqlite::Result<()>`: re-derives plain text and preview of downloaded messages whose preview still looks like markup; run off the UI thread when a worker starts.

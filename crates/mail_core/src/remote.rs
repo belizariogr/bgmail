@@ -27,6 +27,8 @@ pub enum RemoteErrorKind {
     /// The server's answer couldn't be parsed. The session can't be used any more, since
     /// the rest of that answer is unread, but this message may fetch fine another way.
     Unreadable,
+    /// The message is over a limit and was rejected: trying again won't help.
+    TooLarge,
     Other,
 }
 
@@ -42,6 +44,7 @@ impl RemoteErrorKind {
             Self::Unsupported => "unsupported",
             Self::Cancelled => "cancelled",
             Self::Unreadable => "unreadable",
+            Self::TooLarge => "too large",
             Self::Other => "other",
         }
     }
@@ -287,6 +290,7 @@ impl From<RemoteError> for SendError {
             RemoteErrorKind::Protocol
             | RemoteErrorKind::NotFound
             | RemoteErrorKind::Unsupported
+            | RemoteErrorKind::TooLarge
             | RemoteErrorKind::Other => Self::permanent(error),
         }
     }

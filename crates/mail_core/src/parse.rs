@@ -9,9 +9,15 @@ use serde::{Deserialize, Serialize};
 use crate::address::Address;
 use crate::compose::extension_for_mime;
 
+/// Largest body a message can have, attachments apart (user decision). Larger ones are
+/// rejected, received or sent.
+pub const MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
+
 /// The parts of a message the app needs, decoupled from `mail-parser`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ParsedMessage {
+    /// Bytes of the body parts, each counted once: what [`MAX_BODY_BYTES`] limits.
+    pub body_size: usize,
     /// Without angle brackets.
     pub message_id: Option<String>,
     pub in_reply_to: Option<String>,
@@ -60,6 +66,7 @@ pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage> {
     }
     let html = html_body(&message);
     Some(ParsedMessage {
+        body_size: body_size(&message),
         message_id: message.message_id().map(clean_id).filter(|i| !i.is_empty()),
         in_reply_to: id_list(message.in_reply_to()).into_iter().next(),
         references: id_list(message.references()),
@@ -313,6 +320,23 @@ fn original_bytes(raw: &[u8], part: &MessagePart<'_>) -> Option<Vec<u8>> {
     }
 }
 
+/// Bytes of the text and HTML body parts; an attachment doesn't count.
+fn body_size(message: &Message<'_>) -> usize {
+    message
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            let id = *index as u32;
+            message.text_body.contains(&id) || message.html_body.contains(&id)
+        })
+        .map(|(_, part)| match &part.body {
+            PartType::Text(text) | PartType::Html(text) => text.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
 /// The HTML of every body part in order, with text parts between them marked up: a
 /// message can have several, as when text follows a PDF in Apple Mail. `None` without
 /// an HTML part: mail-parser also lists text parts as the HTML body of text-only mail.
@@ -390,6 +414,13 @@ fn clean_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_body_size_leaves_attachments_out_and_counts_each_part_once() {
+        let raw = b"From: a@b.c\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\nContent-Type: text/plain\r\n\r\n12345\r\n--X\r\nContent-Type: application/pdf; name=r.pdf\r\nContent-Disposition: attachment; filename=r.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\nAAAAAAAAAAAAAAAA\r\n--X--\r\n";
+        let parsed = super::parse_message(raw).unwrap();
+        assert!((5..=7).contains(&parsed.body_size), "{}", parsed.body_size);
+    }
+
     use super::*;
 
     fn attached(part: &str) -> Vec<u8> {

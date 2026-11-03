@@ -29,7 +29,16 @@ pub struct BodyContent {
 /// part or, for HTML-only mail, from `html_to_text`. Unparseable input yields
 /// an empty text body.
 pub fn body_content(raw: &[u8]) -> BodyContent {
+    body_content_within(raw, usize::MAX).unwrap_or_default()
+}
+
+/// [`body_content`], or `None` for a body over `limit` bytes, attachments apart: it goes
+/// no further than parsing, which the rest would multiply in memory.
+pub fn body_content_within(raw: &[u8], limit: usize) -> Option<BodyContent> {
     let parsed = parse_message(raw).unwrap_or_default();
+    if parsed.body_size > limit {
+        return None;
+    }
     let (content, format, plain_text) = match (&parsed.html, &parsed.text) {
         (Some(html), text) => {
             let content = if html.to_ascii_lowercase().contains("cid:") {
@@ -44,7 +53,7 @@ pub fn body_content(raw: &[u8]) -> BodyContent {
         (None, None) => (String::new(), "text", String::new()),
     };
     let plain_text = plain_text.replace("\r\n", "\n");
-    BodyContent {
+    Some(BodyContent {
         preview: preview_text(&plain_text, PREVIEW_CHARS),
         attachments: parsed
             .attachments
@@ -67,7 +76,7 @@ pub fn body_content(raw: &[u8]) -> BodyContent {
         content,
         format,
         plain_text,
-    }
+    })
 }
 
 /// Re-derives the plain text and preview of stored bodies written before
@@ -195,6 +204,14 @@ fn base64_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_body_over_the_limit_is_refused_and_attachments_do_not_count() {
+        let raw = b"From: a@b.c\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\nContent-Type: text/plain\r\n\r\n1234567890\r\n--X\r\nContent-Type: application/pdf; name=r.pdf\r\nContent-Disposition: attachment; filename=r.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n--X--\r\n";
+        assert!(body_content_within(raw, 5).is_none());
+        let kept = body_content_within(raw, 12).expect("the attachment doesn't count");
+        assert_eq!(kept.attachments.len(), 1);
+    }
 
     #[test]
     fn an_image_too_big_to_embed_stays_reachable_as_an_attachment() {

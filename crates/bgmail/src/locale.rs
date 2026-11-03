@@ -170,6 +170,8 @@ pub enum Key {
     NoticeTooDeep,
     NoticeCrashed,
     StatusBodyFailed,
+    StatusBodyRejected,
+    ComposeBodyTooLarge,
     StatusForwardNeedsBody,
     StatusMessageSent,
     StatusSendFailed,
@@ -556,6 +558,10 @@ impl Key {
             (NoticeCrashed, P) => "O BGMail fechou ao exibir esta mensagem, por isso ela é exibida como texto simples.",
             (StatusBodyFailed, E) => "Could not download the message",
             (StatusBodyFailed, P) => "Não foi possível baixar a mensagem",
+            (StatusBodyRejected, E) => "This message was rejected: its body is over 256 MB",
+            (StatusBodyRejected, P) => "Esta mensagem foi rejeitada: o corpo passa de 256 MB",
+            (ComposeBodyTooLarge, E) => "The message body is limited to 256 MB.",
+            (ComposeBodyTooLarge, P) => "O corpo da mensagem é limitado a 256 MB.",
             (StatusForwardNeedsBody, E) => "The message is still downloading. Try forwarding it again in a moment.",
             (StatusForwardNeedsBody, P) => "A mensagem ainda está sendo baixada. Tente encaminhar de novo em instantes.",
             (StatusMessageSent, E) => "Message sent",
@@ -1041,7 +1047,7 @@ mod tests {
         assert_eq!(Language::from_code(""), Language::default());
     }
 
-    const ALL_KEYS: [Key; 250] = [
+    const ALL_KEYS: [Key; 252] = [
         Key::ViewZoomIn,
         Key::ViewZoomOut,
         Key::ViewZoomReset,
@@ -1139,6 +1145,8 @@ mod tests {
         Key::PrintFrom,
         Key::PrintDate,
         Key::StatusBodyFailed,
+        Key::StatusBodyRejected,
+        Key::ComposeBodyTooLarge,
         Key::StatusForwardNeedsBody,
         Key::StatusMessageSent,
         Key::StatusSendFailed,

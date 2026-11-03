@@ -448,6 +448,7 @@
       the app; imports have a total budget; an image arriving between timer and paint
       is drawn; Close from the main window leaves compose alone; a menu over a
       scrollbar's track gets its click.
+- ✅ A body over 256 MB, attachments apart, is rejected, received or sent (user decision).
 - ✅ A search gives the mailbox's selection back; a complete typed address beats the
       suggestion on Enter and Tab; the Sent copy records the Bcc (user decisions).
 - ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user

@@ -2135,6 +2135,11 @@ impl RootView {
                     );
                 }
             }
+            SyncEvent::BodyRejected { message_id } => {
+                if self.selected_message_id == Some(message_id) {
+                    self.set_status_note(Key::StatusBodyRejected.tr(cx.language()), cx);
+                }
+            }
             SyncEvent::Sent { .. } => {
                 self.set_status_note(Key::StatusMessageSent.tr(cx.language()), cx);
                 self.refresh_unsent();

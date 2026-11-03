@@ -112,6 +112,9 @@ that edit the database and queue those server ops.
 - **Unparsable answers:** `RemoteErrorKind::Unreadable` means a dropped session;
   `fetch_readable_headers` retries without the structure (`fetch_headers_plain`), then
   one by one, skipping what still can't be read, so one message can't stop a sync.
+- **Body limit** (user decision): a body over `mail_core::MAX_BODY_BYTES` (256 MiB,
+  attachments apart) is rejected: not stored, `SyncEvent::BodyRejected`, and not
+  downloaded again in the session (`rejected_bodies`). Compose refuses to send one.
 - **Sent copy** (user decision): the APPENDed copy carries `Bcc:`
   (`mail_core::sent_copy`); what goes to SMTP doesn't.
 - **Backoff** resets after a completed cycle (or a good IDLE result), not when a

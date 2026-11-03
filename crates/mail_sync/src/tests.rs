@@ -1603,6 +1603,42 @@ fn a_message_unreadable_every_way_is_skipped_and_the_rest_syncs() {
 }
 
 #[test]
+fn a_body_over_the_limit_is_rejected_and_not_downloaded_again() {
+    let options = EngineOptions {
+        max_message_body: 1,
+        ..test_options()
+    };
+    let h = Harness::new(PROVIDER_IMAP, "{}", options);
+    h.server.deliver("INBOX", &mail("a", 1), unread());
+    let h = h.started();
+    let id = h.id_of("a");
+    let wait_rejected = || {
+        h.wait_for(
+            "BodyRejected",
+            |event| matches!(event, SyncEvent::BodyRejected { message_id } if *message_id == id),
+        )
+    };
+    assert!(h.engine.send(h.account, Command::FetchBody(id)));
+    wait_rejected();
+    let fetches = || {
+        h.server
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("fetch_body"))
+            .count()
+    };
+    assert_eq!(fetches(), 1);
+    assert_eq!(
+        h.db.get_message(id).unwrap().unwrap().body_state,
+        storage::BODY_STATE_HEADERS
+    );
+
+    assert!(h.engine.send(h.account, Command::FetchBody(id)));
+    wait_rejected();
+    assert_eq!(fetches(), 1);
+}
+
+#[test]
 fn a_sent_message_is_listed_in_sent_right_away() {
     let h = Harness::imap().started();
     h.db.enqueue_outgoing(

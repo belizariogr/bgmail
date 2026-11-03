@@ -2,7 +2,7 @@
 //! connected `MailRemote`, executes commands and sync cycles, and keeps an
 //! IDLE thread watching the Inbox.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -20,7 +20,7 @@ use storage::{
     PendingOp, BODY_STATE_FULL, PROVIDER_LOCAL,
 };
 
-use crate::body::{body_content, repair_stale_previews};
+use crate::body::{body_content_within, repair_stale_previews};
 use crate::contacts;
 use crate::engine::EngineOptions;
 use crate::events::{AccountStatus, Command, SyncEvent};
@@ -235,6 +235,8 @@ struct Worker {
     backoff: Backoff,
     /// A message was filed in Sent since that folder last synced.
     sent_is_stale: bool,
+    /// Messages whose body was over the limit, not to be downloaded again.
+    rejected_bodies: HashSet<i64>,
     retry_at: Option<Instant>,
     auth_failed: bool,
     next_poll: Instant,
@@ -257,6 +259,7 @@ impl Worker {
             events: setup.events,
             backoff: Backoff::new(setup.options.retry_base, setup.options.retry_max),
             sent_is_stale: false,
+            rejected_bodies: HashSet::new(),
             next_poll: Instant::now() + setup.options.poll_interval,
             options: setup.options,
             cancel: setup.cancel,
@@ -1581,7 +1584,12 @@ impl Worker {
 
     fn download_body(&mut self, message_id: i64, folder: &str, uid: u32) -> Result<(), Abort> {
         let raw = self.rm()?.fetch_body(folder, uid)?;
-        let body = body_content(&raw);
+        let Some(body) = body_content_within(&raw, self.options.max_message_body) else {
+            self.rejected_bodies.insert(message_id);
+            return Err(
+                RemoteError::new(RemoteErrorKind::TooLarge, "message body over the limit").into(),
+            );
+        };
         self.db.store_body(
             message_id,
             &raw,
@@ -1603,6 +1611,10 @@ impl Worker {
                 Ok(())
             }
             Err(Abort::Shutdown) => Err(Abort::Shutdown),
+            Err(Abort::Remote(error)) if error.kind == RemoteErrorKind::TooLarge => {
+                self.emit(SyncEvent::BodyRejected { message_id });
+                Ok(())
+            }
             Err(Abort::Remote(error)) => {
                 self.emit(SyncEvent::BodyFailed {
                     message_id,
@@ -1625,6 +1637,12 @@ impl Worker {
     }
 
     fn try_fetch_body(&mut self, message_id: i64) -> Result<(), Abort> {
+        // Once per session: opening it again shouldn't download it all again.
+        if self.rejected_bodies.contains(&message_id) {
+            return Err(
+                RemoteError::new(RemoteErrorKind::TooLarge, "message body over the limit").into(),
+            );
+        }
         let not_found = |what: &str| RemoteError::new(RemoteErrorKind::NotFound, what);
         let Some(message) = self.db.get_message(message_id)? else {
             return Err(not_found("message no longer exists").into());

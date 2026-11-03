@@ -1948,19 +1948,30 @@ fn build_draft(
         errors.banner = Some(Key::ComposeLocalAccount.tr(language).to_string());
         return Err(errors);
     };
+    let text = reply_text(reply, &fields.body);
+    // Same structure as Gmail's replies, which it collapses in conversations.
+    let html = message_html(reply, fields);
+    if body_over_limit(&text, html.as_deref()) {
+        errors.banner = Some(Key::ComposeBodyTooLarge.tr(language).to_string());
+        return Err(errors);
+    }
     Ok(Draft {
         from: Address::new(Some(account.name.clone()), account.email.clone()),
         to,
         cc,
         bcc,
         subject: fields.subject.trim().to_string(),
-        text: reply_text(reply, &fields.body),
-        // Same structure as Gmail's replies, which it collapses in conversations.
-        html: message_html(reply, fields),
+        text,
+        html,
         in_reply_to: reply.in_reply_to.clone(),
         references: reply.references.clone(),
         attachments: attachments.to_vec(),
     })
+}
+
+/// Whether a message's body is over the limit for all mail, attachments apart.
+fn body_over_limit(text: &str, html: Option<&str>) -> bool {
+    text.len() + html.map_or(0, str::len) > mail_core::MAX_BODY_BYTES
 }
 
 /// Total bytes of `attachments`.
@@ -2148,6 +2159,14 @@ mod tests {
         root.update(cx, |root, cx| root.close_focused_auxiliary_window(cx));
         cx.run_until_parked();
         assert!(root.read_with(cx, |root, _| root.compose_window_for_tests().is_some()));
+    }
+
+    #[test]
+    fn a_body_over_the_limit_cannot_be_sent() {
+        let half = "x".repeat(mail_core::MAX_BODY_BYTES / 2);
+        assert!(!body_over_limit(&half, Some(&half)));
+        assert!(body_over_limit(&half, Some(&format!("{half}x"))));
+        assert!(!body_over_limit("short", None));
     }
 
     #[gpui::test]

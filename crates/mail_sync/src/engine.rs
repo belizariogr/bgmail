@@ -30,6 +30,8 @@ pub struct EngineOptions {
     pub body_prefetch: usize,
     /// Bodies larger than this (bytes) are only fetched on demand.
     pub max_body_size: u32,
+    /// Bodies larger than this (bytes, attachments apart) are rejected.
+    pub max_message_body: usize,
     /// First reconnect delay; doubles per failure.
     pub retry_base: Duration,
     /// Reconnect delay cap.
@@ -48,6 +50,7 @@ impl Default for EngineOptions {
             body_prefetch_inbox: 30,
             body_prefetch: 10,
             max_body_size: 10 * 1024 * 1024,
+            max_message_body: mail_core::MAX_BODY_BYTES,
             retry_base: Duration::from_secs(1),
             retry_max: Duration::from_secs(5 * 60),
             send_retry_delays: [60, 5 * 60, 15 * 60, 60 * 60]
