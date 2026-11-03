@@ -85,6 +85,10 @@ struct MessageParserState {
     offset_end: usize,
 }
 
+/// BGMail: see where they are checked in `parse_`.
+const MAX_MISSING_BOUNDARIES: usize = 64;
+const MAX_BOUNDARY_BYTES: usize = 256;
+
 impl MessageParserState {
     fn new() -> MessageParserState {
         MessageParserState {
@@ -121,6 +125,7 @@ impl MessageParser {
         self.parse_(raw_message.as_ref(), MAX_NESTED_ENCODED, true)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn parse_<'x>(
         &self,
         raw_message: &'x [u8],
@@ -135,6 +140,7 @@ impl MessageParser {
         let mut state_stack = Vec::with_capacity(4);
 
         let mut part_headers = Vec::new();
+        let mut missing_boundaries = 0;
 
         'outer: loop {
             // Parse headers
@@ -157,10 +163,19 @@ impl MessageParser {
             let (is_multipart, mut is_inline, mut is_text, mut mime_type) =
                 mime_type(content_type, &state.mime_type);
 
+            // BGMail: a search that fails reads to the end and comes back, so a message of parts
+            // declaring boundaries it never uses was quadratic: 51 s at 3.2 MB, during sync. Past
+            // this many failures such parts are text. And comparing a boundary is as long as it
+            // is, at every run of hyphens, when RFC 2046 lets it be 70 bytes.
             if is_multipart
-                && let Some(mime_boundary) = content_type.and_then(|f| f.attribute("boundary"))
+                && missing_boundaries < MAX_MISSING_BOUNDARIES
+                && let Some(mime_boundary) = content_type
+                    .and_then(|f| f.attribute("boundary"))
+                    .filter(|boundary| boundary.len() <= MAX_BOUNDARY_BYTES)
             {
+                missing_boundaries += 1;
                 if stream.seek_next_part(mime_boundary.as_bytes()) {
+                    missing_boundaries -= 1;
                     let part_id = message.parts.len();
                     let new_state = MessageParserState {
                         in_alternative: state.in_alternative

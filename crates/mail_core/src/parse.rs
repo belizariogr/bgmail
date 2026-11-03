@@ -1070,6 +1070,43 @@ amanh=E3.\r\n";
     }
 
     #[test]
+    fn parts_declaring_boundaries_they_never_use_stay_linear() {
+        let mut raw =
+            String::from("Subject: kept\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n");
+        for _ in 0..80_000 {
+            raw.push_str("--B\r\nContent-Type:multipart/x;boundary=z\r\n\r\n");
+        }
+        raw.push_str("--B--\r\n");
+        let start = std::time::Instant::now();
+        assert_eq!(parse_message(raw.as_bytes()).unwrap().subject, "kept");
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_boundary_past_its_limit_makes_a_part_of_text() {
+        let boundary = "-".repeat(1 << 20) + "x";
+        let raw = format!(
+            "Subject: kept\r\nContent-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\n{}",
+            "-".repeat(1 << 20)
+        );
+        let start = std::time::Instant::now();
+        assert_eq!(parse_message(raw.as_bytes()).unwrap().subject, "kept");
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_broken_multipart_doesnt_stop_the_next_ones() {
+        let raw = "Content-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\n\
+            Content-Type: multipart/x; boundary=none\r\n\r\nA\r\n--B\r\n\
+            Content-Type: text/plain\r\n\r\nSeen\r\n--B--\r\n";
+        assert!(parse_message(raw.as_bytes())
+            .unwrap()
+            .text
+            .unwrap()
+            .contains("Seen"));
+    }
+
+    #[test]
     fn continuations_are_still_joined_in_order() {
         let raw = b"Content-Type: text/plain; name*1=b.txt; name*0=a\r\n\r\nbody";
         let message = parse_raw(raw).unwrap();
