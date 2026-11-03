@@ -811,9 +811,10 @@ pub fn tile_starts(start: f64, len: f64, from: f64, to: f64, repeat: bool) -> Ve
     if !repeat {
         return vec![start];
     }
-    let mut x = start - ((start - from) / len).ceil().max(0.0) * len;
+    // Forward too: rows above the window would use up the limit before reaching it.
+    let mut x = start - ((start - from) / len).ceil() * len;
     let mut out = Vec::new();
-    while x < to && out.len() < 512 {
+    while x < to && out.len() < MAX_FRAME_TILES {
         out.push(x);
         x += len;
     }
@@ -1108,6 +1109,12 @@ mod tests {
             tile_starts(10.0, 5.0, 0.0, 20.0, true),
             vec![0.0, 5.0, 10.0, 15.0]
         );
+        // Starting where the window is, whatever came before it, and without stopping at 512.
+        assert_eq!(
+            tile_starts(0.0, 8.0, 5000.0, 5016.0, true),
+            vec![5000.0, 5008.0]
+        );
+        assert_eq!(tile_starts(0.0, 1.0, 0.0, 600.0, true).len(), 600);
     }
 
     fn brush(format: ImageFormat, alpha_type: ImageAlphaType, px: [u8; 4]) -> ImageBrush {

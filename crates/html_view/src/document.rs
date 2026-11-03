@@ -208,6 +208,32 @@ fn without_box_size(style: &str) -> String {
         .join(";")
 }
 
+/// Mail has no business asking for input: form controls never exist in a document, whatever
+/// reaches the parser. Hosts sanitize them away too, but this holds if that ever fails, and
+/// Blitz's code for them (where clicking a label once overflowed the stack) stays unreachable.
+fn remove_form_controls(doc: &mut BaseDocument) {
+    const CONTROLS: &[&str] = &["input", "textarea", "select", "button", "form"];
+    let mut found = Vec::new();
+    let mut stack = vec![doc.root_node().id];
+    while let Some(id) = stack.pop() {
+        let Some(node) = doc.get_node(id) else {
+            continue;
+        };
+        if node
+            .element_data()
+            .is_some_and(|element| CONTROLS.contains(&&*element.name.local))
+        {
+            found.push(id);
+        } else {
+            stack.extend(node.children.iter().copied());
+        }
+    }
+    let mut mutator = doc.mutate();
+    for id in found {
+        mutator.remove_and_drop_node(id);
+    }
+}
+
 /// Shows unavailable images (blocked remote, missing `cid:`) the way
 /// Chromium does, so mail laid out around images keeps its shape:
 /// - with alt text: the alt text after a 16px icon slot, inline (declared
@@ -436,13 +462,16 @@ fn nesting_depth(doc: &BaseDocument, root: NodeId) -> usize {
     deepest
 }
 
-/// Whether `html` has more tags, or an end tag more words, than hosts should sanitize and parse:
-/// a linear scan to run before both. It doesn't follow the tokenizer: no one scan has to agree
-/// with both parsers, and each attempt left holes to hide a tag in (`<a ">`, `<? <a b=">`, script
-/// data, ...). So it counts everything that could be a tag, and only overstates. Start tags with
-/// too many attributes are the sanitizer's to drop; it can't see those of end tags.
+/// Whether `html` has more tags, or an end tag more attributes, than hosts should sanitize and
+/// parse: a linear scan to run before both. It counts everything that could be a tag, wherever it
+/// is, so no state another parser is in can hide one; it only overstates. Start tags with too many
+/// attributes are the sanitizer's to drop; it can't see those of end tags, which the parser's
+/// tokenizer still compares with each other.
 pub fn has_too_many_tags(html: &str) -> bool {
     let bytes = html.as_bytes();
+    // Each end tag is read on its own, so one can't hide the next in its quotes; this keeps
+    // that linear, for `</a b="</a b="...`.
+    let mut budget = bytes.len().saturating_mul(16).saturating_add(1 << 20);
     let mut tags = 0;
     let mut at = 0;
     while let Some(found) = bytes[at..].iter().position(|&byte| byte == b'<') {
@@ -457,23 +486,60 @@ pub fn has_too_many_tags(html: &str) -> bool {
             return true;
         }
         if closing {
-            // Past the `>` it stops at, or `</a </a </a...` would scan the rest per tag.
-            let rest = &bytes[name_at..];
-            let end = rest
-                .iter()
-                .position(|&byte| byte == b'>')
-                .unwrap_or(rest.len());
-            let words = rest[..end]
-                .split(u8::is_ascii_whitespace)
-                .filter(|word| !word.is_empty())
-                .count();
-            if words > MAX_TAG_ATTRIBUTES {
+            let (attributes, read) = end_tag_attributes(&bytes[name_at..]);
+            budget = budget.saturating_sub(read);
+            if attributes > MAX_TAG_ATTRIBUTES || budget == 0 {
                 return true;
             }
-            at = name_at + end;
         }
     }
     false
+}
+
+/// Attributes of the end tag whose name starts `bytes`, as the tokenizer reads them, and how much
+/// it read to tell: it stops past [`MAX_TAG_ATTRIBUTES`].
+fn end_tag_attributes(bytes: &[u8]) -> (usize, usize) {
+    #[derive(Clone, Copy)]
+    enum State {
+        TagName,
+        BeforeName,
+        Name,
+        AfterName,
+        BeforeValue,
+        Quoted(u8),
+        Unquoted,
+    }
+    let mut state = State::TagName;
+    let mut attributes = 0;
+    for (at, &byte) in bytes.iter().enumerate() {
+        let space = byte.is_ascii_whitespace();
+        state = match state {
+            State::Quoted(quote) if byte == quote => State::BeforeName,
+            State::Quoted(quote) => State::Quoted(quote),
+            _ if byte == b'>' => return (attributes, at),
+            State::TagName if space || byte == b'/' => State::BeforeName,
+            State::TagName => State::TagName,
+            State::BeforeName if space || byte == b'/' => State::BeforeName,
+            State::AfterName if space => State::AfterName,
+            State::Name | State::AfterName if byte == b'/' => State::BeforeName,
+            State::Name | State::AfterName if byte == b'=' => State::BeforeValue,
+            State::Name if space => State::AfterName,
+            State::Name => State::Name,
+            State::BeforeName | State::AfterName => {
+                attributes += 1;
+                State::Name
+            }
+            State::BeforeValue if space => State::BeforeValue,
+            State::BeforeValue if byte == b'"' || byte == b'\'' => State::Quoted(byte),
+            State::BeforeValue => State::Unquoted,
+            State::Unquoted if space => State::BeforeName,
+            State::Unquoted => State::Unquoted,
+        };
+        if attributes > MAX_TAG_ATTRIBUTES {
+            return (attributes, at);
+        }
+    }
+    (attributes, bytes.len())
 }
 
 /// Runs `build` on a thread with the stack [`MAX_NESTING_DEPTH`] assumes. Style and layout
@@ -834,6 +900,7 @@ impl HtmlDocument {
         );
         let base = url::Url::parse(&base_url)
             .unwrap_or_else(|_| url::Url::parse(MESSAGE_BASE_URL).expect("valid base URL"));
+        remove_form_controls(&mut inner);
         replace_unavailable_images(&mut inner, &resources, &base, mode == DocumentMode::Quirks);
         if mode == DocumentMode::Quirks {
             mark_quirky_margins(&mut inner);
@@ -2395,41 +2462,18 @@ mod tests {
     }
 
     #[test]
-    fn form_controls_take_chromium_sizes() {
-        let html = "<!DOCTYPE html><body style=\"margin:0\">\
-            <div><input id=\"i10\" size=\"10\"></div><div><input id=\"i\"></div>\
-            <div><select id=\"s\"><option>a</option></select></div>\
-            <div><select id=\"l\"><option>a</option><option selected>A much longer option</option></select></div>\
-            <div><input id=\"r\" type=\"radio\"></div>";
-        // `size` characters of the 13.33px control font, plus border and padding.
-        assert!((box_of(html, "i10").2 - 98.0).abs() < 1.0);
-        assert!((box_of(html, "i").2 - 158.0).abs() < 1.0);
-        // A drop-down is as wide as its widest option plus the arrow.
-        let (_, _, short, height) = box_of(html, "s");
-        assert!(height > 10.0 && short > 22.0);
-        assert!(box_of(html, "l").2 > short + 50.0);
-        assert_eq!(box_of(html, "r").2, 13.0);
-    }
-
-    #[test]
-    fn selects_paint_their_option_and_arrow() {
-        let mut doc = laid_out("<!DOCTYPE html><body><select><option>Other</option><option selected>Downloads</option></select>");
-        let list = doc.display_list();
-        let words: Vec<&str> = list
-            .commands
-            .iter()
-            .filter_map(|c| match c {
-                crate::display_list::Command::Text(run) => Some(run),
-                _ => None,
-            })
-            .flat_map(|run| run.words.iter().map(|w| w.text.as_str()))
-            .collect();
-        assert_eq!(words, ["Downloads"]);
-        // The ▾ (no CSS border is stroked: borders are fills).
-        assert!(list
-            .commands
-            .iter()
-            .any(|c| matches!(c, crate::display_list::Command::Stroke { .. })));
+    fn form_controls_never_exist() {
+        let html = "<!DOCTYPE html><body><p>kept</p><form><input value=a><textarea>b</textarea>\
+            <select><option>c</option></select><button>d</button></form><input value=e>\
+            <select><option>f</option></select><button>g</button><textarea>h</textarea>";
+        let mut doc = laid_out(html);
+        let list = format!("{:?}", doc.display_list().commands);
+        assert!(list.contains("kept"));
+        for gone in [
+            "\"a\"", "\"b\"", "\"c\"", "\"d\"", "\"e\"", "\"f\"", "\"g\"", "\"h\"",
+        ] {
+            assert!(!list.contains(gone), "{gone}");
+        }
     }
 
     #[test]
@@ -2906,13 +2950,15 @@ mod hostile_tests {
     }
 
     #[test]
-    fn tags_and_end_tag_words_are_counted_without_parsing() {
+    fn tags_and_end_tag_attributes_are_counted_without_parsing() {
         let limit = MAX_OPENING_TAGS + 1;
         assert!(has_too_many_tags(&"<p>".repeat(limit)));
         assert!(has_too_many_tags(&"</i>".repeat(limit)));
         assert!(!has_too_many_tags(&"<p>".repeat(MAX_OPENING_TAGS)));
         assert!(!has_too_many_tags("a < b, é <é <"));
-        let words: String = (0..2000).map(|i| format!(" a{i}")).collect();
+        let spaced: String = (0..2000).map(|i| format!(" a{i}")).collect();
+        let slashed: String = (0..2000).map(|i| format!("/a{i}")).collect();
+        let quoted: String = (0..2000).map(|i| format!("a{i}=\"\"")).collect();
         // Nothing can hide a tag or an end tag from it.
         for prefix in [
             "",
@@ -2926,15 +2972,32 @@ mod hostile_tests {
                 has_too_many_tags(&format!("{prefix}{}", "<i>".repeat(limit))),
                 "{prefix}"
             );
+            for attributes in [&spaced, &slashed] {
+                assert!(
+                    has_too_many_tags(&format!("{prefix}<p>x</p{attributes}>")),
+                    "{prefix}"
+                );
+            }
             assert!(
-                has_too_many_tags(&format!("{prefix}<p>x</p{words}>")),
+                has_too_many_tags(&format!("{prefix}<p>x</p {quoted}>")),
+                "{prefix}"
+            );
+            assert!(
+                has_too_many_tags(&format!("{prefix}<p>x</p a=\">\" {spaced}>")),
                 "{prefix}"
             );
         }
+        // A long quoted value is one attribute, and a page of words in a style isn't one.
+        assert!(!has_too_many_tags(&format!("</p a=\"{spaced}\">")));
         // Linear, also on tags that never end.
         let start = std::time::Instant::now();
         assert!(has_too_many_tags(&"</a ".repeat(1_000_000)));
         assert!(has_too_many_tags(&"<a ".repeat(1_000_000)));
+        let _ = has_too_many_tags(&format!(
+            "{}{}",
+            "</a b=".repeat(100_000),
+            "x".repeat(1 << 20)
+        ));
         assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
     }
 
@@ -3227,7 +3290,8 @@ mod hostile_tests {
 
     #[test]
     fn nested_inline_tables_with_much_text_lay_out_in_bounded_time() {
-        let open = "<table style=\"display:inline-table;width:50%\"><td>a b c <img width=9 height=9>";
+        let open =
+            "<table style=\"display:inline-table;width:50%\"><td>a b c <img width=9 height=9>";
         let html = format!("{}{}", open.repeat(8), "word ".repeat(2000));
         let start = std::time::Instant::now();
         let mut document = parse(&html);
@@ -3244,9 +3308,8 @@ mod hostile_tests {
     }
 
     #[test]
-    fn a_click_through_a_label_doesnt_return_to_it() {
-        // `<input>` never reaches this document through the sanitizer; the event code still
-        // can't recurse until the stack runs out, which aborts.
+    fn a_label_cant_click_a_control_that_doesnt_exist() {
+        // This used to overflow the stack and abort, the click going around label and control.
         for html in [
             "<label>x<input type=file>y</label>",
             "<label for=b id=a><label for=a id=b><input id=c type=file></label></label>",
@@ -3256,5 +3319,53 @@ mod hostile_tests {
                 drag(&mut document, x, y);
             }
         }
+    }
+
+    #[test]
+    fn what_isnt_a_row_or_cell_in_a_table_keeps_its_content() {
+        for html in [
+            "<table><tr style=display:block><td>Kept</td></tr></table>",
+            "<table><tr style=display:flex><td>Kept</td></tr></table>",
+            "<table><tr style=display:inline><td>Kept</td></tr></table>",
+            "<table><tbody style=display:block><tr><td>Kept</td></tr></tbody></table>",
+            "<table><thead style=display:block><tr><td>Kept</td></tr></thead></table>",
+            "<div style=display:table><p>Kept</p></div>",
+            "<table><caption>Kept</caption><tr><td>x</td></tr></table>",
+        ] {
+            let mut document = parse(html);
+            let list = format!("{:?}", document.display_list().commands);
+            assert!(list.contains("Kept"), "{html}");
+        }
+    }
+
+    #[test]
+    fn a_table_part_changing_display_at_a_width_rebuilds_the_table() {
+        let html = "<style>@media(max-width:480px){tbody{display:block!important}}</style>\
+            <table><tr><td>Kept</td><td>Also</td></tr></table>";
+        let mut document = parse(html);
+        for width in [300.0, 640.0, 300.0, 640.0] {
+            document.layout(width);
+            let list = format!("{:?}", document.display_list().commands);
+            assert!(list.contains("Kept") && list.contains("Also"), "{width}");
+        }
+    }
+
+    #[test]
+    fn generated_content_of_nested_inlines_is_kept() {
+        let html =
+            "<style>.n::before{content:'Made'}</style><p><span><a class=n>link</a></span></p>";
+        let mut document = parse(html);
+        let list = format!("{:?}", document.display_list().commands);
+        assert!(list.contains("Made") && list.contains("link"));
+    }
+
+    #[test]
+    fn vertical_align_changing_at_a_width_lays_out_again() {
+        let html = "<style>.d{display:inline-block;height:20px;width:9px}\
+            @media(max-width:400px){.d{vertical-align:40px}}</style><p style=margin:0><span class=d></span>x</p>";
+        let fresh = parse(html).layout(640.0);
+        let mut document = parse(html);
+        document.layout(300.0);
+        assert_eq!(document.layout(640.0), fresh);
     }
 }
