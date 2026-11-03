@@ -422,6 +422,10 @@ pub struct BaseDocument {
     /// dedicated storage on the node because their style changed (populated by
     /// the style traversal and by pseudo-element box construction).
     pub(crate) pending_style_image_nodes: Vec<NodeId>,
+    /// BGMail: decoded bytes this document's images may still take.
+    pub(crate) image_budget: Arc<std::sync::atomic::AtomicU64>,
+    /// BGMail: a node was freed since the last paint tree, whose lists may still hold it.
+    pub(crate) paint_tree_stale: bool,
 
     // Tracks in-flight "critical" resources (e.g. stylesheets linked from the `<head>`),
     // keyed by request id
@@ -560,6 +564,8 @@ impl BaseDocument {
             image_cache: HashMap::new(),
             pending_images: HashMap::new(),
             pending_style_image_nodes: Vec::new(),
+            image_budget: crate::net::new_image_budget(),
+            paint_tree_stale: false,
             pending_critical_resources: HashSet::new(),
             line_height_quirk: false,
             controls_to_form: HashMap::new(),

@@ -3,7 +3,11 @@ use selectors::context::QuirksMode;
 use std::sync::atomic::Ordering as Ao;
 use std::{
     io::Cursor,
-    sync::{Arc, atomic::AtomicUsize, mpsc::Sender},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize},
+        mpsc::Sender,
+    },
 };
 use style::{
     font_face::{FontFaceSourceFormat, FontFaceSourceFormatKeyword, FontStyleRange, Source},
@@ -579,17 +583,33 @@ fn stylo_to_fontique_style(style: &FontStyleRange) -> parley::fontique::FontStyl
 const MAX_ANIMATION_FRAMES: usize = 400;
 const MAX_ANIMATION_BYTES: usize = 64 << 20;
 
+/// BGMail: most decoded bytes of one still image (64 megapixels), and of all the images
+/// of a document. A few hundred bytes of GIF or PNG can declare a huge canvas, and the
+/// decoder allocates what the header declares.
+const MAX_IMAGE_BYTES: u64 = 256 << 20;
+const MAX_DOCUMENT_IMAGE_BYTES: u64 = 2 << 30;
+
+pub(crate) fn new_image_budget() -> Arc<AtomicU64> {
+    Arc::new(AtomicU64::new(MAX_DOCUMENT_IMAGE_BYTES))
+}
+
 /// BGMail: the frames of an animated GIF (more than one frame), composited
 /// to full canvases by the decoder, as (width, height, frames). Delays under
 /// 20ms play at 100ms, like browsers.
 pub(crate) fn decode_gif_animation(
     bytes: &[u8],
 ) -> Option<(u32, u32, crate::node::AnimationFrames)> {
-    use image::AnimationDecoder;
+    use image::{AnimationDecoder, ImageDecoder};
     if !bytes.starts_with(b"GIF8") {
         return None;
     }
-    let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
+    let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
+    // BGMail: `GifDecoder::new` sets no limits, and the canvas is allocated before the
+    // first frame reaches the check below. Twice the budget: the decoder keeps a canvas
+    // and a frame buffer besides the frame it returns.
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(2 * MAX_ANIMATION_BYTES as u64);
+    decoder.set_limits(limits).ok()?;
     let mut frames = Vec::new();
     let mut size = None;
     let mut total = 0usize;
@@ -625,10 +645,25 @@ impl NetHandler for ResourceHandler<DocumentSrcHandler> {
 
 pub struct ImageHandler {
     kind: ImageType,
+    /// BGMail: decoded bytes the document may still take; see [`MAX_DOCUMENT_IMAGE_BYTES`].
+    budget: Arc<AtomicU64>,
 }
 impl ImageHandler {
-    pub fn new(kind: ImageType) -> Self {
-        Self { kind }
+    pub(crate) fn new(kind: ImageType, budget: Arc<AtomicU64>) -> Self {
+        Self { kind, budget }
+    }
+
+    /// BGMail: takes `bytes` from the document's budget, if it still has them.
+    fn charge(&self, bytes: u64) -> Result<(), String> {
+        let charged = self
+            .budget
+            .fetch_update(Ao::Relaxed, Ao::Relaxed, |left| left.checked_sub(bytes));
+        if charged.is_err() {
+            // Later images aren't worth decoding either.
+            self.budget.store(0, Ao::Relaxed);
+            return Err("the document's images take too much memory".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -641,7 +676,13 @@ impl NetHandler for ResourceHandler<ImageHandler> {
 
 impl ImageHandler {
     fn parse(&self, bytes: Bytes) -> Result<Resource, String> {
+        // BGMail: don't decode what couldn't be kept anyway.
+        if self.budget.load(Ao::Relaxed) == 0 {
+            return Err("the document's images take too much memory".to_string());
+        }
         if let Some((width, height, animation)) = decode_gif_animation(&bytes) {
+            let total: usize = animation.frames.iter().map(|frame| frame.0.len()).sum();
+            self.charge(total as u64)?;
             let first = animation.frames[0].0.clone();
             let data = Arc::new(first.data().to_vec());
             return Ok(Resource::Image(
@@ -652,15 +693,18 @@ impl ImageHandler {
                 Some(Arc::new(animation)),
             ));
         }
-        let image_err = match image::ImageReader::new(Cursor::new(&bytes))
+        let mut reader = image::ImageReader::new(Cursor::new(&bytes))
             .with_guessed_format()
-            .expect("IO errors impossible with Cursor")
-            .decode()
-        {
+            .expect("IO errors impossible with Cursor");
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(MAX_IMAGE_BYTES);
+        reader.limits(limits);
+        let image_err = match reader.decode() {
             Ok(image) => {
                 let width = image.width();
                 let height = image.height();
                 let raw_rgba8_data = image.into_rgba8().into_raw();
+                self.charge(raw_rgba8_data.len() as u64)?;
                 return Ok(Resource::Image(
                     self.kind,
                     width,
@@ -710,6 +754,35 @@ mod tests {
             }
         }
         bytes
+    }
+
+    /// A GIF with one 1×1 frame on a canvas of 65535×65535, in a few bytes.
+    fn huge_canvas_gif() -> Vec<u8> {
+        let mut bytes = b"GIF89a\xff\xff\xff\xff\x80\0\0\0\0\0\xff\xff\xff".to_vec();
+        bytes.extend_from_slice(b"!\xf9\x04\0\n\0\0\0,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;");
+        bytes
+    }
+
+    #[test]
+    fn a_small_gif_cant_allocate_the_canvas_it_declares() {
+        // Without limits this asks for 16 GiB before the first frame.
+        assert!(decode_gif_animation(&huge_canvas_gif()).is_none());
+        let handler = ImageHandler::new(ImageType::Image, new_image_budget());
+        assert!(handler.parse(Bytes::from(huge_canvas_gif())).is_err());
+    }
+
+    #[test]
+    fn images_share_a_budget_per_document() {
+        // Two pixels of RGBA: 8 bytes.
+        let still = gif(&[[1; 4]], 50);
+        let budget = Arc::new(AtomicU64::new(12));
+        let handler = ImageHandler::new(ImageType::Image, budget.clone());
+        assert!(handler.parse(Bytes::from(still.clone())).is_ok());
+        assert_eq!(budget.load(Ao::Relaxed), 4);
+        // Past the budget nothing is kept, and nothing later is decoded.
+        assert!(handler.parse(Bytes::from(still.clone())).is_err());
+        assert_eq!(budget.load(Ao::Relaxed), 0);
+        assert!(handler.parse(Bytes::from(still)).is_err());
     }
 
     #[test]
