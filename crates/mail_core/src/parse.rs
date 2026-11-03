@@ -88,9 +88,18 @@ pub fn attachment_content(raw: &[u8], index: usize) -> Option<Vec<u8>> {
     part_bytes(raw, part)
 }
 
+/// What only renders a body again. Listed so that anything unknown stays reachable as
+/// an attachment rather than vanishing.
+const OTHER_RENDERINGS: &[&str] = &[
+    "text/x-amp-html",
+    "text/watch-html",
+    "text/enriched",
+    "text/richtext",
+];
+
 /// Parts of a `multipart/alternative` that are only another rendering of a body it
-/// also has, like `text/x-amp-html`: the same message, not attachments. An invitation
-/// (`text/calendar`) or anything with a name is meant to be seen as one.
+/// also has: the same message, not attachments. Anything with a name is meant to be
+/// seen as one.
 fn other_body_versions(message: &Message<'_>) -> Vec<u32> {
     let is_body = |id: &u32| message.text_body.contains(id) || message.html_body.contains(id);
     let mut versions = Vec::new();
@@ -108,9 +117,8 @@ fn other_body_versions(message: &Message<'_>) -> Vec<u32> {
         versions.extend(children.iter().copied().filter(|id| {
             !is_body(id)
                 && message.parts.get(*id as usize).is_some_and(|child| {
-                    matches!(child.body, PartType::Text(_) | PartType::Html(_))
+                    OTHER_RENDERINGS.contains(&mime_type(child).as_str())
                         && child.attachment_name().is_none()
-                        && !mime_type(child).starts_with("text/calendar")
                         && !child
                             .content_disposition()
                             .is_some_and(|d| d.ctype().eq_ignore_ascii_case("attachment"))
@@ -251,12 +259,23 @@ fn percent_decoded(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Letters, digits and the punctuation of RFC 6838: the type goes back into a header
+/// when forwarding, where anything else could add to it.
+fn is_mime_token(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(&b))
+}
+
 fn mime_type(part: &MessagePart<'_>) -> String {
-    match part.content_type() {
-        Some(ct) => match ct.subtype() {
-            Some(sub) => format!("{}/{}", ct.ctype(), sub).to_ascii_lowercase(),
-            None => ct.ctype().to_ascii_lowercase(),
-        },
+    let declared = part.content_type().and_then(|ct| {
+        let subtype = ct.subtype()?;
+        (is_mime_token(ct.ctype()) && is_mime_token(subtype))
+            .then(|| format!("{}/{}", ct.ctype(), subtype).to_ascii_lowercase())
+    });
+    match declared {
+        Some(mime) => mime,
         None => match part.body {
             PartType::Text(_) => "text/plain".into(),
             PartType::Html(_) => "text/html".into(),
@@ -463,7 +482,59 @@ mod tests {
         let raw = b"From: a@b.c\r\nMessage-ID: <a@b\rX-Evil: 1>\r\n\r\nx";
         assert_eq!(
             parse_message(raw).unwrap().message_id.as_deref(),
-            Some("a@bX-Evil:1")
+            Some("a@bX-Evil: 1")
+        );
+    }
+
+    #[test]
+    fn ids_keep_their_spaces() {
+        let raw = b"From: a@b.c\r\nMessage-ID: <abcdef\r\n gh@example.com>\r\n\r\nx";
+        assert_eq!(
+            parse_message(raw).unwrap().message_id.as_deref(),
+            Some("abcdef gh@example.com")
+        );
+        let raw = multipart(
+            "related",
+            &[
+                &format!("{HTML}<img src=\"cid:my%20logo.png\">"),
+                "Content-Type: image/png\r\nContent-ID: <my logo.png>\r\nContent-Transfer-Encoding: base64\r\n\r\nAQID",
+            ],
+        );
+        let info = &parse_message(&raw).unwrap().attachments[0];
+        assert_eq!(info.content_id.as_deref(), Some("my logo.png"));
+        assert!(info.inline);
+    }
+
+    #[test]
+    fn only_known_renderings_leave_the_attachments() {
+        for mime in ["text/vcard", "text/csv", "text/x-vcalendar"] {
+            let raw = multipart(
+                "alternative",
+                &[
+                    &format!("{TEXT}plain"),
+                    &format!("Content-Type: {mime}\r\n\r\nx"),
+                    &format!("{HTML}<p>h</p>"),
+                ],
+            );
+            assert_eq!(parse_message(&raw).unwrap().attachments.len(), 1, "{mime}");
+        }
+    }
+
+    #[test]
+    fn a_mime_type_is_only_kept_as_a_plain_token() {
+        let raw = attached(
+            "Content-Type: application/pdf\rX-Evil: 1\r\nContent-Disposition: attachment; filename=a.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\nAAAA",
+        );
+        let info = &parse_message(&raw).unwrap().attachments[0];
+        assert!(!info.mime_type.contains('\r'), "{:?}", info.mime_type);
+        assert_eq!(info.mime_type, "application/octet-stream");
+
+        let raw = attached(
+            "Content-Type: application/vnd.ms-excel\r\nContent-Disposition: attachment; filename=a.xls\r\nContent-Transfer-Encoding: base64\r\n\r\nAAAA",
+        );
+        assert_eq!(
+            parse_message(&raw).unwrap().attachments[0].mime_type,
+            "application/vnd.ms-excel"
         );
     }
 

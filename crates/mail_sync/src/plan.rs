@@ -485,7 +485,12 @@ pub fn new_remote_message(header: &RemoteHeader, parsed: &ParsedMessage) -> NewR
         reply_to: format_address_list(&parsed.reply_to),
         message_id_hdr: parsed.message_id.clone(),
         in_reply_to: parsed.in_reply_to.clone(),
-        references_hdr: parsed.references.join(" "),
+        // One per line: an id can hold spaces.
+        references_hdr: parsed
+            .references
+            .iter()
+            .map(|id| format!("{id}\n"))
+            .collect(),
         thread_id,
         date_ts,
         received_at: received_at(date_ts),
@@ -1129,7 +1134,7 @@ Content-Type: multipart/mixed;\r\n boundary=\"x\"\r\n\r\n";
         assert_eq!(message.in_reply_to.as_deref(), Some("parent@example.com"));
         assert_eq!(
             message.references_hdr,
-            "root@example.com parent@example.com"
+            "root@example.com\nparent@example.com\n"
         );
         assert_eq!(message.thread_id.as_deref(), Some("root@example.com"));
         assert_eq!(message.date_ts, 1_700_000_000);

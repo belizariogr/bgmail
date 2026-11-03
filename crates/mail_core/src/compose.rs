@@ -210,12 +210,14 @@ pub(crate) fn extension_for_mime(mime: &str) -> Option<&'static str> {
         .map(|(ext, _)| *ext)
 }
 
-/// A message id as it can go in a header. Only what a header can carry: a CR left in
-/// the id of a message being answered could start a header of its sender's choosing.
+/// A message or content id as it can go in a header. The line breaks of folding go, as
+/// does any other control character: a CR left in the id of a message being answered
+/// could start a header of its sender's choosing. Spaces stay: they are part of it for
+/// whoever searches the server or follows a `cid:`.
 pub(crate) fn header_id(id: &str) -> String {
     strip_brackets(id)
         .chars()
-        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .filter(|c| !c.is_control() || *c == '\t')
         .collect()
 }
 

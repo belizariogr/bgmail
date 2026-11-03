@@ -961,6 +961,16 @@ pub struct RootView {
     command_palette_focus_pending: bool,
 }
 
+/// The ids of a stored `References`: one per line, or space-separated in rows from
+/// before ids could hold spaces.
+fn stored_references(stored: &str) -> Vec<String> {
+    if stored.contains('\n') {
+        stored.lines().map(str::to_string).collect()
+    } else {
+        stored.split_whitespace().map(str::to_string).collect()
+    }
+}
+
 /// Minimal parsed form of a stored message whose raw source is missing (local/demo
 /// messages, or one whose body wasn't downloaded yet), so reply/forward still work.
 fn parsed_from_detail(detail: &MessageDetail) -> ParsedMessage {
@@ -976,11 +986,7 @@ fn parsed_from_detail(detail: &MessageDetail) -> ParsedMessage {
     ParsedMessage {
         message_id: detail.message_id_hdr.clone(),
         in_reply_to: detail.in_reply_to.clone(),
-        references: detail
-            .references_hdr
-            .split_whitespace()
-            .map(str::to_string)
-            .collect(),
+        references: stored_references(&detail.references_hdr),
         subject: detail.subject.clone(),
         from: Some(from),
         reply_to: mail_core::valid_addresses(&detail.reply_to),
@@ -8368,6 +8374,13 @@ mod tests {
             view.pre_search_mailbox,
             Some(Selection::Global(GlobalMailbox::Inbox))
         ));
+    }
+
+    #[test]
+    fn stored_references_are_read_in_both_forms() {
+        assert_eq!(stored_references("a@x b@x"), ["a@x", "b@x"]);
+        assert_eq!(stored_references("a b@x\nc@x\n"), ["a b@x", "c@x"]);
+        assert!(stored_references("").is_empty());
     }
 
     #[test]
