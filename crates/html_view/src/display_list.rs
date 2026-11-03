@@ -30,6 +30,9 @@ const MAX_DASHES: f64 = 16384.0;
 const MAX_PATH_ELEMENTS: usize = 2 << 20;
 const MIN_SHAPE_COST: usize = 4;
 
+/// Widest or tallest curve recorded, in px.
+const MAX_CURVE_EXTENT: f64 = 16384.0;
+
 /// Geometry of a filled shape, in document coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Geometry {
@@ -455,12 +458,35 @@ fn should_dash(path: &BezPath, style: &kurbo::Stroke) -> bool {
 
 pub fn is_finite_path(path: &BezPath) -> bool {
     let ok = |p: &Point| p.x.is_finite() && p.y.is_finite();
+    let mut from = Point::ZERO;
     path.elements().iter().all(|el| match el {
-        PathEl::MoveTo(a) | PathEl::LineTo(a) => ok(a),
-        PathEl::QuadTo(a, b) => ok(a) && ok(b),
-        PathEl::CurveTo(a, b, c) => ok(a) && ok(b) && ok(c),
+        PathEl::MoveTo(a) | PathEl::LineTo(a) => {
+            from = *a;
+            ok(a)
+        }
+        PathEl::QuadTo(a, b) => {
+            let fits = ok(a) && ok(b) && curve_fits(&[from, *a, *b]);
+            from = *b;
+            fits
+        }
+        PathEl::CurveTo(a, b, c) => {
+            let fits = ok(a) && ok(b) && ok(c) && curve_fits(&[from, *a, *b, *c]);
+            from = *c;
+            fits
+        }
         PathEl::ClosePath => true,
     })
+}
+
+/// Whether a curve is small enough to flatten. The segments it takes grow with its size, whatever
+/// part of it shows: a dashed corner under `scale(1e16)` froze the window for 10 s. No
+/// message means a curve this big, and it isn't drawn.
+fn curve_fits(points: &[Point]) -> bool {
+    let extent = |value: fn(&Point) -> f64| {
+        let values = points.iter().map(value);
+        values.clone().fold(f64::MIN, f64::max) - values.fold(f64::MAX, f64::min)
+    };
+    extent(|p| p.x) <= MAX_CURVE_EXTENT && extent(|p| p.y) <= MAX_CURVE_EXTENT
 }
 
 /// Whether a path is made only of straight segments (cheap check used by tests
