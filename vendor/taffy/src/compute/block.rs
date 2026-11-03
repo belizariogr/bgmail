@@ -1271,16 +1271,21 @@ fn perform_final_layout_on_in_flow_children(
                     // The margins of a float never collapse
                     Line::FALSE,
                 );
-                let mut item_layout = tree.perform_child_layout(
-                    item.node_id,
-                    Size { width: item_known_width, height: item_known_height },
+                // BGMail: only measured when only a size is wanted, as a full layout has one cache
+                // entry: a float in a table in a float took twice as long per level, 11 s at 801
+                // bytes.
+                let mut item_layout = tree.compute_child_layout(item.node_id, LayoutInput {
+                    run_mode,
+                    sizing_mode: SizingMode::InherentSize,
+                    axis: RequestedAxis::Both,
+                    known_dimensions: Size { width: item_known_width, height: item_known_height },
+                    known_dimensions_are_definite: Size { width: true, height: true },
                     parent_size,
-                    Size { width: item_available_width, height: AvailableSpace::MaxContent },
-                    SizingMode::InherentSize,
+                    available_space: Size { width: item_available_width, height: AvailableSpace::MaxContent },
                     // A float establishes a new block formatting context: its margins do not
                     // collapse with the margins of its children
-                    Line::FALSE,
-                );
+                    vertical_margins_are_collapsible: Line::FALSE,
+                });
                 item.oof_candidates = item_layout.oof_candidates.take();
                 let margin_box = item_layout.size + item_non_auto_margin.sum_axes();
 

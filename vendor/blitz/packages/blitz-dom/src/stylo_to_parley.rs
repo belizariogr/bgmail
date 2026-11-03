@@ -519,6 +519,8 @@ pub(crate) fn style(
         .families
         .list
         .iter()
+        // BGMail: done per style, and 60000 names in 8000 paragraphs took 38 s.
+        .take(64)
         .enumerate()
         .map(|(index, family)| match family {
             stylo::SingleFontFamily::FamilyName(name) => {
