@@ -1,6 +1,6 @@
 //! `mailto:` links (RFC 6068): what another app asks BGMail to compose.
 
-use crate::address::{parse_address_list, Address};
+use crate::address::{valid_addresses, Address};
 use crate::compose::Draft;
 
 /// The draft a `mailto:` URI describes, or `None` for any other URI. Only the
@@ -34,14 +34,7 @@ pub fn draft_from_mailto(uri: &str) -> Option<Draft> {
 
 /// Valid addresses of a comma-separated list; the invalid ones are dropped.
 fn addresses(list: &str) -> Vec<Address> {
-    match parse_address_list(list) {
-        Ok(valid) => valid,
-        Err(_) => list
-            .split(',')
-            .filter_map(|one| parse_address_list(one).ok())
-            .flatten()
-            .collect(),
-    }
+    valid_addresses(list)
 }
 
 /// A line break in a subject would be a header injection once sent.
@@ -82,6 +75,13 @@ fn percent_decode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quoted_name_survives_an_invalid_neighbor() {
+        let draft = draft_from_mailto("mailto:%22Doe,%20John%22%20%3Cj@x.test%3E,nope").unwrap();
+        assert_eq!(draft.to.len(), 1);
+        assert_eq!(draft.to[0].email, "j@x.test");
+    }
 
     fn emails(list: &[Address]) -> Vec<&str> {
         list.iter().map(|a| a.email.as_str()).collect()
