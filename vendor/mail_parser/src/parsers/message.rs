@@ -210,7 +210,8 @@ impl MessageParser {
             if is_multipart {
                 mime_type = MimeType::TextOther;
                 is_text = true;
-                is_inline = state.parts == 1 && state.mime_type == MimeType::Message;
+                is_inline = (state.parts == 1 && state.mime_type == MimeType::Message)
+                    || (message.text_body.is_empty() && message.html_body.is_empty());
             }
 
             let (mut encoding, decode_fnc): (Encoding, DecodeFnc<'_>) = match part_headers

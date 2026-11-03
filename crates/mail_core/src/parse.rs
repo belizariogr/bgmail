@@ -1106,6 +1106,16 @@ amanh=E3.\r\n";
     }
 
     #[test]
+    fn a_nested_multipart_without_its_boundary_is_still_the_body() {
+        let raw = "Content-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\n\
+            Content-Type: multipart/alternative; boundary=gone\r\n\r\nWhat it says\r\n--B\r\n\
+            Content-Type: application/pdf; name=a.pdf\r\n\r\nPDF\r\n--B--\r\n";
+        let parsed = parse_message(raw.as_bytes()).unwrap();
+        assert!(parsed.text.unwrap().contains("What it says"));
+        assert_eq!(parsed.attachments.len(), 1);
+    }
+
+    #[test]
     fn a_broken_multipart_doesnt_stop_the_next_ones() {
         let raw = "Content-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\n\
             Content-Type: multipart/x; boundary=none\r\n\r\nA\r\n--B\r\n\
