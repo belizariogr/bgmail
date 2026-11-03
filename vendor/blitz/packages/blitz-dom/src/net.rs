@@ -676,12 +676,14 @@ const STATE_PSEUDO_CLASSES: &[&str] = &[":hover", ":active", ":focus", ":checked
 /// BGMail: whether a declaration in a rule matching on [`STATE_PSEUDO_CLASSES`] only changes
 /// how boxes look. As Gmail keeps `:hover` for colors but strips what generates content.
 fn is_paint_property(name: &str) -> bool {
-    matches!(
-        name,
-        "color" | "opacity" | "cursor" | "box-shadow" | "text-shadow"
-    ) || name.starts_with("background-")
-        || name.starts_with("text-decoration-")
-        || name.ends_with("-color")
+    // A custom property does whatever the rules using it say: `display:var(--x-color)`.
+    !name.starts_with("--")
+        && (matches!(
+            name,
+            "color" | "opacity" | "cursor" | "box-shadow" | "text-shadow"
+        ) || name.starts_with("background-")
+            || name.starts_with("text-decoration-")
+            || name.ends_with("-color"))
 }
 
 /// BGMail: reduces rules that apply on hover, focus and the like to paint properties, so no
