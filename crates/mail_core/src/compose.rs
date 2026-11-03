@@ -76,16 +76,17 @@ pub fn build_message(draft: &Draft, message_id: &str, date_unix: i64) -> Vec<u8>
     if !draft.cc.is_empty() {
         builder = builder.cc(to_builder_list(&draft.cc));
     }
-    if let Some(id) = draft.in_reply_to.as_deref().map(header_id) {
-        if !id.is_empty() {
-            builder = builder.in_reply_to(id);
-        }
+    // The builder folds between ids only, and a server may refuse lines over 998 bytes: replying
+    // to a message with a hostile id loses the link to it, not the reply.
+    let usable = |id: &String| !id.is_empty() && id.len() <= 900;
+    if let Some(id) = draft.in_reply_to.as_deref().map(header_id).filter(usable) {
+        builder = builder.in_reply_to(id);
     }
     let references: Vec<String> = draft
         .references
         .iter()
         .map(|r| header_id(r))
-        .filter(|r| !r.is_empty())
+        .filter(usable)
         .collect();
     if !references.is_empty() {
         builder = builder.references(MessageId::from(references));

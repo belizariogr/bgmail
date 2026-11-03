@@ -267,6 +267,7 @@ pub fn reads_as_safe(html: &str) -> bool {
                 || name == "math"
                 || DISALLOWED_ELEMENTS
                     .split(',')
+                    .chain(UNWRAPPED_ELEMENTS.split(','))
                     .any(|element| element.trim() == name);
             if unsafe_attribute || unsafe_element {
                 self.0.set(true);
@@ -413,10 +414,14 @@ fn channel(value: f32) -> u8 {
 /// decision). The SVG parts stay listed for a stray tag outside one: `foreignobject`
 /// (hosts arbitrary HTML) and the SMIL animation family (`animate`, `animatetransform`,
 /// `animatemotion`, `set`), which can assign event-handler attributes at runtime.
+/// Form controls that only wrap what a message says: they go, what they hold stays. A whole
+/// ASP.NET message comes in a `<form>`, and Gmail and Thunderbird show its content.
+const UNWRAPPED_ELEMENTS: &str = "form, button";
+
 const DISALLOWED_ELEMENTS: &str = "script, object, embed, applet, \
      iframe, frame, frameset, \
      video, audio, source, track, \
-     input, textarea, select, button, form, \
+     input, textarea, select, \
      base, meta, link, canvas, dialog, portal, \
      foreignobject, animate, animatetransform, animatemotion, set, \
      template, noscript";
@@ -550,6 +555,10 @@ fn sanitize_html_inner(
             el.remove();
             Ok(())
         }))
+        .append_element_content_handler(element!(UNWRAPPED_ELEMENTS, |el| {
+            el.remove_and_keep_content();
+            Ok(())
+        }))
         .append_element_content_handler(element!("*", |el| {
             if let Some(is_blocked) = neutralize_attributes(el, load_remote, shown) {
                 has_remote.set(true);
@@ -664,17 +673,6 @@ fn neutralize_attributes(
         el.remove();
         return None;
     }
-    // A name can start with `=` only as the first; past it, removing what stands between makes
-    // it the value of the attribute before, and the rest of the tag reads as something else.
-    if el
-        .attributes()
-        .iter()
-        .skip(1)
-        .any(|attr| attr.name().starts_with('='))
-    {
-        el.remove();
-        return None;
-    }
     let is_img = el.tag_name() == "img";
     let is_svg_image = matches!(el.tag_name().as_str(), "image" | "feimage");
     // `attributes()` borrows the element, so collect everything we need first and
@@ -721,6 +719,28 @@ fn neutralize_attributes(
         })
         .collect();
 
+    // A name can start with `=` only as the first; past it, rewriting the tag without what
+    // stood between makes it the value of the attribute before, and the rest of the tag reads as
+    // something else. Untouched, a tag comes out as it came. Without the tag, then, keeping what
+    // it holds, unless that is raw text, which keeping would turn into markup.
+    let rewritten = !doomed.is_empty() || blocked_img_src.is_some() || el.has_attribute("style");
+    let joins = rewritten
+        && el
+            .attributes()
+            .iter()
+            .skip(1)
+            .any(|attr| attr.name().starts_with('='));
+    if joins {
+        if matches!(
+            el.tag_name().as_str(),
+            "title" | "style" | "xmp" | "noembed" | "noframes" | "plaintext"
+        ) {
+            el.remove();
+        } else {
+            el.remove_and_keep_content();
+        }
+        return None;
+    }
     for name in doomed {
         el.remove_attribute(&name);
     }
@@ -798,11 +818,14 @@ fn is_dangerous_url(value: &str) -> bool {
     match scheme.as_str() {
         "javascript" | "vbscript" => true,
         "data" => {
+            // As a browser reads it: `image/svg+\nxml` is `image/svg+xml`.
             let media = trimmed[colon + 1..]
                 .split([';', ','])
                 .next()
                 .unwrap_or("")
-                .trim()
+                .chars()
+                .filter(|c| !c.is_whitespace() && !c.is_control())
+                .collect::<String>()
                 .to_ascii_lowercase();
             !(media.starts_with("image/") && media != "image/svg+xml")
         }
@@ -1776,5 +1799,49 @@ mod tests {
             quoted.contains("hello") && !quoted.contains('x'),
             "{quoted}"
         );
+    }
+
+    #[test]
+    fn a_stray_equals_sign_loses_nothing_that_was_safe() {
+        for (html, kept) in [
+            (
+                "<html lang=en =\"\"><body><p>Everything</p></body></html>",
+                "Everything",
+            ),
+            (
+                "<table width=600 =\"\"><tr><td>Whole newsletter</td></tr></table>",
+                "Whole newsletter",
+            ),
+            ("<p>Read <a href=x =y>this link</a> now</p>", "this link"),
+            (
+                "<table background=http://x.test/a =\"\"><tr><td>Kept</td></tr></table>",
+                "Kept",
+            ),
+        ] {
+            let sanitized = sanitize_html_inner(html, false, &HashSet::new()).0;
+            assert!(sanitized.contains(kept), "{html}\n{sanitized}");
+            assert!(reads_as_safe(&sanitized), "{html}\n{sanitized}");
+        }
+    }
+
+    #[test]
+    fn what_a_form_or_button_holds_stays() {
+        let html = "<form id=form1><table><tr><td>Whole message</td></tr></table>\
+            <input value=gone></form><a href=http://x.test><button>Buy now</button></a>";
+        let sanitized = sanitize_html_inner(html, true, &HashSet::new()).0;
+        for kept in ["Whole message", "Buy now", "href"] {
+            assert!(sanitized.contains(kept), "{sanitized}");
+        }
+        for gone in ["<form", "<button", "<input", "gone"] {
+            assert!(!sanitized.contains(gone), "{sanitized}");
+        }
+        assert!(reads_as_safe(&sanitized));
+    }
+
+    #[test]
+    fn a_media_type_is_read_as_a_browser_reads_it() {
+        assert!(is_dangerous_url("data:image/svg+\nxml;base64,AA"));
+        assert!(is_dangerous_url("data:image/svg+\txml;base64,AA"));
+        assert!(!is_dangerous_url("data:image/png;base64,AA"));
     }
 }
