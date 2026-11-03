@@ -56,6 +56,9 @@ repository instead of living in someone's checkout.
     can be built off the UI thread (`html_view::DetachedDocument`).
   - `assets/default.css`: `td, th { padding: 1px }`, cell min/max-height
     neutralised (`!important`).
+  - `net.rs`/`mutator.rs`: nothing in a message's CSS or HTML can abort: an `@import`
+    or `<img src>` that doesn't resolve is refused (`resolve_url` removed), and
+    `MAX_IMPORTS` limits the total imports of a stylesheet.
   - `util.rs` (`parse_svg_image`): an SVG can't read local files; only `data:` images
     resolve, since a device or a UNC path in a message's `<image href>` would block
     the UI or reach the network.

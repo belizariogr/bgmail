@@ -444,6 +444,10 @@
       the main window; discovery keeps its login; IME selection stays inside the text;
       pasting cleans line breaks; single-line fields scroll and clip; `EHLO` doesn't
       send the machine's name, as Thunderbird (decided from its behavior).
+- ✅ Review round 11: `@import url()` and an `<img src>` that doesn't parse no longer abort
+      the app; imports have a total budget; an image arriving between timer and paint
+      is drawn; Close from the main window leaves compose alone; a menu over a
+      scrollbar's track gets its click.
 - ✅ A search gives the mailbox's selection back; a complete typed address beats the
       suggestion on Enter and Tab; the Sent copy records the Bcc (user decisions).
 - ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user
