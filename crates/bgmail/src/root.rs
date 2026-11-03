@@ -696,6 +696,9 @@ impl ReaderJob {
             notice = Some(ReaderNotice::Clipped);
         }
         let rendered = email_document(self.colors, &shown, self.remote);
+        if rendered.refused {
+            notice = Some(ReaderNotice::Unrenderable);
+        }
         let mut document = match HtmlDocument::try_parse(&rendered.html, options()) {
             Ok(document) => document,
             Err(RenderError::TooDeep { .. } | RenderError::TooComplex) => {

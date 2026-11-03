@@ -20,6 +20,8 @@ pub struct RenderedEmail {
     pub html: String,
     /// How many remote `<img>` were blocked.
     pub blocked_images: usize,
+    /// The sanitized body didn't read as safe (see [`reads_as_safe`]), so it became text.
+    pub refused: bool,
 }
 
 /// Theme colors of the message page. The page can be forced white
@@ -61,7 +63,7 @@ pub fn email_document(
     body: &MessageBody,
     load_remote: bool,
 ) -> RenderedEmail {
-    let (inner, _, blocked_images) = match body {
+    let (mut inner, _, mut blocked_images) = match body {
         MessageBody::Html(html) => sanitize_html_inner(html, load_remote, &HashSet::new()),
         MessageBody::Text(plain) => (
             format!("<pre class=\"plain\">{}</pre>", escape_html(plain)),
@@ -69,6 +71,14 @@ pub fn email_document(
             0,
         ),
     };
+    let refused = matches!(body, MessageBody::Html(_)) && !reads_as_safe(&inner);
+    if let (true, MessageBody::Html(html)) = (refused, body) {
+        inner = format!(
+            "<pre class=\"plain\">{}</pre>",
+            escape_html(&plain_text(html))
+        );
+        blocked_images = 0;
+    }
     // Keep the message's own doctype: a legacy one selects the (quirks)
     // rendering mode its layout was written for.
     let doctype = match body {
@@ -88,6 +98,7 @@ pub fn email_document(
     RenderedEmail {
         html,
         blocked_images,
+        refused,
     }
 }
 
@@ -150,7 +161,7 @@ pub fn print_document(
     };
     let csp = format!(
         "default-src 'none'; img-src {images}; style-src 'unsafe-inline'; \
-         script-src 'nonce-{nonce}'"
+         script-src 'nonce-{nonce}'; form-action 'none'; base-uri 'none'"
     );
     let head = format!(
         "<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
@@ -187,12 +198,18 @@ pub fn quotable_html(html: &str) -> String {
     use lol_html::{element, rewrite_str, RewriteStrSettings};
 
     let (sanitized, _, _) = sanitize_html_inner(html, true, &HashSet::new());
-    let sanitized = match leading_doctype(&sanitized) {
-        Some(doctype) => sanitized.replacen(doctype, "", 1),
-        None => sanitized,
-    };
     let settings = RewriteStrSettings::new()
-        .append_element_content_handler(element!("head, title", |el| {
+        // By the tokenizer: cutting where a text search found one could open a comment.
+        .append_document_content_handler(lol_html::doctype!(|doctype| {
+            doctype.remove();
+            Ok(())
+        }))
+        // With what follows it when unclosed, as it would take the whole body.
+        .append_element_content_handler(element!("head", |el| {
+            el.remove_and_keep_content();
+            Ok(())
+        }))
+        .append_element_content_handler(element!("title, head style", |el| {
             el.remove();
             Ok(())
         }))
@@ -209,7 +226,69 @@ pub fn quotable_html(html: &str) -> String {
             }
             Ok(())
         }));
-    rewrite_str(&sanitized, settings).unwrap_or_default()
+    let quoted = rewrite_str(&sanitized, settings).unwrap_or_default();
+    if reads_as_safe(&quoted) {
+        quoted
+    } else {
+        String::new()
+    }
+}
+
+/// Whether `html`, followed by what closes the page around it, reads to the parser that will show
+/// it as free of what the sanitizer removes. The last check: rewriting tags in place can make the
+/// output read differently from what was checked (each removal joins what was around it), and
+/// no list of such cases has held. Tokens, not a tree: the modes where a tree builder reads
+/// raw text differently are only entered through elements this already refuses.
+pub fn reads_as_safe(html: &str) -> bool {
+    use html5ever::tendril::StrTendril;
+    use html5ever::tokenizer::{
+        states::RawKind, BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer,
+        TokenizerOpts,
+    };
+
+    #[derive(Default)]
+    struct Check(std::cell::Cell<bool>);
+    impl TokenSink for Check {
+        type Handle = ();
+        fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
+            let Token::TagToken(tag) = token else {
+                return TokenSinkResult::Continue;
+            };
+            if tag.kind != TagKind::StartTag {
+                return TokenSinkResult::Continue;
+            }
+            let name = &*tag.name;
+            let unsafe_attribute = tag.attrs.iter().any(|attr| {
+                let attribute = &*attr.name.local;
+                attribute.starts_with("on")
+                    || (URL_ATTRIBUTES.contains(&attribute) && is_dangerous_url(&attr.value))
+            });
+            let unsafe_element = name == "svg"
+                || name == "math"
+                || DISALLOWED_ELEMENTS
+                    .split(',')
+                    .any(|element| element.trim() == name);
+            if unsafe_attribute || unsafe_element {
+                self.0.set(true);
+            }
+            // As the tree builder does, or the text of these would read as tags.
+            match name {
+                "title" => TokenSinkResult::RawData(RawKind::Rcdata),
+                "style" | "xmp" | "noembed" | "noframes" => {
+                    TokenSinkResult::RawData(RawKind::Rawtext)
+                }
+                "plaintext" => TokenSinkResult::Plaintext,
+                _ => TokenSinkResult::Continue,
+            }
+        }
+    }
+    let tokenizer = Tokenizer::new(Check::default(), TokenizerOpts::default());
+    let input = BufferQueue::default();
+    input.push_back(StrTendril::from_slice(html));
+    input.push_back(StrTendril::from_slice("</body></html>"));
+    let _ = tokenizer.feed(&input);
+    tokenizer.end();
+    !tokenizer.sink.0.get()
 }
 
 /// A plain-text original as it goes inside a reply's quote.
@@ -439,7 +518,10 @@ fn sanitize_html_inner(
     use lol_html::{element, rewrite_str, text, RewriteStrSettings};
     use std::cell::{Cell, RefCell};
 
-    let without_foreign = without_foreign_content(html);
+    // Closes a tag left open at the end, which the tokenizer writes back unchecked and what
+    // follows this body in a page would close. The handler below takes it out again.
+    let closed = format!("{html}<!---->");
+    let without_foreign = without_foreign_content(&closed);
     let has_remote = Cell::new(false);
     let blocked = Cell::new(0usize);
     // `<style>` text arrives in chunks (a `url(` may straddle two): buffer it
@@ -449,6 +531,12 @@ fn sanitize_html_inner(
         // A `<` the tokenizer took for text is written back as it came, and what is removed
         // after it can leave it next to a name: `<<script></script>script>` came out as
         // `<script>`. As an entity, it stays text for whoever reads the output.
+        .append_document_content_handler(lol_html::doc_comments!(|comment| {
+            if comment.text().is_empty() {
+                comment.remove();
+            }
+            Ok(())
+        }))
         .append_document_content_handler(lol_html::doc_text!(|chunk| {
             if chunk.text_type() == lol_html::html_content::TextType::Data
                 && chunk.as_str().contains('<')
@@ -496,7 +584,11 @@ fn sanitize_html_inner(
             Ok(())
         }));
 
-    let html = rewrite_str(&without_foreign, settings).unwrap_or_default();
+    let mut html = rewrite_str(&without_foreign, settings).unwrap_or_default();
+    // Inside an unclosed `<xmp>` or `<title>` it was text, not a comment.
+    if html.ends_with("<!---->") {
+        html.truncate(html.len() - "<!---->".len());
+    }
     (html, has_remote.get(), blocked.get())
 }
 
@@ -569,6 +661,17 @@ fn neutralize_attributes(
     // replying. No such tag is meant to be read. With its content, which keeping would turn
     // the text of a `<xmp>` into markup after it was checked.
     if el.attributes().len() > html_view::MAX_TAG_ATTRIBUTES {
+        el.remove();
+        return None;
+    }
+    // A name can start with `=` only as the first; past it, removing what stands between makes
+    // it the value of the attribute before, and the rest of the tag reads as something else.
+    if el
+        .attributes()
+        .iter()
+        .skip(1)
+        .any(|attr| attr.name().starts_with('='))
+    {
         el.remove();
         return None;
     }
@@ -1568,54 +1671,10 @@ mod tests {
         assert!(colors.is_dark());
     }
 
-    /// Tags and attributes `html` has for the tokenizer of the parser that will read it.
-    fn tags_as_parsed(html: &str) -> Vec<(String, Vec<String>)> {
-        use html5ever::tendril::StrTendril;
-        use html5ever::tokenizer::{
-            states::RawKind, BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer,
-            TokenizerOpts,
-        };
-
-        #[derive(Default)]
-        struct Tags(std::cell::RefCell<Vec<(String, Vec<String>)>>);
-        impl TokenSink for Tags {
-            type Handle = ();
-            fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
-                if let Token::TagToken(tag) = token {
-                    if tag.kind == TagKind::StartTag {
-                        let attrs = tag.attrs.iter().map(|a| a.name.local.to_string()).collect();
-                        self.0.borrow_mut().push((tag.name.to_string(), attrs));
-                        // As the tree builder does, or the text of these would read as tags.
-                        return match &*tag.name {
-                            "title" | "textarea" => TokenSinkResult::RawData(RawKind::Rcdata),
-                            "style" | "xmp" | "iframe" | "noembed" | "noframes" => {
-                                TokenSinkResult::RawData(RawKind::Rawtext)
-                            }
-                            "script" => TokenSinkResult::RawData(RawKind::ScriptData),
-                            "plaintext" => TokenSinkResult::Plaintext,
-                            _ => TokenSinkResult::Continue,
-                        };
-                    }
-                }
-                TokenSinkResult::Continue
-            }
-        }
-        let tokenizer = Tokenizer::new(Tags::default(), TokenizerOpts::default());
-        let input = BufferQueue::default();
-        input.push_back(StrTendril::from_slice(html));
-        let _ = tokenizer.feed(&input);
-        tokenizer.end();
-        tokenizer.sink.0.into_inner()
-    }
-
     /// What comes out of the sanitizer is read by another parser: what it leaves or removes
     /// can't join with what is around it into something it was there to remove.
     #[test]
     fn nothing_removed_by_the_sanitizer_can_join_into_active_content() {
-        const FORBIDDEN: &[&str] = &[
-            "script", "iframe", "frame", "object", "embed", "form", "input", "textarea", "select",
-            "button", "meta", "link", "base", "svg", "math",
-        ];
         let many: String = (0..1100).map(|i| format!(" a{i}")).collect();
         let prefixes = [
             "",
@@ -1648,23 +1707,74 @@ mod tests {
                         format!("{prefix}<title{many}><{name} onclick=x></title>"),
                         format!("{prefix}<noembed{many}><{name} onclick=x></noembed>"),
                         format!("<?a> <{gap}{name} onclick=x> ?><!doctype b>"),
+                        format!("<a b onclick=x = c=\"><{name} onclick=x>\">"),
+                        format!("<a b/=c=\"><{name} onclick=x>\" style=x>"),
+                        format!("<d =/=x=\"><{name} onclick=x>\" onclick=y>"),
+                        format!("<!-- -<!doctype b>-> <{name} onclick=x> --><!doctype b>"),
+                        "<?a><wbr<!doctype b> onclick=x>?><!doctype b>".to_string(),
+                        format!("<p>x</p><{name} onclick=x "),
                     ] {
                         let sanitized = sanitize_html_inner(&html, false, &HashSet::new()).0;
+                        assert!(reads_as_safe(&sanitized), "{html}\n{sanitized}");
                         let quoted = quotable_html(&html);
-                        for output in [&sanitized, &quoted] {
-                            for (tag, attrs) in tags_as_parsed(output) {
-                                assert!(!FORBIDDEN.contains(&tag.as_str()), "{html}\n{output}");
-                                assert!(
-                                    !attrs.iter().any(|a| a.starts_with("on")),
-                                    "{html}\n{output}"
-                                );
-                            }
-                        }
+                        assert!(reads_as_safe(&quoted), "{html}\n{quoted}");
                         let again = sanitize_html_inner(&sanitized, false, &HashSet::new()).0;
                         assert_eq!(again, sanitized, "{html}");
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn what_reads_as_active_content_is_refused_whatever_let_it_through() {
+        for html in [
+            "<script>1</script>",
+            "<p onclick=x>",
+            "<a href=javascript:x>",
+            "<meta http-equiv=refresh content=0 ",
+            "<input ",
+            "<a b = c=\"><form>\">",
+            "<xmp></xmp><iframe>",
+        ] {
+            assert!(!reads_as_safe(html), "{html}");
+        }
+        for html in [
+            "<p>x</p>",
+            "<style>a{}<script></style>",
+            "<title><script></title>",
+            "<xmp><script></xmp>",
+            "<!-- <script> -->",
+            "<a title=\"<script>\" href=http://x.test>",
+            "a < b",
+        ] {
+            assert!(reads_as_safe(html), "{html}");
+        }
+    }
+
+    #[test]
+    fn the_samples_in_the_repository_all_read_as_safe() {
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../spikes/html_render/corpus"
+        );
+        let Ok(files) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for file in files.flatten() {
+            let html = String::from_utf8_lossy(&std::fs::read(file.path()).unwrap()).into_owned();
+            let sanitized = sanitize_html_inner(&html, true, &HashSet::new()).0;
+            assert!(reads_as_safe(&sanitized), "{:?}", file.path());
+            assert!(reads_as_safe(&quotable_html(&html)), "{:?}", file.path());
+        }
+    }
+
+    #[test]
+    fn a_quote_keeps_a_body_after_an_unclosed_head() {
+        let quoted = quotable_html("<html><head><title>x</title><body>hello</body></html>");
+        assert!(
+            quoted.contains("hello") && !quoted.contains('x'),
+            "{quoted}"
+        );
     }
 }
