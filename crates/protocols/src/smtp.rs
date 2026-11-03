@@ -93,6 +93,9 @@ impl SmtpSender {
             host: server.host.clone(),
             port: server.port,
             tls,
+            // `[127.0.0.1]`: without its `hostname` feature, lettre doesn't send the
+            // machine's name, which servers record in `Received:` for all to read.
+            // Thunderbird also avoids it.
             hello: ClientId::default(),
             credentials: Credentials::new(username.to_string(), password),
             mechanisms,
