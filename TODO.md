@@ -452,6 +452,21 @@
   refuses over 500k tags or 1024 attributes in one, also when printing; a frame past 512 MiB of
   pixels leaves the rest out instead of remaking textures; the sync thread has 16 MiB of stack; a
   hostile `COPYUID` isn't expanded.
+- ✅ Review round 16 (590000 fuzz seeds, one panic, one abort): text the tokenizer kept as `<` is
+  written back as `&lt;`, since `<<script></script>script>` came out of the sanitizer as `<script>`
+  (it predates this review), and a tag over 1024 attributes goes with its content; a property test
+  reads the sanitizer's output back with the parser's tokenizer. The tag scan no longer follows
+  tokenizers: it counts everything that could be a tag, and the words of end tags. A label's
+  click reaches its control once. A box that becomes a leaf clears its hoisted list, and one back
+  in flow forgets its containing block, so text no longer vanishes after a width crosses `@media`.
+  `line-height` saturates. Image tiles only draw what shows, up to 64000 per frame. Layout budgets
+  count text, not visits alone. Over 4096 RFC 2231 continuations aren't joined. NUL stays out of
+  search. Round 15's `window.drop_image` is gone: it aborted on a texture with uploads pending.
+- ⬜ Known limits of round 16. Textures of past messages stay in GPUI's sprite atlas until the
+  window closes: `window.drop_image` destroys one with uploads pending, and freeing them safely
+  takes a sync point in all three atlases, of which only Blade can be tested here. Tiles past 64000
+  in a frame aren't drawn (a 1x1 tile on a very large box). `display:contents` on a `<tr>` or `<td>`
+  loses its text.
 - ⬜ Known limits of round 14, by the rule below. Forwarding puts the whole body in the editor, which
   shapes every line (over 2 MiB should forward as `message/rfc822`, as Thunderbird). Text with
   negative spacing past its own width isn't drawn. `store_body` of 200 MB holds the write lock
@@ -468,8 +483,7 @@
   when shown; radii saturate, so 2 KB of huge dotted decorations no longer freeze the window for
   minutes; `<html a0><html a1>...` is bounded; the tag scan follows the tokenizer's quotes and
   counts end tags, and the sanitizer drops tags over 1024 attributes; off-screen images use no
-  frame pixels, so long newsletters keep their last images, and evicted textures leave the GPU's
-  atlas; `repair_stale_previews` runs once per account (it rewrote matching messages at every
+  frame pixels, so long newsletters keep their last images; `repair_stale_previews` runs once per account (it rewrote matching messages at every
   start); forwarding parses once, and replying to many addresses is linear; a fetched header block
   is cut at 1 MiB; `NUL.tar.gz` is a device name for saving.
 - ✅ Review round 13: nested `message/rfc822` no longer overflow the sync thread's stack on

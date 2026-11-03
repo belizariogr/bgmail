@@ -77,8 +77,13 @@ repository instead of living in someone's checkout.
     as Parley asserts on more than `u16::MAX` styles and a `nowrap` span can take two; past it
     text takes the open style and `<br>` doesn't break.
   - `layout/inline/layout.rs`: full layouts for baselines stop after `MAX_LAYOUT_VISITS_FOR_BASELINES`
-    (4 M, `layout_visits`) node visits per pass, as nested inline tables were exponential.
+    (4 M, `layout_visits`) node visits and bytes of inline text per pass, as nested inline tables were exponential.
   - `node/node.rs`: `containing_block` and the walks up skip freed boxes.
+  - `node/node.rs` (`record_out_of_flow`): a box back in flow forgets its containing block.
+  - `taffy/src/compute/oof.rs`: a box that became a leaf clears its hoisted list.
+  - `events/pointer.rs`: a label passes a click on once (`in_label_click`), as its control's own
+    click bubbles back to it.
+  - `layout/table.rs`: `display:contents` on a row group keeps its children in the table.
   - `net.rs`: GIF animations decode under `Limits` (2 × `MAX_ANIMATION_BYTES`), still images
     under `MAX_IMAGE_BYTES` (256 MiB), and a document's images share
     `MAX_DOCUMENT_IMAGE_BYTES` (2 GiB, `BaseDocument::image_budget`): past it they stay

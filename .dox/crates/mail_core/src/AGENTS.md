@@ -192,6 +192,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`referenced_cids`** (pub) — `pub fn referenced_cids(html: &str) -> HashSet<String>`: lowercase, percent-decoded Content-IDs the HTML refers to; `html_references_cid` is its one-off form.
 - **`body_ids`** (private) — the parts of the text and HTML bodies, as a set.
 - **`cid_value_len`** / **`cid_skip_len`** (pub) — length of a `cid:` value within 998 bytes, and what to skip when it has none, so a body of markers stays linear.
+- **`without_excess_continuations`** (private) — `raw` with the `*` of RFC 2231 continuations taken out past 4096 of them, same length, as the parser is quadratic in them; used by what parses a whole message.
 - **`parse_header_block`** (pub) — `parse_message` for a fetched header block, cut at the last line within 1 MiB; only sync uses it, and it arrives whatever the message's size.
 - **`attachment_contents`** (pub) — `pub fn attachment_contents(raw: &[u8], indexes: &[usize]) -> Vec<Option<Vec<u8>>>`: `attachment_content` for many parts, parsing once.
 - **`parse_message`** (pub) — `pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage>`
