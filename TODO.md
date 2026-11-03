@@ -429,6 +429,14 @@
       `.exe` from `runs_code`; replies keep runs of spaces and the thread's root.
 - ✅ A certificate on a loopback address isn't validated, so Proton Bridge's preset works
       (user decision). Confirm it with a real Bridge: only tested against a local server.
+- ✅ Review round 9: a message the client can't parse no longer stops a folder's sync;
+      `html_to_text` is linear; the database is private to its user; the delete shortcut
+      leaves text fields and other windows alone; borders aren't backgrounds for the
+      contrast pass, and bullets are adapted; compose's accounts stay current; a click
+      forgets a pending style; a comma stays inside typed quotes; the find bar keeps its
+      place; an abandoned build clears its crash marker.
+- ⬜ Search text of mail stored before round 9 keeps its line breaks: phrases across a
+      line break are only found in newer mail (rebuilding needs a background pass).
 - ✅ A search gives the mailbox's selection back; a complete typed address beats the
       suggestion on Enter and Tab; the Sent copy records the Bcc (user decisions).
 - ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user

@@ -109,6 +109,9 @@ that edit the database and queue those server ops.
   concurrently with its successor.
 - **NewMail:** only unread rows *created* (not merged) in the `sys:inbox`
   folder after its first sync, never after a UIDVALIDITY reset.
+- **Unparsable answers:** `RemoteErrorKind::Unreadable` means a dropped session;
+  `fetch_readable_headers` retries without the structure (`fetch_headers_plain`), then
+  one by one, skipping what still can't be read, so one message can't stop a sync.
 - **Sent copy** (user decision): the APPENDed copy carries `Bcc:`
   (`mail_core::sent_copy`); what goes to SMTP doesn't.
 - **Backoff** resets after a completed cycle (or a good IDLE result), not when a
