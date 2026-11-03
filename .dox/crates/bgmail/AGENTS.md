@@ -118,8 +118,10 @@ wiring to `storage`.
   wins); smaller ones build in place, so no placeholder flashes. No parsed
   document cache: measured, the largest real message builds in about 180 ms, so a
   cache would only save that on reopening at a memory cost. Bodies
-  `html_view` refuses (too deep) show as plain text, and a message whose formatted rendering was interrupted by a crash (the
-  `crash_guard` marker survived) as plain text, each with a notice. The
+  `html_view` refuses (too deep or too complex) show as plain text, and a message that was
+  showing formatted when the app crashed or was killed (the `crash_guard` marker survived,
+  armed for as long as it shows) as plain text, each with a notice. Reply quotes follow the
+  same rules with a marker of their own. The
   release profile keeps `panic = "abort"` (decided with two opposing
   reviews): unwinding through Blitz/GPUI state isn't safe and stack overflow
   or OOM can't be caught anyway.

@@ -121,7 +121,10 @@ positions Blitz computed.
   overflow an 8 MB stack). `try_parse` refuses trees deeper than
   `MAX_NESTING_DEPTH` (256) with `RenderError::TooDeep`, and `layout`/paint
   never process such a tree (defense in depth). The Blitz document is not
-  `Send`, so it can't move off the UI thread; hosts bound document size.
+  `Send`, so it can't move off the UI thread. Hostile markup is bounded by
+  `MAX_MARKUP_TAGS` and `MAX_TABLE_SPAN_AREA` (`RenderError::TooComplex`), by the display
+  list's `MAX_PATH_ELEMENTS` and `MAX_DASHES`, and by `MAX_DECORATION_MARKS`,
+  `MAX_BORDER_DOTS` in the painters; what passes them is drawn solid or not at all.
 - **Images:** drawn at less than half their size, they are pre-downscaled on
   the CPU (area filter, premultiplied alpha) and cached per upload size —
   GPUI samples without mipmaps.

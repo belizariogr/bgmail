@@ -444,6 +444,16 @@
       the main window; discovery keeps its login; IME selection stays inside the text;
       pasting cleans line breaks; single-line fields scroll and clip; `EHLO` doesn't
       send the machine's name, as Thunderbird (decided from its behavior).
+- ✅ Review round 12 (hostile HTML, measured under a memory cap): a 113-byte GIF no longer
+  allocates the canvas it declares (decoder limits, 256 MiB per image, 2 GiB per document);
+  dotted/dashed borders and text decorations are bounded per line and per document, drawn
+  solid past that; `colspan`, `<col span>`, columns and rows are limited, and their `u16`
+  sums no longer wrap; lengths saturate at `nscoord_MAX`, so Parley's assert can't trip;
+  `display:contents` pseudos of tables, replaced elements styled as tables, boxes freed by
+  `:hover` and selections older than their text no longer panic. `try_parse` refuses over
+  2 M tags or 2 M cells added by spans (`TooComplex`). The crash guard now stays armed
+  while a message shows (a kill makes it open once as text), and reply quotes have their
+  own guard and text fallback.
 - ✅ Review round 11: `@import url()` and an `<img src>` that doesn't parse no longer abort
       the app; imports have a total budget; an image arriving between timer and paint
       is drawn; Close from the main window leaves compose alone; a menu over a

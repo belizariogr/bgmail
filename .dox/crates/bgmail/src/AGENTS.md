@@ -477,7 +477,7 @@ window.
 
 - **`merge_attachments`** (private, L1212) — appends files while the total stays within `cap`; returns whether any was rejected.
 
-- **struct `QuotedOriginal`** / **`reply_html`** / **`reply_text`** / **`toggle_quote`** / **`build_quote_view`** / **`render_quote`** (private, `compose`): what a reply quotes, the HTML and plain-text versions sent, and the quote below the editor.
+- **struct `QuotedOriginal`** / **`reply_html`** / **`reply_text`** / **`toggle_quote`** / **`build_quote_view`** / **`render_quote`** (private, `compose`): what a reply quotes, the HTML and plain-text versions sent, and the quote below the editor. `render_guard` marks the original while its formatted quote exists (**struct `QuoteGuard`**, cleared on drop); `None` when it already crashed the app, so the quote shows as text, as does what `try_parse` refuses.
 - **struct `QuoteToggleColors`** / **`quote_toggle_colors`** (private, `compose`): colors of the `⋯` button, from the light theme over a white page.
 - **`default_mail_app`**: `status()` / `set_default()` (pub, per OS), enums `Status`, `Outcome`, `Error`; on Linux `status_with` / `set_default_with` / `status_from_query` / `application_dirs`.
 - **`instance`**: `mailto_argument` / `lock_profile` / `hand_over` / `listen`, `ProfileLock`, `ACTIVATE` (pub); `lock_at` (file lock at `instance.lock`; I/O failure = `Unavailable`, which starts anyway), `hand_over_through` (retries while the running process starts), `forward_through`, `serve`, `read_message`, `new_token`, `write_private`, `instance_file` (private): one process per profile; a later launch hands over its `mailto:` link, or `ACTIVATE` to show the window, and exits.
@@ -694,7 +694,9 @@ window.
 - **`CrashGuard::beside(db_path)`**: Guard for that database.
 - **`CrashGuard::take_unfinished()`**: Message id left by a run that crashed while rendering it (marker cleared); `None` otherwise.
 - **`CrashGuard::begin(id)`**: Writes the marker before rendering formatted HTML (best effort).
-- **`CrashGuard::finish()`**: Removes the marker once a frame showing it was drawn.
+- **`CrashGuard::beside_for_quotes(db_path)`**: Guard of reply quotes (`quote-render.guard`), which show beside the reader.
+- **`CrashGuard::finish_if(id)`**: `finish`, unless the marker is by now another message's.
+- **`CrashGuard::finish()`**: Removes the marker: the message stopped showing, or the app quit on its own. It stays while the message shows, since hover, selection and zoom run the renderer again.
 - Tests: unfinished renders reported once; finished renders leave no marker.
 
 ### `src/print.rs`
@@ -1588,6 +1590,8 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Purpose: Keyboard handling while palette open.
   - Behavior: Handles Escape, Up/Down (move selection), Enter (execute); returns whether event was consumed.
 
+- **`clear_render_guards`** (pub(crate)): On app quit, removes the reader and quote markers: nothing rendering made the app crash.
+- **`set_reader_guard`** (private): Writes the marker for a message, or removes it if one exists (`reader_guarded`, so an empty reader costs no disk access per frame).
 - **`persist_now`** (pub(crate), L953)
   - Signature: `pub(crate) fn persist_now(&self)`
   - Purpose: Immediate synchronous settings save.

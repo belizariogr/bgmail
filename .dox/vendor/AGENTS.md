@@ -59,6 +59,25 @@ repository instead of living in someone's checkout.
   - `net.rs`/`mutator.rs`: nothing in a message's CSS or HTML can abort: an `@import`
     or `<img src>` that doesn't resolve is refused (`resolve_url` removed), and
     `MAX_IMPORTS` limits the total imports of a stylesheet.
+  - `net.rs`: GIF animations decode under `Limits` (2 × `MAX_ANIMATION_BYTES`), still images
+    under `MAX_IMAGE_BYTES` (256 MiB), and a document's images share
+    `MAX_DOCUMENT_IMAGE_BYTES` (2 GiB, `BaseDocument::image_budget`): past it they stay
+    placeholders.
+  - `layout/table.rs`: `colspan` and `<col span>` count at most `MAX_COLSPAN` (1000, as in
+    HTML), a table has at most `MAX_TABLE_COLUMNS` (8192; cells past it overlap the last
+    column) and `MAX_TABLE_ROW` grid rows (`i16`).
+  - `stylo_taffy/src/convert.rs` (`saturate_px`, `MAX_LENGTH_PX`) and `stylo_to_parley.rs`:
+    lengths, `calc()` and letter/word spacing saturate at `nscoord_MAX`, without NaN.
+  - `layout/inline/layout.rs`: a line's max advance never passes the layout's, which Parley
+    asserts in release too.
+  - `layout/construct.rs` + `layout/mod.rs`: `display:contents` pseudos of tables and text
+    nodes without a wrap context aren't layout children; replaced elements never become
+    tables.
+  - `document.rs` + `layout/paint_tree.rs` + `layout/damage.rs`: freeing a node
+    (`paint_tree_stale`) rebuilds the whole paint tree next frame; stale ids are skipped.
+    `get_selected_text` tolerates offsets older than the text.
+  - `resolve.rs` (`assert_layout_parents_consistent`, debug only): walks the box tree, as a
+    box that became inline keeps its old, unread list.
   - `util.rs` (`parse_svg_image`): an SVG can't read local files; only `data:` images
     resolve, since a device or a UNC path in a message's `<image href>` would block
     the UI or reach the network.

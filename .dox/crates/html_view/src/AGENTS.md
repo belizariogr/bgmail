@@ -77,7 +77,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   selection_color }`: parse options; extra UA CSS goes after Blitz's default
   sheet; `selection_color` is RGBA.
 - `const MAX_NESTING_DEPTH = 256`: deepest nesting `try_parse` accepts.
-- `enum RenderError { TooDeep { depth } }` (+ `Display`, `Error`).
+- `const MAX_MARKUP_TAGS = 2_000_000`: most `<` of a document `try_parse` accepts.
+- `const MAX_TABLE_SPAN_AREA = 2_000_000`: most cells `colspan`/`rowspan`/`<col span>` add.
+- `enum RenderError { TooDeep { depth }, TooComplex }` (+ `Display`, `Error`).
 - `fn nesting_depth(doc, root)` (private): deepest node nesting, iterative.
 - `const DEFAULT_SELECTION_COLOR`: RGBA used when no selection color is given.
 - `fn inline_roots(doc, node_id, out)` (private): inline roots in layout order
@@ -150,7 +152,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
     `document_mode(html)` is `NoQuirks`.
 - `with_depth()` (private): records the tree's nesting depth after parsing.
 - `HtmlDocument::try_parse(html, options) -> Result<Self, RenderError>`:
-  `parse`, then `TooDeep` above `MAX_NESTING_DEPTH`.
+  `TooComplex` above `MAX_MARKUP_TAGS` (before parsing), then `parse`, `TooDeep` above
+  `MAX_NESTING_DEPTH`, and `TooComplex` above `MAX_TABLE_SPAN_AREA` (`table_span_area`).
 - `HtmlDocument::depth()`: element nesting depth.
 - `HtmlDocument::layout(width) -> f32`: returns 0 without resolving a tree
   deeper than the limit; otherwise sets the viewport when the width changes
@@ -299,6 +302,10 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `fn layer_radii(geometry)` (private): radii of a rounded clip.
 - `fn convert_paint(paint, transform, brush_transform)` (private): owned
   `Brush`, folding transforms; resource/custom paints become transparent.
+- `DisplayList::charge(elements)`: takes a shape from `MAX_PATH_ELEMENTS` (8 M, each shape
+  counting at least 4); `fill`/`stroke` drop what no longer fits.
+- `fn should_dash(path, stroke)`: dashes only up to `MAX_DASHES` (16384) per path, finite
+  lengths only (`kurbo::dash` wouldn't return); otherwise the stroke is solid.
 - `fn is_finite_geometry(geometry)`, `fn is_finite_path(path)`: no NaN/∞
   (GPUI's tessellator rejects them).
 - `fn is_polygonal(path)`: only straight segments.
