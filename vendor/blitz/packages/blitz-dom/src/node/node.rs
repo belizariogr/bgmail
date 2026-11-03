@@ -137,6 +137,8 @@ pub struct Node {
     /// Written by the style traversal from the node's new primary style, so that layout
     /// passes can test it without reading styles.
     pub out_of_flow: AtomicBool,
+    /// BGMail: where this node was last found in its parent's children.
+    sibling_hint: std::sync::atomic::AtomicU32,
 
     /// Node type (Element, TextNode, etc) specific data.
     ///
@@ -434,6 +436,7 @@ impl Node {
 
             flags: NodeFlags::empty(),
             out_of_flow: AtomicBool::new(false),
+            sibling_hint: std::sync::atomic::AtomicU32::new(0),
             data,
         }
     }
@@ -1033,6 +1036,26 @@ impl Node {
     // Get the index of the current node in the parents child list
     pub fn index_of_child(&self, child_id: NodeId) -> Option<usize> {
         self.children.iter().position(|id| *id == child_id)
+    }
+
+    /// BGMail: [`Self::child_index`] that remembers where it found each sibling. Checked against
+    /// the list on each use, so a list that changed only costs searching again.
+    pub(crate) fn sibling_index(&self) -> Option<usize> {
+        let siblings = &self.tree().get(self.parent?)?.children;
+        let hint = self.sibling_hint.load(Ordering::Relaxed) as usize;
+        if siblings.get(hint) == Some(&self.id) {
+            return Some(hint);
+        }
+        let mut found = None;
+        for (index, id) in siblings.iter().enumerate() {
+            if let Some(sibling) = self.tree().get(*id) {
+                sibling.sibling_hint.store(index as u32, Ordering::Relaxed);
+            }
+            if *id == self.id {
+                found = Some(index);
+            }
+        }
+        found
     }
 
     // Get the index of the current node in the parents child list

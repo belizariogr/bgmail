@@ -66,6 +66,32 @@ use style_dom::ElementState;
 
 use style::values::computed::text::TextAlign as StyloTextAlign;
 
+thread_local! {
+    /// BGMail: selector steps between siblings this style pass can still take. `regras × N²` of
+    /// them remain possible by the selectors themselves, and past this a selector just doesn't
+    /// match, keeping each pass near a second whatever a message's CSS asks for.
+    static SIBLING_STEPS_LEFT: std::cell::Cell<u64> = const { std::cell::Cell::new(MAX_SIBLING_STEPS) };
+}
+const MAX_SIBLING_STEPS: u64 = 1 << 26;
+
+fn take_sibling_step() -> bool {
+    SIBLING_STEPS_LEFT.with(|left| {
+        let steps = left.get();
+        left.set(steps.saturating_sub(1));
+        steps > 0
+    })
+}
+
+/// BGMail: starts the budget of a style pass.
+pub(crate) fn reset_sibling_steps() {
+    SIBLING_STEPS_LEFT.with(|left| left.set(MAX_SIBLING_STEPS));
+}
+
+/// BGMail: whether the pass ran out, leaving selectors that should have matched unmatched.
+pub(crate) fn sibling_steps_exhausted() -> bool {
+    SIBLING_STEPS_LEFT.with(|left| left.get() == 0)
+}
+
 impl crate::document::BaseDocument {
     pub fn resolve_stylist(&mut self, now: f64) {
         style::thread_state::enter(ThreadState::LAYOUT);
@@ -162,7 +188,12 @@ impl crate::document::BaseDocument {
             });
             let pool_guard = parallel.then(|| STYLE_THREAD_POOL.pool());
             let rayon_pool = pool_guard.as_ref().and_then(|g| g.as_ref());
+            reset_sibling_steps();
             style::driver::traverse_dom(&traverser, token, rayon_pool);
+            // BGMail: a first layout then gives up, so the message opens as text.
+            if sibling_steps_exhausted() && self.layout_deadline.is_some() {
+                self.layout_timed_out = true;
+            }
             nodes_needing_style_image_flush =
                 std::mem::take(traverser.nodes_needing_style_image_flush.get_mut().unwrap());
         }
@@ -336,11 +367,17 @@ impl<'a> TNode for BlitzNode<'a> {
     }
 
     fn prev_sibling(&self) -> Option<Self> {
-        self.backward(1)
+        let index = self.sibling_index()?.checked_sub(1)?;
+        take_sibling_step().then_some(())?;
+        let siblings = &self.tree().get(self.parent?)?.children;
+        self.tree().get(*siblings.get(index)?)
     }
 
     fn next_sibling(&self) -> Option<Self> {
-        self.forward(1)
+        let index = self.sibling_index()? + 1;
+        take_sibling_step().then_some(())?;
+        let siblings = &self.tree().get(self.parent?)?.children;
+        self.tree().get(*siblings.get(index)?)
     }
 
     fn owner_doc(&self) -> Self::ConcreteDocument {
@@ -424,30 +461,27 @@ impl selectors::Element for BlitzNode<'_> {
         matches!(self.data, NodeData::AnonymousBlock(_))
     }
 
-    // These methods are implemented naively since we only threaded real nodes and not fake nodes
-    // we should try and use `find` instead of this foward/backward stuff since its ugly and slow
+    // BGMail: walking the siblings once. Each step searched for this node in its parent's list,
+    // so `x~p` with 8000 siblings took 16 s, before layout could give up.
     fn prev_sibling_element(&self) -> Option<Self> {
-        let mut n = 1;
-        while let Some(node) = self.backward(n) {
-            if node.is_element() {
-                return Some(node);
-            }
-            n += 1;
-        }
-
-        None
+        let index = self.sibling_index()?;
+        let siblings = &self.tree().get(self.parent?)?.children;
+        siblings[..index]
+            .iter()
+            .rev()
+            .take_while(|_| take_sibling_step())
+            .filter_map(|id| self.tree().get(*id))
+            .find(|node| node.is_element())
     }
 
     fn next_sibling_element(&self) -> Option<Self> {
-        let mut n = 1;
-        while let Some(node) = self.forward(n) {
-            if node.is_element() {
-                return Some(node);
-            }
-            n += 1;
-        }
-
-        None
+        let index = self.sibling_index()?;
+        let siblings = &self.tree().get(self.parent?)?.children;
+        siblings[index + 1..]
+            .iter()
+            .take_while(|_| take_sibling_step())
+            .filter_map(|id| self.tree().get(*id))
+            .find(|node| node.is_element())
     }
 
     fn first_element_child(&self) -> Option<Self> {
@@ -947,6 +981,10 @@ impl<'a> TElement for BlitzNode<'a> {
             }
 
             let value = &value[1..];
+            // BGMail: these cuts are by byte; `#日` aborted the app. No such color exists.
+            if !value.is_ascii() {
+                return None;
+            }
             if value.len() == 3 {
                 let r = u8::from_str_radix(&value[0..1], 16).ok()?;
                 let g = u8::from_str_radix(&value[1..2], 16).ok()?;
