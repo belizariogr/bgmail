@@ -423,6 +423,10 @@
       an attached `.eml` is that message rather than the one around it; other renderings
       of a body aren't attachments; ids lose what a header can't carry; `mailto:` keeps
       a quoted name next to an invalid address.
+- ✅ Review round 8: ids keep their spaces, losing only control characters; only known
+      renderings leave the attachments; MIME types kept as plain tokens; text after an
+      unclosed `<head>` and a literal `<` survive `html_to_text`; a long name can't hide
+      `.exe` from `runs_code`; replies keep runs of spaces and the thread's root.
 - ✅ A search gives the mailbox's selection back; a complete typed address beats the
       suggestion on Enter and Tab; the Sent copy records the Bcc (user decisions).
 - ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user
