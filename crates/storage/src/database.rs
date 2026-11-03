@@ -74,6 +74,16 @@ fn keep_private(path: &Path) {
 #[cfg(not(unix))]
 fn keep_private(_: &Path) {}
 
+/// What a new database takes from a damaged one.
+const RECOVERED_TABLES: [&str; 2] = ["accounts", "outbox"];
+
+/// Whether `error` says the database file is damaged.
+pub fn is_corrupt(error: &rusqlite::Error) -> bool {
+    use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
+    matches!(error, rusqlite::Error::SqliteFailure(failure, _)
+        if matches!(failure.code, NotADatabase | DatabaseCorrupt))
+}
+
 impl Database {
     /// Opens (or creates) the database at `path` and applies migrations.
     ///
@@ -95,36 +105,60 @@ impl Database {
         Ok(db)
     }
 
-    /// [`Self::open`] that survives a damaged file: it is kept beside as `<name>.corrupt`, with
-    /// its journals, so it can still be recovered, and a new one starts in its place; the second
-    /// value says so. Aborting would leave the app unable to start, with no message, for good.
-    /// Thunderbird rebuilds its damaged index files the same way. Other errors (a full disk, no
-    /// permission) aren't about the file, which stays untouched.
+    /// [`Self::open`] that survives a damaged file (see [`Self::replace_corrupt`]); the second
+    /// value says it did. Aborting would leave the app unable to start, with no message, for good.
+    /// Other errors (a full disk, no permission) aren't about the file, which stays untouched.
     pub fn open_or_replace_corrupt(path: impl AsRef<Path>) -> rusqlite::Result<(Self, bool)> {
-        use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
         let path = path.as_ref();
         match Self::open(path) {
-            Err(rusqlite::Error::SqliteFailure(error, _))
-                if matches!(error.code, NotADatabase | DatabaseCorrupt) =>
-            {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let free = (0..)
-                    .map(|n| match n {
-                        0 => format!("{name}.corrupt"),
-                        n => format!("{name}.corrupt-{n}"),
-                    })
-                    .find(|kept| !path.with_file_name(kept).exists())
-                    .unwrap_or_default();
-                for suffix in ["", "-wal", "-shm"] {
-                    let _ = std::fs::rename(
-                        path.with_file_name(format!("{name}{suffix}")),
-                        path.with_file_name(format!("{free}{suffix}")),
-                    );
-                }
-                Ok((Self::open(path)?, true))
-            }
+            Err(error) if is_corrupt(&error) => Ok((Self::replace_corrupt(path)?, true)),
             opened => opened.map(|db| (db, false)),
         }
+    }
+
+    /// Keeps a damaged file beside as `<name>.corrupt`, with its journals, and starts a new one with
+    /// what can be read of the accounts and the unsent mail: mail comes back by syncing, and
+    /// these wouldn't. Close the file first. Thunderbird rebuilds damaged indexes the same way,
+    /// keeping accounts apart. Only for what can't be loaded at all: a page lost among the
+    /// messages isn't worth moving everything for.
+    pub fn replace_corrupt(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        let path = path.as_ref();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let kept = (0..)
+            .map(|n| match n {
+                0 => format!("{name}.corrupt"),
+                n => format!("{name}.corrupt-{n}"),
+            })
+            .find(|kept| !path.with_file_name(kept).exists())
+            .unwrap_or_default();
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::rename(
+                path.with_file_name(format!("{name}{suffix}")),
+                path.with_file_name(format!("{kept}{suffix}")),
+            );
+        }
+        let db = Self::open(path)?;
+        db.recover_from(&path.with_file_name(&kept));
+        Ok(db)
+    }
+
+    /// Best effort, table by table: what fails stays out.
+    fn recover_from(&self, kept: &Path) {
+        let attached = self.conn.execute(
+            "ATTACH DATABASE ?1 AS old",
+            [kept.to_string_lossy().as_ref()],
+        );
+        if attached.is_err() {
+            return;
+        }
+        let _ = self.conn.execute_batch("PRAGMA foreign_keys = OFF;");
+        for table in RECOVERED_TABLES {
+            let _ = self.conn.execute_batch(&format!(
+                "INSERT OR IGNORE INTO {table} SELECT * FROM old.{table};"
+            ));
+        }
+        let _ = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
+        let _ = self.conn.execute_batch("DETACH DATABASE old;");
     }
 
     /// Opens the default database path.
@@ -831,5 +865,36 @@ mod tests {
         std::fs::write(&path, vec![b'y'; 4096]).unwrap();
         assert!(Database::open_or_replace_corrupt(&path).unwrap().1);
         assert!(dir.path().join("mail.db.corrupt-1").exists());
+    }
+
+    #[test]
+    fn a_replaced_database_keeps_its_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let db = Database::open(&path).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO accounts (name, email) VALUES ('Ann', 'ann@x.test')",
+                [],
+            )
+            .unwrap();
+        drop(db);
+        let db = Database::replace_corrupt(&path).unwrap();
+        assert_eq!(db.list_accounts().unwrap().len(), 1);
+        assert!(dir.path().join("mail.db.corrupt").exists());
+    }
+
+    #[test]
+    fn only_a_damaged_file_counts_as_corrupt() {
+        let locked = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        );
+        assert!(!is_corrupt(&locked));
+        let damaged = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            None,
+        );
+        assert!(is_corrupt(&damaged));
     }
 }

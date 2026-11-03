@@ -1341,32 +1341,45 @@ impl RootView {
         let crash_guard = CrashGuard::beside(db_path.as_ref());
         let quote_guard = CrashGuard::beside_for_quotes(db_path.as_ref());
         let db_path = db_path.as_ref().to_path_buf();
-        let (db, database_replaced) = storage::Database::open_or_replace_corrupt(&db_path)
+        let (mut db, mut database_replaced) = storage::Database::open_or_replace_corrupt(&db_path)
             .expect("failed to open mail database");
-        if seed {
-            let mut seed_messages = db_seed::seed_messages();
-            if let Some(dir) = std::env::var_os("BGMAIL_SAMPLE_DIR") {
-                seed_messages.extend(db_seed::sample_dir_messages(std::path::Path::new(&dir)));
+        // What the first frame needs. The rest of the app takes errors, but with no accounts or
+        // folders it can't start: a page lost among these is worth starting over, at every start
+        // otherwise.
+        let load = |db: &storage::Database| -> rusqlite::Result<_> {
+            if seed {
+                let mut seed_messages = db_seed::seed_messages();
+                if let Some(dir) = std::env::var_os("BGMAIL_SAMPLE_DIR") {
+                    seed_messages.extend(db_seed::sample_dir_messages(std::path::Path::new(&dir)));
+                }
+                storage::seed_if_empty(db.conn(), &db_seed::seed_accounts(), &seed_messages)?;
             }
-            storage::seed_if_empty(db.conn(), &db_seed::seed_accounts(), &seed_messages)
-                .expect("failed to seed mail database");
-        }
-
-        let accounts = db.list_accounts().expect("failed to load accounts");
-        let mut folders_by_account = HashMap::new();
-        for account in &accounts {
-            folders_by_account.insert(
-                account.id,
-                sidebar_ordered(db.list_folders(account.id).expect("failed to load folders")),
-            );
-        }
+            let accounts = db.list_accounts()?;
+            let mut folders_by_account = HashMap::new();
+            for account in &accounts {
+                folders_by_account
+                    .insert(account.id, sidebar_ordered(db.list_folders(account.id)?));
+            }
+            let list_messages = db.list_messages(&mail_list_query(
+                &Selection::Global(GlobalMailbox::Inbox),
+                "",
+            ))?;
+            Ok((accounts, folders_by_account, list_messages))
+        };
+        let (accounts, folders_by_account, list_messages) = match load(&db) {
+            Err(error) if storage::is_corrupt(&error) => {
+                drop(db);
+                db = storage::Database::replace_corrupt(&db_path)
+                    .expect("failed to open mail database");
+                database_replaced = true;
+                load(&db).expect("failed to load the new mail database")
+            }
+            loaded => loaded.expect("failed to load mail"),
+        };
 
         let onboarding_completed =
             !crate::onboarding::needs_onboarding(settings.onboarding_completed, accounts.len());
         let selected_mailbox = Selection::Global(GlobalMailbox::Inbox);
-        let list_messages = db
-            .list_messages(&mail_list_query(&selected_mailbox, ""))
-            .expect("failed to load messages");
         // Opening a message marks it read, so a real profile starts with no
         // selection; the demo keeps its showcase message open.
         let selected_message_id = seed

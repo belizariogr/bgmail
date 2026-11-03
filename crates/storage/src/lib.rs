@@ -17,7 +17,7 @@ mod test_support;
 mod types;
 
 pub use contacts::Contact;
-pub use database::{database_path, global_folder_path, Database};
+pub use database::{database_path, global_folder_path, is_corrupt, Database};
 pub use folder::{
     folders_csv, is_manual_move_destination_forbidden, is_system_path, system, user_folder_path,
     SYSTEM_PREFIX, USER_PREFIX,
