@@ -1,6 +1,6 @@
 //! Downloaded raw message → what `storage::Database::store_body` keeps.
 
-use mail_core::{inline_images, parse_message, readable_text, referenced_cids};
+use mail_core::{cid_value_len, inline_images, parse_message, readable_text, referenced_cids};
 use storage::{Database, NewAttachment};
 
 /// Upper bound of image bytes inlined as `data:` URIs into one stored HTML
@@ -135,9 +135,13 @@ pub fn inline_cid_images(
     while let Some(found) = lower[pos..].find("cid:") {
         let start = pos + found;
         let value_start = start + "cid:".len();
-        let value_end = html[value_start..]
-            .find(|c: char| matches!(c, '"' | '\'' | ')' | '>') || c.is_whitespace())
-            .map_or(html.len(), |end| value_start + end);
+        let Some(value_len) = cid_value_len(&html[value_start..], |_| false) else {
+            let skipped = value_start + mail_core::cid_skip_len(&html[value_start..]);
+            out.push_str(&html[pos..skipped]);
+            pos = skipped;
+            continue;
+        };
+        let value_end = value_start + value_len;
         let prefix = &lower[..start];
         let prefix = prefix
             .strip_suffix(['"', '\''])

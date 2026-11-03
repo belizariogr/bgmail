@@ -277,18 +277,45 @@ pub fn html_references_cid(html: &str, cid: &str) -> bool {
 /// Every Content-ID the HTML refers to, lowercase. Checking each part against the set
 /// instead of scanning the body per part keeps a message with many parts linear.
 pub fn referenced_cids(html: &str) -> HashSet<String> {
-    let html = html.to_ascii_lowercase();
-    html.match_indices("cid:")
-        .map(|(start, _)| {
-            let rest = &html[start + "cid:".len()..];
-            let end = rest
-                .find(|c: char| {
-                    c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | '&' | ';')
-                })
-                .unwrap_or(rest.len());
-            percent_decoded(&rest[..end])
-        })
-        .collect()
+    // ASCII lowercasing keeps byte offsets identical to `html`.
+    let lower = html.to_ascii_lowercase();
+    let mut cids = HashSet::new();
+    let mut pos = 0;
+    while let Some(found) = lower[pos..].find("cid:") {
+        let start = pos + found + "cid:".len();
+        match cid_value_len(&html[start..], |c| matches!(c, '<' | '&' | ';')) {
+            Some(len) => {
+                cids.insert(percent_decoded(&html[start..start + len]).to_ascii_lowercase());
+                pos = start + len;
+            }
+            None => pos = start + cid_skip_len(&html[start..]),
+        }
+    }
+    cids
+}
+
+/// How much of `rest` to skip when [`cid_value_len`] finds no value: all it looked at, or
+/// a body of nothing but `cid:` would cost that much per marker.
+pub fn cid_skip_len(rest: &str) -> usize {
+    let mut len = MAX_CID_BYTES.min(rest.len());
+    while !rest.is_char_boundary(len) {
+        len -= 1;
+    }
+    len
+}
+
+/// Longest `cid:` value looked for: what a header line can hold.
+const MAX_CID_BYTES: usize = 998;
+
+/// Length of the `cid:` value at the start of `rest`, ending at whitespace, a quote, `)`, `>`
+/// or what `also_ends` takes. `None` if it doesn't end within what a header can hold: copying
+/// up to the end of the body for each `cid:` took gigabytes for 400 KB of them.
+pub fn cid_value_len(rest: &str, also_ends: impl Fn(char) -> bool) -> Option<usize> {
+    rest.char_indices()
+        .take_while(|(at, _)| *at <= MAX_CID_BYTES)
+        .find(|(_, c)| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>') || also_ends(*c))
+        .map(|(at, _)| at)
+        .or((rest.len() <= MAX_CID_BYTES).then_some(rest.len()))
 }
 
 fn percent_decoded(text: &str) -> String {
@@ -964,7 +991,20 @@ amanh=E3.\r\n";
 
     #[test]
     fn referenced_cids_are_lowercase_and_decoded() {
-        let cids = referenced_cids("<img src='CID:A%40b'> <img src=cid:c>");
-        assert!(cids.contains("a@b") && cids.contains("c") && cids.len() == 2);
+        let cids = referenced_cids("<img src='CID:A%40b'> <img src=cid:c> <img src=cid:%41bc>");
+        assert!(cids.contains("a@b") && cids.contains("c") && cids.contains("abc"));
+        assert_eq!(cids.len(), 3);
+    }
+
+    #[test]
+    fn repeated_cid_markers_dont_copy_the_rest_of_the_body() {
+        let html = "cid:".repeat(100_000);
+        let start = std::time::Instant::now();
+        // Only the tail fits a value.
+        assert!(referenced_cids(&html).len() <= 1);
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+        assert_eq!(cid_value_len("abc", |_| false), Some(3));
+        assert_eq!(cid_value_len("abc>d", |_| false), Some(3));
+        assert_eq!(cid_value_len(&"é".repeat(1000), |_| false), None);
     }
 }
