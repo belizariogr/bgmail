@@ -434,10 +434,11 @@ pub(crate) fn build_inline_layout_into(
 }
 
 /// BGMail: the most style spans of an inline context. Parley asserts there are at most
-/// `u16::MAX` styles, also in release, and a long log with a `<br>` per line reaches them.
+/// `u16::MAX` styles, also in release, and a long log with a `<br>` per line reaches them;
+/// a `nowrap` span can take two.
 /// Past this limit an element's text takes the style already open, and a `<br>` stops
 /// breaking the line.
-const MAX_INLINE_SPANS: u32 = 60_000;
+const MAX_INLINE_SPANS: u32 = 30_000;
 
 impl LineHeightQuirk {
     fn take_span(&mut self) -> bool {

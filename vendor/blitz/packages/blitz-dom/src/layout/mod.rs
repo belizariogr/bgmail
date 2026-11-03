@@ -174,6 +174,7 @@ impl LayoutPassState<'_> {
         inputs: taffy::tree::LayoutInput,
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::tree::LayoutOutput {
+        self.layout_visits += 1;
         #[cfg(feature = "writing-mode")]
         {
             self.compute_child_layout_in_own_wm(node_id, inputs, block_ctx)

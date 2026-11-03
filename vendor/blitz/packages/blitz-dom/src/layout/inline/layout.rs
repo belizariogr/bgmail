@@ -34,8 +34,9 @@ use crate::stylo_to_parley;
 /// (e.g. 150.016px in a 150px column) still fits on one line in browsers.
 const LINE_FIT_TOLERANCE: f32 = 1.0 / 32.0;
 
-/// BGMail: the most full layouts a layout pass forces for baselines; see their use.
-const MAX_FORCED_INLINE_LAYOUTS: usize = 100_000;
+/// BGMail: nodes a layout pass may visit and still force full layouts for baselines; see
+/// their use. Counting visits, as one forced layout can hold a table of any size.
+const MAX_LAYOUT_VISITS_FOR_BASELINES: usize = 4_000_000;
 
 fn subtract_margins(mut child_inputs: LayoutInput, margin: taffy::Rect<f32>) -> LayoutInput {
     child_inputs.available_space = child_inputs
@@ -484,8 +485,7 @@ impl LayoutPassState<'_> {
             // A full layout skips Taffy's measure cache, so nested inline tables cost about
             // 4x per level: a 600-byte message froze the app for seconds. Past the budget a
             // box is measured, and may sit on its bottom edge instead of its baseline.
-            if exports_baseline && self.forced_inline_layouts < MAX_FORCED_INLINE_LAYOUTS {
-                self.forced_inline_layouts += 1;
+            if exports_baseline && self.layout_visits < MAX_LAYOUT_VISITS_FOR_BASELINES {
                 box_inputs.run_mode = taffy::RunMode::PerformLayout;
             }
 
