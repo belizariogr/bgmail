@@ -124,9 +124,10 @@ pub enum Appearance {
 /// hostile mail could crash the app. Real mail stays well under 100.
 pub const MAX_NESTING_DEPTH: usize = 256;
 
-/// Most tags (`<`) of a document. Each costs a DOM node with its styles, about 1 KB, and a
-/// message may have 256 MB of them.
-pub const MAX_MARKUP_TAGS: usize = 2_000_000;
+/// Most elements a document can leave open, by a scan that needs no parsing (see
+/// [`has_too_many_open_tags`]). Far past any depth that renders; it only keeps the
+/// quadratic cost of open elements in the sanitizer and the parser from being paid.
+const MAX_OPEN_TAGS: u32 = 16_384;
 
 /// Most table cells that `colspan`, `rowspan` and `<col span>` can add to a document. A few
 /// bytes declare them, and each costs memory in the layout's grid.
@@ -138,7 +139,7 @@ pub enum RenderError {
     /// Elements nest deeper than [`MAX_NESTING_DEPTH`].
     TooDeep { depth: usize },
     /// The document costs too much memory to lay out, whatever its size in bytes: past
-    /// [`MAX_MARKUP_TAGS`] or [`MAX_TABLE_SPAN_AREA`].
+    /// [`blitz_dom::MAX_DOM_NODES`] or [`MAX_TABLE_SPAN_AREA`].
     TooComplex,
 }
 
@@ -434,6 +435,59 @@ fn nesting_depth(doc: &BaseDocument, root: NodeId) -> usize {
     deepest
 }
 
+/// Whether `html` leaves more elements open than any document that renders, by a linear scan
+/// to run before sanitizing and parsing, which are quadratic in them. Counts by tag name, so
+/// closing another tag doesn't hide an open one, and leaves out tags that need no closing.
+/// Tags in comments count too, which can only overstate.
+pub fn has_too_many_open_tags(html: &str) -> bool {
+    const UNCLOSED: &[&str] = &[
+        "area", "base", "br", "caption", "col", "colgroup", "dd", "dt", "embed", "hr", "img",
+        "input", "li", "link", "meta", "optgroup", "option", "p", "param", "rp", "rt", "source",
+        "tbody", "td", "tfoot", "th", "thead", "tr", "track", "wbr",
+    ];
+    let mut open = std::collections::HashMap::new();
+    let mut total = 0u32;
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        rest = &rest[start + 1..];
+        let closing = rest.starts_with('/');
+        let name = rest.trim_start_matches('/');
+        let end = name
+            .find(|c: char| !c.is_ascii_alphanumeric())
+            .unwrap_or(name.len());
+        let name = name[..end].to_ascii_lowercase();
+        if name.is_empty() || UNCLOSED.contains(&name.as_str()) {
+            continue;
+        }
+        let count = open.entry(name).or_insert(0u32);
+        if !closing {
+            *count += 1;
+            total += 1;
+        } else if *count > 0 {
+            *count -= 1;
+            total -= 1;
+        }
+        if total > MAX_OPEN_TAGS {
+            return true;
+        }
+    }
+    false
+}
+
+/// Runs `build` on a thread with the stack [`MAX_NESTING_DEPTH`] assumes. Style and layout
+/// recurse per level, and pool threads have less: 512 KB on macOS, too little for 160 levels.
+pub fn with_render_stack<T: Send>(build: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("bgmail-render".into())
+            .stack_size(8 << 20)
+            .spawn_scoped(scope, build)
+            .expect("the system can't start a thread")
+            .join()
+            .expect("the render thread panicked")
+    })
+}
+
 /// The cells the spans of `doc`'s tables add (see [`MAX_TABLE_SPAN_AREA`]).
 fn table_span_area(doc: &BaseDocument) -> u64 {
     let mut area = 0u64;
@@ -446,6 +500,7 @@ fn table_span_area(doc: &BaseDocument) -> u64 {
         let Some(element) = node.element_data() else {
             continue;
         };
+        // Whatever the element: any can be a cell or a column by its style, unknown here.
         let span = |name: &str| {
             element
                 .attrs()
@@ -455,11 +510,7 @@ fn table_span_area(doc: &BaseDocument) -> u64 {
                 .unwrap_or(1)
                 .clamp(1, u16::MAX as u64)
         };
-        let cells = match &*element.name.local {
-            "td" | "th" => span("colspan") * span("rowspan"),
-            "col" | "colgroup" => span("span"),
-            _ => 1,
-        };
+        let cells = span("colspan") * span("rowspan") * span("span");
         if cells > 1 {
             area += cells;
         }
@@ -821,10 +872,10 @@ impl HtmlDocument {
     /// Like [`Self::parse`], but refuses documents that can't be rendered
     /// safely (see [`RenderError`]).
     pub fn try_parse(html: &str, options: DocumentOptions) -> Result<Self, RenderError> {
-        if html.bytes().filter(|&byte| byte == b'<').count() > MAX_MARKUP_TAGS {
+        let document = Self::parse(html, options);
+        if document.inner.tree().len() >= blitz_dom::MAX_DOM_NODES {
             return Err(RenderError::TooComplex);
         }
-        let document = Self::parse(html, options);
         if document.depth > MAX_NESTING_DEPTH {
             return Err(RenderError::TooDeep {
                 depth: document.depth,
@@ -2844,7 +2895,135 @@ mod hostile_tests {
         assert!(refused(
             &"<table><tr><td colspan=1000>x</table>".repeat(2001)
         ));
-        assert!(refused(&"<".repeat(MAX_MARKUP_TAGS + 1)));
+        // A tag can make hundreds of nodes, by the formatting elements it reopens.
+        assert!(refused(&"<p>x".repeat(300_000)));
+        let formatting: String = (0..240).map(|i| format!("<b a{i}>")).collect();
+        assert!(refused(&format!("<p>{formatting}{}", "<p>x".repeat(3000))));
         assert!(!refused(&"<table><tr><td colspan=2>x</table>".repeat(100)));
+    }
+
+    #[test]
+    fn open_tags_are_counted_without_parsing() {
+        assert!(has_too_many_open_tags(&"<i>".repeat(20_000)));
+        assert!(has_too_many_open_tags(&"<div></b>".repeat(20_000)));
+        // Tags that need no closing, and closed ones, however many.
+        assert!(!has_too_many_open_tags(&"<p>x<br><td>".repeat(20_000)));
+        assert!(!has_too_many_open_tags(&"<span>x</span>".repeat(20_000)));
+        assert!(!has_too_many_open_tags("a < b, é <é"));
+    }
+
+    #[test]
+    fn hover_rules_keep_only_what_paints() {
+        let html = "<style>p:hover{height:300px;display:none;color:red}\
+            @media all{p:is(:hover){--x:1;float:left}}</style><body style=margin:0><p>hello</p>";
+        let mut document = parse(html);
+        let height = document.layout(640.0);
+        let colors =
+            |document: &mut HtmlDocument| format!("{:?}", document.display_list().commands);
+        let before = colors(&mut document);
+        hover(&mut document, 10.0, 20.0);
+        assert_eq!(document.layout(640.0), height);
+        // The color of the rule still applies.
+        assert_ne!(colors(&mut document), before);
+    }
+
+    #[test]
+    fn styles_replaced_under_a_table_context_stay_alive() {
+        // The context keeps `calc()` pointers into styles a restyle replaces: this read freed
+        // memory, and crashed where it landed.
+        for html in [
+            "<style>*:hover{color:red}::after{content:'x'}</style>\
+                <table style=\"width:calc(100% - 1px)\"><tr><td style=\"width:calc(50% - 1px)\">a</table>",
+            "<style>@media(max-width:400px){*{color:red}}::after{content:'x'}</style>\
+                <table style=\"width:calc(100% - 1px)\"><tr><td style=\"width:calc(50% - 1px)\">a</table>",
+        ] {
+            let mut document = parse(html);
+            for _ in 0..20 {
+                hover(&mut document, 8.0, 8.0);
+                document.layout(300.0);
+                document.display_list();
+                hover(&mut document, 500.0, 500.0);
+                document.layout(640.0);
+                document.display_list();
+            }
+        }
+    }
+
+    #[test]
+    fn boxes_freed_by_a_media_query_arent_reached_by_walks_up() {
+        let html = "<style>@media(max-width:400px){a{display:contents}*{display:inline}}\
+            ::after{content:'x'}</style><a href=#>link</a><p>y</p>";
+        let mut document = parse(html);
+        for _ in 0..5 {
+            hover(&mut document, 10.0, 10.0);
+            document.layout(300.0);
+            hover(&mut document, 10.0, 10.0);
+            let _ = document.find("x");
+            document.select_match(0);
+            document.layout(640.0);
+            document.display_list();
+        }
+    }
+
+    #[test]
+    fn a_long_log_with_a_break_per_line_lays_out() {
+        // Parley asserts on more styles than a `u16` holds.
+        parse(&"<br>".repeat(70_000));
+        parse(&"<a>x".repeat(70_000));
+        parse(&format!("<pre>{}", "<b>x</b>".repeat(70_000)));
+    }
+
+    #[test]
+    fn nested_inline_tables_lay_out_in_bounded_time() {
+        let open = "<table style=display:inline-table><tr><td>";
+        let start = std::time::Instant::now();
+        parse(&format!("{}x", open.repeat(60)));
+        assert!(start.elapsed().as_secs() < 30, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn an_exhausted_budget_stops_layers_shadows_and_stops() {
+        let stops = vec!["red"; 1000].join(",");
+        let layers = vec![format!("linear-gradient({stops})"); 100].join(",");
+        let html = format!(
+            "<style>div{{height:1px;background:{layers}}}</style>{}",
+            "<div></div>".repeat(300)
+        );
+        let mut document = parse(&html);
+        let commands = document.display_list().commands.len();
+        assert!(commands < 10_000, "{commands}");
+        let shadows = vec!["0 0 1px red"; 1000].join(",");
+        let html = format!(
+            "<style>div{{height:1px;box-shadow:{shadows}}}</style>{}",
+            "<div></div>".repeat(2000)
+        );
+        let mut document = parse(&html);
+        let commands = document.display_list().commands.len();
+        assert!(commands < 600_000, "{commands}");
+    }
+
+    #[test]
+    fn spaced_tiles_past_the_limit_arent_drawn_one_by_one() {
+        const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg==";
+        let html = format!(
+            "<div style=\"background:url({PNG}) space;width:17000000px;height:17000000px\"></div>"
+        );
+        let mut document = HtmlDocument::parse(
+            &html,
+            DocumentOptions {
+                resources: Resources::new().allow_remote(true),
+                ..Default::default()
+            },
+        );
+        document.prepare(640.0);
+        document.display_list();
+    }
+
+    #[test]
+    fn a_long_word_of_many_styles_is_recorded_in_linear_time() {
+        // Each style's run walked every cluster of the word: 10000 took 3 s, on the UI thread.
+        let start = std::time::Instant::now();
+        parse(&format!("<pre>{}", "<b>x</b>".repeat(50_000)));
+        assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
     }
 }

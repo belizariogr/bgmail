@@ -17,8 +17,8 @@ use gpui::{
     Subscription, Task, WeakEntity, Window, WindowBounds,
 };
 use html_view::{
-    Appearance as PageAppearance, DetachedDocument, DocumentOptions, HtmlDocument, HtmlView,
-    Resources,
+    has_too_many_open_tags, with_render_stack, Appearance as PageAppearance, DetachedDocument,
+    DocumentOptions, HtmlDocument, HtmlView, Resources,
 };
 use mail_core::{Address, Draft, OutgoingAttachment};
 use storage::Contact;
@@ -39,7 +39,7 @@ use crate::app_menus;
 use crate::attachments::{file_family, human_size};
 use crate::crash_guard::CrashGuard;
 use crate::locale::{ActiveLanguage, Key, Language};
-use crate::root::RootView;
+use crate::root::{clipped_text, RootView};
 
 /// Default width of the compose window on first open, in pixels.
 pub const COMPOSE_DEFAULT_WIDTH: f32 = 790.0;
@@ -493,36 +493,43 @@ impl ComposeView {
                 accent: theme.accent,
             }
         };
+        // Dropped first: the guard it replaces clears the marker of the same message.
+        self._quote_guard = None;
         self._quote_guard = quoted.render_guard.clone().map(|(guard, id)| {
             guard.begin(id);
             QuoteGuard(guard, id)
         });
         let build = cx.background_spawn(async move {
-            let text = MessageBody::Text(quoted.block.into());
-            let body = if quoted.render_guard.is_some() {
-                MessageBody::Html(quoted.html.into())
-            } else {
-                text.clone()
-            };
-            let rendered = email_document(colors, &body, quoted.load_remote);
-            let options = || DocumentOptions {
-                appearance: if colors.is_dark() {
-                    PageAppearance::Dark
+            with_render_stack(move || {
+                // Text costs the same as in the reader, so it is clipped the same way.
+                let block = clipped_text(&quoted.block).unwrap_or(&quoted.block);
+                let text = MessageBody::Text(block.to_string().into());
+                let body = if quoted.render_guard.is_some() && !has_too_many_open_tags(&quoted.html)
+                {
+                    MessageBody::Html(quoted.html.into())
                 } else {
-                    PageAppearance::Light
-                },
-                resources: Resources::new().allow_remote(quoted.load_remote),
-                dark_page: colors.dark_page(),
-                ..Default::default()
-            };
-            // What the reader would refuse shows as text here too.
-            let mut document =
-                HtmlDocument::try_parse(&rendered.html, options()).unwrap_or_else(|_| {
-                    let fallback = email_document(colors, &text, false);
-                    HtmlDocument::parse(&fallback.html, options())
-                });
-            document.prepare(QUOTE_FIRST_LAYOUT_WIDTH);
-            DetachedDocument::new(document)
+                    text.clone()
+                };
+                let rendered = email_document(colors, &body, quoted.load_remote);
+                let options = || DocumentOptions {
+                    appearance: if colors.is_dark() {
+                        PageAppearance::Dark
+                    } else {
+                        PageAppearance::Light
+                    },
+                    resources: Resources::new().allow_remote(quoted.load_remote),
+                    dark_page: colors.dark_page(),
+                    ..Default::default()
+                };
+                // What the reader would refuse shows as text here too.
+                let mut document = HtmlDocument::try_parse(&rendered.html, options())
+                    .unwrap_or_else(|_| {
+                        let fallback = email_document(colors, &text, false);
+                        HtmlDocument::parse(&fallback.html, options())
+                    });
+                document.prepare(QUOTE_FIRST_LAYOUT_WIDTH);
+                DetachedDocument::new(document)
+            })
         });
         self._quote_task = Some(cx.spawn(async move |this, cx| {
             let document = build.await;

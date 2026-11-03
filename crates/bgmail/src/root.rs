@@ -52,8 +52,8 @@ use crate::mail_service::{self, MailService, OverallStatus, StartError};
 use crate::settings::SettingsView;
 use crate::shortcuts;
 use html_view::{
-    Appearance as PageAppearance, DetachedDocument, DocumentOptions, HitInfo, HtmlDocument,
-    HtmlView, HtmlViewEvent, RenderError,
+    has_too_many_open_tags, Appearance as PageAppearance, DetachedDocument, DocumentOptions,
+    HitInfo, HtmlDocument, HtmlView, HtmlViewEvent, RenderError,
 };
 use mail_core::{AccountConfig, Address, Draft, ParsedMessage, QuoteLabels, ReplyKind};
 use mail_sync::{actions as mail_actions, ActionOutcome, Command, SyncEvent};
@@ -606,6 +606,27 @@ struct ReaderSignature {
 /// avoids flashing the placeholder at every message.
 const BACKGROUND_BUILD_BYTES: usize = 256 * 1024;
 
+/// Most of a plain-text body the reader shows. Text costs over 100 times its size to lay
+/// out, and a body can have 256 MB. Gmail clips bodies at about 102 KB; Thunderbird shows
+/// everything and hangs for minutes. Replying and forwarding use the whole body.
+const MAX_SHOWN_TEXT_BYTES: usize = 2 << 20;
+
+/// What the reader shows of a plain-text body: up to the last line that fits, or to the
+/// limit if a single line passes it. `None` when it all fits.
+pub(crate) fn clipped_text(text: &str) -> Option<&str> {
+    if text.len() <= MAX_SHOWN_TEXT_BYTES {
+        return None;
+    }
+    let mut end = MAX_SHOWN_TEXT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(match text[..end].rfind('\n') {
+        Some(line_end) => &text[..line_end],
+        None => &text[..end],
+    })
+}
+
 /// Everything a reader document is made from, so it can be built on any thread.
 struct ReaderJob {
     colors: DocumentColors,
@@ -626,7 +647,8 @@ struct BuiltReader {
 
 impl ReaderJob {
     fn runs_in_background(&self) -> bool {
-        matches!(&self.body, MessageBody::Html(html) if html.len() >= BACKGROUND_BUILD_BYTES)
+        let (MessageBody::Html(body) | MessageBody::Text(body)) = &self.body;
+        body.len() >= BACKGROUND_BUILD_BYTES
     }
 
     /// Sanitizes, themes, parses and lays out the body. A message that crashed
@@ -647,19 +669,36 @@ impl ReaderJob {
             MessageBody::Html(html) => MessageBody::Text(plain_text(html).into()),
             text => text.clone(),
         };
-        let mut notice = (self.crashed && matches!(self.body, MessageBody::Html(_)))
-            .then_some(ReaderNotice::Crashed);
-        let shown = if notice.is_some() {
-            as_plain()
-        } else {
-            self.body.clone()
+        // True when the text had to be clipped; the message then says so, unless it already
+        // explains why this is text at all.
+        let clip = |body: MessageBody| match &body {
+            MessageBody::Text(text) => match clipped_text(text) {
+                Some(shown) => (MessageBody::Text(shown.to_string().into()), true),
+                None => (body, false),
+            },
+            MessageBody::Html(_) => (body, false),
         };
+        let too_many_tags =
+            matches!(&self.body, MessageBody::Html(html) if has_too_many_open_tags(html));
+        let mut notice = match (&self.body, self.crashed, too_many_tags) {
+            (MessageBody::Html(_), true, _) => Some(ReaderNotice::Crashed),
+            (_, _, true) => Some(ReaderNotice::Unrenderable),
+            _ => None,
+        };
+        let (shown, clipped) = if notice.is_some() {
+            clip(as_plain())
+        } else {
+            clip(self.body.clone())
+        };
+        if clipped && notice.is_none() {
+            notice = Some(ReaderNotice::Clipped);
+        }
         let rendered = email_document(self.colors, &shown, self.remote);
         let mut document = match HtmlDocument::try_parse(&rendered.html, options()) {
             Ok(document) => document,
             Err(RenderError::TooDeep { .. } | RenderError::TooComplex) => {
                 notice = Some(ReaderNotice::Unrenderable);
-                let fallback = email_document(self.colors, &as_plain(), false);
+                let fallback = email_document(self.colors, &clip(as_plain()).0, false);
                 HtmlDocument::parse(&fallback.html, options())
             }
         };
@@ -681,6 +720,8 @@ impl ReaderJob {
 enum ReaderNotice {
     /// The renderer refused it (`RenderError`).
     Unrenderable,
+    /// It is plain text too long to show whole (see [`MAX_SHOWN_TEXT_BYTES`]).
+    Clipped,
     /// The app closed while rendering it last time (see [`CrashGuard`]).
     Crashed,
 }
@@ -3689,7 +3730,8 @@ impl RootView {
         self.reader_notice = None;
         self.content_blocked_count = 0;
         let token = self.reader_build_token;
-        let built = cx.background_spawn(async move { job.build() });
+        let built =
+            cx.background_spawn(async move { html_view::with_render_stack(|| job.build()) });
         cx.spawn_in(window, async move |this, cx| {
             let built = built.await;
             this.update_in(cx, |this, _, cx| {
@@ -3748,6 +3790,7 @@ impl RootView {
         let language = cx.language();
         let text = match notice {
             ReaderNotice::Unrenderable => Key::NoticeTooDeep,
+            ReaderNotice::Clipped => Key::NoticeClipped,
             ReaderNotice::Crashed => Key::NoticeCrashed,
         }
         .tr(language);
@@ -4137,6 +4180,8 @@ impl RootView {
         let quoted_html = parsed
             .html
             .as_deref()
+            // Sanitizing it would freeze the window (see `has_too_many_open_tags`).
+            .filter(|html| !has_too_many_open_tags(html))
             .map(quotable_html)
             .or_else(|| parsed.text.as_deref().map(quotable_text))
             .filter(|html| kind != ReplyKind::Forward && !html.trim().is_empty());
@@ -7385,13 +7430,13 @@ mod tests {
     }
 
     #[test]
-    fn only_large_html_is_built_in_the_background() {
+    fn only_large_bodies_are_built_in_the_background() {
         assert!(!job("<p>small</p>", false).runs_in_background());
         let large = "x".repeat(BACKGROUND_BUILD_BYTES);
         assert!(job(&large, false).runs_in_background());
         let mut text = job("", false);
         text.body = MessageBody::Text(large.into());
-        assert!(!text.runs_in_background());
+        assert!(text.runs_in_background());
     }
 
     #[test]

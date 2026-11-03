@@ -169,6 +169,7 @@ pub enum Key {
     // Reader: plain-text fallback notices.
     NoticeTooDeep,
     NoticeCrashed,
+    NoticeClipped,
     StatusBodyFailed,
     StatusBodyRejected,
     ComposeBodyTooLarge,
@@ -554,6 +555,8 @@ impl Key {
             (FindNoMatches, P) => "Nenhum resultado",
             (NoticeTooDeep, E) => "This message couldn't be displayed formatted, so it is shown as plain text.",
             (NoticeTooDeep, P) => "Não foi possível exibir esta mensagem formatada, por isso ela é exibida como texto simples.",
+            (NoticeClipped, E) => "This message is too long to show whole, so only its beginning is shown.",
+            (NoticeClipped, P) => "Esta mensagem é longa demais para ser exibida inteira, por isso só o início é exibido.",
             (NoticeCrashed, E) => "BGMail closed while showing this message, so it is shown as plain text.",
             (NoticeCrashed, P) => "O BGMail fechou ao exibir esta mensagem, por isso ela é exibida como texto simples.",
             (StatusBodyFailed, E) => "Could not download the message",
@@ -1047,7 +1050,7 @@ mod tests {
         assert_eq!(Language::from_code(""), Language::default());
     }
 
-    const ALL_KEYS: [Key; 252] = [
+    const ALL_KEYS: [Key; 253] = [
         Key::ViewZoomIn,
         Key::ViewZoomOut,
         Key::ViewZoomReset,
@@ -1141,6 +1144,7 @@ mod tests {
         Key::FindNoMatches,
         Key::NoticeTooDeep,
         Key::NoticeCrashed,
+        Key::NoticeClipped,
         Key::CommandPrint,
         Key::PrintFrom,
         Key::PrintDate,

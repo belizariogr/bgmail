@@ -21,8 +21,8 @@ pub mod text;
 pub use contrast::DarkPage;
 pub use display_list::DisplayList;
 pub use document::{
-    Appearance, DetachedDocument, DocumentMode, DocumentOptions, HtmlDocument, RenderError,
-    DEFAULT_SELECTION_COLOR, MAX_NESTING_DEPTH,
+    has_too_many_open_tags, with_render_stack, Appearance, DetachedDocument, DocumentMode,
+    DocumentOptions, HtmlDocument, RenderError, DEFAULT_SELECTION_COLOR, MAX_NESTING_DEPTH,
 };
 pub use element::{init, HtmlElement, HtmlView, HtmlViewEvent};
 pub use interaction::{HitInfo, PointerButton, PointerInput, PointerModifiers, PointerPhase};
