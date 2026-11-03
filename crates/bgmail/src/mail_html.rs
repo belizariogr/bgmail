@@ -553,6 +553,12 @@ fn neutralize_attributes(
     load_remote: bool,
     shown: &HashSet<String>,
 ) -> Option<bool> {
+    // Removing them by name is quadratic in lol_html: 300000 took 89 s, on the UI thread when
+    // replying. No such tag is meant to be read.
+    if el.attributes().len() > html_view::MAX_TAG_ATTRIBUTES {
+        el.remove_and_keep_content();
+        return None;
+    }
     let is_img = el.tag_name() == "img";
     let is_svg_image = matches!(el.tag_name().as_str(), "image" | "feimage");
     // `attributes()` borrows the element, so collect everything we need first and

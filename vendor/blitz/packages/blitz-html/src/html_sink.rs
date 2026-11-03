@@ -381,8 +381,11 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     }
 
     fn add_attrs_if_missing(&self, target: &Self::Handle, attrs: Vec<html5ever::Attribute>) {
-        let attrs = attrs.into_iter().map(html5ever_to_blitz_attr).collect();
-        self.mutr().add_attrs_if_missing(*target, attrs);
+        let bytes = attrs.iter().map(|attr| attr.value.len()).sum();
+        if self.budget.take_markup(bytes) {
+            let attrs = attrs.into_iter().map(html5ever_to_blitz_attr).collect();
+            self.mutr().add_attrs_if_missing(*target, attrs);
+        }
     }
 
     fn remove_from_parent(&self, target: &Self::Handle) {

@@ -128,7 +128,7 @@ pub const MAX_NESTING_DEPTH: usize = 256;
 /// (see [`has_too_many_tags`]). The sanitizer has a stack entry per tag, about 30 KB per 1000,
 /// and removing attributes and rejecting duplicates are quadratic in a tag's.
 const MAX_OPENING_TAGS: usize = 500_000;
-const MAX_TAG_ATTRIBUTES: usize = 1024;
+pub const MAX_TAG_ATTRIBUTES: usize = 1024;
 
 /// Most table cells that `colspan`, `rowspan` and `<col span>` can add to a document. A few
 /// bytes declare them, and each costs memory in the layout's grid.
@@ -438,38 +438,72 @@ fn nesting_depth(doc: &BaseDocument, root: NodeId) -> usize {
 
 /// Whether `html` has more tags, or a tag more attributes, than hosts should sanitize and parse:
 /// a linear scan to run before both. Limits on nesting and text are the parser's, as only it
-/// knows them.
+/// knows them. Quotes count as the tokenizer counts them, only after a `=`, or `<a ">` would hide
+/// the rest of the message from the scan.
 pub fn has_too_many_tags(html: &str) -> bool {
+    enum State {
+        BeforeName,
+        Name,
+        AfterName,
+        BeforeValue,
+        Quoted(u8),
+        Unquoted,
+    }
     let bytes = html.as_bytes();
     let mut tags = 0;
     let mut at = 0;
     while let Some(found) = bytes[at..].iter().position(|&byte| byte == b'<') {
         at += found + 1;
-        if !bytes.get(at).is_some_and(u8::is_ascii_alphabetic) {
+        if bytes[at..].starts_with(b"!--") {
+            // Past `!` too, as `<!-->` is a whole comment.
+            match html[at + 1..].find("-->") {
+                Some(end) => at += 1 + end + 3,
+                None => return false,
+            }
+            continue;
+        }
+        let name_at = at + usize::from(bytes.get(at) == Some(&b'/'));
+        if !bytes.get(name_at).is_some_and(u8::is_ascii_alphabetic) {
             continue;
         }
         tags += 1;
         if tags > MAX_OPENING_TAGS {
             return true;
         }
+        at = name_at;
+        while bytes
+            .get(at)
+            .is_some_and(|&byte| !byte.is_ascii_whitespace() && byte != b'/' && byte != b'>')
+        {
+            at += 1;
+        }
         // To the end of the tag, where the next one is looked for, or `<a <a <a...` would scan
         // the rest of the message for each.
         let mut attributes = 0;
-        let mut quote = None;
-        let mut in_space = false;
+        let mut state = State::BeforeName;
         while let Some(&byte) = bytes.get(at) {
             at += 1;
-            match quote {
-                Some(open) if byte == open => quote = None,
-                Some(_) => {}
-                None if byte == b'>' => break,
-                None if byte == b'"' || byte == b'\'' => quote = Some(byte),
-                None if byte.is_ascii_whitespace() => in_space = true,
-                None => {
-                    attributes += usize::from(in_space);
-                    in_space = false;
+            let space = byte.is_ascii_whitespace();
+            state = match state {
+                State::Quoted(quote) if byte == quote => State::BeforeName,
+                State::Quoted(quote) => State::Quoted(quote),
+                _ if byte == b'>' => break,
+                State::BeforeName | State::AfterName if space => state,
+                State::BeforeName if byte == b'/' => state,
+                State::Name | State::AfterName if byte == b'/' => State::BeforeName,
+                State::Name | State::AfterName if byte == b'=' => State::BeforeValue,
+                State::Name if space => State::AfterName,
+                State::Name => State::Name,
+                State::BeforeName | State::AfterName => {
+                    attributes += 1;
+                    State::Name
                 }
-            }
+                State::BeforeValue if space => state,
+                State::BeforeValue if byte == b'"' || byte == b'\'' => State::Quoted(byte),
+                State::BeforeValue => State::Unquoted,
+                State::Unquoted if space => State::BeforeName,
+                State::Unquoted => State::Unquoted,
+            };
             if attributes > MAX_TAG_ATTRIBUTES {
                 return true;
             }
@@ -2916,11 +2950,25 @@ mod hostile_tests {
         // In a quote it's one value, and no tag is found in text.
         assert!(!has_too_many_tags(&format!("<p a=\"{attributes}\">")));
         assert!(!has_too_many_tags("a < b, é <é <"));
+        // Quotes only count after a `=`, so a stray one hides nothing.
+        assert!(has_too_many_tags(&format!(
+            "<a \">{}",
+            "<i>".repeat(MAX_OPENING_TAGS + 1)
+        )));
+        assert!(has_too_many_tags(&format!("<a \"><p{attributes}>")));
+        // End tags count, and comments are skipped, whatever they hold.
+        assert!(has_too_many_tags(&format!("<p></p{attributes}>")));
+        assert!(has_too_many_tags(&format!(
+            "<!-- <a b=\" --><p{attributes}>"
+        )));
+        assert!(has_too_many_tags(&format!("<!--><p{attributes}>")));
+        assert!(has_too_many_tags(&"</i>".repeat(MAX_OPENING_TAGS + 1)));
+        assert!(!has_too_many_tags("<!-- never closed <p>"));
         // Linear on tags that never end.
         let start = std::time::Instant::now();
         assert!(has_too_many_tags(&"<a ".repeat(1_000_000)));
         assert!(!has_too_many_tags(&format!(
-            "<a \"{}",
+            "<a b=\"{}",
             "<a ".repeat(1_000_000)
         )));
         assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
@@ -3108,5 +3156,69 @@ mod hostile_tests {
         let start = std::time::Instant::now();
         parse(&format!("<pre>{}", "<b>x</b>".repeat(50_000)));
         assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_hidden_box_doesnt_run_the_layout_it_had_when_shown() {
+        // Its `img` has lost its styles by then, and this used to abort.
+        for html in [
+            "<style>@media(min-width:601px){summary{display:inline}}</style>\
+                <details open><summary>s</summary><div><img></div></details>",
+            "<style>@media(max-width:600px){summary{display:inline-block}}</style>\
+                <details open><summary>s</summary><div><span style=display:inline-block>x</span></div></details>",
+        ] {
+            let mut document = parse(html);
+            for (x, y) in [(5.0, 5.0), (20.0, 12.0), (8.0, 8.0)] {
+                drag(&mut document, x, y);
+                document.layout(300.0);
+                document.display_list();
+                drag(&mut document, x, y);
+                document.layout(640.0);
+                document.display_list();
+            }
+        }
+    }
+
+    fn drag(document: &mut HtmlDocument, x: f32, y: f32) {
+        for (phase, pressed) in [
+            (PointerPhase::Down { click_count: 1 }, true),
+            (PointerPhase::Up, false),
+        ] {
+            document.pointer(PointerInput {
+                x,
+                y,
+                phase,
+                button: PointerButton::Primary,
+                primary_pressed: pressed,
+                modifiers: Default::default(),
+            });
+        }
+    }
+
+    #[test]
+    fn huge_radii_dont_make_huge_paths() {
+        let start = std::time::Instant::now();
+        let text = "a ".repeat(1000);
+        parse(&format!(
+            "<p style=\"text-decoration:line-through dotted;font-size:calc(1px*infinity)\">{text}"
+        ));
+        parse(
+            &"<div style=\"clip-path:circle(1e30px);width:9px;height:9px;background:red\"></div>"
+                .repeat(3000),
+        );
+        parse(
+            &"<div style=\"clip-path:ellipse(1e30px 1e30px);width:9px;height:9px\"></div>"
+                .repeat(3000),
+        );
+        assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn merged_root_attributes_are_bounded() {
+        let html: String = (0..20_000).map(|i| format!("<html a{i}>")).collect();
+        let start = std::time::Instant::now();
+        let document = HtmlDocument::try_parse(&html, DocumentOptions::default());
+        assert!(document.is_ok());
+        assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
     }
 }
