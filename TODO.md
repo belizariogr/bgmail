@@ -439,6 +439,11 @@
       line break are only found in newer mail (rebuilding needs a background pass).
 - ✅ A folder gets a system role by name only at the top, under `INBOX` or under Gmail's
       own folder; an action with no folder to go to says so (user decisions).
+- ✅ Review round 10: an unreadable last message no longer leaves the account offline;
+      a hostile font can't multiply in memory; other shortcuts on messages only act from
+      the main window; discovery keeps its login; IME selection stays inside the text;
+      pasting cleans line breaks; single-line fields scroll and clip; `EHLO` doesn't
+      send the machine's name, as Thunderbird (decided from its behavior).
 - ✅ A search gives the mailbox's selection back; a complete typed address beats the
       suggestion on Enter and Tab; the Sent copy records the Bcc (user decisions).
 - ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user

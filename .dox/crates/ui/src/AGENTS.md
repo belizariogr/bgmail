@@ -912,6 +912,7 @@ _300 functions/methods documented._
     masked). Used by caret/selection painting, mouse hit-testing and the IME
     `bounds_for_range` / `character_index_for_point`.
 
+- **`scrolled_to_caret`** (private, `text_input`): the horizontal scroll that keeps the caret in view; the field also clips to its bounds, and paste turns line breaks into spaces (removes them when masked).
 - **`placeholder`** (pub) — `pub fn placeholder(&self) -> &SharedString`: the current placeholder.
 
 - **`set_placeholder`** (pub, L235)

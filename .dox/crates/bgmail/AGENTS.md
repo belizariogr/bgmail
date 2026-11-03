@@ -59,8 +59,8 @@ wiring to `storage`.
 - The UI language persists as `Config::language` (`Language::code`, a string so an
   unknown value loses only the language). Change it through `RootView::set_language`,
   from Settings or the first-run welcome step (`settings::language_picker`).
-- The delete shortcut only acts from the main window and never in a text field
-  (`shortcuts`, `NoAction` in `TextInput`/`TextArea`).
+- Commands on messages only act from the main window (`schedule_message_command`), and
+  the delete shortcut never from a text field (`NoAction` in `TextInput`/`TextArea`).
 - Recipients (user decision): Enter and Tab take a complete typed address (with a dot
   in the domain) over the highlighted suggestion; picking one with the arrows still
   wins.
