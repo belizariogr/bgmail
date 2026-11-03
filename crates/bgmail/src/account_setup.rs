@@ -266,6 +266,7 @@ pub(crate) fn error_key(kind: RemoteErrorKind, oauth: bool, user_cancelled: bool
         RemoteErrorKind::Protocol
         | RemoteErrorKind::NotFound
         | RemoteErrorKind::Unsupported
+        | RemoteErrorKind::Unreadable
         | RemoteErrorKind::Other => Key::AccountErrUnexpected,
     })
 }

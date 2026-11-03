@@ -24,6 +24,9 @@ pub enum RemoteErrorKind {
     NotFound,
     Unsupported,
     Cancelled,
+    /// The server's answer couldn't be parsed. The session can't be used any more, since
+    /// the rest of that answer is unread, but this message may fetch fine another way.
+    Unreadable,
     Other,
 }
 
@@ -38,6 +41,7 @@ impl RemoteErrorKind {
             Self::NotFound => "not found",
             Self::Unsupported => "unsupported",
             Self::Cancelled => "cancelled",
+            Self::Unreadable => "unreadable",
             Self::Other => "other",
         }
     }
@@ -135,6 +139,16 @@ pub trait MailRemote: Send {
     fn uids(&mut self, folder: &str) -> RemoteResult<Vec<u32>>;
     /// Unknown UIDs are skipped, not errors (they may have been expunged).
     fn fetch_headers(&mut self, folder: &str, uids: &[u32]) -> RemoteResult<Vec<RemoteHeader>>;
+
+    /// [`Self::fetch_headers`] without the message structure (`has_attachments` stays
+    /// `None`), for when that is what the server's answer can't be parsed for.
+    fn fetch_headers_plain(
+        &mut self,
+        folder: &str,
+        uids: &[u32],
+    ) -> RemoteResult<Vec<RemoteHeader>> {
+        self.fetch_headers(folder, uids)
+    }
     /// With `changed_since` (CONDSTORE), only messages whose modseq is greater.
     fn fetch_flags(
         &mut self,
@@ -268,7 +282,8 @@ impl From<RemoteError> for SendError {
             RemoteErrorKind::Auth
             | RemoteErrorKind::Network
             | RemoteErrorKind::Tls
-            | RemoteErrorKind::Cancelled => Self::transient(error),
+            | RemoteErrorKind::Cancelled
+            | RemoteErrorKind::Unreadable => Self::transient(error),
             RemoteErrorKind::Protocol
             | RemoteErrorKind::NotFound
             | RemoteErrorKind::Unsupported

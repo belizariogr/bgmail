@@ -222,6 +222,14 @@ impl FakeRemote {
 
     /// Creates `name` (no-op if it exists). `attributes` are LIST flags such
     /// as `\Sent`; returns the folder's UIDVALIDITY.
+    /// Removes a folder, as if deleted elsewhere; `false` if there was none.
+    pub fn remove_folder(&self, name: &str) -> bool {
+        let mut state = self.lock();
+        let before = state.folders.len();
+        state.folders.retain(|folder| folder.name != name);
+        state.folders.len() != before
+    }
+
     pub fn add_folder(&self, name: &str, attributes: &[&str]) -> u32 {
         let mut state = self.lock();
         if let Ok(folder) = state.folder(name) {
@@ -412,6 +420,15 @@ impl MailRemote for FakeRemote {
     fn uids(&mut self, folder: &str) -> RemoteResult<Vec<u32>> {
         let state = self.enter(format!("uids {folder}"))?;
         Ok(state.folder(folder)?.messages.keys().copied().collect())
+    }
+
+    fn fetch_headers_plain(
+        &mut self,
+        folder: &str,
+        uids: &[u32],
+    ) -> RemoteResult<Vec<RemoteHeader>> {
+        drop(self.enter(format!("fetch_headers_plain {folder} {}", uid_list(uids)))?);
+        self.fetch_headers(folder, uids)
     }
 
     fn fetch_headers(&mut self, folder: &str, uids: &[u32]) -> RemoteResult<Vec<RemoteHeader>> {

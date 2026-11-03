@@ -401,6 +401,35 @@ impl MailRemote for ImapRemote {
         Ok(out)
     }
 
+    fn fetch_headers_plain(
+        &mut self,
+        folder: &str,
+        uids: &[u32],
+    ) -> RemoteResult<Vec<RemoteHeader>> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_selected(folder)?;
+        let wanted: HashSet<u32> = uids.iter().copied().collect();
+        let items = header_items(&self.capabilities).replace(" BODYSTRUCTURE", "");
+        let mut out = Vec::new();
+        for set in uid_chunks(uids, HEADER_CHUNK) {
+            let data = self.run(&format!("UID FETCH {set} ({items})"))?;
+            out.extend(
+                parse_responses(&data)
+                    .into_iter()
+                    .filter_map(|response| match response {
+                        Response::Fetch(_, attrs) => header_from_attributes(&attrs),
+                        _ => None,
+                    })
+                    .filter(|header| wanted.contains(&header.uid)),
+            );
+        }
+        out.sort_by_key(|header| header.uid);
+        out.dedup_by_key(|header| header.uid);
+        Ok(out)
+    }
+
     fn fetch_flags(
         &mut self,
         folder: &str,
@@ -884,6 +913,10 @@ pub fn map_error(err: imap::Error) -> RemoteError {
             RemoteError::new(kind, no.information)
         }
         E::Bad(bad) => RemoteError::new(RemoteErrorKind::Protocol, bad.information),
+        E::Bye(bye) if is_parse_failure(&bye.information) => RemoteError::new(
+            RemoteErrorKind::Unreadable,
+            "unreadable answer from the server",
+        ),
         E::Bye(bye) => RemoteError::new(
             RemoteErrorKind::Network,
             format!("server closed the connection: {}", bye.information),
@@ -892,6 +925,13 @@ pub fn map_error(err: imap::Error) -> RemoteError {
         E::Validate(err) => RemoteError::new(RemoteErrorKind::Other, err.to_string()),
         other => RemoteError::new(RemoteErrorKind::Protocol, other.to_string()),
     }
+}
+
+/// Whether a `Bye` from the client is really an answer it couldn't parse: that is how it
+/// reports one, with no text. A real one is untagged and ignored, showing up as a lost
+/// connection instead.
+fn is_parse_failure(information: &str) -> bool {
+    information == "no explanation given"
 }
 
 /// Kind of a `NO` answer: `[TRYCREATE]` or a "no such mailbox"-style text
@@ -1040,6 +1080,31 @@ pub(crate) mod test_server {
 mod tests {
     use super::test_server::{start, Step};
     use super::*;
+
+    #[test]
+    fn an_answer_the_client_cannot_parse_is_told_from_a_closed_connection() {
+        assert!(is_parse_failure("no explanation given"));
+        assert!(!is_parse_failure("shutting down"));
+    }
+
+    #[test]
+    fn plain_headers_leave_the_structure_out() {
+        let (mut remote, handle) = session(
+            FULL_CAPS,
+            vec![
+                ("SELECT \"INBOX\" (CONDSTORE)", "* OK [UIDVALIDITY 1] x\r\n{tag} OK done\r\n"),
+                (
+                    "UID FETCH 1 (UID FLAGS RFC822.SIZE BODY.PEEK[HEADER] X-GM-MSGID X-GM-THRID MODSEQ)",
+                    "* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 4 BODY[HEADER] {4}\r\nX: y)\r\n{tag} OK done\r\n",
+                ),
+                ("LOGOUT", "{tag} OK bye\r\n"),
+            ],
+        );
+        let headers = remote.fetch_headers_plain("INBOX", &[1]).unwrap();
+        assert_eq!(headers[0].uid, 1);
+        assert_eq!(headers[0].has_attachments, None);
+        finish(remote, handle);
+    }
 
     #[test]
     fn a_passing_login_refusal_is_not_a_verdict_on_the_password() {
