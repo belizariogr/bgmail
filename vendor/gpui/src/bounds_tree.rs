@@ -5,6 +5,9 @@ use std::{
     ops::{Add, Sub},
 };
 
+/// BGMail: how much taller than its sibling a node can be before rotating.
+const MAX_HEIGHT_DIFFERENCE: u32 = 16;
+
 #[derive(Debug)]
 pub(crate) struct BoundsTree<U>
 where
@@ -111,21 +114,79 @@ where
             self.root = Some(new_parent);
         }
 
-        for node_index in self.stack.drain(..).rev() {
-            let Node::Internal {
-                max_order: max_ordering,
-                ..
-            } = &mut self.nodes[node_index]
-            else {
-                unreachable!()
-            };
-            if *max_ordering >= ordering {
-                break;
-            }
-            *max_ordering = ordering;
+        // BGMail: balanced on the way up. Without this, boxes that stack or shrink made a list as
+        // deep as they are many, walked on each insert and recursively: 85000 of them took 16 s
+        // per frame. Orders come from the search, so this doesn't change what draws over what.
+        while let Some(node_index) = self.stack.pop() {
+            self.refresh_internal(node_index);
+            self.balance(node_index);
         }
 
         ordering
+    }
+
+    /// Recomputes what an internal node keeps about its children.
+    fn refresh_internal(&mut self, index: usize) {
+        let Node::Internal { left, right, .. } = self.nodes[index] else {
+            return;
+        };
+        let (left, right) = (&self.nodes[left], &self.nodes[right]);
+        let new_bounds = left.bounds().union(right.bounds());
+        let new_order = cmp::max(left.max_ordering(), right.max_ordering());
+        let new_height = 1 + cmp::max(left.height(), right.height());
+        if let Node::Internal {
+            bounds,
+            max_order,
+            height,
+            ..
+        } = &mut self.nodes[index]
+        {
+            *bounds = new_bounds;
+            *max_order = new_order;
+            *height = new_height;
+        }
+    }
+
+    /// One rotation if a child of `index` is over one taller than the other: the taller moves
+    /// down a level under `index` (which keeps its place, as nodes don't know their parents),
+    /// taking the shorter child and the shorter of its own, and its taller child comes up.
+    fn balance(&mut self, index: usize) {
+        let Node::Internal { left, right, .. } = self.nodes[index] else {
+            return;
+        };
+        let (tall, short) = if self.nodes[left].height() > self.nodes[right].height() {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        // With some slack: rotating ignores area, joining boxes far apart, and each such union
+        // is walked without finding anything. Doing it at every level took seconds on grids.
+        if self.nodes[tall].height() <= self.nodes[short].height() + MAX_HEIGHT_DIFFERENCE {
+            return;
+        }
+        let Node::Internal {
+            left: tall_left,
+            right: tall_right,
+            ..
+        } = self.nodes[tall]
+        else {
+            return;
+        };
+        let (up, down) = if self.nodes[tall_left].height() > self.nodes[tall_right].height() {
+            (tall_left, tall_right)
+        } else {
+            (tall_right, tall_left)
+        };
+        if let Node::Internal { left, right, .. } = &mut self.nodes[tall] {
+            *left = short;
+            *right = down;
+        }
+        if let Node::Internal { left, right, .. } = &mut self.nodes[index] {
+            *left = tall;
+            *right = up;
+        }
+        self.refresh_internal(tall);
+        self.refresh_internal(index);
     }
 
     fn find_max_ordering(&self, index: usize, bounds: &Bounds<U>, mut max_ordering: u32) -> u32 {
@@ -172,11 +233,13 @@ where
         let right_node = &self.nodes[right];
         let new_bounds = left_node.bounds().union(right_node.bounds());
         let max_ordering = cmp::max(left_node.max_ordering(), right_node.max_ordering());
+        let height = 1 + cmp::max(left_node.height(), right_node.height());
         self.nodes.push(Node::Internal {
             bounds: new_bounds,
             left,
             right,
             max_order: max_ordering,
+            height,
         });
         self.nodes.len() - 1
     }
@@ -209,6 +272,8 @@ where
         right: usize,
         bounds: Bounds<U>,
         max_order: u32,
+        /// BGMail: levels under it, to keep it balanced.
+        height: u32,
     },
 }
 
@@ -216,6 +281,13 @@ impl<U> Node<U>
 where
     U: Clone + Debug + Default + PartialEq,
 {
+    fn height(&self) -> u32 {
+        match self {
+            Node::Leaf { .. } => 0,
+            Node::Internal { height, .. } => *height,
+        }
+    }
+
     fn bounds(&self) -> &Bounds<U> {
         match self {
             Node::Leaf { bounds, .. } => bounds,

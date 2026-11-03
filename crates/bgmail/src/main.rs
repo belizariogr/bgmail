@@ -93,6 +93,20 @@ fn schedule_menu_command(id: CommandId, cx: &mut App) {
     });
 }
 
+/// [`schedule_menu_command`] for what acts on the selected messages: from another window,
+/// they aren't what is in front of the user.
+fn schedule_message_command(id: CommandId, cx: &mut App) {
+    let main = cx.global::<MainWindow>().0;
+    cx.defer(move |cx| {
+        let _ = main.update(cx, |view, window, cx| {
+            let ctx = view.command_context();
+            if window.is_window_active() && commands::command_enabled(&id, &ctx) {
+                view.execute_command(&id, window, cx);
+            }
+        });
+    });
+}
+
 fn schedule_compose_action(
     cx: &mut App,
     action: impl FnOnce(&mut ComposeView, &mut gpui::Window, &mut gpui::Context<ComposeView>) + 'static,
@@ -132,6 +146,22 @@ fn schedule_app_zoom(steps: i32, cx: &mut App) {
     });
 }
 
+/// Quits unless a message is being written. Deferred because the window the action
+/// came from is busy dispatching it, and the compose window may be the one to ask.
+pub(crate) fn schedule_quit(cx: &mut App) {
+    // The first-run window comes before the main one.
+    let Some(main) = cx.try_global::<MainWindow>().map(|main| main.0) else {
+        cx.quit();
+        return;
+    };
+    cx.defer(move |cx| {
+        let may_quit = main.update(cx, |root, _, cx| root.may_quit(cx));
+        if may_quit.unwrap_or(true) {
+            cx.quit();
+        }
+    });
+}
+
 /// Global handlers keep macOS menu items enabled when focus is outside the main
 /// view tree (compose/settings windows).
 fn register_global_menu_actions(cx: &mut App) {
@@ -145,30 +175,37 @@ fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &MessageDelete, cx| {
         let main = cx.global::<MainWindow>().0;
         cx.defer(move |cx| {
-            let _ = main.update(cx, |view, window, cx| view.request_delete(window, cx));
+            // From another window, it wouldn't be the message in front of the user.
+            let _ = main.update(cx, |view, window, cx| {
+                if window.is_window_active() {
+                    view.request_delete(window, cx);
+                }
+            });
         });
     });
     cx.on_action(|_: &MessageDeletePermanent, cx| {
-        schedule_menu_command(CommandId::MessageDeletePermanent, cx);
+        schedule_message_command(CommandId::MessageDeletePermanent, cx);
     });
-    cx.on_action(|_: &MessageRestore, cx| schedule_menu_command(CommandId::MessageRestore, cx));
-    cx.on_action(|_: &MessageArchive, cx| schedule_menu_command(CommandId::MessageArchive, cx));
-    cx.on_action(|_: &MessageMarkJunk, cx| schedule_menu_command(CommandId::MessageMarkJunk, cx));
-    cx.on_action(|_: &MessagePrint, cx| schedule_menu_command(CommandId::MessagePrint, cx));
+    cx.on_action(|_: &MessageRestore, cx| schedule_message_command(CommandId::MessageRestore, cx));
+    cx.on_action(|_: &MessageArchive, cx| schedule_message_command(CommandId::MessageArchive, cx));
+    cx.on_action(|_: &MessageMarkJunk, cx| {
+        schedule_message_command(CommandId::MessageMarkJunk, cx)
+    });
+    cx.on_action(|_: &MessagePrint, cx| schedule_message_command(CommandId::MessagePrint, cx));
     cx.on_action(|_: &MessageToggleFlag, cx| {
-        schedule_menu_command(CommandId::MessageToggleFlag, cx);
+        schedule_message_command(CommandId::MessageToggleFlag, cx);
     });
-    cx.on_action(|_: &MessageReply, cx| schedule_menu_command(CommandId::MessageReply, cx));
+    cx.on_action(|_: &MessageReply, cx| schedule_message_command(CommandId::MessageReply, cx));
     cx.on_action(|_: &MessageReplyAll, cx| {
-        schedule_menu_command(CommandId::MessageReplyAll, cx);
+        schedule_message_command(CommandId::MessageReplyAll, cx);
     });
-    cx.on_action(|_: &MessageForward, cx| schedule_menu_command(CommandId::MessageForward, cx));
+    cx.on_action(|_: &MessageForward, cx| schedule_message_command(CommandId::MessageForward, cx));
     cx.on_action(|_: &MessageToggleRead, cx| {
-        schedule_menu_command(CommandId::MessageToggleRead, cx);
+        schedule_message_command(CommandId::MessageToggleRead, cx);
     });
     cx.on_action(|_: &GetNewMail, cx| schedule_menu_command(CommandId::SyncNow, cx));
     cx.on_action(|action: &MoveMessageToFolder, cx| {
-        schedule_menu_command(CommandId::MoveToFolder(action.path.clone()), cx);
+        schedule_message_command(CommandId::MoveToFolder(action.path.clone()), cx);
     });
     cx.on_action(|_: &ComposeSend, cx| {
         schedule_compose_action(cx, |view, _, cx| view.send_message(cx));
@@ -211,11 +248,19 @@ fn main() {
     startup::mark_start();
     startup::log_milestone("main entered");
 
-    // A launch for a `mailto:` link only hands it to the running instance, if any.
+    // A later launch only hands over what it came for; this binding keeps the profile
+    // for as long as the process runs.
     let launch_link = instance::mailto_argument(std::env::args().skip(1));
-    if launch_link.as_deref().is_some_and(instance::forward) {
-        return;
-    }
+    let _profile = match instance::lock_profile() {
+        instance::ProfileLock::Busy => {
+            let message = launch_link.as_deref().unwrap_or(instance::ACTIVATE);
+            if !instance::hand_over(message) {
+                eprintln!("BGMail is already running but did not answer");
+            }
+            return;
+        }
+        lock => lock,
+    };
     let (links, incoming_links) = async_channel::unbounded::<String>();
     if let Some(link) = launch_link {
         links.send_blocking(link).ok();
@@ -237,12 +282,11 @@ fn main() {
         let settings = config::load();
         let ui_scale = app_zoom::sanitize(settings.ui_scale);
         theme::init(settings.appearance(), cx);
-        // Initialize localization (English by default).
-        locale::init(locale::Language::default(), cx);
+        locale::init(settings.language(), cx);
         ui::bind_keys(cx);
         ui::prompt::init(cx);
         html_view::init(cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Quit, cx| schedule_quit(cx));
         shortcuts::bind_app_shortcuts(cx);
         cx.set_menus(app_menus());
 
@@ -297,6 +341,7 @@ fn main() {
                         // — within the `request_save` debounce window — isn't lost.
                         cx.on_app_quit(|view: &mut RootView, _cx| {
                             view.persist_now();
+                            view.clear_render_guards();
                             async {}
                         })
                         .detach();
@@ -313,6 +358,11 @@ fn main() {
                         RootView::new(settings)
                     });
                     view.update(cx, |view, cx| {
+                        if view.database_replaced {
+                            use crate::locale::ActiveLanguage;
+                            let note = locale::Key::StatusDatabaseReplaced.tr(cx.language());
+                            view.set_status_note(note, cx);
+                        }
                         // Sync starts after the window exists; it never
                         // blocks the first frame (threads + async keychain).
                         view.start_mail(cx);
@@ -331,11 +381,16 @@ fn main() {
                     // too — not just on app quit.
                     let weak = view.downgrade();
                     window.on_window_should_close(cx, move |_window, cx| {
-                        if let Some(view) = weak.upgrade() {
-                            view.update(cx, |view, _| view.persist_now());
+                        let may_quit = weak.upgrade().is_none_or(|view| {
+                            view.update(cx, |view, cx| {
+                                view.persist_now();
+                                view.may_quit(cx)
+                            })
+                        });
+                        if may_quit {
+                            cx.quit();
                         }
-                        cx.quit();
-                        true
+                        may_quit
                     });
                     // Windows: keep the window cloaked (invisible to the compositor)
                     // while it maximizes and lays out, then reveal it once finished —
@@ -418,10 +473,20 @@ fn main() {
 
         startup::log_milestone("main window opened");
 
+        main_window
+            .update(cx, |view, _, cx| view.watch_unsent(cx))
+            .ok();
         cx.spawn(async move |cx| {
             while let Ok(link) = incoming_links.recv().await {
                 main_window
-                    .update(cx, |view, window, cx| view.open_mailto(&link, window, cx))
+                    .update(cx, |view, window, cx| {
+                        if link == instance::ACTIVATE {
+                            window.activate_window();
+                            cx.activate(true);
+                        } else {
+                            view.open_mailto(&link, window, cx);
+                        }
+                    })
                     .ok();
             }
         })

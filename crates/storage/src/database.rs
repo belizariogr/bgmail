@@ -8,8 +8,8 @@ use rusqlite::{
     params, params_from_iter, Connection, OptionalExtension, Transaction, TransactionBehavior,
 };
 
-use crate::folder::{folder_like_pattern, system};
-use crate::search::fold_for_search;
+use crate::folder::{folder_csv_needle, system};
+use crate::search::{collapse_spaces, fold_for_search, search_like_pattern};
 use crate::types::{MailListQuery, MessageDetail, MessageListItem};
 
 /// Default database path: `~/.config/BGMail/mail.db`.
@@ -47,6 +47,56 @@ pub struct Database {
     conn: Connection,
 }
 
+/// All of the user's mail is in there: other users of the machine can't read it. SQLite
+/// gives its `-wal` and `-shm` files the mode of the database. Best effort: nothing to do
+/// about a file system that doesn't allow it.
+#[cfg(unix)]
+fn keep_private(path: &Path) {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let private = std::fs::Permissions::from_mode(0o600);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path);
+    let _ = std::fs::set_permissions(path, private.clone());
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        let _ = std::fs::set_permissions(&sidecar, private.clone());
+    }
+    if path.parent() == Some(config_dir().as_path()) {
+        let _ = std::fs::set_permissions(config_dir(), std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+#[cfg(not(unix))]
+fn keep_private(_: &Path) {}
+
+/// What a new database takes from a damaged one.
+const RECOVERED_TABLES: [(&str, &str); 2] = [
+    ("accounts", ""),
+    (
+        "outbox",
+        "WHERE account_id IN (SELECT id FROM main.accounts)",
+    ),
+];
+
+/// Whether `error` says the database file is damaged.
+pub fn is_corrupt(error: &rusqlite::Error) -> bool {
+    use rusqlite::Error::{
+        FromSqlConversionFailure, InvalidColumnType, SqlInputError, SqliteFailure,
+    };
+    use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
+    match error {
+        SqliteFailure(failure, _) => matches!(failure.code, NotADatabase | DatabaseCorrupt),
+        // Fixed queries can only fail these on a schema or values damaged in the file.
+        SqlInputError { .. } | FromSqlConversionFailure(..) | InvalidColumnType(..) => true,
+        _ => false,
+    }
+}
+
 impl Database {
     /// Opens (or creates) the database at `path` and applies migrations.
     ///
@@ -56,6 +106,7 @@ impl Database {
         if let Some(parent) = path.as_ref().parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        keep_private(path.as_ref());
         let conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
@@ -65,6 +116,72 @@ impl Database {
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
+    }
+
+    /// [`Self::open`] that survives a damaged file (see [`Self::replace_corrupt`]); the second
+    /// value says it did. Aborting would leave the app unable to start, with no message, for good.
+    /// Other errors (a full disk, no permission) aren't about the file, which stays untouched.
+    pub fn open_or_replace_corrupt(path: impl AsRef<Path>) -> rusqlite::Result<(Self, bool)> {
+        let path = path.as_ref();
+        match Self::open(path) {
+            Err(error) if is_corrupt(&error) => Ok((Self::replace_corrupt(path)?, true)),
+            opened => opened.map(|db| (db, false)),
+        }
+    }
+
+    /// Keeps a damaged file beside as `<name>.corrupt`, with its journals, and starts a new one with
+    /// what can be read of the accounts and the unsent mail: mail comes back by syncing, and
+    /// these wouldn't. Close the file first. Thunderbird rebuilds damaged indexes the same way,
+    /// keeping accounts apart. Only for what can't be loaded at all: a page lost among the
+    /// messages isn't worth moving everything for.
+    pub fn replace_corrupt(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        let path = path.as_ref();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let kept = (0..)
+            .map(|n| match n {
+                0 => format!("{name}.corrupt"),
+                n => format!("{name}.corrupt-{n}"),
+            })
+            .find(|kept| !path.with_file_name(kept).exists())
+            .unwrap_or_default();
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::rename(
+                path.with_file_name(format!("{name}{suffix}")),
+                path.with_file_name(format!("{kept}{suffix}")),
+            );
+        }
+        let db = Self::open(path)?;
+        db.recover_from(&path.with_file_name(&kept));
+        Ok(db)
+    }
+
+    /// Best effort, table by table: what fails stays out.
+    fn recover_from(&self, kept: &Path) {
+        let attached = self.conn.execute(
+            "ATTACH DATABASE ?1 AS old",
+            [kept.to_string_lossy().as_ref()],
+        );
+        if attached.is_err() {
+            return;
+        }
+        let _ = self.conn.execute_batch("PRAGMA foreign_keys = OFF;");
+        for (table, only) in RECOVERED_TABLES {
+            // The columns both have: the damaged file may be from another version.
+            let columns = self.conn.prepare(&format!(
+                "SELECT group_concat(name) FROM pragma_table_info('{table}') \
+                 WHERE name IN (SELECT name FROM pragma_table_info('{table}', 'old'))"
+            ));
+            let Ok(Some(columns)) = columns.and_then(|mut statement| {
+                statement.query_row([], |row| row.get::<_, Option<String>>(0))
+            }) else {
+                continue;
+            };
+            let _ = self.conn.execute_batch(&format!(
+                "INSERT OR IGNORE INTO {table} ({columns}) SELECT {columns} FROM old.{table} {only};"
+            ));
+        }
+        let _ = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
+        let _ = self.conn.execute_batch("DETACH DATABASE old;");
     }
 
     /// Opens the default database path.
@@ -106,22 +223,18 @@ impl Database {
     fn repair_starred_folder_membership(&self) -> rusqlite::Result<()> {
         use crate::folder::folders_csv;
 
-        let pattern = folder_like_pattern(system::FLAGGED);
+        let needle = folder_csv_needle(system::FLAGGED);
         let mut stmt = self.conn.prepare(
             "SELECT id, folders_csv FROM messages
-             WHERE starred = 1 AND folders_csv NOT LIKE ?1",
+             WHERE starred = 1 AND instr(folders_csv, ?1) = 0",
         )?;
-        let rows = stmt.query_map(params![pattern], |row| {
+        let rows = stmt.query_map(params![needle], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?;
         let updates: Vec<(String, i64)> = rows
             .filter_map(|row| row.ok())
             .map(|(id, csv)| {
-                let mut paths: Vec<String> = csv
-                    .split(',')
-                    .filter(|segment| !segment.is_empty())
-                    .map(str::to_string)
-                    .collect();
+                let mut paths = crate::message_ops::parse_folders_csv(&csv);
                 if !paths.iter().any(|path| path == system::FLAGGED) {
                     paths.push(system::FLAGGED.to_string());
                     paths.sort();
@@ -145,24 +258,24 @@ impl Database {
         account_id: Option<i64>,
         folder_path: &str,
     ) -> rusqlite::Result<usize> {
-        let pattern = folder_like_pattern(folder_path);
+        let needle = folder_csv_needle(folder_path);
         let hidden = hidden_from_folder(folder_path);
         let sql = if account_id.is_some() {
             format!(
                 "SELECT COUNT(*) FROM messages
-                 WHERE account_id = ?1 AND unread = 1 AND folders_csv LIKE ?2{hidden}"
+                 WHERE account_id = ?1 AND unread = 1 AND instr(folders_csv, ?2) > 0{hidden}"
             )
         } else {
             format!(
-                "SELECT COUNT(*) FROM messages WHERE unread = 1 AND folders_csv LIKE ?1{hidden}"
+                "SELECT COUNT(*) FROM messages WHERE unread = 1 AND instr(folders_csv, ?1) > 0{hidden}"
             )
         };
         let count: i64 = if let Some(account_id) = account_id {
             self.conn
-                .query_row(&sql, params![account_id, pattern], |row| row.get(0))?
+                .query_row(&sql, params![account_id, needle], |row| row.get(0))?
         } else {
             self.conn
-                .query_row(&sql, params![pattern], |row| row.get(0))?
+                .query_row(&sql, params![needle], |row| row.get(0))?
         };
         Ok(count as usize)
     }
@@ -268,21 +381,21 @@ fn query_filter(query: &MailListQuery) -> Option<(&'static str, Vec<Value>)> {
     match query {
         MailListQuery::Search(text) => search_filter(text),
         MailListQuery::GlobalSystemFolder(path) if path == system::FLAGGED => Some((
-            "folders_csv LIKE ?1 AND folders_csv NOT LIKE '%,sys:trash,%'",
-            vec![Value::Text(folder_like_pattern(path))],
+            "instr(folders_csv, ?1) > 0 AND folders_csv NOT LIKE '%,sys:trash,%'",
+            vec![Value::Text(folder_csv_needle(path))],
         )),
         MailListQuery::GlobalSystemFolder(path) => Some((
-            "folders_csv LIKE ?1",
-            vec![Value::Text(folder_like_pattern(path))],
+            "instr(folders_csv, ?1) > 0",
+            vec![Value::Text(folder_csv_needle(path))],
         )),
         MailListQuery::AccountFolder {
             account_id,
             folder_path,
         } => Some((
-            "account_id = ?1 AND folders_csv LIKE ?2",
+            "account_id = ?1 AND instr(folders_csv, ?2) > 0",
             vec![
                 Value::Integer(*account_id),
-                Value::Text(folder_like_pattern(folder_path)),
+                Value::Text(folder_csv_needle(folder_path)),
             ],
         )),
     }
@@ -294,10 +407,13 @@ fn query_filter(query: &MailListQuery) -> Option<(&'static str, Vec<Value>)> {
 /// (a quoted phrase is a substring match there); shorter ones fall back to
 /// `LIKE`, which trigrams cannot answer.
 fn search_filter(query: &str) -> Option<(&'static str, Vec<Value>)> {
-    let folded = fold_for_search(query.trim());
+    let folded = collapse_spaces(&fold_for_search(query));
     if folded.is_empty() {
         return None;
     }
+    // A phrase costs its trigrams: 64 KB pasted here took 12 s and 2 GB. What starts with this
+    // is still found, among the few things that also do.
+    let folded: String = folded.chars().take(MAX_QUERY_CHARS).collect();
     if folded.chars().count() >= FTS_MIN_CHARS {
         Some((
             "id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1)",
@@ -305,11 +421,14 @@ fn search_filter(query: &str) -> Option<(&'static str, Vec<Value>)> {
         ))
     } else {
         Some((
-            "search_text LIKE ?1",
-            vec![Value::Text(format!("%{folded}%"))],
+            "search_text LIKE ?1 ESCAPE '\\'",
+            vec![Value::Text(search_like_pattern(&folded)?)],
         ))
     }
 }
+
+/// Longest search looked for.
+const MAX_QUERY_CHARS: usize = 1024;
 
 /// Wraps `text` as one FTS5 string (phrase), escaping embedded quotes, so user
 /// input is never parsed as FTS query syntax.
@@ -317,15 +436,27 @@ fn fts_phrase(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\"\""))
 }
 
+/// A text column, whatever it holds: only damage or another tool can leave anything but valid
+/// text there, and a replacement character beats losing the database to one subject.
+pub(crate) fn lossy_text(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
+    use rusqlite::types::ValueRef;
+    Ok(match row.get_ref(index)? {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => String::new(),
+    })
+}
+
 /// Maps a row selected with [`LIST_COLUMNS`].
 fn list_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageListItem> {
     Ok(MessageListItem {
         id: row.get(0)?,
         account_id: row.get(1)?,
-        sender: row.get(2)?,
-        sender_email: row.get(3)?,
-        subject: row.get(4)?,
-        preview: row.get(5)?,
+        sender: lossy_text(row, 2)?,
+        sender_email: lossy_text(row, 3)?,
+        subject: lossy_text(row, 4)?,
+        preview: lossy_text(row, 5)?,
         received_at: row.get(6)?,
         date_ts: row.get(7)?,
         thread_id: row.get(8)?,
@@ -458,7 +589,7 @@ mod tests {
         };
         let mut stmt = db
             .conn()
-            .prepare("SELECT id FROM messages WHERE search_text LIKE ?1 ORDER BY id")
+            .prepare("SELECT id FROM messages WHERE search_text LIKE ?1 ESCAPE '\\' ORDER BY id")
             .unwrap();
         stmt.query_map(params![pattern], |row| row.get(0))
             .unwrap()
@@ -518,6 +649,156 @@ mod tests {
         assert_eq!(search_ids(&db, "relatorio"), vec![ids[0]]);
         assert_eq!(search_ids(&db, "ão"), vec![ids[0], ids[2]]);
         assert!(search_ids(&db, "  ").is_empty());
+    }
+
+    /// One message in each of `paths`, of the fixture's remote account.
+    fn messages_in_folders(paths: &[&str]) -> (tempfile::NamedTempFile, Database, i64) {
+        let (file, db, fx) = crate::test_support::remote_db();
+        for (ix, path) in paths.iter().enumerate() {
+            let folder = db
+                .upsert_remote_folder(fx.account, path, "", path, None)
+                .unwrap();
+            let message = crate::types::NewRemoteMessage {
+                unread: true,
+                ..crate::test_support::remote_message(&format!("m{ix}"), None)
+            };
+            db.insert_remote_message(fx.account, folder, 1, &message)
+                .unwrap();
+        }
+        (file, db, fx.account)
+    }
+
+    fn folder_subjects(db: &Database, account_id: i64, folder_path: &str) -> Vec<String> {
+        let query = MailListQuery::AccountFolder {
+            account_id,
+            folder_path: folder_path.into(),
+        };
+        db.list_messages(&query)
+            .unwrap()
+            .into_iter()
+            .map(|message| message.subject)
+            .collect()
+    }
+
+    #[test]
+    fn a_folder_lists_only_its_own_messages_whatever_its_name() {
+        // Wildcards of `LIKE`, its case folding, and the separator of `folders_csv`.
+        let (_file, db, account) = messages_in_folders(&[
+            "user:My_Work",
+            "user:MyXWork",
+            "user:100%",
+            "user:1000",
+            "user:work",
+            "user:WORK",
+            "user:Clients",
+            "user:Clients, VIP",
+        ]);
+        for (ix, path) in [
+            "user:My_Work",
+            "user:MyXWork",
+            "user:100%",
+            "user:1000",
+            "user:work",
+            "user:WORK",
+            "user:Clients",
+            "user:Clients, VIP",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(folder_subjects(&db, account, path), [format!("m{ix}")]);
+            assert_eq!(db.unread_in_folder(Some(account), path).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn a_folder_named_after_the_trash_does_not_make_a_message_trash() {
+        let (_file, db, account) = messages_in_folders(&["user:x,sys:trash"]);
+        let query = MailListQuery::AccountFolder {
+            account_id: account,
+            folder_path: "user:x,sys:trash".into(),
+        };
+        let id = db.list_messages(&query).unwrap()[0].id;
+        assert!(!db.message_is_in_trash(id).unwrap());
+        let message = db.get_message(id).unwrap().unwrap();
+        assert_eq!(
+            crate::parse_folders_csv(&message.folders_csv),
+            ["user:x,sys:trash"]
+        );
+        assert!(crate::message_has_folder(
+            &message.folders_csv,
+            "user:x,sys:trash"
+        ));
+        assert!(!crate::message_has_folder(&message.folders_csv, "user:x"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_its_owner_can_read_the_database() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let mode = |file: &Path| std::fs::metadata(file).unwrap().permissions().mode() & 0o777;
+        drop(Database::open(&path).unwrap());
+        assert_eq!(mode(&path), 0o600);
+
+        // One created before this keeps nothing open to others either.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let db = Database::open(&path).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir.path().join("mail.db-wal")), 0o600);
+        drop(db);
+    }
+
+    #[test]
+    fn a_phrase_is_found_across_a_line_break() {
+        let (_file, db, fx) = crate::test_support::remote_db();
+        let id = db
+            .insert_remote_message(
+                fx.account,
+                fx.inbox,
+                1,
+                &crate::test_support::remote_message("s", None),
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "UPDATE messages SET search_text = ?1 WHERE id = ?2",
+                params![
+                    crate::search::build_search_text("", "", "", "encontro na reuniao\nde amanha"),
+                    id
+                ],
+            )
+            .unwrap();
+        for query in ["reuniao de amanha", "reuniao   de\tamanha"] {
+            let found = db
+                .list_messages(&MailListQuery::Search(query.into()))
+                .unwrap();
+            assert_eq!(found.len(), 1, "{query}");
+        }
+    }
+
+    #[test]
+    fn a_short_search_takes_its_wildcards_literally() {
+        let (_file, db, fx) = crate::test_support::remote_db();
+        for (uid, subject) in [(1, "a_b"), (2, "axb"), (3, "100%")] {
+            db.insert_remote_message(
+                fx.account,
+                fx.inbox,
+                uid,
+                &crate::test_support::remote_message(subject, None),
+            )
+            .unwrap();
+        }
+        let subjects = |query: &str| -> Vec<String> {
+            db.list_messages(&MailListQuery::Search(query.into()))
+                .unwrap()
+                .into_iter()
+                .map(|message| message.subject)
+                .collect()
+        };
+        assert_eq!(subjects("a_"), ["a_b"]);
+        assert_eq!(subjects("%"), ["100%"]);
     }
 
     #[test]
@@ -598,5 +879,85 @@ mod tests {
         worker.join().unwrap();
         assert_eq!(ui.message_count_all().unwrap(), 50);
         assert_eq!(ui.pending_ops(fx.account).unwrap().len(), 50);
+    }
+
+    #[test]
+    fn a_damaged_database_is_kept_aside_and_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        std::fs::write(&path, vec![b'x'; 4096]).unwrap();
+        let (_, replaced) = Database::open_or_replace_corrupt(&path).unwrap();
+        assert!(replaced);
+        assert_eq!(
+            std::fs::read(dir.path().join("mail.db.corrupt")).unwrap(),
+            vec![b'x'; 4096]
+        );
+        // A good one stays, and a second damaged one keeps the first copy.
+        let (_, replaced) = Database::open_or_replace_corrupt(&path).unwrap();
+        assert!(!replaced);
+        std::fs::remove_file(dir.path().join("mail.db-wal")).ok();
+        std::fs::remove_file(dir.path().join("mail.db-shm")).ok();
+        std::fs::write(&path, vec![b'y'; 4096]).unwrap();
+        assert!(Database::open_or_replace_corrupt(&path).unwrap().1);
+        assert!(dir.path().join("mail.db.corrupt-1").exists());
+    }
+
+    #[test]
+    fn a_replaced_database_keeps_its_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let db = Database::open(&path).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO accounts (name, email) VALUES ('Ann', 'ann@x.test')",
+                [],
+            )
+            .unwrap();
+        drop(db);
+        let db = Database::replace_corrupt(&path).unwrap();
+        assert_eq!(db.list_accounts().unwrap().len(), 1);
+        assert!(dir.path().join("mail.db.corrupt").exists());
+    }
+
+    #[test]
+    fn a_replaced_database_takes_the_columns_it_can() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let old = rusqlite::Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT, email TEXT);
+             INSERT INTO accounts VALUES (1, 'Ann', 'ann@x.test');",
+        )
+        .unwrap();
+        drop(old);
+        let db = Database::replace_corrupt(&path).unwrap();
+        assert_eq!(db.list_accounts().unwrap()[0].email, "ann@x.test");
+    }
+
+    #[test]
+    fn a_subject_that_isnt_text_doesnt_stop_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("mail.db")).unwrap();
+        let row = db
+            .conn()
+            .query_row("SELECT CAST(x'41ff42' AS TEXT)", [], |row| {
+                lossy_text(row, 0)
+            })
+            .unwrap();
+        assert_eq!(row, "A\u{fffd}B");
+    }
+
+    #[test]
+    fn only_a_damaged_file_counts_as_corrupt() {
+        let locked = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        );
+        assert!(!is_corrupt(&locked));
+        let damaged = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            None,
+        );
+        assert!(is_corrupt(&damaged));
     }
 }

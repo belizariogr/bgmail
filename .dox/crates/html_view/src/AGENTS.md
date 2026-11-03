@@ -77,7 +77,12 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   selection_color }`: parse options; extra UA CSS goes after Blitz's default
   sheet; `selection_color` is RGBA.
 - `const MAX_NESTING_DEPTH = 256`: deepest nesting `try_parse` accepts.
-- `enum RenderError { TooDeep { depth } }` (+ `Display`, `Error`).
+- `fn has_too_many_tags(html) -> bool` (pub): linear count of what could be a tag anywhere, over `MAX_OPENING_TAGS` (500k), and of each end tag's attributes as the tokenizer reads them (`end_tag_attributes`), over `MAX_TAG_ATTRIBUTES` (1024). Each end tag is read on its own, with a budget of bytes, so nothing hides one from it; it only overstates. The sanitizer drops start tags over that limit.
+- `fn remove_form_controls(doc)`: removes `input`, `textarea`, `select`, `button`, `form` after parsing.
+- `fn with_render_stack(build) -> T` (pub): runs `build` on a thread with 8 MiB of stack,
+  what `MAX_NESTING_DEPTH` assumes; pool threads have less (512 KB on macOS).
+- `const MAX_TABLE_SPAN_AREA = 2_000_000`: most cells `colspan`/`rowspan`/`<col span>` add.
+- `enum RenderError { TooDeep { depth }, TooComplex }` (+ `Display`, `Error`).
 - `fn nesting_depth(doc, root)` (private): deepest node nesting, iterative.
 - `const DEFAULT_SELECTION_COLOR`: RGBA used when no selection color is given.
 - `fn inline_roots(doc, node_id, out)` (private): inline roots in layout order
@@ -149,13 +154,20 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
     quirks), and enables Blitz's line height quirk unless
     `document_mode(html)` is `NoQuirks`.
 - `with_depth()` (private): records the tree's nesting depth after parsing.
+- `HtmlDocument::prepare_within(width, limit) -> bool`: `prepare` that gives up on a layout past
+  `limit`, or a recording past `MAX_RECORDING_TIME` (2 s), returning `false` with the document
+  incomplete, for hosts to show text instead. Hangs can't be stopped from outside, and a partial
+  message would hide its end.
 - `HtmlDocument::try_parse(html, options) -> Result<Self, RenderError>`:
-  `parse`, then `TooDeep` above `MAX_NESTING_DEPTH`.
+  `parse`, then `TooDeep` above `MAX_NESTING_DEPTH`, `TooComplex` if parsing stopped at a budget
+  (`parse_refused`), and `TooComplex` above `MAX_TABLE_SPAN_AREA` (`table_span_area`,
+  any element, as a cell's display isn't known yet).
 - `HtmlDocument::depth()`: element nesting depth.
 - `HtmlDocument::layout(width) -> f32`: returns 0 without resolving a tree
   deeper than the limit; otherwise sets the viewport when the width changes
-  (dropping the cached display list), resolves styles/layout (re-resolving while
-  critical resources are pending, max 4 passes), records content width =
+  (dropping the cached display list), resolves styles/layout (again while critical
+  resources are pending or resources just arrived, which also drops the cached list, max 4
+  passes), records content width =
   max(width, `overflow_right`) and returns content height =
   max(root height, root scrollHeight).
 - `HtmlDocument::set_zoom(zoom)` / `zoom()`: page zoom (clamped 25%–500%,
@@ -299,6 +311,20 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `fn layer_radii(geometry)` (private): radii of a rounded clip.
 - `fn convert_paint(paint, transform, brush_transform)` (private): owned
   `Brush`, folding transforms; resource/custom paints become transparent.
+- `DisplayList::charge(elements)`: takes a command from `MAX_PATH_ELEMENTS` (2 M: path elements
+  and gradient stops, each command counting at least 4). Once one doesn't fit nothing does;
+  refused layers are counted (`refused_layers`) so their `Pop`s and contents stay out.
+- `DisplayList::push_dots(transform, color, radius, centers)`: dotted borders as `Command::Dots`, drawn
+  as a quad per visible dot, since in one path they took seconds to tessellate; a path under a
+  rotation, skew or a different scale per axis, as quads are round. Costs 4 per dot.
+- `DisplayList::exhausted()`: the budget ran out; painters that build a lot check it first.
+- `fn gradient_stops(brush)`: what a brush adds to a command's cost.
+- `fn path_cost(path)`: elements, plus for each curve the segments flattening takes (`sqrt(extent /
+  tolerance)`), as triangles, not elements, are what fills memory.
+- `fn should_dash(path, stroke)`: dashes only up to `MAX_DASHES` (16384) per path, finite
+  lengths only (`kurbo::dash` wouldn't return); otherwise the stroke is solid.
+- `fn curve_fits(points)`: a curve within `MAX_CURVE_EXTENT` (16384 px) on each axis, as its
+  segments grow with its size whatever shows; `is_finite_path` refuses paths with larger ones.
 - `fn is_finite_geometry(geometry)`, `fn is_finite_path(path)`: no NaN/∞
   (GPUI's tessellator rejects them).
 - `fn is_polygonal(path)`: only straight segments.
@@ -327,12 +353,15 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `FaceSpec` with variable weight, synthetic bold (≥700) and italic.
 - `struct ClusterSpan { text_range, x, advance, is_space }`.
 - `fn is_blank(source, range)`: whitespace/control text (or out of range).
-- `fn clusters_in_span(clusters, offset, advance)`: clusters of one glyph run
+- `fn shaped_clusters(run, source, run_start_x)`: a shaped run's clusters in visual order, once per
+  run, not per glyph run.
+- `fn clusters_in_span(clusters, from, offset, advance)`: continuing at `from`, and returning the
+  next index, so a run of many styles stays linear; clusters of one glyph run
   (Parley splits shaped runs by style without exposing cluster ranges).
 - `fn group_words(source, clusters) -> Vec<Word>`: words (x of first visual
   cluster, width, per-cluster ranges); whitespace splits; line breaks → spaces.
 - `fn color_glyph_run(glyph_run, transform)`: glyph ids + document positions.
-- `fn text_run_from_glyph_run(glyph_run, run_start_x, source, transform, color,
+- `fn text_run_from_glyph_run(glyph_run, run_clusters, next_cluster, source, transform, color,
   faces) -> Option<TextRun>`: GPUI-facing run (face, CSS-px size, document
   baseline, words in document x with widths/clusters).
 - Tests: word grouping (+widths/clusters), RTL logical words, blank detection,
@@ -379,6 +408,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   use; `worker(rx)`: a `ureq` agent (timeout, generic user agent, HTTP
   errors as errors) fetching jobs, caching bodies, answering the handler and
   finishing the load; `get(agent, url)`: body capped at `MAX_BODY`.
+- `is_reachable_from_mail` (private): refuses loopback, `0.0.0.0/8`, `::`, link-local (IPv6-mapped too); private ranges pass (user decision). `struct OffThisMachine` (private `ureq` resolver, used for every request and redirect): filters resolved addresses with it, `HostNotFound` when none is left; a configured proxy is exempt.
 - `struct BodyCache` (private): `get`, `insert`/`insert_capped` (oldest
   evicted past the cap; bodies over the cap or already cached skipped);
   `cache()`.
@@ -425,7 +455,17 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
 - `fn css_angle(start, end)`: CSS gradient angle (0° up, clockwise).
 - `fn to_bgra_straight(brush)`: RGBA/BGRA, premultiplied or straight → straight
   BGRA (GPUI's image format).
-- `fn downscaled_size(source, target) -> Option<(u32, u32)>`: upload size when
+- `PaintCache::make_room(bytes) -> bool`: accounts for new pixels a frame needs. `false` if the
+  frame alone passes `MAX_CACHED_PIXEL_BYTES` (512 MiB), and what doesn't fit isn't drawn, instead
+  of remaking the same textures on every repaint; otherwise clears images and gradients when the
+  cache would pass it. Hits count toward the frame too (`frame_pixel_bytes`).
+- `PaintCache::evict_pixels()`: empties images and gradients. The atlas keeps their textures (⬜ in `TODO.md`): `window.drop_image` aborts on one with uploads pending.
+- `fn stretched_tile(repeat, tile, source_pixels, area, scale, horizontal)`: a tile under a device pixel on an axis, or whose source is a pixel across there, stops repeating and takes the area's length.
+- `fn paint_image_fill`: leaves out images outside the content mask before decoding or counting, and tiles only what shows (`tile_starts` starts where the window is), up to `MAX_FRAME_TILES` (64000) per frame.
+- `fn paint_sampled_gradient`: samples only boxes that intersect the content mask, keyed relative
+  to the box so equal boxes share one texture.
+- `fn downscaled_size(source, target) -> Option<(u32, u32)>`: sizes are the source's halved (few
+  per image), at most `MAX_UPLOAD_SIDE` (8192) even if not shrunk; upload size when
   an image is drawn at less than half its size on either side (never above
   the source size).
 - `fn resize_straight(buffer, width, height)`: area (triangle) resize in
@@ -434,9 +474,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   image and upload size (pre-downscaled when `downscaled_size` says so).
 - `HtmlDocument::follow_selection_drag` / `text_boxes` / `nearest_text_position`, `nearest_box`, `drag_scroll_delta` (private): selection by dragging from and to anywhere.
 - `HtmlView::set_display_scale` (pub): scales the page on top of the user's zoom.
-- `contrast`: `DarkPage` (pub), `adapt_text_contrast`, `behind`, `is_line`, `adapt`, `readable_color`, `luminance`, `contrast`, `rgb_to_hsl`, `hsl_to_rgb` (private).
+- `contrast`: `DarkPage` (pub), `adapt_text_contrast`, `behind`, `is_line`, `adapt` (leaves transparent text alone), `readable_color` (keeps the alpha), `luminance`, `contrast`, `rgb_to_hsl`, `hsl_to_rgb` (private).
 - `struct DetachedDocument` (`new`, `into_inner`) / `HtmlDocument::prepare(width)` / `HtmlView::content_height()` (pub): moving a document between threads, doing its first layout and recording up front, and the laid out height.
-- `fn with_family_name(font, family)` (`fonts`, pub(crate)): the sfnt rewritten with a `name` table for `family` (checksums redone); `None` when not a single-face sfnt.
+- `fn with_family_name(font, family)` (`fonts`, pub(crate)): the sfnt rewritten with a `name` table for `family` (checksums redone); `None` when not a single-face sfnt. Refuses more than 256 tables or copying more than the file (a hostile font could multiply itself).
 - `fn register_web_font(face, window)` (private): hands a web font file to GPUI under a family of its own; returns the family to request.
 - `fn gpui_font(face, cache, window)` (private): GPUI `Font` for a `FaceSpec`,
   registering the font bytes when the family is not installed.

@@ -226,18 +226,30 @@ mod platform {
 pub(crate) fn with_family_name(font: &[u8], family: &str) -> Option<Vec<u8>> {
     const HEADER: usize = 12;
     const RECORD: usize = 16;
+    // Real fonts have a few dozen.
+    const MAX_TABLES: usize = 256;
     let be16 = |at: usize| Some(u16::from_be_bytes(font.get(at..at + 2)?.try_into().ok()?));
     let be32 = |at: usize| Some(u32::from_be_bytes(font.get(at..at + 4)?.try_into().ok()?));
     if !matches!(font.get(..4)?, [0, 1, 0, 0] | b"OTTO" | b"true") {
         return None;
     }
+    // A font comes from whoever sent the mail, and its entries can all point at the whole
+    // file: copying them must not cost more than the file.
+    let count = usize::from(be16(4)?);
+    if count > MAX_TABLES {
+        return None;
+    }
+    let mut copied = 0usize;
     let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
-    for ix in 0..usize::from(be16(4)?) {
+    for ix in 0..count {
         let record = HEADER + ix * RECORD;
         let tag: [u8; 4] = font.get(record..record + 4)?.try_into().ok()?;
         let offset = be32(record + 8)? as usize;
         let length = be32(record + 12)? as usize;
         if &tag != b"name" {
+            copied = copied
+                .checked_add(length)
+                .filter(|sum| *sum <= font.len())?;
             tables.push((tag, font.get(offset..offset.checked_add(length)?)?.to_vec()));
         }
     }
@@ -335,6 +347,26 @@ mod tests {
         for tag in [b"head", b"hhea", b"maxp", b"cmap"] {
             assert!(font.table_data(Tag::new(tag)).is_some());
         }
+    }
+
+    #[test]
+    fn with_family_name_refuses_a_font_that_would_multiply_itself() {
+        let hostile = |tables: u16| {
+            let mut font = vec![0, 1, 0, 0];
+            font.extend_from_slice(&tables.to_be_bytes());
+            font.extend_from_slice(&[0; 6]);
+            let size = (12 + usize::from(tables) * 16) as u32;
+            for ix in 0..tables {
+                font.extend_from_slice(&ix.to_be_bytes());
+                font.extend_from_slice(b"xx");
+                font.extend_from_slice(&[0; 4]);
+                font.extend_from_slice(&0u32.to_be_bytes());
+                font.extend_from_slice(&size.to_be_bytes());
+            }
+            font
+        };
+        assert_eq!(super::with_family_name(&hostile(60_000), "x"), None);
+        assert_eq!(super::with_family_name(&hostile(100), "x"), None);
     }
 
     #[test]

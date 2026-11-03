@@ -80,7 +80,11 @@ pub(crate) enum ConnectPlan {
     Ready(AccountConfig),
     /// No server typed yet: discover the settings (network) first, then test
     /// [`with_password_auth`] of the result.
-    Discover { email: String, username: String },
+    /// `username`: what the user typed; with nothing, what discovery finds stands.
+    Discover {
+        email: String,
+        username: Option<String>,
+    },
 }
 
 /// Loose e-mail shape check: one `@`, a non-empty local part without spaces
@@ -152,16 +156,17 @@ pub(crate) fn plan_password_connect<'a>(
     if password.is_empty() {
         return Err(FormError::PasswordRequired);
     }
-    let username = match manual.username.trim() {
-        "" => email.to_string(),
-        name => name.to_string(),
-    };
+    let typed = manual.username.trim();
     if manual.is_blank() {
         return Ok(ConnectPlan::Discover {
             email: email.to_string(),
-            username,
+            username: (!typed.is_empty()).then(|| typed.to_string()),
         });
     }
+    let username = match typed {
+        "" => email.to_string(),
+        name => name.to_string(),
+    };
     if manual.imap_host.trim().is_empty() || manual.smtp_host.trim().is_empty() {
         return Err(FormError::HostRequired);
     }
@@ -266,6 +271,8 @@ pub(crate) fn error_key(kind: RemoteErrorKind, oauth: bool, user_cancelled: bool
         RemoteErrorKind::Protocol
         | RemoteErrorKind::NotFound
         | RemoteErrorKind::Unsupported
+        | RemoteErrorKind::Unreadable
+        | RemoteErrorKind::TooLarge
         | RemoteErrorKind::Other => Key::AccountErrUnexpected,
     })
 }
@@ -345,7 +352,10 @@ pub(crate) fn run_password_connect(
     let config = match plan {
         ConnectPlan::Ready(config) => config,
         ConnectPlan::Discover { email, username } => match discover(&email) {
-            Some(found) => with_password_auth(found, &email, &username),
+            Some(mut found) => {
+                let username = username.unwrap_or_else(|| std::mem::take(&mut found.username));
+                with_password_auth(found, &email, &username)
+            }
             None => {
                 return ConnectOutcome {
                     tried: None,
@@ -614,7 +624,7 @@ mod tests {
             plan_password_connect("me@example.com", "pw", &ManualFields::default(), []),
             Ok(ConnectPlan::Discover {
                 email: "me@example.com".into(),
-                username: "me@example.com".into(),
+                username: None,
             })
         );
     }
@@ -814,10 +824,31 @@ mod tests {
     }
 
     #[test]
+    fn discovery_keeps_its_login_unless_one_was_typed() {
+        let found = |email: &str| {
+            let mut config = google_config(email);
+            config.username = "maria".into();
+            Some(config)
+        };
+        for (typed, expected) in [(None, "maria"), (Some("typed"), "typed")] {
+            let plan = ConnectPlan::Discover {
+                email: "maria@x.test".into(),
+                username: typed.map(str::to_string),
+            };
+            let seen = std::cell::RefCell::new(String::new());
+            run_password_connect(plan, found, |config| {
+                *seen.borrow_mut() = config.username.clone();
+                Ok(())
+            });
+            assert_eq!(*seen.borrow(), expected);
+        }
+    }
+
+    #[test]
     fn password_connect_discovers_then_reports_failures() {
         let plan = ConnectPlan::Discover {
             email: "me@gmail.com".into(),
-            username: "me@gmail.com".into(),
+            username: Some("me@gmail.com".into()),
         };
         let outcome = run_password_connect(
             plan,
@@ -838,7 +869,7 @@ mod tests {
         let nothing = run_password_connect(
             ConnectPlan::Discover {
                 email: "me@x.com".into(),
-                username: "me".into(),
+                username: Some("me".into()),
             },
             |_| None,
             |_| Ok(()),

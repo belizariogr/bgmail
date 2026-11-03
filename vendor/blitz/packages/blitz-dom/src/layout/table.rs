@@ -61,6 +61,11 @@ pub struct TableContext {
     /// Taffy stores calc values as raw pointers, so these must outlive the `style`.
     #[allow(dead_code)]
     calc_values: Vec<LengthPercentage>,
+    /// BGMail: `style` holds raw pointers to the `calc()` values of these styles, and a
+    /// restyle that compares equal keeps this context while replacing the styles. Without
+    /// them a hover or a window resize made layout read freed memory.
+    #[allow(dead_code)]
+    computed_style: ServoArc<ComputedValues>,
 }
 
 // #[derive(Debug, Clone, Eq, PartialEq)]
@@ -73,6 +78,9 @@ pub struct TableContext {
 pub struct TableCell {
     // kind: TableItemKind,
     pub node_id: NodeId,
+    /// BGMail: keeps the `calc()` values of `style` alive; see `TableContext::computed_style`.
+    #[allow(dead_code)]
+    computed_style: ServoArc<ComputedValues>,
     /// Index (into `TableContext::rows`) of the row the cell originates in
     pub row: u16,
     /// Index of the column the cell originates in
@@ -80,6 +88,11 @@ pub struct TableCell {
     /// BGMail: a non-cell row child (e.g. `<td style="display:block">`) laid out
     /// as if wrapped in an anonymous table cell.
     pub anonymous: bool,
+    /// BGMail: a caption, which spans the table.
+    pub is_caption: bool,
+    /// BGMail: the cell's `min-width` and `max-width` in an automatic table, with its padding and
+    /// borders.
+    pub width_limits: (Option<f32>, Option<f32>),
     /// The anonymously wrapped block's own vertical margins (px, lengths only).
     pub own_margins: (f32, f32),
     /// BGMail: (colspan, rowspan), for painting collapsed borders.
@@ -104,6 +117,14 @@ struct ColumnCursor {
     rowspans: Vec<u16>,
 }
 
+/// BGMail: the most a `colspan` or `<col span>` counts, as in the HTML standard.
+const MAX_COLSPAN: u16 = 1000;
+/// BGMail: the most columns of a table. A column costs about 55 bytes in every layout of
+/// the table, and grid lines are `i16`.
+const MAX_TABLE_COLUMNS: u16 = 8192;
+/// BGMail: the last row that gets its own grid line (`i16`); later ones overlap it.
+const MAX_TABLE_ROW: u16 = i16::MAX as u16;
+
 impl ColumnCursor {
     fn start_row(&mut self) {
         self.col = 0;
@@ -120,8 +141,18 @@ impl ColumnCursor {
         self.col
     }
 
+    /// BGMail: the column and span a cell at the next free column gets within
+    /// [`MAX_TABLE_COLUMNS`]. Cells that don't fit overlap the last column, as browsers let
+    /// cells overlap.
+    fn fit(&mut self, colspan: u16) -> (u16, u16) {
+        let col = self.next_free().min(MAX_TABLE_COLUMNS - 1);
+        self.col = col;
+        (col, colspan.clamp(1, MAX_TABLE_COLUMNS - col))
+    }
+
     fn place(&mut self, colspan: u16, rowspan: u16) {
-        let end = self.col + colspan;
+        // BGMail: `u16` wrapped around past 65535 columns, and the slice below panicked.
+        let end = (self.col as usize + colspan as usize).min(MAX_TABLE_COLUMNS as usize) as u16;
         if self.rowspans.len() < end as usize {
             self.rowspans.resize(end as usize, 0);
         }
@@ -146,7 +177,8 @@ pub struct TableColumn {
 #[derive(Debug, Clone)]
 pub struct TableRow {
     // kind: TableItemKind,
-    pub node_id: NodeId,
+    /// BGMail: `None` for an anonymous row, which has no style of its own to paint.
+    pub node_id: Option<NodeId>,
     /// The row group (if any) that contains the row
     pub group: Option<NodeId>,
     /// The row's specified `height`, if it is a length
@@ -249,6 +281,7 @@ pub(crate) fn build_table_context(
         panic!("Ignoring table because it has no styles");
     };
 
+    let computed_style = ServoArc::clone(&stylo_styles);
     let mut style = table_taffy_style(&stylo_styles, wm);
     style.item_is_table = true;
     // BGMail: a table's `height` is a minimum: the table grows to fit its
@@ -281,6 +314,7 @@ pub(crate) fn build_table_context(
 
     drop(stylo_styles);
 
+    let items = wrap_table_text_runs(doc, table_root_node_id, &children, &mut anonymous_blocks);
     let mut columns: Vec<TableColumn> = Vec::new();
     let mut column_sizes: Vec<taffy::TrackSizingFunction> = Vec::new();
     for child_id in children.iter().copied() {
@@ -297,14 +331,19 @@ pub(crate) fn build_table_context(
         let display = doc.nodes[child_id]
             .primary_styles()
             .map(|s| s.clone_display());
+        // BGMail: captions last, so that the first real row sets what depends on it (fixed
+        // widths, collapsed borders). They are moved into place below.
+        if display.is_some_and(|d| d.outside() == DisplayOutside::TableCaption) {
+            return 3;
+        }
         match display.map(|d| d.inside()) {
             Some(DisplayInside::TableHeaderGroup) => 0,
             Some(DisplayInside::TableFooterGroup) => 2,
             _ => 1,
         }
     };
-    for order in 0..3 {
-        for child_id in children.iter().copied() {
+    for order in 0..4 {
+        for child_id in items.iter().copied() {
             if row_group_order(doc, child_id) != order {
                 continue;
             }
@@ -344,6 +383,42 @@ pub(crate) fn build_table_context(
     }
     let num_columns = cursor.num_columns.max(column_sizes.len() as u16);
     column_sizes.resize(num_columns as usize, remaining_column);
+    // BGMail: a caption spans the table, and comes before the rows. `caption-side` isn't in this
+    // build of Stylo, so `bottom` is read as the top.
+    let is_caption = |doc: &BaseDocument, cell: &TableCell| {
+        doc.nodes[cell.node_id]
+            .display_style()
+            .is_some_and(|d| d.outside() == DisplayOutside::TableCaption)
+    };
+    let mut top_captions = Vec::new();
+    for cell in cells.iter_mut().filter(|cell| is_caption(doc, cell)) {
+        cell.span.0 = num_columns.max(1);
+        cell.style.grid_column.end = style_helpers::span(num_columns.max(1));
+        top_captions.push(cell.row);
+    }
+    if !top_captions.is_empty() {
+        let mut order: Vec<u16> = top_captions.clone();
+        order.extend((0..rows.len() as u16).filter(|row| !top_captions.contains(row)));
+        let mut new_row = vec![0u16; rows.len()];
+        for (new, old) in order.iter().enumerate() {
+            new_row[*old as usize] = new as u16;
+        }
+        let mut taken: Vec<Option<TableRow>> =
+            std::mem::take(&mut rows).into_iter().map(Some).collect();
+        rows = order
+            .iter()
+            .filter_map(|old| taken[*old as usize].take())
+            .collect();
+        for cell in &mut cells {
+            if let Some(&row) = new_row.get(cell.row as usize) {
+                cell.row = row;
+                cell.style.grid_row.start =
+                    style_helpers::line((row + 1).min(MAX_TABLE_ROW) as i16);
+            }
+        }
+        // First as well among what is laid out, which is the order text is selected in.
+        cells.sort_by_key(|cell| !is_caption(doc, cell));
+    }
     if is_fixed {
         // In the fixed table layout algorithm, percentage column widths resolve against
         // the table's content width minus the horizontal border-spacing between columns,
@@ -470,6 +545,7 @@ pub(crate) fn build_table_context(
             border_style: first_cell_border,
             is_fixed,
             calc_values,
+            computed_style,
         },
         layout_children,
         anonymous_blocks,
@@ -540,7 +616,9 @@ fn collect_columns(
                 ),
                 _ => column,
             };
-            for _ in 0..span {
+            // BGMail: limited as `colspan`, or a short `<col>` costs 65535 columns.
+            let room = (MAX_TABLE_COLUMNS as usize).saturating_sub(columns.len());
+            for _ in 0..(span as usize).min(MAX_COLSPAN as usize).min(room) {
                 columns.push(TableColumn {
                     node_id,
                     group: None,
@@ -580,9 +658,10 @@ fn needs_anonymous_cell(doc: &BaseDocument, node_id: NodeId) -> bool {
 
 /// BGMail: whether an element generates no box (`display: none`).
 fn generates_no_box(doc: &BaseDocument, node_id: NodeId) -> bool {
-    doc.nodes[node_id]
-        .display_style()
-        .is_some_and(|display| display.outside() == DisplayOutside::None)
+    doc.nodes[node_id].display_style().is_some_and(|display| {
+        // `contents` has no box, but what is inside it does.
+        display.outside() == DisplayOutside::None && display.inside() != DisplayInside::Contents
+    })
 }
 
 /// BGMail: `children` of row `row_id` with each run of consecutive children
@@ -606,13 +685,59 @@ fn group_anonymous_cell_runs(
         items.push(wrapper);
     };
     for &child_id in children {
-        if needs_anonymous_cell(doc, child_id) {
+        // Text directly in a row is in that cell too, like any box that isn't a cell.
+        if needs_anonymous_cell(doc, child_id)
+            || (doc.nodes[child_id].is_text_node() && !doc.nodes[child_id].is_whitespace_node())
+        {
             run.push(child_id);
         } else if !doc.nodes[child_id].is_element() || generates_no_box(doc, child_id) {
             // Neither text (rows lay out none; whitespace between cells is
             // insignificant) nor `display:none` boxes break a run. Responsive
             // mail hides cells between the ones it stacks.
             continue;
+        } else {
+            flush(doc, &mut run, &mut items);
+            items.push(child_id);
+        }
+    }
+    flush(doc, &mut run, &mut items);
+    items
+}
+
+/// BGMail: `children` of table `table_id` with each run of what isn't part of a table holding any
+/// text replaced by one anonymous block (CSS 2.2 §17.2.1), which then gets a row and cell. An HTML
+/// table can't have text, as the parser moves it out, but `<a style="display:table">Call to
+/// action</a>` can, and lost its label. Boxes without text around keep rows of their own.
+fn wrap_table_text_runs(
+    doc: &mut BaseDocument,
+    table_id: NodeId,
+    children: &[NodeId],
+    anonymous_blocks: &mut Vec<NodeId>,
+) -> Vec<NodeId> {
+    let mut items = Vec::with_capacity(children.len());
+    let mut run: Vec<NodeId> = Vec::new();
+    let mut flush = |doc: &mut BaseDocument, run: &mut Vec<NodeId>, items: &mut Vec<NodeId>| {
+        let has_text = run
+            .iter()
+            .any(|&id| doc.nodes[id].is_text_node() && !doc.nodes[id].is_whitespace_node());
+        if has_text {
+            let wrapper = super::construct::create_anonymous_block_node(doc, table_id);
+            doc.nodes[wrapper].children = std::mem::take(run).into();
+            anonymous_blocks.push(wrapper);
+            items.push(wrapper);
+        } else {
+            items.append(run);
+        }
+    };
+    for &child_id in children {
+        let node = &doc.nodes[child_id];
+        let caption = node
+            .display_style()
+            .is_some_and(|display| display.outside() == DisplayOutside::TableCaption);
+        if node.is_text_node() || (!caption && needs_anonymous_cell(doc, child_id)) {
+            run.push(child_id);
+        } else if !node.is_element() || generates_no_box(doc, child_id) {
+            items.push(child_id);
         } else {
             flush(doc, &mut run, &mut items);
             items.push(child_id);
@@ -653,7 +778,9 @@ fn collect_table_cells(
         return;
     };
 
-    if display.outside() == DisplayOutside::None {
+    // BGMail: `display:contents` has no outer display either, but its children are the table's
+    // (the arm for it below was unreachable, and the row or table's text vanished).
+    if display.outside() == DisplayOutside::None && display.inside() != DisplayInside::Contents {
         node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
         return;
     }
@@ -690,11 +817,13 @@ fn collect_table_cells(
         | DisplayInside::TableHeaderGroup
         | DisplayInside::TableFooterGroup
         | DisplayInside::Contents => {
+            // BGMail: its own, not its children's: a cell needs its own to rebuild its boxes, as
+            // a width can make it a block with an inline layout, and keeping that one after it
+            // is a cell again aborted the app. Rows clear theirs.
+            node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             let first_row = rows.len();
             let children = std::mem::take(&mut doc.nodes[node_id].children);
             for child_id in children.iter().copied() {
-                doc.nodes[child_id]
-                    .remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                 collect_table_cells(
                     doc,
                     child_id,
@@ -709,7 +838,8 @@ fn collect_table_cells(
                     columns,
                     first_cell_border,
                     percent_columns,
-                    false,
+                    // BGMail: `contents` in a row is still in that row.
+                    in_row,
                     anonymous_blocks,
                 );
             }
@@ -722,7 +852,7 @@ fn collect_table_cells(
         }
         DisplayInside::TableRow => {
             node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
-            *row += 1;
+            *row = row.saturating_add(1);
             cursor.start_row();
 
             let height = node.primary_styles().and_then(|style| {
@@ -730,7 +860,7 @@ fn collect_table_cells(
                 (height.tag() == taffy::CompactLength::LENGTH_TAG).then(|| height.value())
             });
             rows.push(TableRow {
-                node_id,
+                node_id: Some(node_id),
                 group: None,
                 height,
                 is_constrained: height.is_some(),
@@ -763,6 +893,23 @@ fn collect_table_cells(
             doc.nodes[node_id].children = children;
         }
         DisplayInside::TableCell => {
+            // BGMail: a cell outside a row (its `<tr>` is `display:contents`) opens an anonymous
+            // one, unless the one before is anonymous too, as siblings in `display:table` share
+            // it. On grid line 0, which doesn't exist, it would land after the rows following it.
+            if !in_row
+                && rows
+                    .last()
+                    .is_none_or(|last| last.node_id.is_some() || last.group.is_some())
+            {
+                *row = row.saturating_add(1);
+                cursor.start_row();
+                rows.push(TableRow {
+                    node_id: None,
+                    group: None,
+                    height: None,
+                    is_constrained: false,
+                });
+            }
             let anonymous = treat_as_anonymous_cell;
             let collapsed = border_collapse == BorderCollapse::Collapse && !anonymous;
             // BGMail: the cell's own layout must not count its borders either
@@ -776,16 +923,17 @@ fn collect_table_cells(
             let colspan: u16 = (!anonymous)
                 .then(|| node.attr(local_name!("colspan")))
                 .flatten()
-                .and_then(|val| val.parse().ok())
-                .unwrap_or(1);
+                .and_then(|val| val.parse::<u16>().ok())
+                .map_or(1, |v| v.clamp(1, MAX_COLSPAN));
             let rowspan: u16 = (!anonymous)
                 .then(|| node.attr(local_name!("rowspan")))
                 .flatten()
                 .and_then(|val| val.parse::<u16>().ok())
-                .map(|v| v.clamp(1, 65534))
+                // BGMail: 65534 as in the standard wraps the `i16` grid lines around.
+                .map(|v| v.clamp(1, MAX_TABLE_ROW.saturating_sub(*row).max(1)))
                 .unwrap_or(1);
             let mut style = table_taffy_style(stylo_style, wm);
-            let col = cursor.next_free();
+            let (col, colspan) = cursor.fit(colspan);
 
             // In the collapsed borders model the borders are laid out as gutters between
             // the cells (see the table's `gap`) rather than as part of the cells
@@ -802,6 +950,29 @@ fn collect_table_cells(
             // floor on their tracks.
             if is_fixed {
                 style.min_size.width = style_helpers::length(0.0);
+            }
+
+            // BGMail: in an automatic table these bound what a cell asks of its column, and not
+            // the cell, which is as wide as the column.
+            let mut width_limits = (None, None);
+            if !is_fixed && !anonymous {
+                let extra = match style.box_sizing {
+                    taffy::BoxSizing::ContentBox => {
+                        let padding = style.padding.resolve_or_zero(None, resolve_calc_value);
+                        let border = style.border.resolve_or_zero(None, resolve_calc_value);
+                        padding.left + padding.right + border.left + border.right
+                    }
+                    taffy::BoxSizing::BorderBox => 0.0,
+                };
+                let limit = |raw: taffy::CompactLength| {
+                    (raw.tag() == taffy::CompactLength::LENGTH_TAG).then(|| raw.value() + extra)
+                };
+                width_limits = (
+                    limit(style.min_size.width.into_raw()),
+                    limit(style.max_size.width.into_raw()),
+                );
+                style.min_size.width = style_helpers::auto();
+                style.max_size.width = style_helpers::auto();
             }
 
             // Column widths from `<col>` elements take precedence over cell widths
@@ -912,7 +1083,7 @@ fn collect_table_cells(
                 end: style_helpers::span(colspan),
             };
             style.grid_row = taffy::Line {
-                start: style_helpers::line(*row as i16),
+                start: style_helpers::line((*row).min(MAX_TABLE_ROW) as i16),
                 end: style_helpers::span(rowspan),
             };
             if rowspan == 1 && style.size.height.tag() == taffy::CompactLength::LENGTH_TAG {
@@ -953,29 +1124,70 @@ fn collect_table_cells(
                 style.size.width = style_helpers::percent(1.0);
             }
             cells.push(TableCell {
+                computed_style: ServoArc::clone(stylo_style),
                 span: (colspan, rowspan),
                 span_width,
                 node_id,
                 row: row.saturating_sub(1),
                 column: col,
                 anonymous,
+                is_caption: display.outside() == DisplayOutside::TableCaption,
+                width_limits,
                 own_margins,
                 style,
             });
 
             cursor.place(colspan, rowspan);
         }
+        // BGMail: what isn't a row or cell directly in a table or row group gets an anonymous
+        // row and cell (CSS 2.2 §17.2.1). `tbody{display:block}` in a media query for narrow
+        // screens left the whole message blank. Captions come here too: display outside, not
+        // inside, makes them one.
         DisplayInside::Flow
         | DisplayInside::FlowRoot
         | DisplayInside::Flex
         | DisplayInside::Grid
         | DisplayInside::GridLanes => {
-            node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
-            // Probably a table caption: ignore
-            // println!(
-            //     "Warning: ignoring non-table typed descendent of table ({:?})",
-            //     display.inside()
-            // );
+            // Its row group took this off, expecting a row. Everything inside too: as parts of a
+            // table, its descendants may never have had boxes of their own.
+            let mut pending = vec![node_id];
+            while let Some(id) = pending.pop() {
+                let descendant = &mut doc.nodes[id];
+                descendant.insert_damage(CONSTRUCT_BOX);
+                descendant.invalidate_layout_cache();
+                descendant
+                    .flags
+                    .remove(crate::node::NodeFlags::IS_TABLE_CELL);
+                descendant
+                    .flags
+                    .remove(crate::node::NodeFlags::IS_COLLAPSED_BORDER_CELL);
+                pending.extend(descendant.children.iter().copied());
+            }
+            *row = row.saturating_add(1);
+            cursor.start_row();
+            rows.push(TableRow {
+                node_id: None,
+                group: None,
+                height: None,
+                is_constrained: false,
+            });
+            collect_table_cells(
+                doc,
+                node_id,
+                wm,
+                is_fixed,
+                border_collapse,
+                row,
+                cursor,
+                cells,
+                oof_children,
+                rows,
+                columns,
+                first_cell_border,
+                percent_columns,
+                true,
+                anonymous_blocks,
+            );
         }
         DisplayInside::TableColumnGroup | DisplayInside::TableColumn | DisplayInside::Table => {
             node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
@@ -1269,6 +1481,32 @@ fn distribute_span_excess(
     }
 }
 
+/// BGMail: the width a table without one would like for its columns (min, max, fixed, percent):
+/// enough for each one's content, and for each percentage to hold its share of the total. A
+/// percentage leaves the rest for the other columns; with nothing left, they take all there is.
+fn preferred_columns_width(columns: &[(f32, f32, Option<f32>, Option<f32>)]) -> f32 {
+    const ALL_THERE_IS: f32 = 1e6;
+    let col_max = |c: &(f32, f32, Option<f32>, Option<f32>)| c.2.map_or(c.1, |f| f.max(c.0));
+    let sum: f32 = columns.iter().map(col_max).sum();
+    let percents: f32 = columns.iter().filter_map(|c| c.3).sum::<f32>().min(1.0);
+    if percents <= 0.0 {
+        return sum;
+    }
+    let others: f32 = columns.iter().filter(|c| c.3.is_none()).map(col_max).sum();
+    let for_others = if percents < 1.0 {
+        others / (1.0 - percents)
+    } else if others > 0.0 {
+        ALL_THERE_IS
+    } else {
+        0.0
+    };
+    let for_percents = columns
+        .iter()
+        .filter_map(|c| c.3.filter(|percent| *percent > 0.0).map(|p| c.1 / p))
+        .fold(0.0, f32::max);
+    sum.max(for_others).max(for_percents).min(ALL_THERE_IS)
+}
+
 impl TableTreeWrapper<'_, '_> {
     /// BGMail: the table's container style with explicit column widths from the
     /// browsers' automatic table layout. Taffy's grid would otherwise grow auto
@@ -1323,6 +1561,7 @@ impl TableTreeWrapper<'_, '_> {
             .collect();
 
         let mut spanning = Vec::new();
+        let mut caption_min = 0.0f32;
         for idx in 0..ctx.cells.len() {
             let cell = &ctx.cells[idx];
             let col = cell.column as usize;
@@ -1356,8 +1595,18 @@ impl TableTreeWrapper<'_, '_> {
                 .width
             };
             let span_width = ctx.cells[idx].span_width.unwrap_or(0.0);
-            let min = measure(AvailableSpace::MinContent).max(span_width);
-            let max = measure(AvailableSpace::MaxContent).max(min);
+            let (least, most) = ctx.cells[idx].width_limits;
+            let bound = |width: f32| {
+                let width = most.map_or(width, |most| width.min(most));
+                least.map_or(width, |least| width.max(least))
+            };
+            let min = bound(measure(AvailableSpace::MinContent)).max(span_width);
+            // A caption wraps to the table's width, and asks only that it fits, not its columns.
+            if ctx.cells[idx].is_caption {
+                caption_min = caption_min.max(min);
+                continue;
+            }
+            let max = bound(measure(AvailableSpace::MaxContent)).max(min);
             if span == 1 {
                 if let Some(c) = columns.get_mut(col) {
                     c.0 = c.0.max(min);
@@ -1392,9 +1641,9 @@ impl TableTreeWrapper<'_, '_> {
             }
         }
 
-        let col_max = |c: &(f32, f32, Option<f32>, Option<f32>)| c.2.map_or(c.1, |f| f.max(c.0));
         let sum_min: f32 = columns.iter().map(|c| c.0).sum();
-        let sum_max: f32 = columns.iter().map(col_max).sum();
+        let sum_min = sum_min.max(caption_min - gap * (n as f32 - 1.0));
+        let sum_max = preferred_columns_width(&columns);
         // The table's own min/max-width bound whatever width it would take.
         let min_width = style
             .min_size
@@ -1579,6 +1828,7 @@ fn distribute_rowspan_height(rows: &mut [f32], origins: &[bool], constrained: &[
 mod auto_table_tests {
     use super::{
         ColumnCursor, distribute_auto_columns, distribute_rowspan_height, distribute_span_excess,
+        preferred_columns_width,
     };
 
     #[test]
@@ -1673,6 +1923,20 @@ mod auto_table_tests {
 
     fn close(a: &[f32], b: &[f32]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.01)
+    }
+
+    #[test]
+    fn percentages_ask_for_room_in_a_table_without_a_width() {
+        let columns = [(10.0, 30.0, None, Some(0.3)), (10.0, 40.0, None, Some(0.7))];
+        assert!((preferred_columns_width(&columns) - 100.0).abs() < 0.01);
+        let rest = [(10.0, 20.0, None, Some(0.5)), (10.0, 60.0, None, None)];
+        assert!((preferred_columns_width(&rest) - 120.0).abs() < 0.01);
+        let all = [(10.0, 20.0, None, Some(1.0)), (10.0, 60.0, None, None)];
+        assert_eq!(preferred_columns_width(&all), 1e6);
+        let alone = [(10.0, 20.0, None, Some(1.0))];
+        assert_eq!(preferred_columns_width(&alone), 20.0);
+        let none = [(10.0, 20.0, None, None), (10.0, 60.0, Some(70.0), None)];
+        assert_eq!(preferred_columns_width(&none), 90.0);
     }
 
     #[test]

@@ -93,7 +93,9 @@ pub(crate) fn decode_component(value: &str) -> String {
         match bytes[i] {
             b'+' => out.push(b' '),
             b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()));
                 match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
                     Some(b) => {
                         out.push(b);

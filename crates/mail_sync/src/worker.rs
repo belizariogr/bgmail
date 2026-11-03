@@ -2,7 +2,7 @@
 //! connected `MailRemote`, executes commands and sync cycles, and keeps an
 //! IDLE thread watching the Inbox.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -11,15 +11,16 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mail_core::{
-    parse_message, AccountConfig, CancelToken, IdleOutcome, MailConnector, MailRemote, MailSender,
-    MessageFlags, RemoteError, RemoteErrorKind, SendError, SendFailure, DEFAULT_SYNC_WINDOW,
+    parse_header_block, AccountConfig, CancelToken, IdleOutcome, MailConnector, MailRemote,
+    MailSender, MessageFlags, RemoteError, RemoteErrorKind, RemoteHeader, SendError, SendFailure,
+    DEFAULT_SYNC_WINDOW,
 };
 use storage::{
     system, Database, Folder, FolderSyncState, NewRemoteMessage, OutgoingRow, OutgoingState,
     PendingOp, BODY_STATE_FULL, PROVIDER_LOCAL,
 };
 
-use crate::body::{body_content, repair_stale_previews};
+use crate::body::{body_content_within, repair_stale_previews};
 use crate::contacts;
 use crate::engine::EngineOptions;
 use crate::events::{AccountStatus, Command, SyncEvent};
@@ -40,6 +41,9 @@ pub(crate) const MAX_OP_ATTEMPTS: u32 = 3;
 pub(crate) const MAX_SEND_ATTEMPTS: u32 = 3;
 /// Failed Sent-copy APPENDs after which the copy is given up.
 pub(crate) const MAX_APPEND_DEFERRALS: u32 = 5;
+/// Age at which a message stops being tried and waits for the user (user decision),
+/// counted even while the app is closed: it may no longer be what its author wants sent.
+pub(crate) const SEND_GIVE_UP_AFTER: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 /// A `sending` row older than this belonged to a worker that died mid-send
 /// (longer than any SMTP transaction can take with its I/O timeouts).
 pub(crate) const SEND_LEASE: Duration = Duration::from_secs(10 * 60);
@@ -115,6 +119,7 @@ pub(crate) fn is_connection_error(kind: RemoteErrorKind) -> bool {
             | RemoteErrorKind::Network
             | RemoteErrorKind::Tls
             | RemoteErrorKind::Cancelled
+            | RemoteErrorKind::Unreadable
     )
 }
 
@@ -228,6 +233,10 @@ struct Worker {
     remote: Option<Box<dyn MailRemote>>,
     queue: VecDeque<Command>,
     backoff: Backoff,
+    /// A message was filed in Sent since that folder last synced.
+    sent_is_stale: bool,
+    /// Messages whose body was over the limit, not to be downloaded again.
+    rejected_bodies: HashSet<i64>,
     retry_at: Option<Instant>,
     auth_failed: bool,
     next_poll: Instant,
@@ -249,6 +258,8 @@ impl Worker {
             connector: setup.connector,
             events: setup.events,
             backoff: Backoff::new(setup.options.retry_base, setup.options.retry_max),
+            sent_is_stale: false,
+            rejected_bodies: HashSet::new(),
             next_poll: Instant::now() + setup.options.poll_interval,
             options: setup.options,
             cancel: setup.cancel,
@@ -489,7 +500,6 @@ impl Worker {
         if self.remote.is_none() {
             self.status(AccountStatus::Connecting);
             self.remote = Some(self.connector.connect(&self.cancel)?);
-            self.backoff.reset();
             self.retry_at = None;
         }
         Ok(())
@@ -521,9 +531,47 @@ impl Worker {
     }
 
     fn idle_status(&mut self) {
+        // A connection opening proves little: a server can log in and then fail every
+        // command, and retrying at the base delay would hammer it with logins.
+        self.backoff.reset();
         self.status(AccountStatus::Idle {
             last_sync: self.last_sync,
         });
+    }
+
+    /// The headers of `uids`, around a message whose structure the client can't parse: it
+    /// would otherwise fail its whole batch at every sync, and with it all the mail after.
+    /// Fetches without the structure, then one by one, skipping what still can't be read.
+    /// Each failure needs a new connection, as the rest of that answer stays unread.
+    fn fetch_readable_headers(
+        &mut self,
+        folder: &str,
+        uids: &[u32],
+    ) -> Result<Vec<RemoteHeader>, Abort> {
+        let unreadable = |error: &RemoteError| error.kind == RemoteErrorKind::Unreadable;
+        match self.rm()?.fetch_headers(folder, uids) {
+            Err(error) if unreadable(&error) => self.disconnect(false),
+            other => return Ok(other?),
+        }
+        self.ensure_connected()?;
+        match self.rm()?.fetch_headers_plain(folder, uids) {
+            Err(error) if unreadable(&error) => self.disconnect(false),
+            other => return Ok(other?),
+        }
+        let mut headers = Vec::new();
+        for uid in uids {
+            self.ensure_connected()?;
+            match self.rm()?.fetch_headers_plain(folder, &[*uid]) {
+                Err(error) if unreadable(&error) => {
+                    eprintln!("BGMail: skipping unreadable message {uid} of {folder}");
+                    self.disconnect(false);
+                }
+                other => headers.extend(other?),
+            }
+        }
+        // The last one may have cost the connection, and the sync goes on after this.
+        self.ensure_connected()?;
+        Ok(headers)
     }
 
     /// Queue → outbox → folder list → every folder → orphan purge.
@@ -536,6 +584,7 @@ impl Worker {
             .map_or(DEFAULT_SYNC_WINDOW, |config| config.sync_window);
         let mut changed = self.process_queue()?;
         self.process_outbox()?;
+        self.sent_is_stale = false;
         self.sync_folder_list()?;
         for folder in sync_order(&self.db.list_folders(self.account_id)?) {
             self.check_interrupts()?;
@@ -593,6 +642,17 @@ impl Worker {
             self.mailbox_changed();
         }
         self.process_outbox()?;
+        // What was just sent shows in Sent now, rather than at the next poll.
+        if std::mem::take(&mut self.sent_is_stale) {
+            let sent = self
+                .db
+                .list_folders(self.account_id)?
+                .into_iter()
+                .find(|folder| folder.path == system::SENT && folder.remote_name.is_some());
+            if let Some(folder) = sent {
+                self.sync_folder(&folder)?;
+            }
+        }
         self.idle_status();
         Ok(())
     }
@@ -840,7 +900,7 @@ impl Worker {
         match self.rm()?.fetch_headers(&folder, &[uid]) {
             Ok(headers) => {
                 for header in headers {
-                    let parsed = parse_message(&header.header).unwrap_or_default();
+                    let parsed = parse_header_block(&header.header).unwrap_or_default();
                     let message = new_remote_message(&header, &parsed);
                     let insert = self.db.record_remote_message(
                         self.account_id,
@@ -1094,6 +1154,17 @@ impl Worker {
                 permanent: true,
             });
         }
+        for (id, error) in
+            self.db
+                .give_up_outgoing(self.account_id, now, SEND_GIVE_UP_AFTER.as_secs() as i64)?
+        {
+            self.emit(SyncEvent::SendFailed {
+                account_id: self.account_id,
+                outbox_id: id,
+                error: error.unwrap_or_else(|| "not sent in time".into()),
+                permanent: true,
+            });
+        }
         let rows = self.db.due_outgoing(self.account_id, now)?;
         let mut sender: Option<Box<dyn MailSender>> = None;
         let mut result = Ok(());
@@ -1162,6 +1233,7 @@ impl Worker {
             self.db.mark_outgoing_append_pending(row.id)?;
         } else {
             self.db.complete_outgoing(row.id)?;
+            self.sent_is_stale = true;
         }
         self.emit(SyncEvent::Sent {
             account_id: self.account_id,
@@ -1243,6 +1315,11 @@ impl Worker {
         }
         let Some(sent) = sent else {
             self.db.complete_outgoing(row.id)?;
+            self.emit(SyncEvent::SentCopyFailed {
+                account_id: self.account_id,
+                outbox_id: row.id,
+                error: "no Sent folder on the server".into(),
+            });
             return Ok(());
         };
         let seen = MessageFlags {
@@ -1250,9 +1327,11 @@ impl Worker {
             ..Default::default()
         };
         self.ensure_connected()?;
-        match self.rm()?.append(&sent, seen, &row.raw) {
+        let copy = mail_core::sent_copy(&row.raw, &row.recipients);
+        match self.rm()?.append(&sent, seen, &copy) {
             Ok(()) => {
                 self.db.complete_outgoing(row.id)?;
+                self.sent_is_stale = true;
                 Ok(())
             }
             Err(error) => {
@@ -1376,12 +1455,12 @@ impl Worker {
         let mut notices = Vec::new();
         for batch in plan.to_fetch.chunks(HEADER_BATCH) {
             self.check_interrupts()?;
-            let headers = self.rm()?.fetch_headers(&name, batch)?;
+            let headers = self.fetch_readable_headers(&name, batch)?;
             // Read after the fetch: the UI may have queued an edit meanwhile,
             // and these flags predate it.
             let flags_pending = messages_with_pending_flags(&self.db.pending_ops(self.account_id)?);
             for header in headers {
-                let parsed = parse_message(&header.header).unwrap_or_default();
+                let parsed = parse_header_block(&header.header).unwrap_or_default();
                 let message = new_remote_message(&header, &parsed);
                 let insert = self.db.record_remote_message(
                     self.account_id,
@@ -1505,7 +1584,12 @@ impl Worker {
 
     fn download_body(&mut self, message_id: i64, folder: &str, uid: u32) -> Result<(), Abort> {
         let raw = self.rm()?.fetch_body(folder, uid)?;
-        let body = body_content(&raw);
+        let Some(body) = body_content_within(&raw, self.options.max_message_body) else {
+            self.rejected_bodies.insert(message_id);
+            return Err(
+                RemoteError::new(RemoteErrorKind::TooLarge, "message body over the limit").into(),
+            );
+        };
         self.db.store_body(
             message_id,
             &raw,
@@ -1527,6 +1611,10 @@ impl Worker {
                 Ok(())
             }
             Err(Abort::Shutdown) => Err(Abort::Shutdown),
+            Err(Abort::Remote(error)) if error.kind == RemoteErrorKind::TooLarge => {
+                self.emit(SyncEvent::BodyRejected { message_id });
+                Ok(())
+            }
             Err(Abort::Remote(error)) => {
                 self.emit(SyncEvent::BodyFailed {
                     message_id,
@@ -1549,6 +1637,12 @@ impl Worker {
     }
 
     fn try_fetch_body(&mut self, message_id: i64) -> Result<(), Abort> {
+        // Once per session: opening it again shouldn't download it all again.
+        if self.rejected_bodies.contains(&message_id) {
+            return Err(
+                RemoteError::new(RemoteErrorKind::TooLarge, "message body over the limit").into(),
+            );
+        }
         let not_found = |what: &str| RemoteError::new(RemoteErrorKind::NotFound, what);
         let Some(message) = self.db.get_message(message_id)? else {
             return Err(not_found("message no longer exists").into());
@@ -1641,10 +1735,10 @@ pub(crate) fn run_idle(mut setup: IdleSetup) {
                 continue;
             }
         };
-        setup.backoff.reset();
         loop {
             match remote.idle(&setup.folder_name, setup.timeout, &setup.cancel) {
                 Ok(IdleOutcome::Changed) => {
+                    setup.backoff.reset();
                     if setup
                         .poke
                         .send(Command::SyncFolder(setup.folder_id))
@@ -1653,7 +1747,7 @@ pub(crate) fn run_idle(mut setup: IdleSetup) {
                         return;
                     }
                 }
-                Ok(IdleOutcome::Timeout) => {}
+                Ok(IdleOutcome::Timeout) => setup.backoff.reset(),
                 Ok(IdleOutcome::Stopped) => return,
                 Err(error) if error.kind == RemoteErrorKind::Unsupported => {
                     setup.unsupported.store(true, Ordering::SeqCst);
@@ -1833,6 +1927,28 @@ mod tests {
         server.fail_next(RemoteErrorKind::Auth);
         let (setup, _commands) = idle_setup(&FakeConnector::new(server, FakeSender::new()));
         run_idle(setup);
+    }
+
+    #[test]
+    fn a_connection_that_fails_right_after_login_still_backs_off() {
+        let server = FakeRemote::new();
+        server.add_folder("INBOX", &[]);
+        for _ in 0..3 {
+            server.fail_next(RemoteErrorKind::Protocol);
+        }
+        let connector = FakeConnector::new(server.clone(), FakeSender::new());
+        let (mut setup, commands) = idle_setup(&connector);
+        setup.backoff = Backoff::new(Duration::from_millis(40), Duration::from_secs(10));
+        drop(commands);
+        let started = Instant::now();
+        let handle = std::thread::spawn(move || run_idle(setup));
+        while connector.connects() < 4 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // 40 + 80 + 160 ms: at the base delay it would take 120 ms.
+        assert!(started.elapsed() >= Duration::from_millis(280));
+        server.deliver("INBOX", b"Subject: x\r\n\r\n", MessageFlags::default());
+        handle.join().unwrap();
     }
 
     #[test]

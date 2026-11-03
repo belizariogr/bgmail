@@ -147,6 +147,7 @@ pub(crate) fn build_inline_layout_into(
     let mut quirk = LineHeightQuirk {
         enabled: line_height_quirk,
         line_empty: true,
+        spans_left: MAX_INLINE_SPANS,
     };
     if let Some(before_id) = root_node.before() {
         build_inline_layout_recursive(
@@ -241,11 +242,14 @@ pub(crate) fn build_inline_layout_into(
                                 ),
                             ]
                         });
-                        builder.push_style_modification_span(
-                            whitespace
-                                .as_ref()
-                                .map_or(&[][..], |styles| styles.as_slice()),
-                        );
+                        let span = quirk.take_span(2);
+                        if span {
+                            builder.push_style_modification_span(
+                                whitespace
+                                    .as_ref()
+                                    .map_or(&[][..], |styles| styles.as_slice()),
+                            );
+                        }
                         for child_id in node.children.iter().copied() {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             build_inline_layout_recursive(
@@ -257,7 +261,9 @@ pub(crate) fn build_inline_layout_into(
                                 quirk,
                             );
                         }
-                        builder.pop_style_span();
+                        if span {
+                            builder.pop_style_span();
+                        }
                     }
                     (DisplayOutside::Inline, DisplayInside::Flow) => {
                         let tag_name = &element_data.name.local;
@@ -284,23 +290,25 @@ pub(crate) fn build_inline_layout_into(
                         } else if *tag_name == local_name!("br") {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             // TODO: update span id for br spans
-                            match style.filter(|_| quirk.enabled && quirk.line_empty) {
-                                // BGMail: under the line height quirk a break
-                                // alone on its line is text: its own span gives
-                                // that line the parent's line height (the
-                                // parent may have none, holding no text).
-                                Some(style) => builder.push_style_span(parley::TextStyle {
-                                    white_space_collapse: WhiteSpaceCollapse::Preserve,
-                                    ..stylo_to_parley::style(node.id, style)
-                                }),
-                                None => builder.push_style_modification_span(&[
-                                    parley::StyleProperty::WhiteSpaceCollapse(
-                                        WhiteSpaceCollapse::Preserve,
-                                    ),
-                                ]),
+                            if quirk.take_span(1) {
+                                match style.filter(|_| quirk.enabled && quirk.line_empty) {
+                                    // BGMail: under the line height quirk a break
+                                    // alone on its line is text: its own span gives
+                                    // that line the parent's line height (the
+                                    // parent may have none, holding no text).
+                                    Some(style) => builder.push_style_span(parley::TextStyle {
+                                        white_space_collapse: WhiteSpaceCollapse::Preserve,
+                                        ..stylo_to_parley::style(node.id, style)
+                                    }),
+                                    None => builder.push_style_modification_span(&[
+                                        parley::StyleProperty::WhiteSpaceCollapse(
+                                            WhiteSpaceCollapse::Preserve,
+                                        ),
+                                    ]),
+                                }
+                                builder.push_text("\n");
+                                builder.pop_style_span();
                             }
-                            builder.push_text("\n");
-                            builder.pop_style_span();
                             quirk.line_empty = true;
                             text_transformer.word_break(builder);
                         } else {
@@ -319,7 +327,10 @@ pub(crate) fn build_inline_layout_into(
                                     ..Default::default()
                                 });
 
-                            builder.push_style_span(style);
+                            let span = quirk.take_span(2);
+                            if span {
+                                builder.push_style_span(style);
+                            }
 
                             // BGMail: reserve the inline element's horizontal margin,
                             // border and padding (Parley has no inline padding) with
@@ -375,7 +386,9 @@ pub(crate) fn build_inline_layout_into(
                                     end_space,
                                 ));
                             }
-                            builder.pop_style_span();
+                            if span {
+                                builder.pop_style_span();
+                            }
                         }
                     }
                     // Inline box
@@ -420,12 +433,32 @@ pub(crate) fn build_inline_layout_into(
     }
 }
 
+/// BGMail: the most styles the spans of an inline context may take. Parley asserts there are at
+/// most `u16::MAX`, also in release, and a long log with a `<br>` per line reaches them. A `<br>`
+/// takes one, as it has no collapsible space of its own, and any other span up to two, when it
+/// is `nowrap`. The rest is for the root, a marker and the spans kept open around them.
+/// Past this limit an element's text takes the style already open, and a `<br>` stops
+/// breaking the line.
+const MAX_INLINE_SPANS: u32 = 64_000;
+
+impl LineHeightQuirk {
+    fn take_span(&mut self, styles: u32) -> bool {
+        let available = self.spans_left >= styles;
+        if available {
+            self.spans_left -= styles;
+        }
+        available
+    }
+}
+
 /// BGMail: line height quirk state while building an inline context.
 struct LineHeightQuirk {
     enabled: bool,
     /// Whether nothing (no text, no box) precedes on the current line since
     /// the start or the last `<br>`.
     line_empty: bool,
+    /// Style spans this inline context may still open (see [`MAX_INLINE_SPANS`]).
+    spans_left: u32,
 }
 
 /// BGMail: the (limited-)quirks line height calculation quirk
@@ -512,9 +545,9 @@ fn inline_edge_space(style: &style::properties::ComputedValues) -> (f32, f32) {
     };
     let start = margin_px(&margin.margin_left)
         + side(border.border_left_width.0, border.border_left_style)
-        + padding.padding_left.0.resolve(zero).px();
+        + stylo_taffy::convert::saturate_px(padding.padding_left.0.resolve(zero).px());
     let end = margin_px(&margin.margin_right)
         + side(border.border_right_width.0, border.border_right_style)
-        + padding.padding_right.0.resolve(zero).px();
+        + stylo_taffy::convert::saturate_px(padding.padding_right.0.resolve(zero).px());
     (start.max(0.0), end.max(0.0))
 }

@@ -1,6 +1,8 @@
-//! One running BGMail receives what later launches are asked to open: a second
-//! process started for a `mailto:` link hands it over and exits, so two
-//! processes never fight over the mail database.
+//! One BGMail runs per profile: a later launch hands over what it was asked to do
+//! (a `mailto:` link, or just showing the window) and exits. Two processes on one
+//! mail database would each run the operation queue, and the second, finding its
+//! work already done, would undo it. A lock file decides, since the system releases
+//! it however the process ends and a stale `instance` file can't be mistaken for it.
 //!
 //! Loopback TCP keeps this one portable code path (std has no Windows local
 //! sockets). A private file holds the port and a random token; connections
@@ -8,6 +10,7 @@
 //! window, which still waits for the user to press Send.
 
 use std::collections::hash_map::RandomState;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -18,6 +21,51 @@ use std::time::Duration;
 const MAX_MESSAGE_BYTES: u64 = 256 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a later launch waits for the running one to start listening.
+const HAND_OVER_ATTEMPTS: u32 = 50;
+const HAND_OVER_DELAY: Duration = Duration::from_millis(100);
+
+/// The message of a launch that has nothing to open: show the window.
+pub const ACTIVATE: &str = "activate";
+
+/// Outcome of trying to be this profile's process.
+pub enum ProfileLock {
+    /// This process is the one; the lock lasts as long as the file stays open.
+    Held(#[allow(dead_code, reason = "held for its lifetime, never read")] File),
+    /// Another BGMail runs on this profile.
+    Busy,
+    /// The lock can't be taken here (read-only or unusual file system): carry on as
+    /// if alone rather than refuse to start.
+    Unavailable,
+}
+
+/// Tries to become the process of this profile.
+pub fn lock_profile() -> ProfileLock {
+    instance_file().map_or(ProfileLock::Unavailable, |file| {
+        lock_at(&file.with_file_name("instance.lock"))
+    })
+}
+
+fn lock_at(path: &Path) -> ProfileLock {
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return ProfileLock::Unavailable;
+        }
+    }
+    let Ok(file) = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+    else {
+        return ProfileLock::Unavailable;
+    };
+    match file.try_lock() {
+        Ok(()) => ProfileLock::Held(file),
+        Err(TryLockError::WouldBlock) => ProfileLock::Busy,
+        Err(TryLockError::Error(_)) => ProfileLock::Unavailable,
+    }
+}
 
 /// The first `mailto:` link among the process arguments.
 pub fn mailto_argument(args: impl IntoIterator<Item = String>) -> Option<String> {
@@ -32,10 +80,20 @@ fn instance_file() -> Option<PathBuf> {
     Some(crate::config::config_path()?.with_file_name("instance"))
 }
 
-/// Hands `message` to the running instance. `false`: there is none (no file, or
-/// a stale one), so this process has to handle it.
-pub fn forward(message: &str) -> bool {
-    instance_file().is_some_and(|file| forward_through(&file, message).is_some())
+/// Hands `message` to the process holding the profile, which may still be starting.
+/// `false`: it never answered.
+pub fn hand_over(message: &str) -> bool {
+    instance_file()
+        .is_some_and(|file| hand_over_through(&file, message, HAND_OVER_ATTEMPTS, HAND_OVER_DELAY))
+}
+
+fn hand_over_through(file: &Path, message: &str, attempts: u32, delay: Duration) -> bool {
+    (0..attempts).any(|attempt| {
+        if attempt > 0 {
+            std::thread::sleep(delay);
+        }
+        forward_through(file, message).is_some()
+    })
 }
 
 fn forward_through(file: &Path, message: &str) -> Option<()> {
@@ -55,8 +113,8 @@ fn forward_through(file: &Path, message: &str) -> Option<()> {
 }
 
 /// Starts listening off the startup path; `on_message` runs on a background
-/// thread for every message. Failing only means later launches open their own
-/// window, as they would without this.
+/// thread for every message. Failing only means later launches can't hand anything
+/// over: they exit without showing this window.
 pub fn listen(on_message: impl Fn(String) + Send + 'static) {
     let Some(file) = instance_file() else {
         return;
@@ -138,6 +196,36 @@ mod tests {
         );
         assert_eq!(mailto_argument(args(&["bgmail", "--x", "http://a"])), None);
         assert_eq!(mailto_argument(args(&["ç", "mail"])), None);
+    }
+
+    #[test]
+    fn only_one_process_holds_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder that doesn't exist yet, as on a first launch.
+        let path = dir.path().join("BGMail").join("instance.lock");
+        let held = lock_at(&path);
+        assert!(matches!(held, ProfileLock::Held(_)));
+        assert!(matches!(lock_at(&path), ProfileLock::Busy));
+        drop(held);
+        assert!(matches!(lock_at(&path), ProfileLock::Held(_)));
+    }
+
+    #[test]
+    fn a_lock_that_cannot_be_taken_does_not_stop_the_app() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the lock file should be.
+        assert!(matches!(lock_at(dir.path()), ProfileLock::Unavailable));
+    }
+
+    #[test]
+    fn handing_over_waits_for_a_starting_instance_and_gives_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("instance");
+        assert!(!hand_over_through(&file, "x", 2, Duration::ZERO));
+
+        let (_serving, served, messages) = serving();
+        assert!(hand_over_through(&served, ACTIVATE, 2, Duration::ZERO));
+        assert_eq!(messages.recv().unwrap(), ACTIVATE);
     }
 
     /// Serves on a private file and returns it with the received messages.

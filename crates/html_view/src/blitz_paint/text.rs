@@ -116,7 +116,10 @@ pub(crate) fn draw_inline_backgrounds<'a>(
         }
         let padding = styles.get_padding();
         let pad = |lp: &style::values::computed::LengthPercentage| {
-            lp.resolve(style::values::computed::Length::new(0.0)).px() as f64
+            // BGMail: saturated as layout saturates lengths, since a box this big makes corners
+            // of millions of curves: 77 bytes of `padding:1e39px` took 1.4 GB.
+            (lp.resolve(style::values::computed::Length::new(0.0)).px() as f64)
+                .min(MAX_DECORATION_SIZE)
         };
         let first = !fragments[..index]
             .iter()
@@ -451,8 +454,15 @@ fn decoration_size(
         GenericTextDecorationLength::Auto => (css_font_size / 10.0).max(1.0) * scale,
     })
     .floor()
-    .max(1.0) as f32
+    .clamp(1.0, MAX_DECORATION_SIZE) as f32
 }
+
+/// BGMail: the thickest decoration. A circle's path grows with its radius: dots of `1e30px`
+/// took 149499 elements each, and 2 KB of them froze the window for minutes.
+const MAX_DECORATION_SIZE: f64 = 17_895_697.0;
+
+/// BGMail: the most marks (dots, dashes, half waves) of one decoration line.
+const MAX_DECORATION_MARKS: f64 = 16384.0;
 
 /// Draws a single decoration line of the given `text-decoration-style` spanning
 /// `[x0, x0 + width]`. `baseline` is the line's baseline and `offset` positions the line
@@ -488,6 +498,17 @@ fn draw_decoration_line(
     let y = (baseline - offset + size / 2.0) as f64;
     let size = size as f64;
     let butt_stroke = Stroke::new(size).with_caps(Cap::Butt);
+    // BGMail: the marks of a line are geometry in proportion to its width, which a message
+    // sets at will; a line no one can see as marks is drawn solid. (`size` is at least 1, so
+    // no style has more marks than this.)
+    let deco_style = match deco_style {
+        TextDecorationStyle::Dotted | TextDecorationStyle::Dashed | TextDecorationStyle::Wavy
+            if w.is_nan() || w / size > MAX_DECORATION_MARKS =>
+        {
+            TextDecorationStyle::Solid
+        }
+        style => style,
+    };
 
     match deco_style {
         TextDecorationStyle::None => {
@@ -513,11 +534,10 @@ fn draw_decoration_line(
         TextDecorationStyle::Dotted => {
             let radius = size / 2.0;
             let step = 2.0 * size;
-            let mut cx = x + radius;
-            while cx <= x + w - radius {
-                let dot = Circle::new((cx, y), radius);
+            let dots = ((w - 2.0 * radius) / step).floor() + 1.0;
+            for i in 0..dots.max(0.0) as usize {
+                let dot = Circle::new((x + radius + i as f64 * step, y), radius);
                 scene.fill(Fill::NonZero, transform, brush, None, &dot);
-                cx += step;
             }
         }
         // Dashes as filled rectangles. Dash/gap lengths are relative to the
@@ -533,12 +553,11 @@ fn draw_decoration_line(
             } else {
                 nominal_gap
             };
-            let mut dx = x;
-            while dx < x + w {
+            for i in 0..(w / (dash + gap)).ceil() as usize {
+                let dx = x + i as f64 * (dash + gap);
                 let end = (dx + dash).min(x + w);
                 let rect = Rect::new(dx, y - size / 2.0, end, y + size / 2.0);
                 scene.fill(Fill::NonZero, transform, brush, None, &rect);
-                dx += dash + gap;
             }
         }
         // A squiggle built from alternating quadratic Béziers.
@@ -547,9 +566,9 @@ fn draw_decoration_line(
             let half_wave = (2.0 * size).max(1.0);
             let mut path = BezPath::new();
             path.move_to((x, y));
-            let mut px = x;
             let mut up = true;
-            while px < x + w {
+            for i in 0..(w / half_wave).ceil() as usize {
+                let px = x + i as f64 * half_wave;
                 let nx = (px + half_wave).min(x + w);
                 // A quad Bézier reaches half the control-point offset at its
                 // midpoint, so use `2 * amplitude` to hit the target peak.
@@ -559,7 +578,6 @@ fn draw_decoration_line(
                     y + 2.0 * amplitude
                 };
                 path.quad_to(((px + nx) / 2.0, ctrl_y), (nx, y));
-                px = nx;
                 up = !up;
             }
             let stroke = Stroke::new(size).with_caps(Cap::Round);
@@ -791,7 +809,8 @@ pub(crate) fn stroke_text<'a>(
         // BGMail: start x of the shaped run the current glyph run belongs to
         // (glyph runs of one shaped run are consecutive on a line).
         let mut shaped_run: Option<(std::ops::Range<usize>, u64, u32)> = None;
-        let mut shaped_run_start_x = 0.0f32;
+        let mut run_clusters = Vec::new();
+        let mut next_cluster = 0;
 
         for item in line.items() {
             if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
@@ -802,7 +821,10 @@ pub(crate) fn stroke_text<'a>(
                 );
                 if shaped_run.as_ref() != Some(&key) {
                     shaped_run = Some(key);
-                    shaped_run_start_x = glyph_run.offset();
+                    run_clusters = source_text.map_or_else(Vec::new, |source| {
+                        crate::text::shaped_clusters(&glyph_run.run(), source, glyph_run.offset())
+                    });
+                    next_cluster = 0;
                 }
                 let run = glyph_run.run();
                 let font = run.font();
@@ -862,7 +884,8 @@ pub(crate) fn stroke_text<'a>(
                 let text_run = source_text.and_then(|source| {
                     crate::text::text_run_from_glyph_run(
                         &glyph_run,
-                        shaped_run_start_x,
+                        &run_clusters,
+                        &mut next_cluster,
                         source,
                         transform,
                         fill_color,

@@ -52,6 +52,15 @@ fn server(port: u16, security: Security) -> ServerConfig {
     }
 }
 
+/// The TLS server by a name, whose certificate is validated.
+fn by_name(port: u16) -> ServerConfig {
+    ServerConfig {
+        host: "localhost".into(),
+        port,
+        security: Security::Tls,
+    }
+}
+
 fn insecure() -> ConnectOptions {
     ConnectOptions {
         accept_invalid_certs: true,
@@ -330,8 +339,20 @@ fn tls_ports_with_self_signed_certificate() {
     remote.noop().unwrap();
     remote.logout();
 
-    let err = ImapRemote::connect(
+    // A literal loopback address skips validation, as Proton Bridge needs (user decision).
+    ImapRemote::connect(
         &server(3993, Security::Tls),
+        ALICE,
+        &Secret::Password(PASSWORD.into()),
+        ConnectOptions::default(),
+        &CancelToken::new(),
+    )
+    .expect("IMAPS on a loopback address")
+    .logout();
+
+    // A name doesn't, even one that comes here.
+    let err = ImapRemote::connect(
+        &by_name(3993),
         ALICE,
         &Secret::Password(PASSWORD.into()),
         ConnectOptions::default(),
@@ -361,7 +382,7 @@ fn tls_ports_with_self_signed_certificate() {
     remote.logout();
 
     let strict = SmtpSender::new(
-        &server(3465, Security::Tls),
+        &by_name(3465),
         ALICE,
         &Secret::Password(PASSWORD.into()),
         ConnectOptions::default(),

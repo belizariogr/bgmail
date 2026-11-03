@@ -174,6 +174,17 @@ impl LayoutPassState<'_> {
         inputs: taffy::tree::LayoutInput,
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::tree::LayoutOutput {
+        self.layout_visits += 1;
+        // BGMail: every so many visits, so that hosts can fall back on what they can show.
+        if let Some(deadline) = self.layout_deadline {
+            if self.deadline_visits & 255 == 0 && std::time::Instant::now() >= deadline {
+                self.layout_timed_out = true;
+            }
+            self.deadline_visits = self.deadline_visits.wrapping_add(1);
+            if self.layout_timed_out {
+                return taffy::tree::LayoutOutput::HIDDEN;
+            }
+        }
         #[cfg(feature = "writing-mode")]
         {
             self.compute_child_layout_in_own_wm(node_id, inputs, block_ctx)
@@ -229,17 +240,29 @@ impl LayoutPassState<'_> {
         let font_styles = node.primary_styles().map(|style| {
             use style::values::computed::font::LineHeight;
 
-            let font_size = style.slow_clone_font_size().used_size().px();
-            let line_height = match style.clone_line_height() {
+            // BGMail: saturated, as a box this tall generates huge corner paths.
+            let font_size =
+                stylo_taffy::convert::saturate_px(style.slow_clone_font_size().used_size().px());
+            let line_height = stylo_taffy::convert::saturate_px(match style.clone_line_height() {
                 LineHeight::Normal => font_size * 1.2,
                 LineHeight::Number(num) => font_size * num.0,
                 LineHeight::Length(value) => value.0.px(),
-            };
+            });
 
             (font_size, line_height)
         });
         let font_size = font_styles.map(|s| s.0);
         let resolved_line_height = font_styles.map(|s| s.1);
+
+        // BGMail: the layout a hidden box keeps from when it was shown can't be run: its
+        // descendants may have lost their styles.
+        if matches!(
+            node.data,
+            NodeData::Element(_) | NodeData::AnonymousBlock(_)
+        ) && node.taffy_display() == Display::None
+        {
+            return taffy::LayoutOutput::HIDDEN;
+        }
 
         match &mut node.data {
             NodeData::Text(data) => {
@@ -491,7 +514,9 @@ impl LayoutPassState<'_> {
                                 default_object_size,
                             )
                         }
-                        _ => unreachable!(),
+                        // BGMail: anything else a hostile style reaches is sized as if it had
+                        // no special data, since this used to abort the process.
+                        _ => tag_intrinsic_sizes(&element_data.name.local, attr_size),
                     };
 
                     #[cfg(feature = "writing-mode")]
@@ -606,14 +631,15 @@ impl LayoutPassState<'_> {
                         }
                     }
 
-                    // HACK: Cap scrollable overflow at node size to prevent scrolling
+                    // HACK: Cap scrollable overflow at node size to prevent scrolling. BGMail: only
+                    // across. Capped down too, text past a cell's fixed height couldn't be reached.
                     let overflow = output.scrollable_overflow_rect;
                     output.scrollable_overflow_rect = taffy::ScrollableOverflow::new(
                         taffy::Rect {
                             left: 0.0,
                             top: 0.0,
                             right: overflow.right().min(output.size.width),
-                            bottom: overflow.bottom().min(output.size.height),
+                            bottom: overflow.bottom(),
                         },
                         output.scrollable_overflow_rect.is_reversed(),
                     );
@@ -828,6 +854,28 @@ impl taffy::LayoutBlockContainer for LayoutPassState<'_> {
         inputs: taffy::LayoutInput,
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::LayoutOutput {
+        #[cfg(feature = "floats")]
+        {
+            // BGMail: a result that placed floats in the formatting context it was given isn't
+            // kept: coming from the cache it wouldn't place them, and the height they add to a cell
+            // measured again was lost, sending an image into the next row. As the cache already
+            // does for margins.
+            let Some(block_ctx) = block_ctx else {
+                return compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
+                    tree.compute_child_layout_internal(node_id, inputs, None)
+                });
+            };
+            if let Some(cached) = taffy::CacheTree::cache_get(self, node_id, &inputs) {
+                return cached;
+            }
+            let mark = block_ctx.float_mark();
+            let output = self.compute_child_layout_internal(node_id, inputs, Some(&mut *block_ctx));
+            if block_ctx.floats_placed_since(mark).next().is_none() {
+                taffy::CacheTree::cache_store(self, node_id, &inputs, output.clone());
+            }
+            output
+        }
+        #[cfg(not(feature = "floats"))]
         compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
             tree.compute_child_layout_internal(node_id, inputs, block_ctx)
         })
@@ -901,7 +949,15 @@ impl RoundTree for LayoutPassState<'_> {
     }
 
     fn hoisted_child_count(&self, node_id: NodeId) -> usize {
-        self.node_from_id(node_id).hoisted_children.borrow().len()
+        // BGMail: a box laid out from cache keeps the list of its last layout, and a width
+        // crossing `@media` may have freed a pseudo-element in it since.
+        let mut children = self.node_from_id(node_id).hoisted_children.borrow_mut();
+        children.retain(|id| {
+            self.nodes
+                .get(*id)
+                .is_some_and(|node| node.out_of_flow.load(core::sync::atomic::Ordering::Relaxed))
+        });
+        children.len()
     }
 
     fn get_hoisted_child_id(&self, node_id: NodeId, index: usize) -> NodeId {

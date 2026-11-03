@@ -48,6 +48,9 @@ impl BaseDocument {
 
         // Process messages that have been sent to our message channel (e.g. loaded resource)
         self.handle_messages();
+        self.layout_visits = 0;
+        self.generated_text_left
+            .set(crate::document::MAX_GENERATED_TEXT_BYTES);
 
         // While render-blocking resources (e.g. stylesheets linked from the `<head>`) are
         // still loading, don't resolve styles or layout (matching how browsers block
@@ -86,7 +89,7 @@ impl BaseDocument {
         // Non-incremental mode is "every node is damaged every frame": mark the
         // whole tree and let the same damage pipeline reconstruct and relayout
         // everything.
-        if !self.incremental_layout {
+        if !self.incremental_layout || std::mem::take(&mut self.rebuild_boxes_once) {
             self.mark_all_damaged();
             timer.record_time("mark_all");
         }
@@ -325,13 +328,11 @@ impl BaseDocument {
     /// anonymous boxes.
     #[cfg(debug_assertions)]
     fn assert_layout_parents_consistent(&self) {
-        use crate::node::NodeFlags;
-
-        for (parent_id, node) in self.nodes.iter() {
-            if !node.flags.contains(NodeFlags::IS_IN_DOCUMENT) {
-                continue;
-            }
-            let Some(children) = node.layout_children.borrow().clone() else {
+        // BGMail: walks the box tree instead of every node: a box that became inline keeps
+        // the list it had as a block, which nothing reads since no walk reaches it.
+        let mut stack = vec![self.root_node().id];
+        while let Some(parent_id) = stack.pop() {
+            let Some(children) = self.nodes[parent_id].layout_children.borrow().clone() else {
                 continue;
             };
             for child_id in children {
@@ -343,6 +344,7 @@ impl BaseDocument {
                     Some(parent_id),
                     "layout_parent of {child_id:?} does not point at its layout container {parent_id:?}"
                 );
+                stack.push(child_id);
             }
         }
     }

@@ -24,6 +24,23 @@ impl Language {
     /// All languages, in the order they should appear in a selector.
     pub const ALL: [Language; 2] = [Language::English, Language::Portuguese];
 
+    /// How the language is saved in the config.
+    pub fn code(self) -> &'static str {
+        match self {
+            Language::English => "en",
+            Language::Portuguese => "pt-BR",
+        }
+    }
+
+    /// The language saved as `code`; the default for anything else, such as a language
+    /// a newer version added.
+    pub fn from_code(code: &str) -> Self {
+        Language::ALL
+            .into_iter()
+            .find(|language| language.code() == code)
+            .unwrap_or_default()
+    }
+
     /// Endonym shown in the UI (a language is always named in itself).
     pub fn label(self) -> &'static str {
         match self {
@@ -152,7 +169,11 @@ pub enum Key {
     // Reader: plain-text fallback notices.
     NoticeTooDeep,
     NoticeCrashed,
+    NoticeClipped,
     StatusBodyFailed,
+    StatusBodyRejected,
+    ComposeBodyTooLarge,
+    StatusForwardNeedsBody,
     StatusMessageSent,
     StatusSendFailed,
     StatusSentCopyFailed,
@@ -291,11 +312,17 @@ pub enum Key {
     StatusAttachmentSaved,
     StatusAttachmentFailed,
     StatusAttachmentOpenFailed,
+    StatusAttachmentRunsCode,
+    StatusDatabaseReplaced,
     StatusActionFailed,
+    StatusNoDestination,
     StatusRemoveAccountFailed,
     UnsentTitle,
     UnsentNoSubject,
     UnsentMaybeSent,
+    UnsentRetrying,
+    UnsentBusy,
+    UnsentBeingEdited,
     UnsentRetry,
     UnsentEdit,
     UnsentDiscardDetail,
@@ -529,10 +556,18 @@ impl Key {
             (FindNoMatches, P) => "Nenhum resultado",
             (NoticeTooDeep, E) => "This message couldn't be displayed formatted, so it is shown as plain text.",
             (NoticeTooDeep, P) => "Não foi possível exibir esta mensagem formatada, por isso ela é exibida como texto simples.",
+            (NoticeClipped, E) => "This message is too long to show whole, so only its beginning is shown.",
+            (NoticeClipped, P) => "Esta mensagem é longa demais para ser exibida inteira, por isso só o início é exibido.",
             (NoticeCrashed, E) => "BGMail closed while showing this message, so it is shown as plain text.",
             (NoticeCrashed, P) => "O BGMail fechou ao exibir esta mensagem, por isso ela é exibida como texto simples.",
             (StatusBodyFailed, E) => "Could not download the message",
             (StatusBodyFailed, P) => "Não foi possível baixar a mensagem",
+            (StatusBodyRejected, E) => "This message was rejected: its body is over 256 MB",
+            (StatusBodyRejected, P) => "Esta mensagem foi rejeitada: o corpo passa de 256 MB",
+            (ComposeBodyTooLarge, E) => "The message body is limited to 256 MB.",
+            (ComposeBodyTooLarge, P) => "O corpo da mensagem é limitado a 256 MB.",
+            (StatusForwardNeedsBody, E) => "The message is still downloading. Try forwarding it again in a moment.",
+            (StatusForwardNeedsBody, P) => "A mensagem ainda está sendo baixada. Tente encaminhar de novo em instantes.",
             (StatusMessageSent, E) => "Message sent",
             (StatusMessageSent, P) => "Mensagem enviada",
             (StatusSentCopyFailed, E) => "Sent, but no copy could be saved in Sent",
@@ -573,8 +608,8 @@ impl Key {
             (DefaultAppFailed, P) => "Não foi possível tornar o BGMail padrão",
             (DefaultAppFinishInSettings, E) => "Choose BGMail in the system settings that just opened.",
             (DefaultAppFinishInSettings, P) => "Escolha o BGMail nas configurações do sistema que acabaram de abrir.",
-            (StatusComposeBusy, E) => "Finish the message you are writing to open this link",
-            (StatusComposeBusy, P) => "Termine a mensagem que está escrevendo para abrir este link",
+            (StatusComposeBusy, E) => "Finish the message you are writing first",
+            (StatusComposeBusy, P) => "Termine primeiro a mensagem que está escrevendo",
             (FormatUndo, E) => "Undo",
             (FormatUndo, P) => "Desfazer",
             (FormatRedo, E) => "Redo",
@@ -814,8 +849,22 @@ impl Key {
             (StatusAttachmentFailed, P) => "Não foi possível salvar o anexo",
             (StatusAttachmentOpenFailed, E) => "Could not open the attachment",
             (StatusAttachmentOpenFailed, P) => "Não foi possível abrir o anexo",
+            (StatusDatabaseReplaced, E) => {
+                "The mail database was damaged. It was kept aside as mail.db.corrupt, and a new one started."
+            }
+            (StatusDatabaseReplaced, P) => {
+                "O banco de e-mails estava danificado. Ele foi guardado como mail.db.corrupt, e um novo foi iniciado."
+            }
+            (StatusAttachmentRunsCode, E) => {
+                "This type of file can run programs, so it won't open from here. Save it if you trust it."
+            }
+            (StatusAttachmentRunsCode, P) => {
+                "Este tipo de arquivo pode executar programas, então não abre por aqui. Salve-o se confiar nele."
+            }
             (StatusActionFailed, E) => "Could not complete the action",
             (StatusActionFailed, P) => "Não foi possível concluir a ação",
+            (StatusNoDestination, E) => "The server has no folder for this, so nothing was changed",
+            (StatusNoDestination, P) => "O servidor não tem uma pasta para isso, então nada foi alterado",
             (StatusRemoveAccountFailed, E) => "Could not remove the account",
             (StatusRemoveAccountFailed, P) => "Não foi possível remover a conta",
             (UnsentTitle, E) => "Unsent messages",
@@ -824,6 +873,12 @@ impl Key {
             (UnsentNoSubject, P) => "(sem assunto)",
             (UnsentMaybeSent, E) => "May already have been sent",
             (UnsentMaybeSent, P) => "Pode já ter sido enviada",
+            (UnsentRetrying, E) => "Still trying to send",
+            (UnsentRetrying, P) => "Ainda tentando enviar",
+            (UnsentBusy, E) => "This message is being sent right now",
+            (UnsentBusy, P) => "Esta mensagem está sendo enviada agora",
+            (UnsentBeingEdited, E) => "This message is open for editing: send or close it first",
+            (UnsentBeingEdited, P) => "Esta mensagem está aberta para edição: envie ou feche antes",
             (UnsentRetry, E) => "Retry",
             (UnsentRetry, P) => "Tentar novamente",
             (UnsentEdit, E) => "Edit",
@@ -989,7 +1044,21 @@ impl ActiveLanguage for App {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [Key; 244] = [
+    #[test]
+    fn every_language_survives_its_saved_code() {
+        for language in Language::ALL {
+            assert_eq!(Language::from_code(language.code()), language);
+        }
+    }
+
+    #[test]
+    fn an_unknown_saved_language_falls_back_to_the_default() {
+        assert_eq!(Language::from_code("xx"), Language::default());
+        assert_eq!(Language::from_code(""), Language::default());
+    }
+
+    const ALL_KEYS: [Key; 254] = [
+        Key::StatusDatabaseReplaced,
         Key::ViewZoomIn,
         Key::ViewZoomOut,
         Key::ViewZoomReset,
@@ -1083,10 +1152,14 @@ mod tests {
         Key::FindNoMatches,
         Key::NoticeTooDeep,
         Key::NoticeCrashed,
+        Key::NoticeClipped,
         Key::CommandPrint,
         Key::PrintFrom,
         Key::PrintDate,
         Key::StatusBodyFailed,
+        Key::StatusBodyRejected,
+        Key::ComposeBodyTooLarge,
+        Key::StatusForwardNeedsBody,
         Key::StatusMessageSent,
         Key::StatusSendFailed,
         Key::StatusSentCopyFailed,
@@ -1225,11 +1298,16 @@ mod tests {
         Key::StatusAttachmentSaved,
         Key::StatusAttachmentFailed,
         Key::StatusAttachmentOpenFailed,
+        Key::StatusAttachmentRunsCode,
         Key::StatusActionFailed,
+        Key::StatusNoDestination,
         Key::StatusRemoveAccountFailed,
         Key::UnsentTitle,
         Key::UnsentNoSubject,
         Key::UnsentMaybeSent,
+        Key::UnsentRetrying,
+        Key::UnsentBusy,
+        Key::UnsentBeingEdited,
         Key::UnsentRetry,
         Key::UnsentEdit,
         Key::UnsentDiscardDetail,

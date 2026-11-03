@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use gpui::SharedString;
-use storage::{is_manual_move_destination_forbidden, system, Folder, MessageDetail};
+use storage::{
+    is_manual_move_destination_forbidden, message_has_folder, system, Folder, MessageDetail,
+};
 
 use crate::data::MailboxKind;
 use crate::locale::{Key, Language};
@@ -182,12 +184,6 @@ impl CommandContext {
 pub struct CommandEntry {
     pub id: CommandId,
     pub label: SharedString,
-}
-
-fn message_has_folder(csv: &str, folder_path: &str) -> bool {
-    csv.split(',')
-        .filter(|segment| !segment.is_empty())
-        .any(|path| path == folder_path)
 }
 
 /// Mail sent to oneself is also in the Inbox: from there it is received mail, which

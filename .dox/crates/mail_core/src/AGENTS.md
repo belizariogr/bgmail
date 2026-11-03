@@ -96,6 +96,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ##### Context: module
 
+- **`split_tokens`** (pub): splits at `,`/`;` outside quotes and angle brackets.
 - **`parse_address_list`** (pub) — `pub fn parse_address_list(input: &str) -> Result<Vec<Address>, Vec<String>>`
   - Purpose: parse a user-typed To/Cc field.
   - Behavior: splits on `,`/`;` outside quotes/angle brackets; skips empty tokens (trailing separators, whitespace); accepts `email`, `Name <email>`, `"Quoted, Name" <email>`, `<email>`; `Err` lists every invalid trimmed token (in order) if any; validity = exactly one `@`, non-empty local/domain, no whitespace or `<>,;"`, nothing after `>`.
@@ -182,17 +183,24 @@ _(none — modules are files; their APIs are cataloged below.)_
 #### Types
 
 - **struct `ParsedMessage`**: `message_id`, `in_reply_to` (no `<>`), `references: Vec<String>`, `subject`, `from`/`sender: Option<Address>`, `to`/`cc`/`bcc`/`reply_to: Vec<Address>`, `date: Option<i64>` (unix UTC), `html`/`text: Option<String>`, `attachments: Vec<AttachmentInfo>`. Default, Clone, Eq.
-- **struct `AttachmentInfo { index, filename, mime_type, size, content_id, inline }`**: serde.
+- **const `MAX_BODY_BYTES`** (pub): 256 MiB, the largest body, attachments apart. **`ParsedMessage::body_size`**: bytes of the text and HTML body parts, each once (`body_size`, private).
+- **struct `AttachmentInfo { index, filename, mime_type, size, content_id, charset, inline }`**: serde. `size` and `attachment_content` give the part's bytes as sent (`part_bytes`, `original_bytes`): a text part is the raw body with only its Content-Transfer-Encoding reverted. `charset` only as a plain token, since forwarding writes it back into a header. **`other_body_versions`** (private): children of an `alternative` with a body that are a known other rendering (`OTHER_RENDERINGS`, not named), left out of the attachments. **`mime_type`** (private): the declared type only as tokens (`is_mime_token`), else by body kind. **`compose::header_id`** (crate): an id without control characters (tab aside), spaces kept, for parsing and `build_message`. **`html_body`** / **`text_body`** (private): every body part in order, the other kind converted; `None` when no part is of that kind.
 
 #### Functions
 
+- **struct `Parsed`** / **`parse_raw`** (private) — a parsed message whose `Drop` unnests `message/rfc822` parts iteratively: the generated one recursed per level and overflowed sync threads.
+- **`referenced_cids`** (pub) — `pub fn referenced_cids(html: &str) -> HashSet<String>`: lowercase, percent-decoded Content-IDs the HTML refers to; `html_references_cid` is its one-off form.
+- **`body_ids`** (private) — the parts of the text and HTML bodies, as a set.
+- **`cid_value_len`** / **`cid_skip_len`** (pub) — length of a `cid:` value within 998 bytes, and what to skip when it has none, so a body of markers stays linear.
+- **`parse_header_block`** (pub) — `parse_message` for a fetched header block, cut at the last line within 1 MiB; only sync uses it, and it arrives whatever the message's size.
+- **`attachment_contents`** (pub) — `pub fn attachment_contents(raw: &[u8], indexes: &[usize]) -> Vec<Option<Vec<u8>>>`: `attachment_content` for many parts, parsing once.
 - **`parse_message`** (pub) — `pub fn parse_message(raw: &[u8]) -> Option<ParsedMessage>`
   - Behavior: `MessageParser::default()`; `None` when no headers. Works on header-only input (bodies `None`). Ids stripped of `<>`; In-Reply-To = first id; subject trimmed (RFC 2047 decoded); groups flattened; addresses without email skipped; date via `to_timestamp()` (tz-aware). `html` only from a real `text/html` part at `html_body[0]`, `text` only from a real text part at `text_body[0]`; empty bodies → `None`.
 - **`attachment_content`** (pub) — `pub fn attachment_content(raw: &[u8], index: usize) -> Option<Vec<u8>>` — decoded bytes of part `index`; `None` for missing or multipart parts; nested messages return their raw bytes.
 - **`inline_images`** (pub) — `pub fn inline_images(raw: &[u8]) -> Vec<(String, String, Vec<u8>)>` — `(cid, mime, bytes)` for listed parts with a Content-ID and an `image/*` type.
 - **`has_attachments`** (pub) — `pub fn has_attachments(message: &ParsedMessage) -> bool` — any attachment with `inline == false`.
 - **`attachment_parts`** (private) — iterator of `(part id, part)`: binary/message parts in `attachments` or carrying a Content-ID; text/html parts only when in `attachments` and not a body part; never multiparts.
-- **`describe`** (private) — builds `AttachmentInfo`: filename from disposition/`name` else `attachment.<ext>` (or `attachment`); `inline` = has Content-ID and disposition is not `attachment`; size = decoded length.
+- **`describe`** (private) — builds `AttachmentInfo`: filename from disposition/`name` else `attachment.<ext>` (or `attachment`); `inline` = an `image/*` whose Content-ID the HTML body references (`html_references_cid`, pub: the whole id, any case, percent-encoded or not) and whose disposition is not `attachment`; size = decoded length.
 - **`mime_type`** (private) — lowercase `type/subtype` from Content-Type, else by body kind.
 - **`part_bytes`** (private) — decoded bytes of a leaf part.
 - **`own_body`** (private) — accepts only the requested body kind (prevents mail-parser's text↔html synthesis).

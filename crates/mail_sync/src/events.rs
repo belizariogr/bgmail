@@ -66,6 +66,10 @@ pub enum SyncEvent {
         message_id: i64,
         error: String,
     },
+    /// Its body is over the limit: it won't be stored or shown.
+    BodyRejected {
+        message_id: i64,
+    },
     Sent {
         account_id: i64,
         outbox_id: i64,

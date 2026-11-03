@@ -88,10 +88,14 @@ that edit the database and queue those server ops.
   `connector.saves_sent_copy()`; APPEND failures retry with back-off and are
   given up after `MAX_APPEND_DEFERRALS`, never resending); `Transient` →
   `queued` with back-off (`EngineOptions::send_retry_delays`, default
-  1 m/5 m/15 m/1 h repeating), attempts untouched; `Permanent` → attempts+1,
+  1 m/5 m/15 m/1 h repeating), attempts untouched; a queued row 3 days old
+  becomes `failed` before any further try (`SEND_GIVE_UP_AFTER`,
+  `Database::give_up_outgoing`, by age from creation or the last user retry, even with
+  the app closed in between; user decision); `Permanent` → attempts+1,
   back-off, `failed` at `MAX_SEND_ATTEMPTS` (3); `Uncertain` → `maybe_sent`,
-  never retried. `failed` / `maybe_sent` rows wait for the UI
-  (`Database::failed_outgoing` / `retry_outgoing` / `delete_outgoing`);
+  never retried. `failed` / `maybe_sent` rows wait for the UI, which also lists rows
+  stuck in the queue, after a failure or left for 5 minutes (`Database::unsent_outgoing` / `retry_outgoing` / `stop_outgoing`,
+  and `delete_outgoing`, which refuses a row being sent);
   `SendFailed { permanent }` is `true` exactly when a row stopped retrying.
   `sending` leases older than `SEND_LEASE` (10 min) become `maybe_sent`.
   The worker wakes itself (`ProcessQueue`) when the earliest backed-off row
@@ -105,8 +109,27 @@ that edit the database and queue those server ops.
   concurrently with its successor.
 - **NewMail:** only unread rows *created* (not merged) in the `sys:inbox`
   folder after its first sync, never after a UIDVALIDITY reset.
-- **Folder mapping** (`plan::folder_path_for`): first folder per role takes
-  the system path; Gmail `\All` becomes `sys:archive` only when no
+- **Unparsable answers:** `RemoteErrorKind::Unreadable` means a dropped session;
+  `fetch_readable_headers` retries without the structure (`fetch_headers_plain`), then
+  one by one, skipping what still can't be read, so one message can't stop a sync.
+- **Body limit** (user decision): a body over `mail_core::MAX_BODY_BYTES` (256 MiB,
+  attachments apart) is rejected: not stored, `SyncEvent::BodyRejected`, and not
+  downloaded again in the session (`rejected_bodies`). Compose refuses to send one.
+- **Sent copy** (user decision): the APPENDed copy carries `Bcc:`
+  (`mail_core::sent_copy`); what goes to SMTP doesn't.
+- **Backoff** resets after a completed cycle (or a good IDLE result), not when a
+  connection opens, so a server failing right after login is retried with growing
+  delays. A send through the queue syncs Sent before going idle (`sent_is_stale`).
+- **Archive with labels** (user decision): on an All Mail account a message with
+  labels only leaves the Inbox and keeps them (`actions::archive_keeping_labels`); out
+  of the Inbox, Archive does nothing (Spam and Trash aren't labels: it leaves them). Move, Trash and Junk still leave every label.
+- **Roles by name** (user decision): only at the top, under `INBOX` or under
+  `[Gmail]`/`[Google Mail]`, so `Projects/Trash` stays the user's. An action whose
+  destination doesn't exist reports `ActionOutcome::no_destination`, which the status bar
+  shows; nothing changes.
+- **Folder mapping** (`plan::folder_path_for`, order from `plan_folders`: declared
+  SPECIAL-USE first, `\All` after the other declared, then by name nearest the top,
+  a leading `INBOX` not counting): first folder per role takes the system path; Gmail `\All` becomes `sys:archive` only when no
   `\Archive` folder exists; `\Flagged`/`\Important`/non-selectable folders
   are not synced; other folders → `user:<decoded/path>` (leading `INBOX`
   segment dropped). A system path re-pointed at another mailbox is reset.

@@ -70,6 +70,7 @@ impl SmtpSender {
         secret: &Secret,
         options: ConnectOptions,
     ) -> RemoteResult<Self> {
+        let options = options.for_host(&server.host);
         let params = || {
             TlsParameters::builder(server.host.clone())
                 .dangerous_accept_invalid_certs(options.accept_invalid_certs)
@@ -92,6 +93,9 @@ impl SmtpSender {
             host: server.host.clone(),
             port: server.port,
             tls,
+            // `[127.0.0.1]`: without its `hostname` feature, lettre doesn't send the
+            // machine's name, which servers record in `Received:` for all to read.
+            // Thunderbird also avoids it.
             hello: ClientId::default(),
             credentials: Credentials::new(username.to_string(), password),
             mechanisms,
@@ -677,18 +681,17 @@ mod tests {
                 });
             }
         });
-        // The fixture certificate is for "localhost"; connect by IP so the
-        // host name check would fail too.
-        let config = ServerConfig {
-            host: "127.0.0.1".into(),
+        // By name, a self-signed certificate takes the option.
+        let named = ServerConfig {
+            host: "localhost".into(),
             port,
             security: Security::Tls,
         };
         let secret = Secret::Password("x".into());
-        let strict = SmtpSender::new(&config, "me", &secret, ConnectOptions::default()).unwrap();
+        let strict = SmtpSender::new(&named, "me", &secret, ConnectOptions::default()).unwrap();
         assert_eq!(strict.verify().unwrap_err().kind, RemoteErrorKind::Tls);
         let lax = SmtpSender::new(
-            &config,
+            &named,
             "me",
             &secret,
             ConnectOptions {
@@ -697,6 +700,18 @@ mod tests {
         )
         .unwrap();
         lax.verify().unwrap();
+
+        // On a loopback address it isn't validated, as for Proton Bridge. The fixture
+        // certificate is for "localhost", so the host name would fail too.
+        let loopback = ServerConfig {
+            host: "127.0.0.1".into(),
+            port,
+            security: Security::Tls,
+        };
+        SmtpSender::new(&loopback, "me", &secret, ConnectOptions::default())
+            .unwrap()
+            .verify()
+            .unwrap();
     }
 
     #[test]

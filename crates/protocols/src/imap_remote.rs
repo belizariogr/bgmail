@@ -401,6 +401,35 @@ impl MailRemote for ImapRemote {
         Ok(out)
     }
 
+    fn fetch_headers_plain(
+        &mut self,
+        folder: &str,
+        uids: &[u32],
+    ) -> RemoteResult<Vec<RemoteHeader>> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_selected(folder)?;
+        let wanted: HashSet<u32> = uids.iter().copied().collect();
+        let items = header_items(&self.capabilities).replace(" BODYSTRUCTURE", "");
+        let mut out = Vec::new();
+        for set in uid_chunks(uids, HEADER_CHUNK) {
+            let data = self.run(&format!("UID FETCH {set} ({items})"))?;
+            out.extend(
+                parse_responses(&data)
+                    .into_iter()
+                    .filter_map(|response| match response {
+                        Response::Fetch(_, attrs) => header_from_attributes(&attrs),
+                        _ => None,
+                    })
+                    .filter(|header| wanted.contains(&header.uid)),
+            );
+        }
+        out.sort_by_key(|header| header.uid);
+        out.dedup_by_key(|header| header.uid);
+        Ok(out)
+    }
+
     fn fetch_flags(
         &mut self,
         folder: &str,
@@ -836,6 +865,17 @@ pub fn has_attachments(structure: &BodyStructure<'_>) -> bool {
     }
 }
 
+/// How many UIDs `members` stand for.
+fn uid_set_len(members: &[UidSetMember]) -> u64 {
+    members
+        .iter()
+        .map(|member| match member {
+            UidSetMember::Uid(_) => 1,
+            UidSetMember::UidRange(range) => u64::from(range.start().abs_diff(*range.end())) + 1,
+        })
+        .sum()
+}
+
 /// Expands `1:3,5` members into UIDs.
 fn expand_uid_set(members: &[UidSetMember]) -> Vec<u32> {
     members
@@ -850,6 +890,9 @@ fn expand_uid_set(members: &[UidSetMember]) -> Vec<u32> {
         .collect()
 }
 
+/// Most UIDs of a `COPYUID` code; far more than a batched command holds.
+const MAX_COPYUID_LEN: u64 = 1 << 20;
+
 /// `source → destination` UID pairs from every `COPYUID` code (RFC 4315) in
 /// the responses; `None` when the server sent none (no UIDPLUS).
 fn copy_uids(responses: &[Response<'_>]) -> Option<Vec<(u32, u32)>> {
@@ -862,6 +905,11 @@ fn copy_uids(responses: &[Response<'_>]) -> Option<Vec<(u32, u32)>> {
         };
         if let Some(ResponseCode::CopyUid(_, source, dest)) = code {
             found = true;
+            // Not expanded past what a command can have moved: `1:4294967295` is 16 GB. What
+            // doesn't fit is treated as a server without the code for those messages.
+            if uid_set_len(source).max(uid_set_len(dest)) > MAX_COPYUID_LEN {
+                continue;
+            }
             let source = expand_uid_set(source);
             let dest = expand_uid_set(dest);
             if source.len() == dest.len() {
@@ -884,6 +932,10 @@ pub fn map_error(err: imap::Error) -> RemoteError {
             RemoteError::new(kind, no.information)
         }
         E::Bad(bad) => RemoteError::new(RemoteErrorKind::Protocol, bad.information),
+        E::Bye(bye) if is_parse_failure(&bye.information) => RemoteError::new(
+            RemoteErrorKind::Unreadable,
+            "unreadable answer from the server",
+        ),
         E::Bye(bye) => RemoteError::new(
             RemoteErrorKind::Network,
             format!("server closed the connection: {}", bye.information),
@@ -892,6 +944,13 @@ pub fn map_error(err: imap::Error) -> RemoteError {
         E::Validate(err) => RemoteError::new(RemoteErrorKind::Other, err.to_string()),
         other => RemoteError::new(RemoteErrorKind::Protocol, other.to_string()),
     }
+}
+
+/// Whether a `Bye` from the client is really an answer it couldn't parse: that is how it
+/// reports one, with no text. A real one is untagged and ignored, showing up as a lost
+/// connection instead.
+fn is_parse_failure(information: &str) -> bool {
+    information == "no explanation given"
 }
 
 /// Kind of a `NO` answer: `[TRYCREATE]` or a "no such mailbox"-style text
@@ -920,9 +979,24 @@ fn no_kind(information: &str, code: Option<&ResponseCode<'_>>) -> RemoteErrorKin
 /// the credentials were rejected.
 pub fn map_login_error(err: imap::Error) -> RemoteError {
     match err {
-        imap::Error::No(no) => RemoteError::new(RemoteErrorKind::Auth, no.information),
+        imap::Error::No(no) => {
+            RemoteError::new(login_refusal_kind(&no.information), no.information)
+        }
         imap::Error::Bad(bad) => RemoteError::new(RemoteErrorKind::Auth, bad.information),
         other => map_error(other),
+    }
+}
+
+/// Why a server said `NO` to a login. RFC 5530 codes for a passing problem aren't a
+/// verdict on the password: treated as one, the account would stop syncing until the
+/// user intervened. They arrive in the text, since the parser doesn't know them.
+fn login_refusal_kind(information: &str) -> RemoteErrorKind {
+    let text = information.trim_start().to_ascii_uppercase();
+    let passing = ["[UNAVAILABLE]", "[SERVERBUG]", "[INUSE]", "[LIMIT]"];
+    if passing.iter().any(|code| text.starts_with(code)) {
+        RemoteErrorKind::Network
+    } else {
+        RemoteErrorKind::Auth
     }
 }
 
@@ -1025,6 +1099,46 @@ pub(crate) mod test_server {
 mod tests {
     use super::test_server::{start, Step};
     use super::*;
+
+    #[test]
+    fn an_answer_the_client_cannot_parse_is_told_from_a_closed_connection() {
+        assert!(is_parse_failure("no explanation given"));
+        assert!(!is_parse_failure("shutting down"));
+    }
+
+    #[test]
+    fn plain_headers_leave_the_structure_out() {
+        let (mut remote, handle) = session(
+            FULL_CAPS,
+            vec![
+                ("SELECT \"INBOX\" (CONDSTORE)", "* OK [UIDVALIDITY 1] x\r\n{tag} OK done\r\n"),
+                (
+                    "UID FETCH 1 (UID FLAGS RFC822.SIZE BODY.PEEK[HEADER] X-GM-MSGID X-GM-THRID MODSEQ)",
+                    "* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 4 BODY[HEADER] {4}\r\nX: y)\r\n{tag} OK done\r\n",
+                ),
+                ("LOGOUT", "{tag} OK bye\r\n"),
+            ],
+        );
+        let headers = remote.fetch_headers_plain("INBOX", &[1]).unwrap();
+        assert_eq!(headers[0].uid, 1);
+        assert_eq!(headers[0].has_attachments, None);
+        finish(remote, handle);
+    }
+
+    #[test]
+    fn a_passing_login_refusal_is_not_a_verdict_on_the_password() {
+        for passing in [
+            "[UNAVAILABLE] Temporary authentication failure",
+            "[serverbug] oops",
+            "  [INUSE] try later",
+            "[LIMIT] too many",
+        ] {
+            assert_eq!(login_refusal_kind(passing), RemoteErrorKind::Network);
+        }
+        for refused in ["[AUTHENTICATIONFAILED] nope", "Invalid credentials", ""] {
+            assert_eq!(login_refusal_kind(refused), RemoteErrorKind::Auth);
+        }
+    }
     use std::ops::RangeInclusive;
     use std::thread;
     use std::time::Instant;
@@ -1860,6 +1974,9 @@ mod tests {
         assert_eq!(copy_uids(&responses), Some(vec![(1, 10), (2, 11)]));
         let responses = parse_responses(b"A1 OK done\r\n");
         assert_eq!(copy_uids(&responses), None);
+        // A hostile range isn't expanded: it would take 16 GB.
+        let responses = parse_responses(b"A1 OK [COPYUID 1 1:4294967295 1:4294967295] done\r\n");
+        assert_eq!(copy_uids(&responses), Some(Vec::new()));
     }
 
     #[test]

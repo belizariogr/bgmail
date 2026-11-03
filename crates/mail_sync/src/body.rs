@@ -1,6 +1,6 @@
 //! Downloaded raw message → what `storage::Database::store_body` keeps.
 
-use mail_core::{inline_images, parse_message, readable_text};
+use mail_core::{cid_value_len, inline_images, parse_message, readable_text, referenced_cids};
 use storage::{Database, NewAttachment};
 
 /// Upper bound of image bytes inlined as `data:` URIs into one stored HTML
@@ -29,7 +29,16 @@ pub struct BodyContent {
 /// part or, for HTML-only mail, from `html_to_text`. Unparseable input yields
 /// an empty text body.
 pub fn body_content(raw: &[u8]) -> BodyContent {
+    body_content_within(raw, usize::MAX).unwrap_or_default()
+}
+
+/// [`body_content`], or `None` for a body over `limit` bytes, attachments apart: it goes
+/// no further than parsing, which the rest would multiply in memory.
+pub fn body_content_within(raw: &[u8], limit: usize) -> Option<BodyContent> {
     let parsed = parse_message(raw).unwrap_or_default();
+    if parsed.body_size > limit {
+        return None;
+    }
     let (content, format, plain_text) = match (&parsed.html, &parsed.text) {
         (Some(html), text) => {
             let content = if html.to_ascii_lowercase().contains("cid:") {
@@ -44,7 +53,8 @@ pub fn body_content(raw: &[u8]) -> BodyContent {
         (None, None) => (String::new(), "text", String::new()),
     };
     let plain_text = plain_text.replace("\r\n", "\n");
-    BodyContent {
+    let shown_cids = referenced_cids(&content);
+    Some(BodyContent {
         preview: preview_text(&plain_text, PREVIEW_CHARS),
         attachments: parsed
             .attachments
@@ -55,19 +65,30 @@ pub fn body_content(raw: &[u8]) -> BodyContent {
                 mime_type: a.mime_type.clone(),
                 size: a.size as u64,
                 content_id: a.content_id.clone(),
-                inline: a.inline,
+                // An image left out of the stored body (over the budget for embedding)
+                // can't be seen there: it has to stay reachable as an attachment.
+                inline: a.inline
+                    && !a
+                        .content_id
+                        .as_deref()
+                        .is_some_and(|cid| shown_cids.contains(&cid.to_ascii_lowercase())),
             })
             .collect(),
         content,
         format,
         plain_text,
-    }
+    })
 }
 
 /// Re-derives the plain text and preview of stored bodies written before
 /// HTML in text parts and named entities were handled, so their list rows
-/// stop showing markup. Failures only leave a row as it was.
+/// stop showing markup. Failures only leave a row as it was. Once per account: the query also
+/// takes text that merely has `&` and `;`, which stays as it is and would come back each start.
 pub fn repair_stale_previews(db: &Database, account_id: i64) -> rusqlite::Result<()> {
+    let flag = format!("previews_repaired_{account_id}");
+    if db.meta_flag(&flag)? {
+        return Ok(());
+    }
     for id in db.messages_with_markup_preview(account_id)? {
         let Some(raw) = db.message_raw(id)? else {
             continue;
@@ -75,7 +96,7 @@ pub fn repair_stale_previews(db: &Database, account_id: i64) -> rusqlite::Result
         let body = body_content(&raw);
         db.update_body_text(id, &body.plain_text, &body.preview)?;
     }
-    Ok(())
+    db.set_meta_flag(&flag)
 }
 
 /// Whitespace collapsed to single spaces, cut at `max_chars` characters.
@@ -103,6 +124,14 @@ pub fn inline_cid_images(
     if images.is_empty() {
         return html.to_string();
     }
+    // A map, since a message can have thousands of parts and of references. The first
+    // of a repeated Content-ID wins.
+    let mut by_id = std::collections::HashMap::new();
+    for (id, mime, bytes) in images {
+        by_id
+            .entry(id.to_ascii_lowercase())
+            .or_insert((mime, bytes));
+    }
     // ASCII lowercasing keeps byte offsets identical to `html`.
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len());
@@ -111,9 +140,13 @@ pub fn inline_cid_images(
     while let Some(found) = lower[pos..].find("cid:") {
         let start = pos + found;
         let value_start = start + "cid:".len();
-        let value_end = html[value_start..]
-            .find(|c: char| matches!(c, '"' | '\'' | ')' | '>') || c.is_whitespace())
-            .map_or(html.len(), |end| value_start + end);
+        let Some(value_len) = cid_value_len(&html[value_start..], |_| false) else {
+            let skipped = value_start + mail_core::cid_skip_len(&html[value_start..]);
+            out.push_str(&html[pos..skipped]);
+            pos = skipped;
+            continue;
+        };
+        let value_end = value_start + value_len;
         let prefix = &lower[..start];
         let prefix = prefix
             .strip_suffix(['"', '\''])
@@ -121,12 +154,11 @@ pub fn inline_cid_images(
             .trim_end();
         let is_url = prefix.ends_with('=') || prefix.ends_with("url(");
         let cid = percent_decode(&html[value_start..value_end]);
-        let image = images
-            .iter()
-            .find(|(id, _, _)| id.eq_ignore_ascii_case(&cid))
-            .filter(|(_, _, bytes)| is_url && bytes.len() <= budget);
+        let image = by_id
+            .get(&cid.to_ascii_lowercase())
+            .filter(|(_, bytes)| is_url && bytes.len() <= budget);
         match image {
-            Some((_, mime, bytes)) => {
+            Some((mime, bytes)) => {
                 budget -= bytes.len();
                 out.push_str(&html[pos..start]);
                 out.push_str("data:");
@@ -189,6 +221,49 @@ fn base64_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_are_repaired_once_per_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("mail.db")).unwrap();
+        // The flag stays: later starts don't run the query at all.
+        repair_stale_previews(&db, 7).unwrap();
+        assert!(db.meta_flag("previews_repaired_7").unwrap());
+        assert!(!db.meta_flag("previews_repaired_8").unwrap());
+    }
+
+    #[test]
+    fn a_body_over_the_limit_is_refused_and_attachments_do_not_count() {
+        let raw = b"From: a@b.c\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\nContent-Type: text/plain\r\n\r\n1234567890\r\n--X\r\nContent-Type: application/pdf; name=r.pdf\r\nContent-Disposition: attachment; filename=r.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n--X--\r\n";
+        assert!(body_content_within(raw, 5).is_none());
+        let kept = body_content_within(raw, 12).expect("the attachment doesn't count");
+        assert_eq!(kept.attachments.len(), 1);
+    }
+
+    #[test]
+    fn an_image_too_big_to_embed_stays_reachable_as_an_attachment() {
+        let image = "A".repeat((MAX_INLINE_BYTES + 3) * 4 / 3);
+        let raw = format!(
+            "From: a@b.c\r\nContent-Type: multipart/related; boundary=X\r\n\r\n--X\r\n\
+             Content-Type: text/html\r\n\r\n<img src=\"cid:big@x\"><img src=\"cid:small@x\">\r\n\
+             --X\r\nContent-Type: image/png\r\nContent-ID: <big@x>\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\n{image}\r\n\
+             --X\r\nContent-Type: image/png\r\nContent-ID: <small@x>\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\nAQID\r\n--X--\r\n"
+        );
+        let body = body_content(raw.as_bytes());
+        assert!(body.content.contains("cid:big@x"));
+        assert!(!body.content.contains("cid:small@x"));
+        let inline = |cid: &str| {
+            body.attachments
+                .iter()
+                .find(|a| a.content_id.as_deref() == Some(cid))
+                .unwrap()
+                .inline
+        };
+        assert!(!inline("big@x"));
+        assert!(inline("small@x"));
+    }
 
     const ALTERNATIVE: &[u8] = b"From: a@x\r\n\
 Subject: Hi\r\n\

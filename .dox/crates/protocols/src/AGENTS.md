@@ -53,6 +53,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 - **const `CONNECT_TIMEOUT`** (pub): 20 s per resolved address.
 - **const `IO_TIMEOUT`** (pub): 60 s per blocking read/write.
+- **`ConnectOptions::for_host`** (pub): the options for a host: a literal loopback address skips validation.
 - **struct `ConnectOptions { accept_invalid_certs: bool }`** (pub): Copy,
   Default (verifying). `accept_invalid_certs` = local test servers only.
 - **type `TlsStream`** (pub): `rustls::StreamOwned<ClientConnection, TcpStream>`.
@@ -214,7 +215,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`classify`** (pub) — `pub fn classify(err, phase: SendPhase) -> SendError`: `Connect` phase and auth replies → transient; `4xx` → transient; other codes → permanent; local client errors → permanent; no code in `Envelope` → transient; no code in `Message` → **uncertain** (the terminator may have reached the server).
 - **`map_error`** (pub) — `pub fn map_error(err: imap::Error) -> RemoteError`: `Io` → `tls::io_error`; `No` → `no_kind`; `Bad` → `Protocol`; `Bye` / `ConnectionLost` → `Network`; `Validate` → `Other`; rest (parse, append, unexpected) → `Protocol`. (The crate reports an unparseable line as a `Bye` "no explanation given".)
 - **`no_kind`** (private) — `[TRYCREATE]` or text containing nonexist / not exist / doesn't exist / no such / unknown mailbox / not found → `NotFound`, else `Protocol`.
-- **`map_login_error`** (pub) — `NO`/`BAD` → `Auth`; others as `map_error`.
+- **`map_login_error`** (pub) — `NO`/`BAD` → `Auth`, except a `NO` with an RFC 5530 passing code (`login_refusal_kind`: `[UNAVAILABLE]`, `[SERVERBUG]`, `[INUSE]`, `[LIMIT]` in the text) → `Network`, which retries; others as `map_error`.
 
 ##### Context: `test_server` (`#[cfg(test)]`, pub(crate))
 
@@ -342,12 +343,11 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 #### Functions
 
-- **`prefer_encrypted`** (private) — the first encrypted server of the list, else the first (cleartext).
 - **`autoconfig_urls`** (pub) — `pub fn autoconfig_urls(email: &str) -> Vec<String>`: ISPDB `https://autoconfig.thunderbird.net/v1.1/<domain>`, `https://autoconfig.<domain>/mail/config-v1.1.xml?emailaddress=<encoded>`, `https://<domain>/.well-known/autoconfig/mail/config-v1.1.xml`; empty without a domain.
 - **`autoconfig`** (pub) — `pub fn autoconfig(email: &str, timeout: Duration) -> Option<AccountConfig>`: `autoconfig_from(autoconfig_urls(email))`.
 - **`autoconfig_from`** (private) — first URL answering 2xx whose body `parse_autoconfig` accepts; transport errors/non-2xx/unusable documents fall through.
 - **`guess_config`** (pub) — `pub fn guess_config(email: &str) -> Option<AccountConfig>`: `imap.<domain>:993` TLS, `smtp.<domain>:587` STARTTLS, username = email, password auth.
 - **`discover_config`** (pub) — `pub fn discover_config(email: &str, timeout: Duration) -> Option<AccountConfig>`: preset → autoconfig → guess (blocking; network only past the preset).
 - **`parse_autoconfig`** (pub) — `pub fn parse_autoconfig(xml: &str, email: &str) -> Option<AccountConfig>`: first usable `incomingServer type="imap"` and `outgoingServer type="smtp"` under `emailProvider`; username from the IMAP server; password auth; `None` unless both exist.
-- **`parse_server`** (private) — `socketType` SSL/TLS → `Tls`, STARTTLS → `StartTls`, plain → `None`, other → skip; hostname required (placeholders substituted); numeric port required; username substituted, default = email.
+- **`parse_server`** (private) — `socketType` SSL/TLS → `Tls`, STARTTLS → `StartTls`, anything else (cleartext too, user decision) → skip; hostname required (placeholders substituted); numeric port required; username substituted, default = email.
 - **`substitute`** (private) — expands `%EMAILADDRESS%`, `%EMAILLOCALPART%`, `%EMAILDOMAIN%` (lowercased domain).

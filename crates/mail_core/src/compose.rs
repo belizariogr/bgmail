@@ -8,7 +8,7 @@ use mail_builder::headers::message_id::MessageId;
 use mail_builder::MessageBuilder;
 use serde::{Deserialize, Serialize};
 
-use crate::address::{same_email, Address};
+use crate::address::Address;
 
 /// A file the user attached in the composer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +16,30 @@ pub struct OutgoingAttachment {
     pub filename: String,
     pub mime_type: String,
     pub data: Vec<u8>,
+}
+
+/// The copy of `raw` kept in the sender's Sent folder: with a `Bcc:` header for the
+/// envelope recipients missing from To and Cc. Only there: the SMTP server gets `raw`,
+/// or the other recipients could read it.
+pub fn sent_copy(raw: &[u8], envelope: &[String]) -> Vec<u8> {
+    let Some(parsed) = crate::parse_message(raw) else {
+        return raw.to_vec();
+    };
+    let visible = || parsed.to.iter().chain(&parsed.cc);
+    let hidden: Vec<&str> = envelope
+        .iter()
+        .filter(|recipient| {
+            !visible().any(|address| crate::same_email(&address.email, recipient))
+                && !recipient.chars().any(char::is_control)
+        })
+        .map(String::as_str)
+        .collect();
+    if hidden.is_empty() {
+        return raw.to_vec();
+    }
+    let mut copy = format!("Bcc: {}\r\n", hidden.join(",\r\n ")).into_bytes();
+    copy.extend_from_slice(raw);
+    copy
 }
 
 /// Everything needed to produce (and later re-open) an outgoing message.
@@ -52,16 +76,17 @@ pub fn build_message(draft: &Draft, message_id: &str, date_unix: i64) -> Vec<u8>
     if !draft.cc.is_empty() {
         builder = builder.cc(to_builder_list(&draft.cc));
     }
-    if let Some(id) = draft.in_reply_to.as_deref().map(strip_brackets) {
-        if !id.is_empty() {
-            builder = builder.in_reply_to(id.to_string());
-        }
+    // The builder folds between ids only, and a server may refuse lines over 998 bytes: replying
+    // to a message with a hostile id loses the link to it, not the reply.
+    let usable = |id: &String| !id.is_empty() && id.len() <= 900;
+    if let Some(id) = draft.in_reply_to.as_deref().map(header_id).filter(usable) {
+        builder = builder.in_reply_to(id);
     }
     let references: Vec<String> = draft
         .references
         .iter()
-        .map(|r| strip_brackets(r).to_string())
-        .filter(|r| !r.is_empty())
+        .map(|r| header_id(r))
+        .filter(usable)
         .collect();
     if !references.is_empty() {
         builder = builder.references(MessageId::from(references));
@@ -103,14 +128,17 @@ pub fn new_message_id(domain_from_email: &str, unique: u64) -> String {
 /// SMTP `RCPT TO` list: to + cc + bcc, de-duplicated case-insensitively
 /// (first spelling wins) so nobody receives two copies.
 pub fn envelope_recipients(draft: &Draft) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for address in draft.to.iter().chain(&draft.cc).chain(&draft.bcc) {
-        if address.email.is_empty() || out.iter().any(|e| same_email(e, &address.email)) {
-            continue;
-        }
-        out.push(address.email.clone());
-    }
-    out
+    let mut seen = std::collections::HashSet::new();
+    draft
+        .to
+        .iter()
+        .chain(&draft.cc)
+        .chain(&draft.bcc)
+        .filter(|address| {
+            !address.email.is_empty() && seen.insert(address.email.trim().to_lowercase())
+        })
+        .map(|address| address.email.clone())
+        .collect()
 }
 
 /// Extension ↔ MIME pairs. The first entry for a MIME type is its canonical
@@ -186,6 +214,17 @@ pub(crate) fn extension_for_mime(mime: &str) -> Option<&'static str> {
         .map(|(ext, _)| *ext)
 }
 
+/// A message or content id as it can go in a header. The line breaks of folding go, as
+/// does any other control character: a CR left in the id of a message being answered
+/// could start a header of its sender's choosing. Spaces stay: they are part of it for
+/// whoever searches the server or follows a `cid:`.
+pub(crate) fn header_id(id: &str) -> String {
+    strip_brackets(id)
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\t')
+        .collect()
+}
+
 pub(crate) fn strip_brackets(id: &str) -> &str {
     let id = id.trim();
     id.strip_prefix('<')
@@ -205,6 +244,41 @@ fn to_builder_list(addresses: &[Address]) -> BuilderAddress<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_id_cannot_add_a_header_to_a_reply() {
+        let draft = Draft {
+            from: Address::new(None::<String>, "a@x.test"),
+            to: vec![Address::new(None::<String>, "b@x.test")],
+            in_reply_to: Some("a@b\rX-Evil: 1".into()),
+            references: vec!["r@b\rX-Evil: 2".into()],
+            ..Default::default()
+        };
+        let raw = build_message(&draft, "id@x.test", 0);
+        assert!(
+            !raw.windows(2).any(|w| w == b"\rX"),
+            "{}",
+            String::from_utf8_lossy(&raw)
+        );
+    }
+
+    #[test]
+    fn the_sent_copy_records_who_was_hidden() {
+        let raw = b"From: a@x.test\r\nTo: B <b@x.test>\r\nCc: c@x.test\r\nSubject: s\r\n\r\nbody";
+        let envelope = |list: &[&str]| list.iter().map(|r| r.to_string()).collect::<Vec<_>>();
+        assert_eq!(sent_copy(raw, &envelope(&["b@x.test", "C@x.test"])), raw);
+
+        let copy = sent_copy(raw, &envelope(&["b@x.test", "d@x.test", "e@x.test"]));
+        let parsed = crate::parse_message(&copy).unwrap();
+        let hidden: Vec<_> = parsed.bcc.iter().map(|a| a.email.as_str()).collect();
+        assert_eq!(hidden, ["d@x.test", "e@x.test"]);
+        assert_eq!(parsed.subject, "s");
+        assert_eq!(parsed.to[0].email, "b@x.test");
+
+        // A value that could add headers isn't written.
+        let copy = sent_copy(raw, &envelope(&["x@x.test\r\nSubject: y"]));
+        assert_eq!(copy, raw);
+    }
     use crate::parse::{attachment_content, parse_message};
 
     fn draft() -> Draft {

@@ -25,7 +25,8 @@ use theme::ActiveTheme;
 use ui::prelude::*;
 use ui::{
     set_native_text_focus, Button, Color, FocusNext, FocusPrevious, Icon, IconButton, IconName,
-    IconSize, Label, LabelSize, ListItem, Scrollbar, ScrollbarState, TextInput, Tooltip,
+    IconSize, Label, LabelSize, ListItem, Scrollbar, ScrollbarState, TextInput, TextInputEvent,
+    Tooltip,
 };
 
 use crate::actions::{
@@ -51,8 +52,8 @@ use crate::mail_service::{self, MailService, OverallStatus, StartError};
 use crate::settings::SettingsView;
 use crate::shortcuts;
 use html_view::{
-    Appearance as PageAppearance, DetachedDocument, DocumentOptions, HitInfo, HtmlDocument,
-    HtmlView, HtmlViewEvent, RenderError,
+    has_too_many_tags, Appearance as PageAppearance, DetachedDocument, DocumentOptions, HitInfo,
+    HtmlDocument, HtmlView, HtmlViewEvent, RenderError,
 };
 use mail_core::{AccountConfig, Address, Draft, ParsedMessage, QuoteLabels, ReplyKind};
 use mail_sync::{actions as mail_actions, ActionOutcome, Command, SyncEvent};
@@ -79,6 +80,8 @@ pub(crate) const WINDOW_MIN_HEIGHT: f32 = 480.0;
 pub(crate) const MAIN_WINDOW_APP_ID: &str = "com.bgmail.main";
 /// Wayland app_id / X11 WM_CLASS of the settings window.
 pub(crate) const SETTINGS_WINDOW_APP_ID: &str = "com.bgmail.settings";
+/// How often the list of unsent messages is read again.
+const UNSENT_REFRESH: Duration = Duration::from_secs(60);
 /// Wayland app_id / X11 WM_CLASS of the compose window.
 pub(crate) const COMPOSE_WINDOW_APP_ID: &str = "com.bgmail.newmail";
 /// Below this window width the sidebar collapses automatically and, once
@@ -380,11 +383,21 @@ impl DragProgress {
 /// pixels, so its progress is kept to tell when it counts.
 #[derive(Clone)]
 struct DraggedMessages {
+    /// The row it started on.
+    row_id: i64,
     ids: Vec<i64>,
     /// The account they belong to: `None` for a selection across accounts, which
     /// has no folder in common.
     account_id: Option<i64>,
     progress: Rc<DragProgress>,
+}
+
+/// See [`RootView::selection_drag`].
+struct SelectionDrag {
+    /// No row is sent mail, which can't be moved.
+    movable: bool,
+    /// The account of every row; `None` when they differ.
+    account_id: Option<i64>,
 }
 
 impl DraggedMessages {
@@ -395,6 +408,13 @@ impl DraggedMessages {
         if self.progress.counts_at(position) && cx.active_drag_cursor_style() != Some(cursor) {
             cx.set_active_drag_cursor_style(cursor, window);
         }
+    }
+
+    /// Whether letting go at `position` on row `id` is really a click on it: the press
+    /// moved enough for GPUI to call it a drag, which eats the click, but not enough to
+    /// count as one.
+    fn is_click_on(&self, id: i64, position: Point<Pixels>) -> bool {
+        self.row_id == id && !self.progress.counts_at(position)
     }
 
     /// Whether they can be dropped on `folder_path` of `account_id` right now.
@@ -586,6 +606,33 @@ struct ReaderSignature {
 /// avoids flashing the placeholder at every message.
 const BACKGROUND_BUILD_BYTES: usize = 256 * 1024;
 
+/// Longest a first layout can take before the message opens as text.
+const UI_LAYOUT_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+const BACKGROUND_LAYOUT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Most of a plain-text body the reader shows. Text costs over 100 times its size to lay
+/// out, and a body can have 256 MB. Gmail clips bodies at about 102 KB; Thunderbird shows
+/// everything and hangs for minutes. Replying and forwarding use the whole body.
+const MAX_SHOWN_TEXT_BYTES: usize = 2 << 20;
+
+/// What the reader shows of a plain-text body: up to the last line that fits, or to the
+/// limit if the last line is long. `None` when it all fits.
+pub(crate) fn clipped_text(text: &str) -> Option<&str> {
+    if text.len() <= MAX_SHOWN_TEXT_BYTES {
+        return None;
+    }
+    let mut end = MAX_SHOWN_TEXT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    // A line break far back isn't worth losing the rest: `ok` before a line of 3 MB.
+    const NEAR_THE_END: usize = 64 << 10;
+    Some(match text[..end].rfind('\n') {
+        Some(line_end) if end - line_end <= NEAR_THE_END => &text[..line_end],
+        _ => &text[..end],
+    })
+}
+
 /// Everything a reader document is made from, so it can be built on any thread.
 struct ReaderJob {
     colors: DocumentColors,
@@ -606,7 +653,8 @@ struct BuiltReader {
 
 impl ReaderJob {
     fn runs_in_background(&self) -> bool {
-        matches!(&self.body, MessageBody::Html(html) if html.len() >= BACKGROUND_BUILD_BYTES)
+        let (MessageBody::Html(body) | MessageBody::Text(body)) = &self.body;
+        body.len() >= BACKGROUND_BUILD_BYTES
     }
 
     /// Sanitizes, themes, parses and lays out the body. A message that crashed
@@ -627,23 +675,54 @@ impl ReaderJob {
             MessageBody::Html(html) => MessageBody::Text(plain_text(html).into()),
             text => text.clone(),
         };
-        let mut notice = (self.crashed && matches!(self.body, MessageBody::Html(_)))
-            .then_some(ReaderNotice::Crashed);
-        let shown = if notice.is_some() {
-            as_plain()
-        } else {
-            self.body.clone()
+        // True when the text had to be clipped; the message then says so, unless it already
+        // explains why this is text at all.
+        let clip = |body: MessageBody| match &body {
+            MessageBody::Text(text) => match clipped_text(text) {
+                Some(shown) => (MessageBody::Text(shown.to_string().into()), true),
+                None => (body, false),
+            },
+            MessageBody::Html(_) => (body, false),
         };
+        let too_many_tags =
+            matches!(&self.body, MessageBody::Html(html) if has_too_many_tags(html));
+        let mut notice = match (&self.body, self.crashed, too_many_tags) {
+            (MessageBody::Html(_), true, _) => Some(ReaderNotice::Crashed),
+            (_, _, true) => Some(ReaderNotice::Unrenderable),
+            _ => None,
+        };
+        let (shown, clipped) = if notice.is_some() {
+            clip(as_plain())
+        } else {
+            clip(self.body.clone())
+        };
+        if clipped && notice.is_none() {
+            notice = Some(ReaderNotice::Clipped);
+        }
         let rendered = email_document(self.colors, &shown, self.remote);
+        if rendered.refused {
+            notice = Some(ReaderNotice::Unrenderable);
+        }
         let mut document = match HtmlDocument::try_parse(&rendered.html, options()) {
             Ok(document) => document,
-            Err(RenderError::TooDeep { .. }) => {
+            Err(RenderError::TooDeep { .. } | RenderError::TooComplex) => {
                 notice = Some(ReaderNotice::Unrenderable);
-                let fallback = email_document(self.colors, &as_plain(), false);
+                let fallback = email_document(self.colors, &clip(as_plain()).0, false);
                 HtmlDocument::parse(&fallback.html, options())
             }
         };
-        document.prepare(self.width);
+        // A last resort, as nothing else stops a hang: longer where it blocks nothing.
+        let limit = if self.runs_in_background() {
+            BACKGROUND_LAYOUT_LIMIT
+        } else {
+            UI_LAYOUT_LIMIT
+        };
+        if !document.prepare_within(self.width, limit) {
+            notice = Some(ReaderNotice::Unrenderable);
+            let fallback = email_document(self.colors, &clip(as_plain()).0, false);
+            document = HtmlDocument::parse(&fallback.html, options());
+            document.prepare(self.width);
+        }
         BuiltReader {
             document: DetachedDocument::new(document),
             blocked_images: if notice.is_some() {
@@ -661,6 +740,8 @@ impl ReaderJob {
 enum ReaderNotice {
     /// The renderer refused it (`RenderError`).
     Unrenderable,
+    /// It is plain text too long to show whole (see [`MAX_SHOWN_TEXT_BYTES`]).
+    Clipped,
     /// The app closed while rendering it last time (see [`CrashGuard`]).
     Crashed,
 }
@@ -762,8 +843,13 @@ pub struct RootView {
     show_sidebar: bool,
     /// User-adjustable width of the accounts/folders sidebar.
     sidebar_width: Pixels,
+    /// The width the user chose; [`Self::sync_layout`] narrows `sidebar_width` from
+    /// it for the moment only, so a smaller window or a zoom doesn't cost it.
+    preferred_sidebar_width: Pixels,
     /// User-adjustable width of the message list.
     list_width: Pixels,
+    /// As [`Self::preferred_sidebar_width`], for `list_width`.
+    preferred_list_width: Pixels,
     /// Whether the window is currently below `NARROW_BREAKPOINT`. When narrow the
     /// sidebar is collapsed and, if reopened, floats over the content.
     narrow: bool,
@@ -790,6 +876,8 @@ pub struct RootView {
     /// after launch, once the initial window state (including a restored maximize)
     /// has settled, so the opening sequence never overwrites the saved sizes.
     persist_ready: bool,
+    /// Where settings are written; a field so tests can keep off the real profile.
+    config_file: Option<std::path::PathBuf>,
     /// Gate that holds the UI behind a plain background until the window has
     /// reached its final size. On Windows the maximize-on-open is asynchronous and
     /// the `WM_SIZE` that grows GPUI's cached viewport can be lost during the busy
@@ -881,6 +969,13 @@ pub struct RootView {
     crashed_messages: HashSet<i64>,
     /// Marker of the message being rendered (crash-loop protection).
     crash_guard: CrashGuard,
+    /// Marks the formatted quote a reply window renders (see [`QuotedOriginal`]).
+    quote_guard: CrashGuard,
+    /// Whether [`Self::crash_guard`]'s marker exists, so an empty reader isn't a disk
+    /// access on every frame.
+    reader_guarded: bool,
+    /// The database was damaged and started over, which the first frame reports.
+    pub(crate) database_replaced: bool,
     /// Inputs that last produced the reader document (selected message and the
     /// colors it was themed with). Used to skip re-parsing the body on every
     /// render when nothing that affects the document has changed.
@@ -902,6 +997,8 @@ pub struct RootView {
     /// Whether the compose message body uses a white background. Persisted; off
     /// by default.
     pub(crate) compose_white_background: bool,
+    /// Persisted copy of the UI language, a global like the theme.
+    language: Language,
     /// Zoom of the whole app, applied to every window it opens.
     ui_scale: f32,
     /// Persisted copy of the theme choice (the theme itself is an app global,
@@ -933,8 +1030,18 @@ pub struct RootView {
     command_palette_focus_pending: bool,
 }
 
-/// Minimal parsed form of a stored message whose raw source is missing
-/// (local/demo messages), so reply/forward still work.
+/// The ids of a stored `References`: one per line, or space-separated in rows from
+/// before ids could hold spaces.
+fn stored_references(stored: &str) -> Vec<String> {
+    if stored.contains('\n') {
+        stored.lines().map(str::to_string).collect()
+    } else {
+        stored.split_whitespace().map(str::to_string).collect()
+    }
+}
+
+/// Minimal parsed form of a stored message whose raw source is missing (local/demo
+/// messages, or one whose body wasn't downloaded yet), so reply/forward still work.
 fn parsed_from_detail(detail: &MessageDetail) -> ParsedMessage {
     let from = Address::new(
         (!detail.sender.is_empty()).then(|| detail.sender.clone()),
@@ -948,15 +1055,12 @@ fn parsed_from_detail(detail: &MessageDetail) -> ParsedMessage {
     ParsedMessage {
         message_id: detail.message_id_hdr.clone(),
         in_reply_to: detail.in_reply_to.clone(),
-        references: detail
-            .references_hdr
-            .split_whitespace()
-            .map(str::to_string)
-            .collect(),
+        references: stored_references(&detail.references_hdr),
         subject: detail.subject.clone(),
         from: Some(from),
-        to: mail_core::parse_address_list(&detail.to_addrs).unwrap_or_default(),
-        cc: mail_core::parse_address_list(&detail.cc_addrs).unwrap_or_default(),
+        reply_to: mail_core::valid_addresses(&detail.reply_to),
+        to: mail_core::valid_addresses(&detail.to_addrs),
+        cc: mail_core::valid_addresses(&detail.cc_addrs),
         text,
         html,
         ..ParsedMessage::default()
@@ -964,23 +1068,38 @@ fn parsed_from_detail(detail: &MessageDetail) -> ParsedMessage {
 }
 
 /// The original's real attachments, carried over when forwarding.
-fn forwarded_attachments(raw: &[u8], parsed: &ParsedMessage) -> Vec<mail_core::OutgoingAttachment> {
-    parsed
+fn forwarded_attachments(
+    raw: &[u8],
+    parsed: &ParsedMessage,
+    shown: &[AttachmentRow],
+) -> Vec<mail_core::OutgoingAttachment> {
+    // What the reader lists goes too: an image too big to embed is inline to the parser.
+    let mime_type = |info: &mail_core::AttachmentInfo| match &info.charset {
+        Some(charset) => format!("{}; charset={charset}", info.mime_type),
+        None => info.mime_type.clone(),
+    };
+    let listed: HashSet<i64> = shown.iter().map(|row| row.part_index as i64).collect();
+    let attachments: Vec<_> = parsed
         .attachments
         .iter()
-        .filter(|info| !info.inline)
-        .filter_map(|info| {
+        .filter(|info| !info.inline || listed.contains(&(info.index as i64)))
+        .collect();
+    let indexes: Vec<usize> = attachments.iter().map(|info| info.index).collect();
+    attachments
+        .into_iter()
+        .zip(mail_core::attachment_contents(raw, &indexes))
+        .filter_map(|(info, data)| {
             Some(mail_core::OutgoingAttachment {
                 filename: info.filename.clone(),
-                mime_type: info.mime_type.clone(),
-                data: mail_core::attachment_content(raw, info.index)?,
+                mime_type: mime_type(info),
+                data: data?,
             })
         })
         .collect()
 }
 
-/// An outgoing message that stopped retrying (`failed` / `maybe_sent`), as
-/// listed in the status bar's "unsent" panel.
+/// An outgoing message that failed (stopped, or still being retried), as listed in
+/// the status bar's "unsent" panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct UnsentItem {
     id: i64,
@@ -992,6 +1111,8 @@ struct UnsentItem {
     error: Option<String>,
     /// The connection broke mid-send: the server may have accepted it.
     maybe_sent: bool,
+    /// More tries are coming unless the user stops them.
+    retrying: bool,
 }
 
 /// Summarizes an unsent outbox row (`subject` comes from its parsed raw).
@@ -1008,17 +1129,18 @@ fn unsent_item(row: &OutgoingRow, subject: String) -> UnsentItem {
             .filter(|error| !error.is_empty())
             .map(str::to_string),
         maybe_sent: row.state == OutgoingState::MaybeSent,
+        retrying: row.state == OutgoingState::Queued,
     }
 }
 
-/// Outbox rows that stopped retrying, minus accounts being removed. Subjects
+/// Outbox rows that failed, minus accounts being removed. Subjects
 /// of rows already in `previous` are reused instead of re-parsing the raw.
 fn load_unsent(
     db: &storage::Database,
     removing: &HashSet<i64>,
     previous: Vec<UnsentItem>,
 ) -> Vec<UnsentItem> {
-    let rows = match db.failed_outgoing() {
+    let rows = match db.unsent_outgoing() {
         Ok(rows) => rows,
         Err(error) => {
             eprintln!("BGMail: could not read the outbox: {error}");
@@ -1083,7 +1205,7 @@ fn compose_init_from_outgoing(row: &OutgoingRow, parsed: &ParsedMessage) -> Comp
             html: None,
             in_reply_to: parsed.in_reply_to.clone(),
             references: parsed.references.clone(),
-            attachments: forwarded_attachments(&row.raw, parsed),
+            attachments: forwarded_attachments(&row.raw, parsed, &[]),
         },
         replaces_outgoing: Some(row.id),
         quoted_original: None,
@@ -1217,32 +1339,47 @@ impl RootView {
             px(settings.compose_height.max(compose::COMPOSE_MIN_HEIGHT)),
         );
         let crash_guard = CrashGuard::beside(db_path.as_ref());
+        let quote_guard = CrashGuard::beside_for_quotes(db_path.as_ref());
         let db_path = db_path.as_ref().to_path_buf();
-        let db = storage::Database::open(&db_path).expect("failed to open mail database");
-        if seed {
-            let mut seed_messages = db_seed::seed_messages();
-            if let Some(dir) = std::env::var_os("BGMAIL_SAMPLE_DIR") {
-                seed_messages.extend(db_seed::sample_dir_messages(std::path::Path::new(&dir)));
+        let (mut db, mut database_replaced) = storage::Database::open_or_replace_corrupt(&db_path)
+            .expect("failed to open mail database");
+        // What the first frame needs. The rest of the app takes errors, but with no accounts or
+        // folders it can't start: a page lost among these is worth starting over, at every start
+        // otherwise.
+        let load = |db: &storage::Database| -> rusqlite::Result<_> {
+            if seed {
+                let mut seed_messages = db_seed::seed_messages();
+                if let Some(dir) = std::env::var_os("BGMAIL_SAMPLE_DIR") {
+                    seed_messages.extend(db_seed::sample_dir_messages(std::path::Path::new(&dir)));
+                }
+                storage::seed_if_empty(db.conn(), &db_seed::seed_accounts(), &seed_messages)?;
             }
-            storage::seed_if_empty(db.conn(), &db_seed::seed_accounts(), &seed_messages)
-                .expect("failed to seed mail database");
-        }
-
-        let accounts = db.list_accounts().expect("failed to load accounts");
-        let mut folders_by_account = HashMap::new();
-        for account in &accounts {
-            folders_by_account.insert(
-                account.id,
-                sidebar_ordered(db.list_folders(account.id).expect("failed to load folders")),
-            );
-        }
+            let accounts = db.list_accounts()?;
+            let mut folders_by_account = HashMap::new();
+            for account in &accounts {
+                folders_by_account
+                    .insert(account.id, sidebar_ordered(db.list_folders(account.id)?));
+            }
+            let list_messages = db.list_messages(&mail_list_query(
+                &Selection::Global(GlobalMailbox::Inbox),
+                "",
+            ))?;
+            Ok((accounts, folders_by_account, list_messages))
+        };
+        let (accounts, folders_by_account, list_messages) = match load(&db) {
+            Err(error) if storage::is_corrupt(&error) => {
+                drop(db);
+                db = storage::Database::replace_corrupt(&db_path)
+                    .expect("failed to open mail database");
+                database_replaced = true;
+                load(&db).expect("failed to load the new mail database")
+            }
+            loaded => loaded.expect("failed to load mail"),
+        };
 
         let onboarding_completed =
             !crate::onboarding::needs_onboarding(settings.onboarding_completed, accounts.len());
         let selected_mailbox = Selection::Global(GlobalMailbox::Inbox);
-        let list_messages = db
-            .list_messages(&mail_list_query(&selected_mailbox, ""))
-            .expect("failed to load messages");
         // Opening a message marks it read, so a real profile starts with no
         // selection; the demo keeps its showcase message open.
         let selected_message_id = seed
@@ -1279,7 +1416,9 @@ impl RootView {
             selected_message_id,
             show_sidebar: true,
             sidebar_width,
+            preferred_sidebar_width: sidebar_width,
             list_width,
+            preferred_list_width: list_width,
             narrow: false,
             window_width: px(settings.window_width),
             window_origin,
@@ -1289,6 +1428,7 @@ impl RootView {
             max_size,
             save_seq: 0,
             persist_ready: false,
+            config_file: config::config_path(),
             // Only Windows defers the first layout (see the field docs); elsewhere
             // the window already has its final size when the UI first renders.
             content_ready: !cfg!(target_os = "windows"),
@@ -1325,8 +1465,15 @@ impl RootView {
             reader_menu: None,
             find_bar: None,
             reader_notice: None,
-            crashed_messages: crash_guard.take_unfinished().into_iter().collect(),
+            crashed_messages: crash_guard
+                .take_unfinished()
+                .into_iter()
+                .chain(quote_guard.take_unfinished())
+                .collect(),
             crash_guard,
+            quote_guard,
+            reader_guarded: false,
+            database_replaced,
             last_reader_sig: None,
             reader_preparing: false,
             reader_build_token: 0,
@@ -1335,6 +1482,7 @@ impl RootView {
             remote_allowed: HashSet::new(),
             reader_white_background: settings.reader_white_background,
             compose_white_background: settings.compose_white_background,
+            language: settings.language(),
             ui_scale: crate::app_zoom::sanitize(settings.ui_scale),
             light_theme: settings.light_theme,
             onboarding_completed,
@@ -1368,39 +1516,46 @@ impl RootView {
         if self.list_filter != ListFilter::All {
             // A message being read stays until the selection moves, even if it
             // no longer matches: opening an unread one marks it read.
-            let (filter, selected, multi) = (
-                self.list_filter,
-                self.selected_message_id,
-                &self.multi_selection,
-            );
+            let (filter, selected) = (self.list_filter, self.selected_message_id);
+            let multi: HashSet<i64> = self.multi_selection.iter().copied().collect();
             self.list_messages.retain(|message| {
                 filter.matches(message)
                     || selected == Some(message.id)
                     || multi.contains(&message.id)
             });
         }
-        self.prune_multi_selection();
+        let collapsed = self.prune_multi_selection();
         if let Some(selected) = self.selected_message_id {
             if self.list_messages.iter().any(|m| m.id == selected) {
                 self.reload_selected_detail();
+                if collapsed {
+                    // Now it's an open message, and it may have only its headers.
+                    self.request_selected_body();
+                }
             } else {
                 self.clear_message_selection();
             }
         }
     }
 
-    /// Drops selected rows that left the list; one survivor is a plain
-    /// selection again.
-    fn prune_multi_selection(&mut self) {
+    /// Drops selected rows that left the list; one survivor is a plain selection
+    /// again (`true`), and with none left the reader doesn't keep showing a message
+    /// that isn't listed.
+    fn prune_multi_selection(&mut self) -> bool {
         let listed: HashSet<i64> = self.list_messages.iter().map(|m| m.id).collect();
         self.multi_selection.retain(|id| listed.contains(id));
         if let [only] = self.multi_selection[..] {
             self.selected_message_id = Some(only);
             self.multi_selection.clear();
             self.multi_preview = None;
-        } else if !self.multi_selection.is_empty() {
-            self.reload_multi_preview();
+            return true;
         }
+        if !self.multi_selection.is_empty() {
+            self.reload_multi_preview();
+        } else if self.multi_preview.is_some() {
+            self.clear_message_selection();
+        }
+        false
     }
 
     /// Re-reads the message shown for a multiple selection and its chips.
@@ -1598,12 +1753,18 @@ impl RootView {
             return false;
         }
         let id = self.list_messages[target].id;
+        self.select_only(id);
+        true
+    }
+
+    /// Makes `id` the only selected row, ending any multiple selection and its preview.
+    fn select_only(&mut self, id: i64) {
         self.multi_selection.clear();
+        self.multi_preview = None;
         self.selected_message_id = Some(id);
         self.selection_anchor = Some(id);
         self.selection_focus = Some(id);
         self.last_reader_sig = None;
-        true
     }
 
     /// Scrolls the message list so the selected row is visible.
@@ -1665,17 +1826,10 @@ impl RootView {
     fn run_message_action(
         &mut self,
         cx: &mut Context<Self>,
-        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome> + Send + 'static,
     ) {
         if !self.multi_selection.is_empty() {
-            if let Err(error) = self.apply_action_to_selection(action) {
-                self.set_status_note(
-                    format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
-                    cx,
-                );
-            }
-            self.sync_app_menus(cx);
-            cx.notify();
+            self.apply_action_to_selection(action, cx);
             return;
         }
         let Some(id) = self.selected_message_id else {
@@ -1684,53 +1838,101 @@ impl RootView {
         self.run_action_on_message(id, cx, action);
     }
 
-    /// Runs `action` on every row of a multiple selection, even if one fails
-    /// (the first error is returned), and leaves nothing selected: opening the
-    /// next message would mark it read without it being asked for.
+    /// Runs `action` on every row of a multiple selection, even if one fails (the
+    /// first error is reported), and leaves nothing selected: opening the next message
+    /// would mark it read without it being asked for. The rows leave the list now.
     fn apply_action_to_selection(
         &mut self,
-        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
-    ) -> rusqlite::Result<()> {
-        let mut result = Ok(());
-        for id in std::mem::take(&mut self.multi_selection) {
-            let outcome = self.act_on_message(id, &action);
-            if result.is_ok() {
-                result = outcome;
-            }
-        }
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = std::mem::take(&mut self.multi_selection);
+        self.run_bulk_action(ids.clone(), action, cx);
+        let ids: HashSet<i64> = ids.into_iter().collect();
+        self.list_messages
+            .retain(|message| !ids.contains(&message.id));
         self.clear_message_selection();
-        self.reload_message_list();
-        result
+        self.sync_app_menus(cx);
+        cx.notify();
     }
 
     /// Runs `action` on every row of a multiple selection that stays selected
     /// afterwards, because the rows stay listed (read state, star).
     fn apply_action_keeping_selection(
         &mut self,
-        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
-    ) -> rusqlite::Result<()> {
-        let mut result = Ok(());
-        for id in self.multi_selection.clone() {
-            let outcome = self.act_on_message(id, &action);
-            if result.is_ok() {
-                result = outcome;
-            }
-        }
-        self.reload_message_list();
-        self.last_reader_sig = None;
-        result
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_bulk_action(self.multi_selection.clone(), action, cx);
     }
 
-    /// Reports the outcome of a bulk toggle and redraws.
-    fn finish_bulk_toggle(&mut self, result: rusqlite::Result<()>, cx: &mut Context<Self>) {
-        if let Err(error) = result {
-            self.set_status_note(
-                format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
-                cx,
-            );
-        }
-        self.sync_app_menus(cx);
-        cx.notify();
+    /// Runs `action` on `ids` off the UI thread, on a connection of its own: each
+    /// message takes several disk writes, and a selection can hold every message of
+    /// a folder. Then reloads, reports the first error and wakes the workers.
+    fn run_bulk_action(
+        &self,
+        ids: Vec<i64>,
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let accounts: HashMap<i64, i64> = self
+            .list_messages
+            .iter()
+            .map(|message| (message.id, message.account_id))
+            .collect();
+        let path = self.db_path.clone();
+        let work = cx.background_spawn(async move {
+            let mut to_wake = HashSet::new();
+            let db = match storage::Database::open(&path) {
+                Ok(db) => db,
+                Err(error) => return (to_wake, Some(error), false),
+            };
+            let mut first_error = None;
+            let mut no_destination = false;
+            for id in ids {
+                match action(&db, id) {
+                    Ok(outcome) => {
+                        no_destination |= outcome.no_destination;
+                        if outcome.needs_sync {
+                            to_wake.extend(accounts.get(&id).copied());
+                        }
+                    }
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+            (to_wake, first_error, no_destination)
+        });
+        cx.spawn(async move |this, cx| {
+            let (to_wake, error, no_destination) = work.await;
+            this.update(cx, |this, cx| {
+                for account_id in to_wake {
+                    this.after_action(
+                        account_id,
+                        ActionOutcome {
+                            changed: true,
+                            needs_sync: true,
+                            no_destination: false,
+                        },
+                    );
+                }
+                this.reload_message_list();
+                this.last_reader_sig = None;
+                if let Some(error) = error {
+                    this.set_status_note(
+                        format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
+                        cx,
+                    );
+                } else if no_destination {
+                    this.set_status_note(Key::StatusNoDestination.tr(cx.language()), cx);
+                }
+                this.sync_app_menus(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Runs `action` on message `id` and hands its server work to the worker.
@@ -1764,11 +1966,19 @@ impl RootView {
         cx: &mut Context<Self>,
         action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
     ) {
-        if let Err(error) = self.apply_message_action(id, action) {
+        let no_destination = Cell::new(false);
+        let result = self.apply_message_action(id, |db, id| {
+            let outcome = action(db, id)?;
+            no_destination.set(outcome.no_destination);
+            Ok(outcome)
+        });
+        if let Err(error) = result {
             self.set_status_note(
                 format!("{}: {error}", Key::StatusActionFailed.tr(cx.language())),
                 cx,
             );
+        } else if no_destination.get() {
+            self.set_status_note(Key::StatusNoDestination.tr(cx.language()), cx);
         }
         self.sync_app_menus(cx);
         self.last_reader_sig = None;
@@ -1812,29 +2022,54 @@ impl RootView {
         }
     }
 
-    /// What dragging row `id` takes along: the whole selection when the row is
-    /// part of it. `None` when that includes sent mail, which can't be moved.
-    fn dragged_messages(&self, id: i64) -> Option<DraggedMessages> {
-        let ids = if self.multi_selection.contains(&id) {
-            self.multi_selection.clone()
-        } else {
-            vec![id]
-        };
-        let sent_only = self.list_messages.iter().any(|message| {
-            ids.contains(&message.id) && commands::message_only_in_sent(&message.folders_csv)
-        });
-        if sent_only || self.showing_sent() {
+    /// What dragging a row of a multiple selection means, worked out once per list render:
+    /// it takes reading every row.
+    fn selection_drag(&self) -> Option<SelectionDrag> {
+        if self.multi_selection.is_empty() {
             return None;
         }
-        let mut accounts = self
+        let chosen: HashSet<i64> = self.multi_selection.iter().copied().collect();
+        let mut rows = self
             .list_messages
             .iter()
-            .filter(|message| ids.contains(&message.id))
-            .map(|message| message.account_id);
-        let first = accounts.next();
-        Some(DraggedMessages {
-            account_id: first.filter(|first| accounts.all(|other| other == *first)),
+            .filter(|message| chosen.contains(&message.id));
+        let mut movable = true;
+        let mut first_account = None;
+        let mut one_account = true;
+        for message in &mut rows {
+            movable &= !commands::message_only_in_sent(&message.folders_csv);
+            one_account &= *first_account.get_or_insert(message.account_id) == message.account_id;
+        }
+        Some(SelectionDrag {
+            movable,
+            account_id: first_account.filter(|_| one_account),
+        })
+    }
+
+    /// What dragging `message` takes along: the whole selection when the row is part of
+    /// it. `None` when that includes sent mail, which can't be moved.
+    fn dragged_messages(
+        &self,
+        message: &MessageListItem,
+        selection: Option<&SelectionDrag>,
+    ) -> Option<DraggedMessages> {
+        if self.showing_sent() {
+            return None;
+        }
+        let (ids, account_id, movable) = match selection {
+            Some(drag) if self.multi_selection.contains(&message.id) => {
+                (self.multi_selection.clone(), drag.account_id, drag.movable)
+            }
+            _ => (
+                vec![message.id],
+                Some(message.account_id),
+                !commands::message_only_in_sent(&message.folders_csv),
+            ),
+        };
+        movable.then(|| DraggedMessages {
+            row_id: message.id,
             ids,
+            account_id,
             progress: Rc::default(),
         })
     }
@@ -1843,9 +2078,10 @@ impl RootView {
     pub(crate) fn toggle_message_read(&mut self, cx: &mut Context<Self>) {
         if let Some(bulk) = self.bulk_selection() {
             let read = bulk.has_unread;
-            let result =
-                self.apply_action_keeping_selection(|db, id| mail_actions::set_read(db, id, read));
-            self.finish_bulk_toggle(result, cx);
+            self.apply_action_keeping_selection(
+                move |db, id| mail_actions::set_read(db, id, read),
+                cx,
+            );
             return;
         }
         let Some(detail) = self.selected_detail.as_ref() else {
@@ -1990,6 +2226,11 @@ impl RootView {
                     );
                 }
             }
+            SyncEvent::BodyRejected { message_id } => {
+                if self.selected_message_id == Some(message_id) {
+                    self.set_status_note(Key::StatusBodyRejected.tr(cx.language()), cx);
+                }
+            }
             SyncEvent::Sent { .. } => {
                 self.set_status_note(Key::StatusMessageSent.tr(cx.language()), cx);
                 self.refresh_unsent();
@@ -2014,7 +2255,11 @@ impl RootView {
     }
 
     /// Shows `note` in the status bar for a few seconds.
-    fn set_status_note(&mut self, note: impl Into<SharedString>, cx: &mut Context<Self>) {
+    pub(crate) fn set_status_note(
+        &mut self,
+        note: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
         self.status_note = Some(note.into());
         self.status_note_seq += 1;
         let token = self.status_note_seq;
@@ -2084,6 +2329,48 @@ impl RootView {
         if self.unsent.is_empty() {
             self.unsent_panel_open = false;
         }
+    }
+
+    /// Moves off the mailboxes of an account going away: the one shown and the one a
+    /// search returns to.
+    fn forget_removed_account_mailboxes(&mut self, account_id: i64) {
+        let inbox = Selection::Global(GlobalMailbox::Inbox);
+        let of_account = |mailbox: &Selection| matches!(mailbox, Selection::Mailbox { account_id: id, .. } if *id == account_id);
+        if of_account(&self.selected_mailbox) {
+            self.selected_mailbox = inbox.clone();
+        }
+        if self.pre_search_mailbox.as_ref().is_some_and(of_account) {
+            self.pre_search_mailbox = Some(inbox);
+        }
+    }
+
+    /// Whether an account still in the database uses the secret of `config`.
+    fn secret_is_shared(&self, config: &AccountConfig) -> bool {
+        self.db.list_accounts().is_ok_and(|accounts| {
+            accounts.iter().any(|account| {
+                AccountConfig::from_json(&account.config_json)
+                    .is_some_and(|other| other.secret_key() == config.secret_key())
+            })
+        })
+    }
+
+    /// Keeps the unsent list current on its own: a message can get stuck with no event
+    /// to tell, as when its account is offline.
+    pub(crate) fn watch_unsent(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(UNSENT_REFRESH).await;
+            let alive = this.update(cx, |this, cx| {
+                let before = this.unsent.clone();
+                this.refresh_unsent();
+                if this.unsent != before {
+                    cx.notify();
+                }
+            });
+            if alive.is_err() {
+                return;
+            }
+        })
+        .detach();
     }
 
     /// Asks every account to sync now ("Get mail").
@@ -2231,10 +2518,7 @@ impl RootView {
         {
             self.clear_message_selection();
         }
-        if matches!(self.selected_mailbox, Selection::Mailbox { account_id: selected, .. } if selected == account_id)
-        {
-            self.selected_mailbox = Selection::Global(GlobalMailbox::Inbox);
-        }
+        self.forget_removed_account_mailboxes(account_id);
         self.collapsed_accounts.clear();
         self.reload_from_database();
         self.sync_app_menus(cx);
@@ -2256,12 +2540,15 @@ impl RootView {
                     let failed = Key::StatusRemoveAccountFailed.tr(cx.language());
                     this.set_status_note(format!("{failed}: {error}"), cx);
                 } else if let Some(config) = AccountConfig::from_json(&account.config_json) {
-                    // Only now: a failed removal keeps a working account.
-                    let delete = cx.delete_credentials(&config.secret_key());
-                    cx.background_spawn(async move {
-                        delete.await.ok();
-                    })
-                    .detach();
+                    // Only now: a failed removal keeps a working account. And only if
+                    // no other account logs in with the same secret.
+                    if !this.secret_is_shared(&config) {
+                        let delete = cx.delete_credentials(&config.secret_key());
+                        cx.background_spawn(async move {
+                            delete.await.ok();
+                        })
+                        .detach();
+                    }
                 }
                 this.reload_from_database();
                 if failure.is_some() {
@@ -2290,6 +2577,14 @@ impl RootView {
 
     /// Puts an unsent message back in the queue and wakes its worker.
     pub(crate) fn retry_unsent(&mut self, id: i64, cx: &mut Context<Self>) {
+        // The original would go out, and then the edited copy too.
+        let being_edited = self
+            .with_compose_window(cx, |view, _, _| view.replaces_outgoing() == Some(id))
+            .unwrap_or(false);
+        if being_edited {
+            self.set_status_note(Key::UnsentBeingEdited.tr(cx.language()), cx);
+            return;
+        }
         let account_id = self
             .unsent
             .iter()
@@ -2312,8 +2607,24 @@ impl RootView {
 
     /// Opens compose prefilled with an unsent message. The outbox row stays
     /// until the edited message is queued (`send_draft` replaces it), so
-    /// closing compose loses nothing.
+    /// closing compose loses nothing. A row still being retried stops first: the
+    /// unedited message mustn't go out while it is being edited.
     pub(crate) fn edit_unsent(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        // Checked first: refused here, the message must go on being retried.
+        let busy = self
+            .with_compose_window(cx, |view, window, _| {
+                window.activate_window();
+                view.has_edits()
+            })
+            .unwrap_or(false);
+        if busy {
+            self.set_status_note(Key::StatusComposeBusy.tr(cx.language()), cx);
+            return;
+        }
+        if let Err(error) = self.db.stop_outgoing(id) {
+            self.report_unsent_error(error, cx);
+            return;
+        }
         let row = match self.db.outgoing(id) {
             Ok(row) => row.filter(|row| row.state.is_stopped()),
             Err(error) => {
@@ -2349,8 +2660,14 @@ impl RootView {
                 return;
             }
             this.update(cx, |this, cx| {
-                if let Err(error) = this.db.delete_outgoing(id) {
-                    this.report_unsent_error(error, cx);
+                match this.db.delete_outgoing(id) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if this.db.outgoing(id).ok().flatten().is_some() {
+                            this.set_status_note(Key::UnsentBusy.tr(cx.language()), cx);
+                        }
+                    }
+                    Err(error) => this.report_unsent_error(error, cx),
                 }
                 this.refresh_unsent();
                 cx.notify();
@@ -2431,9 +2748,28 @@ impl RootView {
             self.close_settings_window(cx);
             return;
         }
+        // From the main window, it isn't the compose window behind it that gets closed.
+        if !self.compose_window_open_and_active(cx) {
+            return;
+        }
         let _ = self.with_compose_window(cx, |view, window, cx| {
-            view.close_window(window, cx);
+            view.discard_draft(window, cx);
         });
+    }
+
+    /// Whether the app may quit now: a message being written is asked about first,
+    /// in its window, and the user quits again after answering.
+    pub(crate) fn may_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        !self
+            .with_compose_window(cx, |view, window, cx| {
+                let busy = view.has_edits();
+                if busy {
+                    window.activate_window();
+                    view.discard_draft(window, cx);
+                }
+                busy
+            })
+            .unwrap_or(false)
     }
 
     /// Closes the settings window when it is open (global shortcut / menu fallback).
@@ -2677,6 +3013,10 @@ impl RootView {
     /// the private temp directory and opens it with the system's default app.
     pub(crate) fn open_attachment(&mut self, attachment: AttachmentRow, cx: &mut Context<Self>) {
         self.attachment_menu = None;
+        if attachments::runs_code(&attachment.filename) {
+            self.set_status_note(Key::StatusAttachmentRunsCode.tr(cx.language()), cx);
+            return;
+        }
         let Some(raw) = self.attachment_raw(&attachment, Key::StatusAttachmentOpenFailed, cx)
         else {
             return;
@@ -2802,6 +3142,10 @@ impl RootView {
 
     /// Whether the list shows a Trash folder, whose rows offer no delete button.
     fn showing_sent(&self) -> bool {
+        // Results come from every folder, whichever one the search started from.
+        if self.searching() {
+            return false;
+        }
         match &self.selected_mailbox {
             Selection::Global(mailbox) => *mailbox == GlobalMailbox::Sent,
             Selection::Mailbox { folder_path, .. } => folder_path == storage::system::SENT,
@@ -2809,10 +3153,30 @@ impl RootView {
     }
 
     fn showing_trash(&self) -> bool {
+        if self.searching() {
+            return self.selection_all_in_trash();
+        }
         matches!(
             &self.selected_mailbox,
             Selection::Mailbox { folder_path, .. } if folder_path == storage::system::TRASH
         )
+    }
+
+    fn searching(&self) -> bool {
+        !self.last_search_query.trim().is_empty()
+    }
+
+    /// Whether every row of a multiple selection is in the Trash.
+    fn selection_all_in_trash(&self) -> bool {
+        let selected: HashSet<i64> = self.multi_selection.iter().copied().collect();
+        !selected.is_empty()
+            && self
+                .list_messages
+                .iter()
+                .filter(|message| selected.contains(&message.id))
+                .all(|message| {
+                    storage::message_has_folder(&message.folders_csv, storage::system::TRASH)
+                })
     }
 
     /// Asks before deleting `ids` for good, then deletes the ones still in the
@@ -2890,10 +3254,10 @@ impl RootView {
     pub(crate) fn toggle_message_flag(&mut self, cx: &mut Context<Self>) {
         if let Some(bulk) = self.bulk_selection() {
             let starred = !bulk.all_starred;
-            let result = self.apply_action_keeping_selection(|db, id| {
-                mail_actions::set_starred(db, id, starred)
-            });
-            self.finish_bulk_toggle(result, cx);
+            self.apply_action_keeping_selection(
+                move |db, id| mail_actions::set_starred(db, id, starred),
+                cx,
+            );
             return;
         }
         let Some(detail) = self.selected_detail.as_ref() else {
@@ -2985,7 +3349,14 @@ impl RootView {
     /// saved sizes.
     pub(crate) fn persist_now(&self) {
         if self.persist_ready {
-            config::save(&self.current_config());
+            self.save_config();
+        }
+    }
+
+    /// Best effort; there is nobody to tell.
+    fn save_config(&self) {
+        if let Some(path) = &self.config_file {
+            let _ = config::save_to(path, &self.current_config());
         }
     }
 
@@ -3017,12 +3388,13 @@ impl RootView {
             max_y: f32::from(self.max_origin.y),
             max_width: f32::from(self.max_size.width),
             max_height: f32::from(self.max_size.height),
-            sidebar_width: f32::from(self.sidebar_width),
-            list_width: f32::from(self.list_width),
+            sidebar_width: f32::from(self.preferred_sidebar_width),
+            list_width: f32::from(self.preferred_list_width),
             load_remote_images: self.load_remote_images,
             notifications_enabled: self.notifications_enabled,
             reader_white_background: self.reader_white_background,
             compose_white_background: self.compose_white_background,
+            language: self.language.code().to_string(),
             ui_scale: self.ui_scale,
             light_theme: self.light_theme,
             onboarding_completed: self.onboarding_completed,
@@ -3072,7 +3444,7 @@ impl RootView {
             let _ = this.update(cx, |this, _| {
                 // Skip if a newer change has since scheduled its own save.
                 if this.save_seq == token {
-                    config::save(&this.current_config());
+                    this.save_config();
                 }
             });
         })
@@ -3145,17 +3517,28 @@ impl RootView {
         let now_active = !query.trim().is_empty();
         if now_active && !was_active {
             self.pre_search_mailbox = Some(self.selected_mailbox.clone());
+            self.remember_selection();
             self.clear_message_selection();
         }
         if !now_active && was_active {
             if let Some(prev) = self.pre_search_mailbox.take() {
                 self.selected_mailbox = prev;
             }
-            self.clear_message_selection();
         }
         self.last_search_query = query;
         self.reload_message_list();
         self.sync_search_selection();
+        if !now_active && was_active {
+            self.restore_selection_after_search();
+        }
+    }
+
+    /// Back from a search, the mailbox shows what it did before, unless a result the
+    /// user opened is listed there too: that one stays open.
+    fn restore_selection_after_search(&mut self) {
+        if self.selected_ids().is_empty() {
+            self.restore_selection();
+        }
     }
 
     fn next_search_debounce_token(&mut self) -> u64 {
@@ -3241,6 +3624,7 @@ impl RootView {
             self.last_search_query.clear();
             self.reload_message_list();
             self.sync_search_selection();
+            self.restore_selection_after_search();
         }
 
         if collapse {
@@ -3327,6 +3711,7 @@ impl RootView {
             self.reader_notice = None;
             self.reader_preparing = false;
             self.reader_build_token += 1;
+            self.set_reader_guard(None);
             return;
         };
         let scale = if self.multi_selection.is_empty() {
@@ -3370,33 +3755,32 @@ impl RootView {
             selection_color: reader_selection_color(colors.accent, background),
             width: f32::from(self.reader_segment_width()),
         };
-        // A crash rendering formatted HTML must not repeat on every start:
-        // mark the message before parsing it (parsing can crash too) until a
-        // frame showing it was drawn.
+        // A crash rendering formatted HTML must not repeat on every start: mark
+        // the message before parsing it (parsing can crash too) for as long as it
+        // shows.
         let guarded = !job.crashed && matches!(job.body, MessageBody::Html(_));
-        if guarded {
-            self.crash_guard.begin(id);
-        }
+        self.set_reader_guard(guarded.then_some(id));
         self.reader_build_token += 1;
         self.last_reader_sig = Some(signature);
         self.reader_menu = None;
         if !job.runs_in_background() {
             self.reader_preparing = false;
-            self.install_reader(job.build(), guarded, window, cx);
+            self.install_reader(job.build(), cx);
             return;
         }
         self.reader_preparing = true;
         self.reader_notice = None;
         self.content_blocked_count = 0;
         let token = self.reader_build_token;
-        let built = cx.background_spawn(async move { job.build() });
+        let built =
+            cx.background_spawn(async move { html_view::with_render_stack(|| job.build()) });
         cx.spawn_in(window, async move |this, cx| {
             let built = built.await;
-            this.update_in(cx, |this, window, cx| {
+            this.update_in(cx, |this, _, cx| {
                 // The user may have moved on while this one was being built.
                 if this.reader_build_token == token {
                     this.reader_preparing = false;
-                    this.install_reader(built, guarded, window, cx);
+                    this.install_reader(built, cx);
                     cx.notify();
                 }
             })
@@ -3405,20 +3789,26 @@ impl RootView {
         .detach();
     }
 
+    /// Marks message `id` as the one being rendered, or none.
+    fn set_reader_guard(&mut self, id: Option<i64>) {
+        match id {
+            Some(id) => self.crash_guard.begin(id),
+            None if self.reader_guarded => self.crash_guard.finish(),
+            None => {}
+        }
+        self.reader_guarded = id.is_some();
+    }
+
+    /// The app is quitting on its own: nothing it was rendering made it crash.
+    pub(crate) fn clear_render_guards(&mut self) {
+        self.set_reader_guard(None);
+        self.quote_guard.finish();
+    }
+
     /// Hands a built document to the reader view.
-    fn install_reader(
-        &mut self,
-        built: BuiltReader,
-        guarded: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn install_reader(&mut self, built: BuiltReader, cx: &mut Context<Self>) {
         self.content_blocked_count = built.blocked_images;
         self.reader_notice = built.notice;
-        if guarded {
-            let guard = self.crash_guard.clone();
-            window.on_next_frame(move |_, _| guard.finish());
-        }
         let document = built.document.into_inner();
         match &self.reader_view {
             Some(view) => view.update(cx, |view, cx| view.set_document(document, cx)),
@@ -3442,6 +3832,7 @@ impl RootView {
         let language = cx.language();
         let text = match notice {
             ReaderNotice::Unrenderable => Key::NoticeTooDeep,
+            ReaderNotice::Clipped => Key::NoticeClipped,
             ReaderNotice::Crashed => Key::NoticeCrashed,
         }
         .tr(language);
@@ -3507,11 +3898,14 @@ impl RootView {
             let input = cx.new(|cx| TextInput::new(placeholder, cx));
             // Defer: the input notifies while it is being updated.
             let root = cx.weak_entity();
-            let observation = cx.observe(&input, move |_, _, cx| {
-                let root = root.clone();
-                cx.defer(move |cx| {
-                    let _ = root.update(cx, |this, cx| this.run_find(cx));
-                });
+            // Not on every notification: moving the caret would restart the search.
+            let observation = cx.subscribe(&input, move |_, _, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Changed) {
+                    let root = root.clone();
+                    cx.defer(move |cx| {
+                        let _ = root.update(cx, |this, cx| this.run_find(cx));
+                    });
+                }
             });
             self.find_bar = Some(FindBar {
                 input,
@@ -3599,6 +3993,15 @@ impl RootView {
             let _ = handle.update(cx, |_, window, cx| window.set_content_scale(scale, cx));
         }
         self.set_status_note(locale::status_zoom(cx.language(), scale), cx);
+        self.request_save(cx);
+        cx.notify();
+    }
+
+    /// Switches the UI language and remembers it for the next launch.
+    pub(crate) fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
+        self.language = language;
+        locale::set_language(language, cx);
+        self.sync_app_menus(cx);
         self.request_save(cx);
         cx.notify();
     }
@@ -3701,7 +4104,7 @@ impl RootView {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(520.0), px(420.0))),
             titlebar: Some(TitlebarOptions {
-                title: Some("BGMail Settings".into()),
+                title: Some(Key::SettingsTitle.tr(cx.language()).into()),
                 appears_transparent: false,
                 traffic_light_position: None,
             }),
@@ -3776,6 +4179,15 @@ impl RootView {
         let Some(detail) = self.selected_detail.clone() else {
             return;
         };
+        // A reply can go without the body, but a forward would carry nothing at all.
+        if kind == ReplyKind::Forward && detail.body_state == storage::BODY_STATE_HEADERS {
+            if let Some(mail) = &self.mail {
+                mail.engine()
+                    .send(detail.account_id, Command::FetchBody(detail.id));
+            }
+            self.set_status_note(Key::StatusForwardNeedsBody.tr(cx.language()), cx);
+            return;
+        }
         let raw = self.db.message_raw(detail.id).ok().flatten();
         let parsed = raw
             .as_deref()
@@ -3810,6 +4222,8 @@ impl RootView {
         let quoted_html = parsed
             .html
             .as_deref()
+            // Sanitizing it would freeze the window.
+            .filter(|html| !has_too_many_tags(html))
             .map(quotable_html)
             .or_else(|| parsed.text.as_deref().map(quotable_text))
             .filter(|html| kind != ReplyKind::Forward && !html.trim().is_empty());
@@ -3818,10 +4232,13 @@ impl RootView {
             attribution: labels.attribution.clone(),
             html,
             load_remote: self.remote_allowed_for(detail.id),
+            render_guard: (!self.crashed_messages.contains(&detail.id))
+                .then(|| (self.quote_guard.clone(), detail.id)),
         });
         if kind == ReplyKind::Forward {
             if let Some(raw) = raw.as_deref() {
-                draft.attachments = forwarded_attachments(raw, &parsed);
+                let shown = visible_attachments(&self.db, Some(&detail));
+                draft.attachments = forwarded_attachments(raw, &parsed, &shown);
             }
         }
         let init = ComposeInit {
@@ -3913,16 +4330,6 @@ impl RootView {
         let Some(draft) = mail_core::draft_from_mailto(uri) else {
             return;
         };
-        let busy = self
-            .with_compose_window(cx, |view, window, _| {
-                window.activate_window();
-                view.has_edits()
-            })
-            .unwrap_or(false);
-        if busy {
-            self.set_status_note(Key::StatusComposeBusy.tr(cx.language()), cx);
-            return;
-        }
         let init = ComposeInit {
             draft,
             ..Default::default()
@@ -3940,19 +4347,25 @@ impl RootView {
         if let Some(handle) = self.compose_window {
             let init_for_open = init.clone();
             let contacts_for_open = contacts.clone();
-            if handle
-                .update(cx, |view, window, cx| {
-                    view.set_contacts(contacts_for_open, cx);
-                    if init_for_open.is_some() {
-                        view.apply_init(init_for_open, window, cx);
-                    }
-                    window.activate_window();
-                })
-                .is_ok()
-            {
-                return;
+            let accounts_for_open = self.compose_accounts();
+            match handle.update(cx, |view, window, cx| {
+                view.set_contacts(contacts_for_open, cx);
+                view.set_accounts(accounts_for_open);
+                window.activate_window();
+                // A message being written is never replaced by another.
+                let busy = init_for_open.is_some() && view.has_edits();
+                if !busy && init_for_open.is_some() {
+                    view.apply_init(init_for_open, window, cx);
+                }
+                busy
+            }) {
+                Ok(true) => {
+                    self.set_status_note(Key::StatusComposeBusy.tr(cx.language()), cx);
+                    return;
+                }
+                Ok(false) => return,
+                Err(_) => self.compose_window = None,
             }
-            self.compose_window = None;
         }
 
         let accounts = self.compose_accounts();
@@ -3982,7 +4395,12 @@ impl RootView {
             let view = cx.new(|cx| {
                 ComposeView::new(accounts, contacts, root, compose_white, init, window, cx)
             });
-            window.on_window_should_close(cx, move |_, cx| {
+            let compose = view.downgrade();
+            window.on_window_should_close(cx, move |window, cx| {
+                if let Some(compose) = compose.upgrade().filter(|c| c.read(cx).has_edits()) {
+                    compose.update(cx, |view, cx| view.discard_draft(window, cx));
+                    return false;
+                }
                 if let Some(root) = root_for_close.upgrade() {
                     root.update(cx, |root, cx| {
                         root.on_compose_window_closed(cx);
@@ -4311,7 +4729,14 @@ impl RootView {
         }
         self.narrow = now_narrow;
 
+        // The sidebar yields only what the list's minimum can't: a window or zoom that
+        // has room again gets the widths the user chose back.
         let sidebar = if self.show_sidebar && !self.narrow {
+            let sidebar_max =
+                (total - px(LIST_MIN_WIDTH) - px(READER_MIN_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
+            self.sidebar_width = self
+                .preferred_sidebar_width
+                .clamp(px(SIDEBAR_MIN_WIDTH), sidebar_max);
             self.sidebar_width
         } else {
             px(0.0)
@@ -4319,14 +4744,9 @@ impl RootView {
 
         // Keep the list within [min, available-for-reader].
         let list_max = (total - sidebar - px(READER_MIN_WIDTH)).max(px(LIST_MIN_WIDTH));
-        self.list_width = self.list_width.clamp(px(LIST_MIN_WIDTH), list_max);
-
-        // Keep the sidebar within [min, available-for-list-and-reader].
-        if self.show_sidebar && !self.narrow {
-            let sidebar_max =
-                (total - self.list_width - px(READER_MIN_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
-            self.sidebar_width = self.sidebar_width.clamp(px(SIDEBAR_MIN_WIDTH), sidebar_max);
-        }
+        self.list_width = self
+            .preferred_list_width
+            .clamp(px(LIST_MIN_WIDTH), list_max);
     }
 
     /// Applies a divider drag: `x` is the cursor position relative to the row's
@@ -4338,6 +4758,7 @@ impl RootView {
                 let max =
                     (total - self.list_width - px(READER_MIN_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
                 self.sidebar_width = x.clamp(px(SIDEBAR_MIN_WIDTH), max);
+                self.preferred_sidebar_width = self.sidebar_width;
             }
             ResizeHandle::List => {
                 let left = if self.show_sidebar && !self.narrow {
@@ -4347,6 +4768,7 @@ impl RootView {
                 };
                 let max = (total - left - px(READER_MIN_WIDTH)).max(px(LIST_MIN_WIDTH));
                 self.list_width = (x - left).clamp(px(LIST_MIN_WIDTH), max);
+                self.preferred_list_width = self.list_width;
             }
         }
     }
@@ -5220,9 +5642,10 @@ impl RootView {
                     let end = range.end.min(this.list_messages.len());
                     let start = range.start.min(end);
                     let this = &*this;
+                    let selection = this.selection_drag();
                     this.list_messages[start..end]
                         .iter()
-                        .map(|message| this.render_message_row(message, cx))
+                        .map(|message| this.render_message_row(message, selection.as_ref(), cx))
                         .collect::<Vec<_>>()
                 }),
             )
@@ -5310,6 +5733,7 @@ impl RootView {
     fn render_message_row(
         &self,
         message: &MessageListItem,
+        selection: Option<&SelectionDrag>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = cx.theme().colors();
@@ -5380,7 +5804,7 @@ impl RootView {
             .when(!selected, |el| el.hover(move |el| el.bg(hover)))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .when_some(self.dragged_messages(message_id), |row, dragged| {
+            .when_some(self.dragged_messages(message, selection), |row, dragged| {
                 row.on_drag(dragged, {
                     let width = self.list_width;
                     let title: SharedString = message.sender.clone().into();
@@ -5408,6 +5832,13 @@ impl RootView {
                     }
                 })
             })
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedMessages, window, cx| {
+                    if dragged.is_click_on(message_id, window.mouse_position()) {
+                        this.click_message_row(message_id, window.modifiers(), window, cx);
+                    }
+                }),
+            )
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 let row = hovered.then_some(message_id);
                 if *hovered || this.hovered_row == Some(message_id) {
@@ -5461,11 +5892,7 @@ impl RootView {
         if let Some(focus) = &self.list_focus {
             window.focus(focus);
         }
-        self.multi_selection.clear();
-        self.selected_message_id = Some(id);
-        self.selection_anchor = Some(id);
-        self.selection_focus = Some(id);
-        self.last_reader_sig = None;
+        self.select_only(id);
         self.on_message_selection_changed(cx);
     }
 
@@ -5560,8 +5987,12 @@ impl RootView {
         let Some(bar) = &self.find_bar else {
             return div().into_any_element();
         };
-        let colors = cx.theme().colors();
         let language = cx.language();
+        // The bar can stay open across a change of language.
+        bar.input.update(cx, |input, _| {
+            input.set_placeholder(Key::FindPlaceholder.tr(language));
+        });
+        let colors = cx.theme().colors();
         let status = if bar.input.read(cx).content().is_empty() {
             String::new()
         } else if bar.count == 0 {
@@ -6071,6 +6502,13 @@ impl RootView {
                         Label::new(Key::UnsentMaybeSent.tr(language))
                             .size(LabelSize::XSmall)
                             .color(Color::Warning),
+                    )
+                })
+                .when(item.retrying, |el| {
+                    el.child(
+                        Label::new(Key::UnsentRetrying.tr(language))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
                     )
                 })
                 .child(
@@ -6938,6 +7376,19 @@ pub(crate) fn can_open_command_palette(main_window_active: bool) -> bool {
 #[cfg(test)]
 impl RootView {
     /// A view on an empty database, as on a first launch.
+    fn dragged_messages_of(&self, id: i64) -> Option<DraggedMessages> {
+        let message = self.list_messages.iter().find(|message| message.id == id)?;
+        self.dragged_messages(message, self.selection_drag().as_ref())
+    }
+
+    pub(crate) fn status_note_for_tests(&self) -> Option<&SharedString> {
+        self.status_note.as_ref()
+    }
+
+    pub(crate) fn compose_window_for_tests(&self) -> Option<WindowHandle<ComposeView>> {
+        self.compose_window
+    }
+
     pub(crate) fn for_tests(path: &std::path::Path) -> Self {
         Self::new_with_database(Config::default(), path, false)
     }
@@ -7021,13 +7472,13 @@ mod tests {
     }
 
     #[test]
-    fn only_large_html_is_built_in_the_background() {
+    fn only_large_bodies_are_built_in_the_background() {
         assert!(!job("<p>small</p>", false).runs_in_background());
         let large = "x".repeat(BACKGROUND_BUILD_BYTES);
         assert!(job(&large, false).runs_in_background());
         let mut text = job("", false);
         text.body = MessageBody::Text(large.into());
-        assert!(!text.runs_in_background());
+        assert!(text.runs_in_background());
     }
 
     #[test]
@@ -7039,6 +7490,48 @@ mod tests {
         let mut document = built.document.into_inner();
         assert!(document.content_height() > 0.0);
         assert_eq!(document.find("hello"), 1);
+    }
+
+    #[test]
+    fn a_message_too_costly_to_lay_out_is_built_as_plain_text() {
+        let built = job(
+            "<table><tr><td colspan=1000 rowspan=32767>Hi</table>",
+            false,
+        )
+        .build();
+        assert_eq!(built.notice, Some(ReaderNotice::Unrenderable));
+    }
+
+    #[test]
+    fn too_deep_markup_is_built_as_plain_text() {
+        let built = job(&"<i>".repeat(20_000), false).build();
+        assert_eq!(built.notice, Some(ReaderNotice::Unrenderable));
+    }
+
+    #[test]
+    fn long_text_is_clipped_at_a_line_with_a_notice() {
+        assert_eq!(clipped_text("short"), None);
+        let lines = "line\n".repeat(MAX_SHOWN_TEXT_BYTES / 4);
+        let shown = clipped_text(&lines).unwrap();
+        assert!(shown.len() <= MAX_SHOWN_TEXT_BYTES && shown.ends_with("line"));
+        let word = "é".repeat(MAX_SHOWN_TEXT_BYTES);
+        assert!(clipped_text(&word).unwrap().len() <= MAX_SHOWN_TEXT_BYTES);
+        // A break far back isn't worth losing the rest.
+        let long_line = format!("ok\n{}", "x".repeat(3 << 20));
+        assert!(clipped_text(&long_line).unwrap().len() > MAX_SHOWN_TEXT_BYTES / 2);
+
+        let built = ReaderJob {
+            body: MessageBody::Text(lines.into()),
+            ..job("", false)
+        }
+        .build();
+        assert_eq!(built.notice, Some(ReaderNotice::Clipped));
+    }
+
+    #[test]
+    fn large_html_text_opens_clipped_as_plain_text() {
+        let built = job(&format!("<p>{}", "x".repeat(5 << 20)), false).build();
+        assert_eq!(built.notice, Some(ReaderNotice::Unrenderable));
     }
 
     #[test]
@@ -7382,11 +7875,37 @@ mod tests {
         let (_dir, mut view) = test_view();
         // Wide (docked) window so the sidebar keeps its column; an oversized list
         // must shrink to preserve the reader's minimum width.
-        view.list_width = px(900.0);
+        view.preferred_list_width = px(900.0);
         view.sync_layout(px(1400.0));
         let reader = px(1400.0) - view.sidebar_width - view.list_width;
         assert!(reader >= px(READER_MIN_WIDTH));
         assert!(view.list_width >= px(LIST_MIN_WIDTH));
+        assert!(view.list_width < px(900.0));
+    }
+
+    #[test]
+    fn a_smaller_window_or_zoom_does_not_cost_the_chosen_widths() {
+        let (_dir, mut view) = test_view();
+        view.preferred_sidebar_width = px(300.0);
+        view.preferred_list_width = px(900.0);
+        view.sync_layout(px(1536.0));
+        assert_eq!(view.list_width, px(1536.0 - 300.0 - READER_MIN_WIDTH));
+        assert_eq!(view.current_config().list_width, 900.0);
+
+        view.sync_layout(px(1920.0));
+        assert_eq!(view.sidebar_width, px(300.0));
+        assert_eq!(view.list_width, px(900.0));
+    }
+
+    #[test]
+    fn dragging_a_divider_chooses_the_width() {
+        let (_dir, mut view) = test_view();
+        view.narrow = false;
+        view.show_sidebar = true;
+        view.resize(ResizeHandle::Sidebar, px(300.0), px(1920.0));
+        view.resize(ResizeHandle::List, px(800.0), px(1920.0));
+        assert_eq!(view.preferred_sidebar_width, px(300.0));
+        assert_eq!(view.preferred_list_width, px(500.0));
     }
 
     #[test]
@@ -7562,6 +8081,7 @@ mod tests {
     ) {
         cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
         let dragged = DraggedMessages {
+            row_id: 1,
             ids: vec![1],
             account_id: Some(1),
             progress: Rc::default(),
@@ -7635,6 +8155,7 @@ mod tests {
             let progress = DragProgress::default();
             progress.start(point(px(0.0), px(0.0)));
             DraggedMessages {
+                row_id: 1,
                 ids: vec![1],
                 account_id: Some(7),
                 progress: Rc::new(progress),
@@ -7672,13 +8193,31 @@ mod tests {
     }
 
     #[test]
+    fn letting_go_before_a_drag_counts_is_a_click_on_that_row() {
+        let (_dir, view) = test_view();
+        let ids = view.list_ids();
+        let dragged = view.dragged_messages_of(ids[0]).unwrap();
+        dragged.progress.start(point(px(10.0), px(10.0)));
+        let near = point(px(14.0), px(10.0));
+        assert!(dragged.is_click_on(ids[0], near));
+        assert!(!dragged.is_click_on(ids[1], near));
+        assert!(!dragged.is_click_on(ids[0], point(px(300.0), px(10.0))));
+        // Once it counted, coming back doesn't make it a click.
+        assert!(!dragged.is_click_on(ids[0], near));
+    }
+
+    #[test]
     fn dragging_a_selected_row_takes_the_selection_along() {
         let (_dir, mut view) = test_view();
         let ids = view.list_ids();
         view.apply_selection(ids[..2].to_vec());
-        assert_eq!(view.dragged_messages(ids[0]).unwrap().ids, ids[..2]);
-        assert_eq!(view.dragged_messages(ids[2]).unwrap().ids, [ids[2]]);
-        assert!(view.dragged_messages(ids[2]).unwrap().account_id.is_some());
+        assert_eq!(view.dragged_messages_of(ids[0]).unwrap().ids, ids[..2]);
+        assert_eq!(view.dragged_messages_of(ids[2]).unwrap().ids, [ids[2]]);
+        assert!(view
+            .dragged_messages_of(ids[2])
+            .unwrap()
+            .account_id
+            .is_some());
     }
 
     #[test]
@@ -7744,6 +8283,355 @@ mod tests {
     }
 
     #[test]
+    fn a_multiple_selection_that_left_the_list_leaves_the_reader_empty() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.apply_selection(vec![ids[0], ids[1]]);
+        assert!(view.reader_detail().is_some());
+
+        view.list_messages.clear();
+        assert!(!view.prune_multi_selection());
+        assert!(view.multi_selection.is_empty());
+        assert!(view.reader_detail().is_none());
+        assert!(view.attachments.is_empty());
+    }
+
+    #[test]
+    fn a_plain_selection_survives_pruning_an_empty_multiple_one() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.apply_selection(vec![ids[0]]);
+        assert!(!view.prune_multi_selection());
+        assert_eq!(view.selected_message_id, Some(ids[0]));
+    }
+
+    #[test]
+    fn a_multiple_selection_down_to_one_row_counts_as_collapsed() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.apply_selection(vec![ids[0], ids[1]]);
+        view.list_messages.retain(|message| message.id == ids[1]);
+        assert!(view.prune_multi_selection());
+        assert_eq!(view.selected_message_id, Some(ids[1]));
+    }
+
+    #[gpui::test]
+    fn editing_a_message_still_being_retried_stops_it_first(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        view.update_in(cx, |view, window, cx| {
+            let account = view.accounts[0].id;
+            let id = view
+                .db
+                .enqueue_outgoing(
+                    account,
+                    "a@x.com",
+                    &["b@x.com".into()],
+                    b"Subject: s\r\n\r\nb",
+                    None,
+                )
+                .unwrap();
+            view.db
+                .defer_outgoing(id, "connect", 9_999_999_999)
+                .unwrap();
+            view.refresh_unsent();
+            assert!(view.unsent[0].retrying);
+
+            view.edit_unsent(id, window, cx);
+            let row = view.db.outgoing(id).unwrap().unwrap();
+            assert_eq!(row.state, OutgoingState::Failed);
+            assert!(view.compose_window.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn an_unsent_message_being_edited_is_left_alone(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        let raw: &[u8] = b"Subject: s\r\n\r\nb";
+        let ids = view.update_in(cx, |view, window, cx| {
+            let account = view.accounts[0].id;
+            let queue = || {
+                let id = view
+                    .db
+                    .enqueue_outgoing(account, "a@x.com", &["b@x.com".into()], raw, None)
+                    .unwrap();
+                view.db
+                    .defer_outgoing(id, "connect", 9_999_999_999)
+                    .unwrap();
+                id
+            };
+            let ids = (queue(), queue());
+            view.edit_unsent(ids.0, window, cx);
+            ids
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            // Retrying what compose holds would send both versions.
+            view.retry_unsent(ids.0, cx);
+            let row = view.db.outgoing(ids.0).unwrap().unwrap();
+            assert_eq!(row.state, OutgoingState::Failed);
+            assert_eq!(
+                view.status_note.as_ref().map(|note| note.as_ref()),
+                Some(Key::UnsentBeingEdited.tr(Language::default()))
+            );
+
+            // Compose busy with edits: the other message keeps being retried.
+            view.compose_window
+                .unwrap()
+                .update(cx, |compose, _, cx| compose.mark_edited_for_tests(cx))
+                .unwrap();
+            view.edit_unsent(ids.1, window, cx);
+            let row = view.db.outgoing(ids.1).unwrap().unwrap();
+            assert_eq!(row.state, OutgoingState::Queued);
+        });
+    }
+
+    #[test]
+    fn a_search_is_not_held_to_the_rules_of_the_folder_it_started_from() {
+        let (_dir, mut view) = test_view();
+        view.apply_mailbox_selection(Selection::Global(GlobalMailbox::Sent));
+        assert!(view.showing_sent());
+        view.last_search_query = "x".into();
+        assert!(!view.showing_sent());
+        assert!(!view.showing_trash());
+
+        let ids = view.list_ids();
+        view.multi_selection = vec![ids[0], ids[1]];
+        view.list_messages[0].folders_csv = ",sys:trash,".into();
+        view.list_messages[1].folders_csv = ",sys:inbox,".into();
+        assert!(!view.showing_trash());
+        view.list_messages[1].folders_csv = ",sys:trash,".into();
+        assert!(view.showing_trash());
+    }
+
+    #[gpui::test]
+    fn the_unsent_list_notices_a_stuck_message_by_itself(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            view.watch_unsent(cx);
+            let id = view
+                .db
+                .enqueue_outgoing(
+                    view.accounts[0].id,
+                    "a@x.com",
+                    &["b@x.com".into()],
+                    b"r",
+                    None,
+                )
+                .unwrap();
+            view.db
+                .defer_outgoing(id, "connect", 9_999_999_999)
+                .unwrap();
+            assert!(view.unsent.is_empty());
+        });
+        cx.executor().advance_clock(UNSENT_REFRESH);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert_eq!(view.unsent.len(), 1));
+    }
+
+    #[gpui::test]
+    fn the_find_bar_only_searches_again_when_the_text_changes(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+            html_view::init(cx);
+        });
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        view.update_in(cx, |view, window, cx| {
+            view.selected_message_id = Some(view.list_ids()[0]);
+            view.reload_selected_detail();
+            view.mark_content_ready(cx);
+            view.open_find_bar(window, cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _| view.find_bar.as_mut().unwrap().current = 3);
+        let input = view.read_with(cx, |view, _| view.find_bar.as_ref().unwrap().input.clone());
+        // A move of the caret only notifies.
+        input.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.reader_view.is_some(), "or `run_find` proves nothing");
+            assert_eq!(view.find_bar.as_ref().unwrap().current, 3);
+        });
+        input.update(cx, |_, cx| cx.emit(TextInputEvent::Changed));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.find_bar.as_ref().unwrap().current, 0);
+        });
+    }
+
+    #[gpui::test]
+    fn an_action_with_no_folder_to_go_to_says_so(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            let id = view.list_ids()[0];
+            view.run_action_on_message(id, cx, |_, _| {
+                Ok(ActionOutcome {
+                    no_destination: true,
+                    ..Default::default()
+                })
+            });
+            assert_eq!(
+                view.status_note.as_ref().map(|note| note.as_ref()),
+                Some(Key::StatusNoDestination.tr(Language::default()))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn forwarding_waits_for_the_body(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        view.update_in(cx, |view, window, cx| {
+            let id = view.list_ids()[0];
+            let mut detail = view.db.get_message(id).unwrap().unwrap();
+            detail.body_state = storage::BODY_STATE_HEADERS;
+            view.selected_message_id = Some(id);
+            view.selected_detail = Some(detail);
+            view.reply_to_selected(ReplyKind::Forward, window, cx);
+            assert!(view.compose_window.is_none());
+            assert_eq!(
+                view.status_note.as_ref().map(|note| note.as_ref()),
+                Some(Key::StatusForwardNeedsBody.tr(Language::default()))
+            );
+        });
+    }
+
+    #[test]
+    fn a_forward_carries_what_the_reader_lists() {
+        let raw = b"From: a@b.c\r\nContent-Type: multipart/related; boundary=X\r\n\r\n--X\r\n\
+            Content-Type: text/html\r\n\r\n<img src=\"cid:big@x\">\r\n--X\r\n\
+            Content-Type: image/png\r\nContent-ID: <big@x>\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nAQID\r\n--X--\r\n";
+        let parsed = mail_core::parse_message(raw).unwrap();
+        assert!(forwarded_attachments(raw, &parsed, &[]).is_empty());
+        let row = AttachmentRow {
+            id: 1,
+            message_id: 1,
+            part_index: parsed.attachments[0].index as u32,
+            filename: "a.png".into(),
+            mime_type: "image/png".into(),
+            size: 3,
+            content_id: Some("big@x".into()),
+            inline: false,
+        };
+        assert_eq!(forwarded_attachments(raw, &parsed, &[row]).len(), 1);
+    }
+
+    #[test]
+    fn a_forward_keeps_a_text_attachment_exactly_as_it_was() {
+        let mut raw = b"From: a@b.c\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\nContent-Type: text/plain\r\n\r\nHi\r\n--X\r\nContent-Type: text/csv; charset=iso-8859-1; name=a.csv\r\nContent-Disposition: attachment; filename=a.csv\r\nContent-Transfer-Encoding: 8bit\r\n\r\n".to_vec();
+        raw.extend_from_slice(b"S\xe3o\r\n--X--\r\n");
+        let parsed = mail_core::parse_message(&raw).unwrap();
+        let forwarded = forwarded_attachments(&raw, &parsed, &[]);
+        assert_eq!(forwarded[0].mime_type, "text/csv; charset=iso-8859-1");
+        assert!(forwarded[0].data.starts_with(b"S\xe3o"));
+
+        let draft = mail_core::Draft {
+            from: Address::new(None::<String>, "a@b.c"),
+            to: vec![Address::new(None::<String>, "c@d.e")],
+            attachments: forwarded,
+            ..Default::default()
+        };
+        let sent = mail_core::build_message(&draft, "id@b.c", 0);
+        let reparsed = mail_core::parse_message(&sent).unwrap();
+        let info = &reparsed.attachments[0];
+        assert_eq!(info.charset.as_deref(), Some("iso-8859-1"));
+        assert!(mail_core::attachment_content(&sent, info.index)
+            .unwrap()
+            .starts_with(b"S\xe3o"));
+    }
+
+    #[test]
+    fn removing_an_account_keeps_a_secret_another_one_logs_in_with() {
+        let (_dir, view) = test_view();
+        let config = |email: &str, username: &str| AccountConfig {
+            email: email.into(),
+            username: username.into(),
+            imap: mail_core::ServerConfig {
+                host: "imap.x.test".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let shared = config("me@x.test", "me@x.test");
+        let other = config("other@x.test", "other@x.test");
+        view.db
+            .create_account("A", "me@x.test", "imap", &shared.to_json())
+            .unwrap();
+        assert!(view.secret_is_shared(&config("alias@x.test", "me@x.test")));
+        assert!(!view.secret_is_shared(&other));
+    }
+
+    #[test]
+    fn a_search_returning_to_a_removed_account_goes_to_the_inbox() {
+        let (_dir, mut view) = test_view();
+        view.pre_search_mailbox = Some(Selection::Mailbox {
+            account_id: 42,
+            folder_path: storage::system::SENT.into(),
+        });
+        view.forget_removed_account_mailboxes(42);
+        assert!(matches!(
+            view.pre_search_mailbox,
+            Some(Selection::Global(GlobalMailbox::Inbox))
+        ));
+    }
+
+    #[test]
+    fn stored_references_are_read_in_both_forms() {
+        assert_eq!(stored_references("a@x b@x"), ["a@x", "b@x"]);
+        assert_eq!(stored_references("a b@x\nc@x\n"), ["a b@x", "c@x"]);
+        assert!(stored_references("").is_empty());
+    }
+
+    #[test]
+    fn a_reply_without_the_body_still_follows_reply_to() {
+        let (_dir, view) = test_view();
+        let id = view.list_ids()[0];
+        let mut detail = view.db.get_message(id).unwrap().unwrap();
+        detail.reply_to = "Support <support@example.com>".into();
+        detail.to_addrs = "ok@example.com, not an address".into();
+        let parsed = parsed_from_detail(&detail);
+        assert_eq!(parsed.reply_to[0].email, "support@example.com");
+        assert_eq!(parsed.to.len(), 1);
+        assert_eq!(parsed.to[0].email, "ok@example.com");
+    }
+
+    #[test]
     fn previewing_a_multiple_selection_keeps_messages_unread() {
         let (_dir, mut view) = test_view();
         let unread: Vec<i64> = view
@@ -7762,40 +8650,70 @@ mod tests {
         assert!(view.reader_detail().is_none());
     }
 
-    #[test]
-    fn bulk_toggles_keep_the_selection_and_cover_every_row() {
-        let (_dir, mut view) = test_view();
-        let ids: Vec<i64> = view.list_ids()[..2].to_vec();
-        view.apply_selection(ids.clone());
-
-        let starred = !view.bulk_selection().unwrap().all_starred;
-        assert!(starred);
-        view.apply_action_keeping_selection(|db, id| mail_actions::set_starred(db, id, starred))
-            .unwrap();
-        assert_eq!(view.multi_selection, ids);
-        assert!(view.bulk_selection().unwrap().all_starred);
-
-        view.apply_action_keeping_selection(|db, id| mail_actions::set_read(db, id, true))
-            .unwrap();
-        assert!(!view.bulk_selection().unwrap().has_unread);
-        for id in ids {
-            let detail = view.db.get_message(id).unwrap().unwrap();
-            assert!(detail.starred && !detail.unread);
-        }
+    fn bulk_view(
+        dir: &TempDir,
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<RootView>, Vec<i64>) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        let ids = view.read_with(cx, |view, _| view.list_ids()[..2].to_vec());
+        view.update(cx, |view, _| view.apply_selection(ids.clone()));
+        (view, ids)
     }
 
-    #[test]
-    fn bulk_restore_brings_trashed_rows_back() {
-        let (_dir, mut view) = test_view();
-        let ids: Vec<i64> = view.list_ids()[..2].to_vec();
-        view.apply_selection(ids.clone());
-        view.apply_action_to_selection(mail_actions::trash).unwrap();
-        view.apply_selection(ids.clone());
-        view.apply_action_to_selection(mail_actions::restore_from_trash)
-            .unwrap();
-        for id in ids {
-            assert_eq!(view.db.message_is_in_trash(id), Ok(false));
-        }
+    #[gpui::test]
+    fn bulk_toggles_keep_the_selection_and_cover_every_row(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = bulk_view(&dir, cx);
+        let starred = view.read_with(cx, |view, _| !view.bulk_selection().unwrap().all_starred);
+        assert!(starred);
+        view.update(cx, |view, cx| {
+            view.apply_action_keeping_selection(
+                move |db, id| mail_actions::set_starred(db, id, starred),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.multi_selection, ids);
+            assert!(view.bulk_selection().unwrap().all_starred);
+        });
+
+        view.update(cx, |view, cx| {
+            view.apply_action_keeping_selection(|db, id| mail_actions::set_read(db, id, true), cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(!view.bulk_selection().unwrap().has_unread);
+            for id in &ids {
+                let detail = view.db.get_message(*id).unwrap().unwrap();
+                assert!(detail.starred && !detail.unread);
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn bulk_restore_brings_trashed_rows_back(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = bulk_view(&dir, cx);
+        view.update(cx, |view, cx| {
+            view.apply_action_to_selection(mail_actions::trash, cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.apply_selection(ids.clone());
+            view.apply_action_to_selection(mail_actions::restore_from_trash, cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            for id in &ids {
+                assert_eq!(view.db.message_is_in_trash(*id), Ok(false));
+            }
+        });
     }
 
     #[test]
@@ -7818,19 +8736,36 @@ mod tests {
         assert_eq!(view.extended_selection(-1), Some(ids[0..=1].to_vec()));
     }
 
+    #[gpui::test]
+    fn bulk_action_reaches_every_row_and_clears_the_selection(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, chosen) = bulk_view(&dir, cx);
+        view.update(cx, |view, cx| {
+            view.apply_action_to_selection(mail_actions::trash, cx);
+            // Gone at once, even with the disk work still ahead.
+            assert!(view.multi_selection.is_empty());
+            assert_eq!(view.selected_message_id, None);
+            assert!(!view.list_messages.iter().any(|m| chosen.contains(&m.id)));
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            for id in &chosen {
+                assert_eq!(view.db.message_is_in_trash(*id), Ok(true));
+                assert!(!view.list_messages.iter().any(|m| m.id == *id));
+            }
+        });
+    }
+
     #[test]
-    fn bulk_action_reaches_every_row_and_clears_the_selection() {
+    fn an_arrow_out_of_a_multiple_selection_survives_the_next_reload() {
         let (_dir, mut view) = test_view();
         let ids = view.list_ids();
-        let chosen = vec![ids[0], ids[1]];
-        view.apply_selection(chosen.clone());
-        view.apply_action_to_selection(mail_actions::trash).unwrap();
-        assert!(view.multi_selection.is_empty());
-        assert_eq!(view.selected_message_id, None);
-        for id in chosen {
-            assert_eq!(view.db.message_is_in_trash(id), Ok(true));
-            assert!(!view.list_messages.iter().any(|m| m.id == id));
-        }
+        view.apply_selection(vec![ids[0], ids[1]]);
+        assert!(view.multi_preview.is_some());
+        view.select_only(ids[2]);
+        assert!(view.multi_preview.is_none());
+        view.reload_message_list();
+        assert_eq!(view.selected_message_id, Some(ids[2]));
     }
 
     #[test]
@@ -7965,9 +8900,9 @@ mod tests {
     fn nothing_listed_in_sent_can_be_dragged() {
         let (_dir, mut view) = test_view();
         let id = view.selected_message_id.unwrap();
-        assert!(view.dragged_messages(id).is_some());
+        assert!(view.dragged_messages_of(id).is_some());
         view.apply_mailbox_selection(Selection::Global(GlobalMailbox::Sent));
-        assert!(view.dragged_messages(id).is_none());
+        assert!(view.dragged_messages_of(id).is_none());
     }
 
     #[test]
@@ -7975,9 +8910,9 @@ mod tests {
         let (_dir, mut view) = test_view();
         let ids: Vec<i64> = view.list_messages.iter().take(2).map(|m| m.id).collect();
         view.multi_selection = ids.clone();
-        assert!(view.dragged_messages(ids[0]).is_some());
+        assert!(view.dragged_messages_of(ids[0]).is_some());
         view.list_messages[1].folders_csv = ",sys:sent,".into();
-        assert!(view.dragged_messages(ids[0]).is_none());
+        assert!(view.dragged_messages_of(ids[0]).is_none());
         assert!(view
             .command_context()
             .bulk
@@ -8160,6 +9095,84 @@ mod tests {
     }
 
     #[gpui::test]
+    fn choosing_a_language_applies_and_remembers_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            view.set_language(Language::Portuguese, cx);
+            assert_eq!(cx.language(), Language::Portuguese);
+            assert_eq!(view.current_config().language(), Language::Portuguese);
+        });
+    }
+
+    #[gpui::test]
+    fn the_saved_language_is_kept_by_later_saves(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("config.json");
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            view.config_file = Some(file.clone());
+            view.enable_persistence();
+            view.set_language(Language::Portuguese, cx);
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(
+            config::load_from(file.clone()).language(),
+            Language::Portuguese
+        );
+
+        view.update(cx, |view, cx| {
+            view.set_appearance(theme::Appearance::Light, cx);
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let saved = config::load_from(file);
+        assert!(saved.light_theme);
+        assert_eq!(saved.language(), Language::Portuguese);
+    }
+
+    #[gpui::test]
+    fn an_attachment_that_runs_code_is_not_opened(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let view = cx.new(|_| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| {
+            view.open_attachment(
+                AttachmentRow {
+                    id: 1,
+                    message_id: 1,
+                    filename: "invoice.pdf.exe".into(),
+                    mime_type: "application/octet-stream".into(),
+                    size: 1,
+                    part_index: 0,
+                    content_id: None,
+                    inline: false,
+                },
+                cx,
+            );
+            assert_eq!(
+                view.status_note_for_tests().map(|note| note.as_ref()),
+                Some(Key::StatusAttachmentRunsCode.tr(Language::default()))
+            );
+        });
+    }
+
+    #[gpui::test]
     fn zooming_changes_the_window_and_is_remembered(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             theme::init(theme::Appearance::Dark, cx);
@@ -8180,6 +9193,24 @@ mod tests {
             assert_eq!(window.content_scale(), 1.0);
             assert_eq!(view.current_config().ui_scale, 1.0);
         });
+    }
+
+    #[test]
+    fn a_search_gives_the_selection_back() {
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        view.apply_selection(vec![ids[0]]);
+        view.remember_selection();
+        view.clear_message_selection();
+
+        // Nothing was opened meanwhile: what the mailbox showed comes back.
+        view.restore_selection_after_search();
+        assert_eq!(view.selected_message_id, Some(ids[0]));
+
+        // A result the user opened stays.
+        view.apply_selection(vec![ids[1]]);
+        view.restore_selection_after_search();
+        assert_eq!(view.selected_message_id, Some(ids[1]));
     }
 
     #[test]
@@ -8400,6 +9431,7 @@ mod tests {
                 recipients: "a@x.com, b@y.com".into(),
                 error: Some("550 mailbox unavailable".into()),
                 maybe_sent: true,
+                retrying: false,
             }
         );
         let mut row = outgoing_row(Vec::new(), &[], OutgoingState::Failed);
@@ -8407,6 +9439,7 @@ mod tests {
         let item = unsent_item(&row, String::new());
         assert_eq!(item.error, None);
         assert!(!item.maybe_sent);
+        assert!(!item.retrying);
     }
 
     #[test]

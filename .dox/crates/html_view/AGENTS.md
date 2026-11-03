@@ -45,9 +45,9 @@ positions Blitz computed.
   parsing into Chromium's broken-image rendering (alt text after an icon, or
   framed boxes; see `replace_unavailable_images`), so layouts match a browser
   that couldn't load them.
-- **Form controls** are inert pictures with Chromium's metrics: `<select>`
-  shows its selected option with a ▾ and is as wide as its widest option;
-  text inputs are `size` characters wide.
+- **Form controls don't exist** (user decision): `HtmlDocument::parse` removes `input`, `textarea`,
+  `select`, `button` and `form` right after parsing, whatever reached it, and with their content.
+  Hosts sanitize them away too; this holds if that ever fails. Blitz's code for them stays, unreachable.
 - **Base URL:** defaults to `bgmail://message/` (Blitz panics resolving
   relative URLs against `about:blank`); that scheme resolves to "missing",
   except protocol-relative references (`//host/…` → `bgmail://host/…`),
@@ -121,13 +121,21 @@ positions Blitz computed.
   overflow an 8 MB stack). `try_parse` refuses trees deeper than
   `MAX_NESTING_DEPTH` (256) with `RenderError::TooDeep`, and `layout`/paint
   never process such a tree (defense in depth). The Blitz document is not
-  `Send`, so it can't move off the UI thread; hosts bound document size.
+  `Send`, so it can't move off the UI thread. Hostile markup is bounded by
+  the parser's budgets (`blitz_dom::MAX_DOM_NODES` and siblings) and `MAX_TABLE_SPAN_AREA`
+  (`RenderError::TooComplex`), by `has_too_many_tags` before sanitizing, `PaintCache`'s
+  `MAX_CACHED_PIXEL_BYTES` per document and per frame and
+  `MAX_UPLOAD_SIDE`, by the display
+  list's `MAX_PATH_ELEMENTS` and `MAX_DASHES`, and by `MAX_DECORATION_MARKS`,
+  `MAX_BORDER_DOTS` in the painters; what passes them is drawn solid or not at all.
 - **Images:** drawn at less than half their size, they are pre-downscaled on
   the CPU (area filter, premultiplied alpha) and cached per upload size —
   GPUI samples without mipmaps.
 - **Vendored painter** (`src/blitz_paint/`, MIT/Apache-2.0, Blitz `e42ee1f`):
   keep diffs minimal and marked `BGMail`; see its child doc.
 
+- **Web fonts** only load from `fonts.gstatic.com` (decided from Gmail dropping `@font-face` and
+  Thunderbird sanitizing fonts, which isn't available here; `vendor/blitz` `net.rs`).
 - Web fonts reach GPUI under a family unique to each file
   (`fonts::with_family_name` rewrites the `name` table): GPUI caches a family's
   faces on first use, so later faces of the same family would never be found

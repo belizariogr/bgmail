@@ -20,6 +20,8 @@ pub struct RenderedEmail {
     pub html: String,
     /// How many remote `<img>` were blocked.
     pub blocked_images: usize,
+    /// The sanitized body didn't read as safe (see [`reads_as_safe`]), so it became text.
+    pub refused: bool,
 }
 
 /// Theme colors of the message page. The page can be forced white
@@ -61,7 +63,7 @@ pub fn email_document(
     body: &MessageBody,
     load_remote: bool,
 ) -> RenderedEmail {
-    let (inner, _, blocked_images) = match body {
+    let (mut inner, _, mut blocked_images) = match body {
         MessageBody::Html(html) => sanitize_html_inner(html, load_remote, &HashSet::new()),
         MessageBody::Text(plain) => (
             format!("<pre class=\"plain\">{}</pre>", escape_html(plain)),
@@ -69,10 +71,22 @@ pub fn email_document(
             0,
         ),
     };
+    let refused = matches!(body, MessageBody::Html(_)) && !reads_as_safe(&inner);
+    if let (true, MessageBody::Html(html)) = (refused, body) {
+        inner = format!(
+            "<pre class=\"plain\">{}</pre>",
+            escape_html(&plain_text(html))
+        );
+        blocked_images = 0;
+    }
     // Keep the message's own doctype: a legacy one selects the (quirks)
     // rendering mode its layout was written for.
     let doctype = match body {
-        MessageBody::Html(html) => leading_doctype(html),
+        // A doctype holding a `<` is no doctype but markup, which could displace the
+        // tags this page relies on (its Content-Security-Policy, for one).
+        MessageBody::Html(html) => {
+            leading_doctype(html).filter(|doctype| !doctype[1..].contains('<'))
+        }
         MessageBody::Text(_) => None,
     }
     .unwrap_or("<!DOCTYPE html>");
@@ -84,6 +98,7 @@ pub fn email_document(
     RenderedEmail {
         html,
         blocked_images,
+        refused,
     }
 }
 
@@ -130,7 +145,14 @@ pub fn print_document(
     nonce: &str,
     load_remote: bool,
 ) -> String {
-    let rendered = email_document(PRINT_COLORS, body, load_remote);
+    // As in the reader, what is too costly to sanitize prints as text.
+    let as_text = match body {
+        MessageBody::Html(html) if html_view::has_too_many_tags(html) => {
+            Some(MessageBody::Text(plain_text(html).into()))
+        }
+        _ => None,
+    };
+    let rendered = email_document(PRINT_COLORS, as_text.as_ref().unwrap_or(body), load_remote);
     // Remote images the user allowed for this message print too.
     let images = if load_remote {
         "data: http: https:"
@@ -139,7 +161,7 @@ pub fn print_document(
     };
     let csp = format!(
         "default-src 'none'; img-src {images}; style-src 'unsafe-inline'; \
-         script-src 'nonce-{nonce}'"
+         script-src 'nonce-{nonce}'; form-action 'none'; base-uri 'none'"
     );
     let head = format!(
         "<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
@@ -176,12 +198,18 @@ pub fn quotable_html(html: &str) -> String {
     use lol_html::{element, rewrite_str, RewriteStrSettings};
 
     let (sanitized, _, _) = sanitize_html_inner(html, true, &HashSet::new());
-    let sanitized = match leading_doctype(&sanitized) {
-        Some(doctype) => sanitized.replacen(doctype, "", 1),
-        None => sanitized,
-    };
     let settings = RewriteStrSettings::new()
-        .append_element_content_handler(element!("head, title", |el| {
+        // By the tokenizer: cutting where a text search found one could open a comment.
+        .append_document_content_handler(lol_html::doctype!(|doctype| {
+            doctype.remove();
+            Ok(())
+        }))
+        // With what follows it when unclosed, as it would take the whole body.
+        .append_element_content_handler(element!("head", |el| {
+            el.remove_and_keep_content();
+            Ok(())
+        }))
+        .append_element_content_handler(element!("title, head style", |el| {
             el.remove();
             Ok(())
         }))
@@ -198,7 +226,70 @@ pub fn quotable_html(html: &str) -> String {
             }
             Ok(())
         }));
-    rewrite_str(&sanitized, settings).unwrap_or_default()
+    let quoted = rewrite_str(&sanitized, settings).unwrap_or_default();
+    if reads_as_safe(&quoted) {
+        quoted
+    } else {
+        String::new()
+    }
+}
+
+/// Whether `html`, followed by what closes the page around it, reads to the parser that will show
+/// it as free of what the sanitizer removes. The last check: rewriting tags in place can make the
+/// output read differently from what was checked (each removal joins what was around it), and
+/// no list of such cases has held. Tokens, not a tree: the modes where a tree builder reads
+/// raw text differently are only entered through elements this already refuses.
+pub fn reads_as_safe(html: &str) -> bool {
+    use html5ever::tendril::StrTendril;
+    use html5ever::tokenizer::{
+        states::RawKind, BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer,
+        TokenizerOpts,
+    };
+
+    #[derive(Default)]
+    struct Check(std::cell::Cell<bool>);
+    impl TokenSink for Check {
+        type Handle = ();
+        fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
+            let Token::TagToken(tag) = token else {
+                return TokenSinkResult::Continue;
+            };
+            if tag.kind != TagKind::StartTag {
+                return TokenSinkResult::Continue;
+            }
+            let name = &*tag.name;
+            let unsafe_attribute = tag.attrs.iter().any(|attr| {
+                let attribute = &*attr.name.local;
+                attribute.starts_with("on")
+                    || (URL_ATTRIBUTES.contains(&attribute) && is_dangerous_url(&attr.value))
+            });
+            let unsafe_element = name == "svg"
+                || name == "math"
+                || DISALLOWED_ELEMENTS
+                    .split(',')
+                    .chain(WRAPPING_CONTROLS.split(','))
+                    .any(|element| element.trim() == name);
+            if unsafe_attribute || unsafe_element {
+                self.0.set(true);
+            }
+            // As the tree builder does, or the text of these would read as tags.
+            match name {
+                "title" => TokenSinkResult::RawData(RawKind::Rcdata),
+                "style" | "xmp" | "noembed" | "noframes" => {
+                    TokenSinkResult::RawData(RawKind::Rawtext)
+                }
+                "plaintext" => TokenSinkResult::Plaintext,
+                _ => TokenSinkResult::Continue,
+            }
+        }
+    }
+    let tokenizer = Tokenizer::new(Check::default(), TokenizerOpts::default());
+    let input = BufferQueue::default();
+    input.push_back(StrTendril::from_slice(html));
+    input.push_back(StrTendril::from_slice("</body></html>"));
+    let _ = tokenizer.feed(&input);
+    tokenizer.end();
+    !tokenizer.sink.0.get()
 }
 
 /// A plain-text original as it goes inside a reply's quote.
@@ -253,6 +344,7 @@ fn document_css(colors: DocumentColors) -> String {
            font: 16px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; \
            overflow-wrap: anywhere; }}\
          a {{ color: {accent}; }}\
+         :where([data-rm-button]:not([hidden])) {{ display: inline-block; }}\
          img[data-rm-blocked-src] {{ background: {soft}; border: 1px dashed {line}; \
            box-sizing: border-box; min-width: 24px; min-height: 24px; }}\
          h1, h2, h3 {{ line-height: 1.25; }}\
@@ -319,16 +411,22 @@ fn channel(value: f32) -> u8 {
 ///   `<style>`.
 /// - **Misc scripting surfaces** (`canvas`, `dialog`, `portal`).
 ///
-/// `svg` is intentionally **kept** (some e-mails use inline vector art), but its
-/// scriptable parts are removed: `script` (covered above), `foreignobject` (hosts
-/// arbitrary HTML) and the SMIL animation family (`animate`, `animatetransform`,
-/// `animatemotion`, `set`) which can assign event-handler attributes at runtime.
+/// `svg` and `math` go in passes of their own (see [`without_foreign_content`], user
+/// decision). The SVG parts stay listed for a stray tag outside one: `foreignobject`
+/// (hosts arbitrary HTML) and the SMIL animation family (`animate`, `animatetransform`,
+/// `animatemotion`, `set`), which can assign event-handler attributes at runtime.
+/// Form controls that only wrap what a message says: they become plain boxes, so what they hold
+/// stays, and stays as hidden or styled as they made it. A whole ASP.NET message comes in a
+/// `<form>`, and Gmail and Thunderbird show its content.
+const WRAPPING_CONTROLS: &str = "form, button";
+
 const DISALLOWED_ELEMENTS: &str = "script, object, embed, applet, \
      iframe, frame, frameset, \
      video, audio, source, track, \
-     input, textarea, select, button, form, \
+     input, textarea, select, \
      base, meta, link, canvas, dialog, portal, \
-     foreignobject, animate, animatetransform, animatemotion, set";
+     foreignobject, animate, animatetransform, animatemotion, set, \
+     template, noscript";
 
 /// URL-bearing attributes whose value we vet against dangerous schemes.
 const URL_ATTRIBUTES: &[&str] = &[
@@ -353,6 +451,41 @@ const URL_ATTRIBUTES: &[&str] = &[
 /// `srcset` is handled separately. Dangerous-scheme vetting still applies to
 /// every [`URL_ATTRIBUTES`] entry regardless.
 const RESOURCE_ATTRIBUTES: &[&str] = &["src", "poster", "background", "data", "xlink:href"];
+
+/// `html` with no `svg` or `math`, in passes of their own, before anything else reads
+/// it. Once it has seen one of these tags the parser stays in "foreign" mode until its
+/// own end tag, where a browser leaves it at any HTML end tag (`<div><svg></div>`), so
+/// from there on the two read different tags: whatever it takes for text, like a
+/// `<style>`'s content, could be real elements nothing has checked. Passes until none
+/// is left, as a removal can join the pieces of a tag. Anything that doesn't settle is
+/// dropped.
+fn without_foreign_content(html: &str) -> std::borrow::Cow<'_, str> {
+    use lol_html::{element, rewrite_str, RewriteStrSettings};
+    const MAX_PASSES: usize = 8;
+
+    let has_tag = |text: &str| {
+        let lower = text.to_ascii_lowercase();
+        lower.contains("<svg") || lower.contains("<math")
+    };
+    if !has_tag(html) {
+        return html.into();
+    }
+    let mut current = html.to_string();
+    for _ in 0..MAX_PASSES {
+        let settings =
+            RewriteStrSettings::new().append_element_content_handler(element!("svg, math", |el| {
+                el.remove();
+                Ok(())
+            }));
+        let next = rewrite_str(&current, settings).unwrap_or_default();
+        // Still there but unchanged: inside text or a `<style>`, where it isn't a tag.
+        if next == current || !has_tag(&next) {
+            return next.into();
+        }
+        current = next;
+    }
+    "".into()
+}
 
 /// Sanitizes an e-mail HTML fragment so it can never execute code or load
 /// untrusted active content in the renderer.
@@ -392,12 +525,34 @@ fn sanitize_html_inner(
     use lol_html::{element, rewrite_str, text, RewriteStrSettings};
     use std::cell::{Cell, RefCell};
 
+    // Closes a tag left open at the end, which the tokenizer writes back unchecked and what
+    // follows this body in a page would close. The handler below takes it out again.
+    let closed = format!("{html}<!---->");
+    let without_foreign = without_foreign_content(&closed);
     let has_remote = Cell::new(false);
     let blocked = Cell::new(0usize);
     // `<style>` text arrives in chunks (a `url(` may straddle two): buffer it
     // and emit it once, stripped, at the end of the text node.
     let style_text = RefCell::new(String::new());
     let settings = RewriteStrSettings::new()
+        // A `<` the tokenizer took for text is written back as it came, and what is removed
+        // after it can leave it next to a name: `<<script></script>script>` came out as
+        // `<script>`. As an entity, it stays text for whoever reads the output.
+        .append_document_content_handler(lol_html::doc_comments!(|comment| {
+            if comment.text().is_empty() {
+                comment.remove();
+            }
+            Ok(())
+        }))
+        .append_document_content_handler(lol_html::doc_text!(|chunk| {
+            if chunk.text_type() == lol_html::html_content::TextType::Data
+                && chunk.as_str().contains('<')
+            {
+                let escaped = chunk.as_str().replace('<', "&lt;");
+                chunk.replace(&escaped, ContentType::Html);
+            }
+            Ok(())
+        }))
         .append_element_content_handler(element!(DISALLOWED_ELEMENTS, |el| {
             el.remove();
             Ok(())
@@ -422,6 +577,53 @@ fn sanitize_html_inner(
             }
             Ok(())
         }))
+        // After the handlers above, which clean the attributes this copies. Written out, as
+        // renaming the element in place also renames whichever end tag comes next: in
+        // `<table><form>x</table>` the table's own, leaving it open with all that follows inside.
+        // An element left open stays so: it ends where its parent does, as the `<form>` would.
+        .append_element_content_handler(element!(WRAPPING_CONTROLS, |el| {
+            if el.removed() {
+                return Ok(());
+            }
+            let control = el.tag_name();
+            let plain = if control == "button" {
+                "span"
+            } else {
+                "section"
+            };
+            // A button is a box inside a line, which `document_css` makes of this mark.
+            let mark = if control == "button" {
+                " data-rm-button=\"\""
+            } else {
+                ""
+            };
+            let attributes: String = el
+                .attributes()
+                .iter()
+                .filter(|attr| {
+                    attr.name()
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                })
+                .filter(|attr| attr.name() != "data-rm-button")
+                .map(|attr| {
+                    let value = escape_html(&decoded_attribute(&attr.value()));
+                    format!(" {}=\"{value}\"", attr.name())
+                })
+                .collect();
+            el.before(&format!("<{plain}{mark}{attributes}>"), ContentType::Html);
+            el.remove_and_keep_content();
+            el.on_end_tag(lol_html::end_tag!(move |end| {
+                let closing = if end.name() == control {
+                    plain.to_string()
+                } else {
+                    end.name()
+                };
+                end.before(&format!("</{closing}>"), ContentType::Html);
+                Ok(())
+            }))?;
+            Ok(())
+        }))
         .append_element_content_handler(text!("style", |chunk| {
             if load_remote {
                 return Ok(());
@@ -436,7 +638,11 @@ fn sanitize_html_inner(
             Ok(())
         }));
 
-    let html = rewrite_str(html, settings).unwrap_or_default();
+    let mut html = rewrite_str(&without_foreign, settings).unwrap_or_default();
+    // Inside an unclosed `<xmp>` or `<title>` it was text, not a comment.
+    if html.ends_with("<!---->") {
+        html.truncate(html.len() - "<!---->".len());
+    }
     (html, has_remote.get(), blocked.get())
 }
 
@@ -505,7 +711,15 @@ fn neutralize_attributes(
     load_remote: bool,
     shown: &HashSet<String>,
 ) -> Option<bool> {
+    // Removing them by name is quadratic in lol_html: 300000 took 89 s, on the UI thread when
+    // replying. No such tag is meant to be read. With its content, which keeping would turn
+    // the text of a `<xmp>` into markup after it was checked.
+    if el.attributes().len() > html_view::MAX_TAG_ATTRIBUTES {
+        el.remove();
+        return None;
+    }
     let is_img = el.tag_name() == "img";
+    let is_svg_image = matches!(el.tag_name().as_str(), "image" | "feimage");
     // `attributes()` borrows the element, so collect everything we need first and
     // only mutate (`remove_attribute`/`set_attribute`) once the borrow is released.
     let mut blocked_img_src = None;
@@ -515,17 +729,20 @@ fn neutralize_attributes(
         .iter()
         .filter_map(|attr| {
             let name = attr.name(); // lower-cased by the parser
-            let value = attr.value();
+            let raw_value = attr.value();
+            // As a browser will read it: `&#106;avascript:` is `javascript:`.
+            let value = decoded_attribute(&raw_value);
             let is_url_attr = URL_ATTRIBUTES.contains(&name.as_str());
             // A remote `<img src>` is what the reader surfaces and lets the user
             // unblock one at a time, so track it (and honor the `shown` allowlist).
             let img_src_remote = is_img && name == "src" && is_url_attr && is_remote_url(&value);
-            let shown_here = img_src_remote && shown.contains(value.as_str());
+            let shown_here =
+                img_src_remote && (shown.contains(&raw_value) || shown.contains(value.as_str()));
             if img_src_remote {
                 let blocked = !load_remote && !shown_here;
                 img_state = Some(blocked);
                 if blocked {
-                    blocked_img_src = Some(value.clone());
+                    blocked_img_src = Some(raw_value.clone());
                 }
             }
             // Only resource-loading attributes are blocked for remoteness;
@@ -533,8 +750,17 @@ fn neutralize_attributes(
             let is_remote = (RESOURCE_ATTRIBUTES.contains(&name.as_str()) && is_remote_url(&value))
                 || (name == "srcset" && !value.trim().is_empty());
             let remote_blocked = is_remote && !load_remote && !shown_here;
+            // A table's or the body's image, which the reader offers to show like any other.
+            if name == "background" && is_remote {
+                img_state.get_or_insert(!load_remote);
+            }
+            // Nothing in an SVG reads outside the message: its images come inline.
+            let svg_file = is_svg_image
+                && matches!(name.as_str(), "href" | "xlink:href")
+                && !is_inline_raster(&value);
             let drop = name.starts_with("on")
                 || name == "contenteditable"
+                || svg_file
                 || (is_url_attr && is_dangerous_url(&value))
                 || (name == "style" && style_has_script_vector(&value))
                 || remote_blocked;
@@ -542,6 +768,28 @@ fn neutralize_attributes(
         })
         .collect();
 
+    // A name can start with `=` only as the first; past it, rewriting the tag without what
+    // stood between makes it the value of the attribute before, and the rest of the tag reads as
+    // something else. Untouched, a tag comes out as it came. Without the tag, then, keeping what
+    // it holds, unless that is raw text, which keeping would turn into markup.
+    let rewritten = !doomed.is_empty() || blocked_img_src.is_some() || el.has_attribute("style");
+    let joins = rewritten
+        && el
+            .attributes()
+            .iter()
+            .skip(1)
+            .any(|attr| attr.name().starts_with('='));
+    if joins {
+        if matches!(
+            el.tag_name().as_str(),
+            "title" | "style" | "xmp" | "noembed" | "noframes" | "plaintext"
+        ) {
+            el.remove();
+        } else {
+            el.remove_and_keep_content();
+        }
+        return img_state;
+    }
     for name in doomed {
         el.remove_attribute(&name);
     }
@@ -549,6 +797,52 @@ fn neutralize_attributes(
         let _ = el.set_attribute("data-rm-blocked-src", &src);
     }
     img_state
+}
+
+/// An attribute value with its character references decoded, which the parser leaves
+/// as written. Numeric ones count without their `;`, as in browsers.
+fn decoded_attribute(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(amp) = rest.find("&#") {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 2..];
+        let (radix, digits) = match after.strip_prefix(['x', 'X']) {
+            Some(hex) => (16, hex),
+            None => (10, after),
+        };
+        let end = digits
+            .find(|c: char| !c.is_digit(radix))
+            .unwrap_or(digits.len());
+        match u32::from_str_radix(&digits[..end], radix)
+            .ok()
+            .and_then(char::from_u32)
+        {
+            Some(decoded) => {
+                out.push(decoded);
+                let tail = &digits[end..];
+                rest = tail.strip_prefix(';').unwrap_or(tail);
+            }
+            None => {
+                out.push_str("&#");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    html_escape::decode_html_entities(&out).into_owned()
+}
+
+/// Whether `value` is a `data:` raster image.
+fn is_inline_raster(value: &str) -> bool {
+    value
+        .trim_start()
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+        && !is_dangerous_url(value)
 }
 
 /// Whether a URL value uses a scheme that can execute or load active content.
@@ -573,11 +867,14 @@ fn is_dangerous_url(value: &str) -> bool {
     match scheme.as_str() {
         "javascript" | "vbscript" => true,
         "data" => {
+            // As a browser reads it: `image/svg+\nxml` is `image/svg+xml`.
             let media = trimmed[colon + 1..]
                 .split([';', ','])
                 .next()
                 .unwrap_or("")
-                .trim()
+                .chars()
+                .filter(|c| !c.is_whitespace() && !c.is_control())
+                .collect::<String>()
                 .to_ascii_lowercase();
             !(media.starts_with("image/") && media != "image/svg+xml")
         }
@@ -772,8 +1069,14 @@ fn decode_entities(text: &str) -> String {
             _ => entity
                 .strip_prefix("#x")
                 .or_else(|| entity.strip_prefix("#X"))
+                .filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))
                 .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-                .or_else(|| entity.strip_prefix('#').and_then(|dec| dec.parse().ok()))
+                .or_else(|| {
+                    entity
+                        .strip_prefix('#')
+                        .filter(|dec| dec.bytes().all(|b| b.is_ascii_digit()))
+                        .and_then(|dec| dec.parse().ok())
+                })
                 .and_then(char::from_u32),
         };
         match decoded {
@@ -810,6 +1113,110 @@ fn escape_html(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_doctype_holding_markup_cannot_move_the_print_policy() {
+        let body = MessageBody::Html(
+            "<!DOCTYPE <body><math><mtext><mglyph><style><img src=x onerror=alert(1)>".into(),
+        );
+        let header = PrintHeader {
+            subject: "s",
+            from_label: "f",
+            from: "a",
+            date_label: "d",
+            date: "t",
+        };
+        let page = print_document(&header, &body, "nonce", false);
+        assert!(!page.to_ascii_lowercase().starts_with("<!doctype <"));
+        let policy = page.find("Content-Security-Policy").expect("policy");
+        assert!(policy < page.find("</head>").expect("head"));
+        assert!(page.find("</head>") < page.find("<body>"));
+        assert!(!page.contains("onerror"));
+    }
+
+    #[test]
+    fn text_with_cdata_markers_is_left_alone() {
+        let clean = sanitize_html("<p>if (a[b[0]]>1)</p>", false);
+        assert!(clean.contains("a[b[0]]>1"), "{clean}");
+    }
+
+    #[test]
+    fn vector_and_math_content_goes_but_the_rest_stays() {
+        let clean = sanitize_html("<p>a</p><svg><path d=\"M0 0\"/></svg><p>b</p>", false);
+        assert_eq!(clean, "<p>a</p><p>b</p>");
+        let clean = sanitize_html("<p>a</p><math><mi>x</mi></math><p>b</p>", false);
+        assert_eq!(clean, "<p>a</p><p>b</p>");
+        let clean = sanitize_html("<style>a{content:\"<svg\"}</style><p>b</p>", false);
+        assert!(clean.contains("<p>b</p>"), "{clean}");
+    }
+
+    #[test]
+    fn markup_that_parses_differently_in_a_browser_is_dropped() {
+        for payload in [
+            "<math><mtext><mglyph><style><img src=x onerror=alert(1)>",
+            "<math><mi><malignmark><style><img src=x onerror=alert(1)>",
+            "<template><svg></template><![CDATA[><img src=x onerror=alert(1)>]]>",
+            "<div><svg></div><style><a id=\"</style><img src=http://t/x onerror=a()>\">",
+            "<div><math></div><style><a id=\"</style><img src=http://t/x onerror=a()>\">",
+            "<template><svg></template><![CDA<![CDATA[TA[><img src=x onerror=alert(1)>]]]]>>",
+            "<sv<svg></svg>g></div><style><a id=\"</style><img src=x onerror=a()>\">",
+        ] {
+            let clean = sanitize_html(payload, false);
+            assert!(!clean.contains("onerror"), "{payload}: {clean}");
+        }
+    }
+
+    #[test]
+    fn nothing_hides_in_noscript() {
+        let clean = sanitize_html(
+            "<noscript><form action=https://evil.test><button>Go</button></form></noscript>x",
+            false,
+        );
+        assert_eq!(clean, "x");
+    }
+
+    #[test]
+    fn attribute_values_are_judged_with_their_references_decoded() {
+        for href in [
+            "&#106;avascript:alert(1)",
+            "&#106avascript:alert(1)",
+            "&#x6A;avascript:alert(1)",
+            "javascript&colon;alert(1)",
+            "java&Tab;script:alert(1)",
+        ] {
+            let clean = sanitize_html(&format!("<a href=\"{href}\">x</a>"), false);
+            assert!(!clean.contains("href"), "{href}: {clean}");
+        }
+        let clean = sanitize_html("<img src=\"&#104;ttps://tracker.test/p.png\">", false);
+        assert!(!clean.contains(" src="), "{clean}");
+        assert!(clean.contains("data-rm-blocked-src"), "{clean}");
+
+        assert_eq!(
+            decoded_attribute("https://a.test/?x=1"),
+            "https://a.test/?x=1"
+        );
+        assert_eq!(decoded_attribute("&#bad"), "&#bad");
+        let kept = sanitize_html("<a href=\"https://a.test/?a=1&amp;b=2\">x</a>", false);
+        assert!(
+            kept.contains("href=\"https://a.test/?a=1&amp;b=2\""),
+            "{kept}"
+        );
+    }
+
+    #[test]
+    fn an_svg_image_only_comes_inline() {
+        for href in [
+            "/dev/zero",
+            "https://tracker.test/p.png",
+            "\\\\host\\share\\x.png",
+        ] {
+            let clean = sanitize_html(&format!("<image href=\"{href}\"/>"), true);
+            assert!(!clean.contains("href"), "{href}: {clean}");
+        }
+        let inline = "data:image/png;base64,AAAA";
+        let clean = sanitize_html(&format!("<image href=\"{inline}\"/>"), false);
+        assert!(clean.contains(inline), "{clean}");
+    }
 
     #[test]
     fn only_dark_pages_adapt_text() {
@@ -1030,24 +1437,14 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_keeps_svg_but_removes_its_scriptable_parts() {
+    fn sanitize_removes_svg_with_its_scriptable_parts() {
         let dirty = "<svg viewBox=\"0 0 10 10\">\
-             <rect width=\"10\" height=\"10\"></rect>\
-             <script>alert(1)</script>\
-             <foreignObject><body>x</body></foreignObject>\
-             <animate attributeName=\"x\"></animate>\
-             <set attributeName=\"onload\" to=\"alert(1)\"></set>\
-             </svg>";
-        let clean = sanitize_html(dirty, true);
-        let lower = clean.to_ascii_lowercase();
-        assert!(clean.contains("<svg"));
-        assert!(clean.contains("<rect"));
-        for needle in ["<script", "alert(1)", "foreignobject", "<animate", "<set"] {
-            assert!(
-                !lower.contains(needle),
-                "expected `{needle}` to be stripped from svg, got: {clean}"
-            );
-        }
+             <script>x()</script>\
+             <foreignObject><p>y</p></foreignObject>\
+             <animate attributeName=\"onclick\"/>\
+             <set attributeName=\"onload\"/>\
+             </svg><p>after</p>";
+        assert_eq!(sanitize_html(dirty, false), "<p>after</p>");
     }
 
     #[test]
@@ -1350,5 +1747,235 @@ mod tests {
         assert_eq!(doc.blocked_images, 1);
         assert!(!doc.html.contains(" src=\"https://"));
         assert!(colors.is_dark());
+    }
+
+    /// What comes out of the sanitizer is read by another parser: what it leaves or removes
+    /// can't join with what is around it into something it was there to remove.
+    #[test]
+    fn nothing_removed_by_the_sanitizer_can_join_into_active_content() {
+        let many: String = (0..1100).map(|i| format!(" a{i}")).collect();
+        let prefixes = [
+            "",
+            "<",
+            "<?",
+            "</ ",
+            "<!-- --!>",
+            "<title>",
+            "<a \">",
+            "<!x>",
+        ];
+        let removed = [
+            "<script></script>".to_string(),
+            "<svg></svg>".to_string(),
+            "<iframe></iframe>".to_string(),
+            "<body>".to_string(),
+            "<html>".to_string(),
+            "<head></head>".to_string(),
+            "<img src=cid:x>".to_string(),
+            "<!doctype b>".to_string(),
+            format!("<p{many}>"),
+        ];
+        for prefix in prefixes {
+            for gap in &removed {
+                for name in ["script", "iframe", "input", "form", "meta", "object"] {
+                    for html in [
+                        format!("{prefix}<{gap}{name} onclick=x>b<{gap}/{name}>"),
+                        format!("{prefix}<{gap}{gap}{name} onclick=x>"),
+                        format!("{prefix}<xmp{many}><{name} onclick=x></xmp>"),
+                        format!("{prefix}<title{many}><{name} onclick=x></title>"),
+                        format!("{prefix}<noembed{many}><{name} onclick=x></noembed>"),
+                        format!("<?a> <{gap}{name} onclick=x> ?><!doctype b>"),
+                        format!("<a b onclick=x = c=\"><{name} onclick=x>\">"),
+                        format!("<a b/=c=\"><{name} onclick=x>\" style=x>"),
+                        format!("<d =/=x=\"><{name} onclick=x>\" onclick=y>"),
+                        format!("<!-- -<!doctype b>-> <{name} onclick=x> --><!doctype b>"),
+                        "<?a><wbr<!doctype b> onclick=x>?><!doctype b>".to_string(),
+                        format!("<p>x</p><{name} onclick=x "),
+                    ] {
+                        let sanitized = sanitize_html_inner(&html, false, &HashSet::new()).0;
+                        assert!(reads_as_safe(&sanitized), "{html}\n{sanitized}");
+                        let quoted = quotable_html(&html);
+                        assert!(reads_as_safe(&quoted), "{html}\n{quoted}");
+                        let again = sanitize_html_inner(&sanitized, false, &HashSet::new()).0;
+                        assert_eq!(again, sanitized, "{html}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn what_reads_as_active_content_is_refused_whatever_let_it_through() {
+        for html in [
+            "<script>1</script>",
+            "<p onclick=x>",
+            "<a href=javascript:x>",
+            "<meta http-equiv=refresh content=0 ",
+            "<input ",
+            "<a b = c=\"><form>\">",
+            "<xmp></xmp><iframe>",
+        ] {
+            assert!(!reads_as_safe(html), "{html}");
+        }
+        for html in [
+            "<p>x</p>",
+            "<style>a{}<script></style>",
+            "<title><script></title>",
+            "<xmp><script></xmp>",
+            "<!-- <script> -->",
+            "<a title=\"<script>\" href=http://x.test>",
+            "a < b",
+        ] {
+            assert!(reads_as_safe(html), "{html}");
+        }
+    }
+
+    #[test]
+    fn the_samples_in_the_repository_all_read_as_safe() {
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../spikes/html_render/corpus"
+        );
+        let Ok(files) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for file in files.flatten() {
+            let html = String::from_utf8_lossy(&std::fs::read(file.path()).unwrap()).into_owned();
+            let sanitized = sanitize_html_inner(&html, true, &HashSet::new()).0;
+            assert!(reads_as_safe(&sanitized), "{:?}", file.path());
+            assert!(reads_as_safe(&quotable_html(&html)), "{:?}", file.path());
+        }
+    }
+
+    #[test]
+    fn a_quote_keeps_a_body_after_an_unclosed_head() {
+        let quoted = quotable_html("<html><head><title>x</title><body>hello</body></html>");
+        assert!(
+            quoted.contains("hello") && !quoted.contains('x'),
+            "{quoted}"
+        );
+    }
+
+    #[test]
+    fn a_stray_equals_sign_loses_nothing_that_was_safe() {
+        for (html, kept) in [
+            (
+                "<html lang=en =\"\"><body><p>Everything</p></body></html>",
+                "Everything",
+            ),
+            (
+                "<table width=600 =\"\"><tr><td>Whole newsletter</td></tr></table>",
+                "Whole newsletter",
+            ),
+            ("<p>Read <a href=x =y>this link</a> now</p>", "this link"),
+            (
+                "<table background=http://x.test/a =\"\"><tr><td>Kept</td></tr></table>",
+                "Kept",
+            ),
+        ] {
+            let sanitized = sanitize_html_inner(html, false, &HashSet::new()).0;
+            assert!(sanitized.contains(kept), "{html}\n{sanitized}");
+            assert!(reads_as_safe(&sanitized), "{html}\n{sanitized}");
+        }
+    }
+
+    #[test]
+    fn what_a_form_or_button_holds_stays() {
+        let html = "<form id=form1><table><tr><td>Whole message</td></tr></table>\
+            <input value=gone></form><a href=http://x.test><button>Buy now</button></a>";
+        let sanitized = sanitize_html_inner(html, true, &HashSet::new()).0;
+        for kept in ["Whole message", "Buy now", "href"] {
+            assert!(sanitized.contains(kept), "{sanitized}");
+        }
+        for gone in ["<form", "<button", "<input", "gone"] {
+            assert!(!sanitized.contains(gone), "{sanitized}");
+        }
+        assert!(reads_as_safe(&sanitized));
+    }
+
+    #[test]
+    fn a_media_type_is_read_as_a_browser_reads_it() {
+        assert!(is_dangerous_url("data:image/svg+\nxml;base64,AA"));
+        assert!(is_dangerous_url("data:image/svg+\txml;base64,AA"));
+        assert!(!is_dangerous_url("data:image/png;base64,AA"));
+    }
+
+    #[test]
+    fn a_hidden_form_or_button_stays_hidden() {
+        for (html, expected) in [
+            (
+                "<form style=\"display:none\">Hidden</form>",
+                "<section style=\"display:none\">Hidden</section>",
+            ),
+            (
+                "<form hidden>Hidden</form>",
+                "<section hidden=\"\">Hidden</section>",
+            ),
+            (
+                "<button class=x>Hidden</button>",
+                "<span data-rm-button=\"\" class=\"x\">Hidden</span>",
+            ),
+        ] {
+            assert_eq!(sanitize_html_inner(html, true, &HashSet::new()).0, expected);
+        }
+    }
+
+    #[test]
+    fn a_remote_image_with_a_stray_equals_sign_is_still_counted() {
+        let (_, has_remote, blocked) = sanitize_html_inner(
+            "<img src=http://x.test/a.png onclick=x width=1 =\"\">",
+            false,
+            &HashSet::new(),
+        );
+        assert!(has_remote);
+        assert_eq!(blocked, 1);
+    }
+
+    #[test]
+    fn a_remote_background_attribute_is_counted_and_offered() {
+        let html = "<table background=http://x.test/a.png><tr><td>x</td></tr></table>";
+        let (clean, has_remote, blocked) = sanitize_html_inner(html, false, &HashSet::new());
+        assert!(has_remote && !clean.contains("background"));
+        assert_eq!(blocked, 1);
+        let (clean, has_remote, blocked) = sanitize_html_inner(html, true, &HashSet::new());
+        assert!(has_remote && clean.contains("background"));
+        assert_eq!(blocked, 0);
+    }
+
+    #[test]
+    fn a_button_comes_out_as_a_box_unless_the_message_hides_it() {
+        let height = |html: &str| {
+            let colors = DocumentColors {
+                background: gpui::white(),
+                text: gpui::black(),
+                accent: gpui::black(),
+            };
+            let body = MessageBody::Html(html.to_string().into());
+            let document = email_document(colors, &body, false);
+            let mut document = html_view::HtmlDocument::parse(
+                &document.html,
+                html_view::DocumentOptions::default(),
+            );
+            document.layout(640.0)
+        };
+        let button = "<button style=\"padding:30px\">Buy</button>";
+        assert!(height(button) - height("<span>Buy</span>") >= 50.0);
+        // As the message's own rules and the attribute keep saying.
+        for hidden in [
+            "<style>.x{display:none}</style><button class=x style=\"padding:30px\">Buy</button>",
+            "<button hidden style=\"padding:30px\">Buy</button>",
+        ] {
+            assert!(height(hidden) < height("<span>Buy</span>"), "{hidden}");
+        }
+    }
+
+    #[test]
+    fn a_form_left_open_doesnt_swallow_what_follows() {
+        let html = "<div style=\"display:none\">x<form>y</div><p>Seen</p>";
+        let sanitized = sanitize_html_inner(html, true, &HashSet::new()).0;
+        assert_eq!(
+            sanitized,
+            "<div style=\"display:none\">x<section>y</div><p>Seen</p>"
+        );
     }
 }

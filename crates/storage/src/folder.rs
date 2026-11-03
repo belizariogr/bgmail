@@ -19,16 +19,35 @@ pub mod system {
     pub const FLAGGED: &str = "sys:flagged";
 }
 
-/// Builds the `folders_csv` value: `,sys:inbox,sys:flagged,` so `LIKE '%,sys:inbox,%'`
-/// is safe and unambiguous.
+/// Stands for a `,` of a path inside `folders_csv`, whose separator it is: a
+/// server's folder can be called "Clients, VIP". No folder name has this control
+/// character, so nothing else needs escaping.
+const CSV_COMMA: char = '\u{1f}';
+
+/// `path` as it is written inside `folders_csv`.
+pub(crate) fn encode_csv_path(path: &str) -> String {
+    path.replace(',', &CSV_COMMA.to_string())
+}
+
+/// The path written as `segment` inside `folders_csv`.
+pub(crate) fn decode_csv_path(segment: &str) -> String {
+    segment.replace(CSV_COMMA, ",")
+}
+
+/// Builds the `folders_csv` value: `,sys:inbox,sys:flagged,`.
 pub fn folders_csv<'a>(paths: impl IntoIterator<Item = &'a str>) -> String {
-    let inner = paths.into_iter().collect::<Vec<_>>().join(",");
+    let inner = paths
+        .into_iter()
+        .map(encode_csv_path)
+        .collect::<Vec<_>>()
+        .join(",");
     format!(",{inner},")
 }
 
-/// `LIKE` pattern that matches a folder path inside [`folders_csv`].
-pub fn folder_like_pattern(folder_path: &str) -> String {
-    format!("%,{folder_path},%")
+/// What `instr(folders_csv, ?)` looks for to find a folder path. Not `LIKE`: a
+/// server's `My_Work` would also match `MyXWork`, and `work` would match `WORK`.
+pub fn folder_csv_needle(folder_path: &str) -> String {
+    format!(",{},", encode_csv_path(folder_path))
 }
 
 /// Path for a user-created folder from its display name.
@@ -59,9 +78,21 @@ mod tests {
     }
 
     #[test]
-    fn folder_like_pattern_matches_inside_csv() {
-        assert_eq!(folder_like_pattern(system::INBOX), "%,sys:inbox,%");
-        assert!(",sys:flagged,sys:inbox,".contains("sys:inbox,"));
+    fn folder_csv_needle_matches_inside_csv() {
+        assert_eq!(folder_csv_needle(system::INBOX), ",sys:inbox,");
+        assert!(",sys:flagged,sys:inbox,".contains(&folder_csv_needle(system::INBOX)));
+    }
+
+    #[test]
+    fn a_comma_in_a_path_stays_inside_its_segment() {
+        let csv = folders_csv(["user:Clients, VIP", system::INBOX]);
+        assert_eq!(csv.matches(',').count(), 3);
+        assert!(csv.contains(&folder_csv_needle("user:Clients, VIP")));
+        assert!(!csv.contains(&folder_csv_needle("user:Clients")));
+        assert_eq!(
+            decode_csv_path(&encode_csv_path("user:Clients, VIP")),
+            "user:Clients, VIP"
+        );
     }
 
     #[test]

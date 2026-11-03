@@ -723,13 +723,18 @@ pub(crate) fn handle_click(
                 }
                 // Clicking labels triggers click, and possibly input event, of associated input
                 local_name!("label") => {
-                    if let Some(target_node_id) =
-                        doc.label_bound_input_element(node_id).map(|n| n.id)
+                    // BGMail: only once per click. The target's own click bubbles back up to
+                    // the label, and to this again, until the stack overflows.
+                    if !doc.in_label_click
+                        && let Some(target_node_id) =
+                            doc.label_bound_input_element(node_id).map(|n| n.id)
                     {
                         // Apply default click event action for target node
                         let target_node = doc.get_node_mut(target_node_id).unwrap();
                         let syn_event = target_node.synthetic_click_event_data(event.mods);
+                        doc.in_label_click = true;
                         handle_click(doc, target_node_id, &syn_event, dispatch_event);
+                        doc.in_label_click = false;
                         break 'matched true;
                     }
                 }

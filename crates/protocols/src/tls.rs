@@ -25,9 +25,25 @@ pub const IO_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ConnectOptions {
     /// Skips certificate validation (chain, expiry, host name). Only for local
-    /// test servers with self-signed certificates (GreenMail, Proton Bridge on
-    /// loopback); the app never sets it for remote hosts.
+    /// test servers with self-signed certificates (GreenMail); the app never sets it.
+    /// For a loopback address see [`Self::for_host`].
     pub accept_invalid_certs: bool,
+}
+
+impl ConnectOptions {
+    /// The options for a connection to `host`: a loopback address skips validation,
+    /// which is how Proton Bridge works, with a certificate of its own on this machine
+    /// (user decision). Only a literal address: a name like `localhost` could resolve
+    /// to anything. Per host, since IMAP and SMTP of an account can be on different ones.
+    pub fn for_host(self, host: &str) -> Self {
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        Self {
+            accept_invalid_certs: self.accept_invalid_certs
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.to_canonical().is_loopback()),
+        }
+    }
 }
 
 /// A client TLS stream over a blocking socket.
@@ -113,7 +129,7 @@ pub fn connect_tcp(host: &str, port: u16) -> RemoteResult<TcpStream> {
 /// eagerly, so certificate problems surface here as [`RemoteErrorKind::Tls`]
 /// instead of on the first command.
 pub fn connect_tls(tcp: TcpStream, host: &str, options: ConnectOptions) -> RemoteResult<TlsStream> {
-    let config = client_config(options)?;
+    let config = client_config(options.for_host(host))?;
     let name = ServerName::try_from(host.to_string())
         .map_err(|err| RemoteError::new(RemoteErrorKind::Tls, format!("bad host name: {err}")))?;
     let connection = ClientConnection::new(config, name)
@@ -303,6 +319,27 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_loopback_address_skips_certificate_validation() {
+        let default = ConnectOptions::default();
+        for host in ["127.0.0.1", "127.8.8.8", "::1", "[::1]", "::ffff:127.0.0.1"] {
+            assert!(default.for_host(host).accept_invalid_certs, "{host}");
+        }
+        for host in [
+            "localhost",
+            "imap.x.test",
+            "10.0.0.1",
+            "127.0.0.1.evil.test",
+            "",
+        ] {
+            assert!(!default.for_host(host).accept_invalid_certs, "{host}");
+        }
+        let forced = ConnectOptions {
+            accept_invalid_certs: true,
+        };
+        assert!(forced.for_host("imap.x.test").accept_invalid_certs);
+    }
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
     use std::thread;
@@ -373,6 +410,13 @@ mod tests {
         let mut line = String::new();
         BufReader::new(&mut tls).read_line(&mut line).unwrap();
         assert_eq!(line, "ping\r\n");
+    }
+
+    #[test]
+    fn connect_tls_accepts_self_signed_on_a_loopback_address() {
+        let port = tls_echo_server();
+        let tcp = connect_tcp("127.0.0.1", port).unwrap();
+        assert!(connect_tls(tcp, "127.0.0.1", ConnectOptions::default()).is_ok());
     }
 
     #[test]

@@ -716,6 +716,11 @@ impl TextArea {
         self.move_to(offset, cx);
     }
 
+    /// The placeholder shown while the area is empty.
+    pub fn placeholder(&self) -> &SharedString {
+        &self.placeholder
+    }
+
     /// Updates the placeholder shown while the area is empty.
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>) {
         self.placeholder = placeholder.into();
@@ -991,10 +996,19 @@ impl TextArea {
         let typed = self
             .pending_style
             .unwrap_or_else(|| self.rich.style_at(self.buffer.selected_range().start));
+        self.buffer.take_single_edit();
         f(&mut self.buffer);
         if self.buffer.revision() != revision {
-            self.rich
-                .apply_edit(&before_text, self.buffer.text(), typed);
+            match self.buffer.take_single_edit() {
+                Some((removed, len)) => {
+                    let inserted = &self.buffer.text()[removed.start..removed.start + len];
+                    self.rich
+                        .apply_edit_at(&before_text, removed, inserted, typed);
+                }
+                None => self
+                    .rich
+                    .apply_edit(&before_text, self.buffer.text(), typed),
+            }
             if self.buffer.undo_steps() != steps {
                 self.push_rich_undo(before_rich);
             }
@@ -1267,6 +1281,8 @@ impl TextArea {
         cx: &mut Context<Self>,
     ) {
         set_native_text_focus(window);
+        // What was toggled for the caret's old place, as moving it by keyboard does.
+        self.pending_style = None;
         window.focus(&self.focus_handle);
         cx.stop_propagation();
         self.is_selecting = true;
@@ -1831,6 +1847,23 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().size_full().child(self.0.clone())
         }
+    }
+
+    #[gpui::test]
+    fn clicking_elsewhere_forgets_what_was_toggled_for_the_caret(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
+        let area = area(cx, "one\ntwo");
+        let (_, cx) = cx.add_window_view(|_, _| DragHost(area.clone()));
+        cx.run_until_parked();
+        area.update(cx, |area, cx| area.toggle_bold(cx));
+        area.read_with(cx, |area, _| assert!(area.pending_style.is_some()));
+        cx.simulate_mouse_down(
+            point(px(1.0), px(1.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| assert!(area.pending_style.is_none()));
     }
 
     #[gpui::test]

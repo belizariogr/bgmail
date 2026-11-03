@@ -3,7 +3,7 @@
 use rusqlite::params;
 
 use crate::folder::{
-    folder_like_pattern, folders_csv, is_manual_move_destination_forbidden, system,
+    decode_csv_path, folder_csv_needle, folders_csv, is_manual_move_destination_forbidden, system,
 };
 use crate::membership::refresh_membership_in;
 use crate::Database;
@@ -12,7 +12,7 @@ use crate::Database;
 pub fn parse_folders_csv(csv: &str) -> Vec<String> {
     csv.split(',')
         .filter(|segment| !segment.is_empty())
-        .map(str::to_string)
+        .map(decode_csv_path)
         .collect()
 }
 
@@ -78,6 +78,18 @@ impl Database {
         };
         let updated = replace_primary_folder(&paths, primary);
         self.set_message_folders(id, &updated)
+    }
+
+    /// Takes the message out of `left` and into `joined`, keeping its other folders.
+    pub fn swap_message_folder(&self, id: i64, left: &str, joined: &str) -> rusqlite::Result<()> {
+        let Some((mut paths, _starred)) = self.load_message_folders(id)? else {
+            return Ok(());
+        };
+        paths.retain(|path| path != left);
+        paths.push(joined.to_string());
+        paths.sort();
+        paths.dedup();
+        self.set_message_folders(id, &paths)
     }
 
     /// Moves the message to the Trash folder (keeps flagged membership when starred).
@@ -189,10 +201,10 @@ impl Database {
 
     /// Returns whether the message currently lives in Trash.
     pub fn message_is_in_trash(&self, id: i64) -> rusqlite::Result<bool> {
-        let pattern = folder_like_pattern(system::TRASH);
+        let needle = folder_csv_needle(system::TRASH);
         let count: i64 = self.conn().query_row(
-            "SELECT COUNT(*) FROM messages WHERE id = ?1 AND folders_csv LIKE ?2",
-            params![id, pattern],
+            "SELECT COUNT(*) FROM messages WHERE id = ?1 AND instr(folders_csv, ?2) > 0",
+            params![id, needle],
             |row| row.get(0),
         )?;
         Ok(count > 0)

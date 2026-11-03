@@ -82,6 +82,21 @@ pub(crate) fn saturating_u16<T: Ord + From<u16> + TryInto<i32>>(input: T) -> u16
     saturating_i16(input) as u16
 }
 
+/// BGMail: the largest length layout takes, in CSS px (`nscoord_MAX`, where Gecko and Blink
+/// saturate too). Past it `f32` sums round apart and overflow to infinity and NaN, which
+/// panics in Parley and hangs the painters.
+pub const MAX_LENGTH_PX: f32 = 17_895_697.0;
+
+/// BGMail: `px` within [`MAX_LENGTH_PX`], without NaN.
+#[inline]
+pub fn saturate_px(px: f32) -> f32 {
+    if px.is_nan() {
+        0.0
+    } else {
+        px.clamp(-MAX_LENGTH_PX, MAX_LENGTH_PX)
+    }
+}
+
 #[inline]
 pub fn length_percentage(val: &stylo::LengthPercentage) -> taffy::LengthPercentage {
     match val.unpack() {
@@ -91,7 +106,7 @@ pub fn length_percentage(val: &stylo::LengthPercentage) -> taffy::LengthPercenta
             // SAFETY: calc is a valid value for LengthPercentage
             unsafe { taffy::LengthPercentage::from_raw(val) }
         }
-        stylo::UnpackedLengthPercentage::Length(len) => length(len.px()),
+        stylo::UnpackedLengthPercentage::Length(len) => length(saturate_px(len.px())),
         stylo::UnpackedLengthPercentage::Percentage(percentage) => percent(percentage.0),
     }
 }
@@ -107,7 +122,7 @@ pub fn dimension(val: &stylo::Size) -> taffy::Dimension {
         stylo::Size::FitContent => taffy::Dimension::fit_content(),
         stylo::Size::FitContentFunction(val) => match val.0.unpack() {
             stylo::UnpackedLengthPercentage::Length(len) => {
-                taffy::Dimension::fit_content_px(len.px())
+                taffy::Dimension::fit_content_px(saturate_px(len.px()))
             }
             stylo::UnpackedLengthPercentage::Percentage(percentage) => {
                 taffy::Dimension::fit_content_percent(percentage.0)
@@ -301,7 +316,7 @@ pub fn box_sizing(input: stylo::BoxSizing) -> taffy::BoxSizing {
 /// [`length_percentage`]) against `parent_size`
 pub fn resolve_calc_value(calc_ptr: *const (), parent_size: f32) -> f32 {
     let calc = unsafe { &*(calc_ptr as *const stylo::CalcLengthPercentage) };
-    calc.resolve(stylo::CSSPixelLength::new(parent_size)).px()
+    saturate_px(calc.resolve(stylo::CSSPixelLength::new(parent_size)).px())
 }
 
 pub fn inset_rect(style: &stylo::ComputedValues) -> taffy::Rect<taffy::LengthPercentageAuto> {

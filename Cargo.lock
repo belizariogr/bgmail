@@ -583,6 +583,8 @@ dependencies = [
  "core-foundation 0.10.0",
  "embed-resource",
  "gpui",
+ "html-escape",
+ "html5ever",
  "html_view",
  "lol_html",
  "mail_core",
@@ -2946,17 +2948,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hostname"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
-dependencies = [
- "cfg-if",
- "libc",
- "windows-link 0.2.1",
-]
-
-[[package]]
 name = "html-escape"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3653,7 +3644,6 @@ checksum = "f2c646bd5cc763b1087b15493e29a64be6147ba8f19342004fa52048ee596eae"
 dependencies = [
  "base64 0.23.1",
  "email_address",
- "hostname",
  "idna",
  "nom 8.0.0",
  "percent-encoding",
@@ -3791,9 +3781,9 @@ dependencies = [
 
 [[package]]
 name = "lol_html"
-version = "3.0.0"
+version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ae574a677ef0443a0bd3c291f0cab9d1e61a3ad85a1515e3cfc0bc720d5a48e"
+checksum = "5adbb62638edf7e6bc88835cd3ea388bdd53382af42045da0e414ea78aa0c91a"
 dependencies = [
  "bitflags 2.13.0",
  "cfg-if",
@@ -3907,8 +3897,6 @@ dependencies = [
 [[package]]
 name = "mail-parser"
 version = "0.11.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ec00bda90c6e645a54506c630c2820cd6b1890cfd2b0a169b50f74b2b8c7c86"
 dependencies = [
  "hashify",
 ]

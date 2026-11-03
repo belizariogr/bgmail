@@ -16,6 +16,9 @@ repository instead of living in someone's checkout.
   - `vendor/taffy/` (DioxusLabs/taffy rev `c256056`, MIT), wired by
     `[patch."https://github.com/DioxusLabs/taffy"]` in the root `Cargo.toml`
     and in `vendor/blitz/Cargo.toml`.
+  - `vendor/mail_parser/` (mail-parser 0.11.9 from crates.io, Apache-2.0 OR MIT, without its tests,
+    examples and resources), wired by `[patch.crates-io]` in the root `Cargo.toml`; its own
+    workspace, listed in `[workspace] exclude`.
   - `vendor/gpui/` (gpui 0.2.2 from crates.io, Apache-2.0, without `examples/`,
     `tests/` and their manifest targets), wired by `[patch.crates-io]` in the root
     `Cargo.toml`; its own workspace, listed in `[workspace] exclude`.
@@ -30,6 +33,20 @@ repository instead of living in someone's checkout.
 - `serde_fmt`: upstream `impl From<serde_fmt::Error> for core::fmt::Error`
   removed. GPUI 0.2.2 enables `log/kv_unstable_serde`, which pulls
   `serde_fmt`; that foreign impl makes `?` ambiguous in Stylo's `ToCss` derive.
+- `mail_parser` (`parsers/fields/content_type.rs`): RFC 2231 continuations merge by a map and append
+  in place, and `-language` names are a set. Quadratic before, on parts the parser decodes too, so
+  no scan of the raw message could bound it; this runs during sync. `parsers/message.rs`: past 8
+  failed searches for a part's boundary, or with a boundary over 256 bytes, multiparts read as
+  text (in the body if the message's own), as each failure read to the end of the message.
+- `taffy` (`compute/block.rs`): a float is only measured when only a size is wanted, as a full
+  layout has one cache entry and nested tables in floats doubled per level.
+- `taffy` (`compute/grid/track_sizing.rs`): `distribute_space_up_to_limits` only takes tracks with room
+  past rounding, and stops when nothing moved.
+- `gpui` (`bounds_tree.rs`): inserting balances on the way up by rotation past a height difference of
+  16 (at every level, rotating ignores area and makes grids slow), as boxes that stack or
+  shrink made a list as deep as they are many (85000: 16 s per frame), walked recursively. Orders
+  come from the search, exact to an ulp, so what draws over what doesn't change. Its own tests don't
+  run in this workspace: check with a copy of the module (order against brute force).
 - `gpui`: per-window content scale, for the zoom of the whole app (no public API
   can scale a window's rendering and input together). `Window::set_content_scale`
   multiplies the scale factor and divides the viewport and event positions
@@ -46,16 +63,94 @@ repository instead of living in someone's checkout.
     (`distribute_auto_columns`, `TableTreeWrapper::auto_layout_column_style`:
     min/max content per column, colspans, percent → fixed → auto priority,
     table min/max-width); cell widths from every row; min/max-height ignored on
-    cells.
+    cells. A table without a width takes what its percentages ask for
+    (`preferred_columns_width`); a cell's `min-width` and `max-width` bound what it asks of its
+    column, not the cell (`TableCell::width_limits`); a caption wraps to the table, comes first
+    among the laid out, and asks only to fit (`is_caption`); text directly in a table or row gets
+    an anonymous cell (`wrap_table_text_runs`, `group_anonymous_cell_runs`).
   - `stylo.rs`: `<table align>` → auto margins/float; case-insensitive `align`;
-    legacy attributes as CSS (`legacy_presentational_css`): `cellspacing`,
+    legacy attributes as CSS (`legacy_presentational_css`, colors by the standard's rules in
+    `legacy_color`, and only ever as `#rrggbb` we wrote): `bgcolor` and `background` on `body`,
+    `table` and table parts only (`MAX_BACKGROUND_ATTRIBUTE`), `bordercolor`, `cellspacing`,
     `cellpadding`, table/cell `border` (incl. `border="0"`), `<font
-    color/size/face>`, `<body text>`, named/bare-hex `bgcolor`.
+    color/size/face>`, `<body text>`.
   - `html.rs` + `font_metrics.rs`: `HtmlParserProvider: Send + Sync` and a
     compile-time assertion that `BlitzFontMetricsProvider` is `Send`, so documents
     can be built off the UI thread (`html_view::DetachedDocument`).
   - `assets/default.css`: `td, th { padding: 1px }`, cell min/max-height
     neutralised (`!important`).
+  - `net.rs`/`mutator.rs`: nothing in a message's CSS or HTML can abort: an `@import`
+    or `<img src>` that doesn't resolve is refused (`resolve_url` removed), and
+    `MAX_IMPORTS` limits the total imports of a stylesheet.
+  - `net.rs` (`keep_only_paint_in_state_rules`, also called by `make_stylesheet`): author rules
+    matching on `:hover`, `:active`, `:focus*`, `:checked`, `:target` keep only paint properties,
+    never custom ones, so moving the pointer never creates or frees a box. Reconstruction still
+    happens when a width crosses `@media`, so stale-id tolerance stays (`hoisted_child_count` in
+    `layout/mod.rs` drops freed boxes from a cached list).
+  - `blitz-html/src/html_sink.rs`: fed in 4 KiB pieces, stops at `MAX_DOM_NODES` (500k, comments and
+    foster-parented text included), `MAX_PARSE_DEPTH` (1024, measured on append, as the tree
+    builder pops without telling the sink), `MAX_TEXT_BYTES` (4 MiB) or `MAX_MARKUP_BYTES` (64 MiB
+    of attributes and comments; past it elements are created without attributes, as a piece can
+    copy one thousands of times). `finish` sets `BaseDocument::parse_refused`; hosts refuse it.
+  - `net.rs` + `document.rs`: WOFF1 tables sum at most 128 MiB (`woff1_table_bytes`), a
+    document's fonts 512 MiB (`font_bytes`).
+  - `layout/table.rs`: `TableContext` and `TableCell` keep the `ComputedValues` their `calc()`
+    pointers point into (`computed_style`).
+  - `layout/inline/build.rs`: at most `MAX_INLINE_SPANS` (64k) styles per inline context,
+    as Parley asserts on more than `u16::MAX`: a `<br>` takes one, any other span two, as a `nowrap`
+    one can; past it text takes the open style and `<br>` doesn't break.
+  - `layout/inline/layout.rs`: full layouts for baselines stop after `MAX_LAYOUT_VISITS_FOR_BASELINES`
+    (4 M, `layout_visits`) node visits and bytes of inline text per pass, as nested inline tables were exponential.
+  - `node/node.rs`: `containing_block` and the walks up skip freed boxes.
+  - `node/node.rs` (`record_out_of_flow`): a box back in flow forgets its containing block.
+  - `taffy/src/compute/oof.rs`: a box that became a leaf clears its hoisted list.
+  - `events/pointer.rs`: a label passes a click on once (`in_label_click`), as its control's own
+    click bubbles back to it.
+  - `layout/table.rs`: `display:contents` on a row group keeps its children in the table, and a
+    cell outside a row opens an anonymous one, shared with its sibling cells; a group clears its own construction damage, not its children's, so
+    a cell rebuilds after being a block; an anonymous row has no node (`TableRow::node_id: None`), so
+    a cell's color stays in the cell; what isn't a row or cell directly in a table or row group gets an anonymous row and cell, captions
+    included (first column), rebuilding its subtree.
+  - `document.rs` + `resolve.rs` (`rebuild_boxes_once`): a media query changing result rebuilds every
+    box in the next pass, about 190 ms at 1 MB, once per crossing. `layout/damage.rs`: a table
+    rebuilds when a part changes display, and `vertical-align` rebuilds its inline layout.
+  - `layout/construct.rs`: `flush_inline_pseudos_recursive` reads the child's display, so nested
+    inlines keep their pseudo-elements.
+  - `layout/mod.rs` (`compute_block_child_layout`): a result that placed floats in the formatting
+    context it was given isn't cached, as a hit wouldn't place them. The scrollable overflow of a
+    table root is capped across only, so text past a cell's height can be reached.
+  - `layout/table.rs`: captions are collected last, span the table and move to the top.
+  - `net.rs` (`TRUSTED_FONT_HOST`): `@font-face` only loads from `fonts.gstatic.com`, as no font
+    engine here survives a hostile font (user-visible: other web fonts use the declared stack).
+  - `stylo_to_parley.rs`: at most 64 families per style.
+  - `stylo.rs`: sibling walks use `Node::sibling_index`, a remembered position checked on use, and
+    a pass takes at most `MAX_SIBLING_STEPS` (2^26) of them: past it selectors don't match, and a
+    first layout gives up.
+  - `document.rs` (`generated_text_left`): `content` and list markers share 256 KB per pass;
+    `layout_deadline`/`layout_timed_out`: layout compares the deadline every 256 visits and then
+    returns empty boxes, so hosts can discard the document.
+  - `net.rs`: GIF animations decode under `Limits` (2 × `MAX_ANIMATION_BYTES`), still images
+    under `MAX_IMAGE_BYTES` (256 MiB), and a document's images share
+    `MAX_DOCUMENT_IMAGE_BYTES` (2 GiB, `BaseDocument::image_budget`): past it they stay
+    placeholders.
+  - `layout/table.rs`: `colspan` and `<col span>` count at most `MAX_COLSPAN` (1000, as in
+    HTML), a table has at most `MAX_TABLE_COLUMNS` (8192; cells past it overlap the last
+    column) and `MAX_TABLE_ROW` grid rows (`i16`).
+  - `stylo_taffy/src/convert.rs` (`saturate_px`, `MAX_LENGTH_PX`) and `stylo_to_parley.rs`:
+    lengths, `calc()` and letter/word spacing saturate at `nscoord_MAX`, without NaN.
+  - `layout/inline/layout.rs`: a line's max advance never passes the layout's, which Parley
+    asserts in release too.
+  - `layout/construct.rs` + `layout/mod.rs`: `display:contents` pseudos of tables and text
+    nodes without a wrap context aren't layout children; replaced elements never become
+    tables.
+  - `document.rs` + `layout/paint_tree.rs` + `layout/damage.rs`: freeing a node
+    (`paint_tree_stale`) rebuilds the whole paint tree next frame; stale ids are skipped.
+    `get_selected_text` tolerates offsets older than the text.
+  - `resolve.rs` (`assert_layout_parents_consistent`, debug only): walks the box tree, as a
+    box that became inline keeps its old, unread list.
+  - `util.rs` (`parse_svg_image`): an SVG can't read local files; only `data:` images
+    resolve, since a device or a UNC path in a message's `<image href>` would block
+    the UI or reach the network.
   - `stylo_to_parley.rs`: `-apple-system`/`BlinkMacSystemFont` map to
     `system-ui` on every platform (as Chromium does).
   - `document.rs` + `layout/inline/layout.rs`: `set_line_height_quirk` (lines

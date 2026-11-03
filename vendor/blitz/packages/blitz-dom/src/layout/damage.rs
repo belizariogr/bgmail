@@ -100,6 +100,12 @@ impl BaseDocument {
                 DisplayInside::Flex | DisplayInside::Grid
             );
         damage_from_children.remove(REORDER_CHILDREN);
+        // BGMail: what becomes or stops being a row or cell only shows in the table's context.
+        // `tbody{display:block}` at a narrow width left the message blank.
+        if self.nodes[node_id].flags.is_table_root() && damage_from_children.contains(CONSTRUCT_BOX)
+        {
+            damage.insert(CONSTRUCT_BOX);
+        }
         damage |= damage_from_children;
 
         // Put children back
@@ -421,6 +427,12 @@ pub(crate) fn compute_layout_damage(old: &ComputedValues, new: &ComputedValues) 
         {
             return true;
         }
+        // BGMail: `vertical-align` is written into the inline layout when it is built.
+        if old.slow_clone_alignment_baseline() != new.slow_clone_alignment_baseline()
+            || old.get_box().baseline_shift != new.get_box().baseline_shift
+        {
+            return true;
+        }
 
         let old_text = old.get_inherited_text();
         let new_text = new.get_inherited_text();
@@ -532,8 +544,11 @@ impl BaseDocument {
         }
 
         for node_id in anon_nodes {
-            if let Some(parent_id) = *(self.nodes[node_id].layout_parent.get_mut()) {
-                self.nodes[parent_id].insert_damage(ALL_DAMAGE);
+            if let Some(parent_id) = *(self.nodes[node_id].layout_parent.get_mut())
+                // BGMail: the parent may have been freed by a box reconstruction.
+                && let Some(parent) = self.nodes.get_mut(parent_id)
+            {
+                parent.insert_damage(ALL_DAMAGE);
             }
         }
     }
@@ -632,7 +647,7 @@ impl BaseDocument {
                                 doc_id,
                                 None, // Don't pass node_id, we'll handle via pending_images
                                 self.shell_provider.clone(),
-                                ImageHandler::new(kind.image_type(idx)),
+                                ImageHandler::new(kind.image_type(idx), self.image_budget.clone()),
                             ),
                         );
 

@@ -212,7 +212,9 @@ _(No functions.)_
 - **`Database::enqueue_outgoing`** (pub) — `pub fn enqueue_outgoing(&self, account_id: i64, sender: &str, recipients: &[String], raw: &[u8], message_id_hdr: Option<&str>) -> rusqlite::Result<i64>`: recipients stored newline-separated; state `queued`, due now.
 - **`Database::outbox`** (pub) — `pub fn outbox(&self, account_id: i64) -> rusqlite::Result<Vec<OutgoingRow>>`: every row of the account (any state), oldest first; recipients split on lines (empty lines dropped).
 - **`Database::due_outgoing`** (pub) — `pub fn due_outgoing(&self, account_id: i64, now: i64) -> rusqlite::Result<Vec<OutgoingRow>>`: `queued` / `append_pending` rows with `next_attempt_at <= now`, oldest first.
-- **`Database::failed_outgoing`** (pub) — `pub fn failed_outgoing(&self) -> rusqlite::Result<Vec<OutgoingRow>>`: `failed` and `maybe_sent` rows of every account (they stopped retrying; the UI resolves them), oldest first. `raw` is empty: the UI lists these on every reload, attachments can be large.
+- **`Database::unsent_outgoing`** (pub) — `pub fn unsent_outgoing(&self) -> rusqlite::Result<Vec<OutgoingRow>>`: `failed`, `maybe_sent` and `queued` after a failure or left for 5 minutes (`STUCK_IN_QUEUE`), oldest first, `raw` empty.
+- **`Database::give_up_outgoing`** (pub) — `pub fn give_up_outgoing(&self, account_id: i64, now: i64, max_age_secs: i64) -> rusqlite::Result<Vec<(i64, Option<String>)>>`: stops `queued` rows older than `max_age_secs` from `MAX(created_at, retry_from)`, skipping rows with no known age; returns their ids and errors.
+- **`Database::stop_outgoing`** (pub) — `pub fn stop_outgoing(&self, id: i64) -> rusqlite::Result<bool>`: `queued` → `failed`; `false` in any other state.
 - **`Database::outgoing`** (pub) — `pub fn outgoing(&self, id: i64) -> rusqlite::Result<Option<OutgoingRow>>`: one row with its raw bytes.
 - **`Database::next_outgoing_due`** (pub) — `pub fn next_outgoing_due(&self, account_id: i64, now: i64) -> rusqlite::Result<Option<i64>>`: earliest `next_attempt_at` after `now` among `queued` / `append_pending` rows.
 - **`Database::replace_outgoing`** (pub) — `pub fn replace_outgoing(&self, old_id: i64, account_id: i64, sender: &str, recipients: &[String], raw: &[u8], message_id_hdr: Option<&str>) -> rusqlite::Result<Option<i64>>`: one transaction: deletes `old_id` and queues `raw`. `None` (nothing changed) when the old row exists and isn't stopped; a missing old row doesn't block.
@@ -225,16 +227,17 @@ _(No functions.)_
 - **`Database::defer_outgoing`** (pub) — `pub fn defer_outgoing(&self, id: i64, error: &str, next_attempt_at: i64) -> rusqlite::Result<()>`: transient failure: `deferrals + 1`, `last_error`, `next_attempt_at`, lease cleared; `sending` → `queued`, `append_pending` kept; attempts untouched.
 - **`Database::fail_outgoing`** (pub) — `pub fn fail_outgoing(&self, id: i64, error: &str, next_attempt_at: i64, max_attempts: u32) -> rusqlite::Result<OutgoingState>`: permanent rejection: `attempts + 1`, `last_error`, `next_attempt_at`, lease cleared; `failed` once attempts reach `max_attempts`, else `queued`; returns the new state (`Failed` for a missing row).
 - **`Database::mark_outgoing_maybe_sent`** (pub) — `pub fn mark_outgoing_maybe_sent(&self, id: i64, error: &str) -> rusqlite::Result<()>`: `maybe_sent` + `last_error`, lease cleared.
-- **`Database::retry_outgoing`** (pub) — `pub fn retry_outgoing(&self, id: i64) -> rusqlite::Result<bool>`: user retry of a stopped row: `queued`, attempts/deferrals/`next_attempt_at` 0, lease and error cleared. `false` (untouched) for any other state.
-- **`Database::delete_outgoing`** (pub) — `pub fn delete_outgoing(&self, id: i64) -> rusqlite::Result<()>`: user discard (any state).
-- Tests: `unix_now_is_after_2020`, `pending_ops_lifecycle` (incl. `update_op`, `pending_op`), `outbox_lifecycle`, `complete_op_if_unchanged_detects_rewrites_and_removals`, `update_op_if_unchanged_is_a_compare_and_swap`, `due_outgoing_respects_backoff_and_state`, `claim_outgoing_is_exclusive_and_leases_expire_to_maybe_sent`, `fail_outgoing_reaches_failed_after_max_attempts`, `failed_outgoing_retry_and_delete`, `replace_outgoing_only_replaces_stopped_or_missing_rows`, `retry_outgoing_only_touches_stopped_rows`, `stopped_listing_leaves_raw_out_and_outgoing_brings_it`, `next_outgoing_due_is_the_earliest_future_retry`, `atomically_rolls_back_on_error`.
+- **`Database::retry_outgoing`** (pub) — `pub fn retry_outgoing(&self, id: i64) -> rusqlite::Result<bool>`: user retry of a stopped row: `queued`, attempts/deferrals/`next_attempt_at` 0, lease and error cleared. `false` (untouched) for any other state. Also accepts a row stuck in the queue; records `retry_from`, from which its age counts.
+- **`Database::delete_outgoing`** (pub) — `pub fn delete_outgoing(&self, id: i64) -> rusqlite::Result<bool>`: deletes the row unless it is `sending` or `append_pending` (`false`).
+- Tests: `unix_now_is_after_2020`, `pending_ops_lifecycle` (incl. `update_op`, `pending_op`), `outbox_lifecycle`, `complete_op_if_unchanged_detects_rewrites_and_removals`, `update_op_if_unchanged_is_a_compare_and_swap`, `due_outgoing_respects_backoff_and_state`, `claim_outgoing_is_exclusive_and_leases_expire_to_maybe_sent`, `fail_outgoing_reaches_failed_after_max_attempts`, `unsent_outgoing_retry_and_delete`, `a_retrying_row_is_listed_and_can_be_stopped_or_discarded`, `a_row_being_sent_cannot_be_stopped_or_discarded`, `replace_outgoing_only_replaces_stopped_or_missing_rows`, `retry_outgoing_only_touches_stopped_rows`, `stopped_listing_leaves_raw_out_and_outgoing_brings_it`, `next_outgoing_due_is_the_earliest_future_retry`, `atomically_rolls_back_on_error`.
 
 ### `src/message_ops.rs`
 
 #### Functions / methods (module)
 
 - **`parse_folders_csv`** (pub) — `pub fn parse_folders_csv(csv: &str) -> Vec<String>`: split on commas, drop empties.
-- **`message_has_folder`** (pub) — `pub fn message_has_folder(csv: &str, folder_path: &str) -> bool`: exact segment match.
+- **`Database::swap_message_folder`** (pub) — `pub fn swap_message_folder(&self, id: i64, left: &str, joined: &str) -> rusqlite::Result<()>`: out of `left`, into `joined`, other folders kept.
+- **`message_has_folder`** (pub, re-exported) — `pub fn message_has_folder(csv: &str, folder_path: &str) -> bool`: exact match over decoded segments.
 - **`is_virtual_flagged_folder`** (pub) — `pub fn is_virtual_flagged_folder(path: &str) -> bool`: `path == sys:flagged`.
 - **`replace_primary_folder`** (pub) — `pub fn replace_primary_folder(paths: &[String], primary: &str) -> Vec<String>`: keeps only flagged, adds `primary`, sorted/deduped.
 - **`folders_csv_from_paths`** (pub) — `pub fn folders_csv_from_paths(paths: &[String]) -> String`.
@@ -279,12 +282,12 @@ These edit `folders_csv` directly and work for every message. For a remote messa
 - **`folders_csv`** (pub, L24)
   - Signature: `pub fn folders_csv<'a>(paths: impl IntoIterator<Item = &'a str>) -> String`
   - Purpose: Serializes folder paths into the comma-wrapped DB format.
-  - Behavior: Joins paths with commas and wraps as `,{path1},{path2},` so SQL `LIKE '%,path,%'` matches unambiguously. Empty iterator yields `,,`.
+  - Behavior: Joins paths with commas and wraps as `,{path1},{path2},` with a `,` inside a path written as U+001F (`encode_csv_path`/`decode_csv_path`, crate-private), so a path never spans segments. Empty iterator yields `,,`.
 
-- **`folder_like_pattern`** (pub, L30)
-  - Signature: `pub fn folder_like_pattern(folder_path: &str) -> String`
-  - Purpose: Builds a SQL LIKE pattern for membership in `folders_csv`.
-  - Behavior: Returns `format!("%,{folder_path},%")`. No escaping beyond the stored path string.
+- **`folder_csv_needle`** (pub)
+  - Signature: `pub fn folder_csv_needle(folder_path: &str) -> String`
+  - Purpose: What `instr(folders_csv, ?)` looks for to test membership.
+  - Behavior: Returns `,{encoded path},`. Used with `instr`, not `LIKE`: exact and case-sensitive, so `My_Work`, `MyXWork`, `work` and `WORK` stay distinct.
 
 - **`user_folder_path`** (pub, L35)
   - Signature: `pub fn user_folder_path(display_name: &str) -> String`
@@ -308,8 +311,8 @@ These edit `folders_csv` directly and work for every message. For a remote messa
   - Purpose: Verifies CSV wrapping format.
   - Behavior: Asserts inbox+flagged paths serialize to `,sys:inbox,sys:flagged,`.
 
-- **`folder_like_pattern_matches_inside_csv`** (private, L62)
-  - Signature: `fn folder_like_pattern_matches_inside_csv()`
+- **`folder_csv_needle_matches_inside_csv`** (private)
+  - Signature: `fn folder_csv_needle_matches_inside_csv()`
   - Purpose: Verifies LIKE pattern shape and substring containment.
   - Behavior: Asserts pattern for inbox is `%,sys:inbox,%` and sample CSV contains `sys:inbox,`.
 
@@ -334,6 +337,8 @@ These edit `folders_csv` directly and work for every message. For a remote messa
 
 ##### Context: `module`
 
+- **`Database::replace_corrupt(path)`** (pub): keeps a damaged file as `<name>.corrupt` with its journals, opens a new one and copies what it can read of `accounts` and `outbox`. **`Database::open_or_replace_corrupt(path)`** (pub): `open`, using it if the file is damaged. **`is_corrupt(error)`** (pub).
+- **`lossy_text(row, index)`** (pub(crate)): a text column whatever it holds, so one damaged value doesn't stop a list or the app.
 - **`fold_for_search`** (pub, L6)
   - Signature: `pub fn fold_for_search(text: &str) -> String`
   - Purpose: Normalizes text for accent-insensitive, case-insensitive matching.

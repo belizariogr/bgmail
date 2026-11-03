@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 # Vendored third-party workspaces (own manifests, path-depended on by crates).
-exclude = ["vendor/blitz", "vendor/taffy", "vendor/gpui"]
+exclude = ["vendor/blitz", "vendor/taffy", "vendor/gpui", "vendor/mail_parser"]
 members = [
     "crates/theme",
     "crates/ui",
@@ -57,6 +57,8 @@ strip = true
 serde_fmt = { path = "vendor/serde_fmt" }
 # See vendor/gpui: adds a per-window content scale, for the whole-app zoom.
 gpui = { path = "vendor/gpui" }
+# See vendor/mail_parser: parameter continuations in linear time, reached during sync.
+mail-parser = { path = "vendor/mail_parser" }
 
 [patch."https://github.com/DioxusLabs/taffy"]
 # Blitz's pinned Taffy with BGMail layout fixes (vendor/taffy).

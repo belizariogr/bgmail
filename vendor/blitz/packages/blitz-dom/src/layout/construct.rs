@@ -26,6 +26,7 @@ use crate::{
     traversal::{iter_children, iter_children_and_pseudos},
 };
 
+use super::replaced::is_replaced_element;
 use super::{
     damage::ALL_DAMAGE, list::collect_list_item_children, replaced::is_inline_box_element,
     table::build_table_context,
@@ -236,6 +237,11 @@ fn push_hoisted_child(
     let child_display = child.display_style().unwrap_or(Display::inline());
     if matches!(child_display.inside(), DisplayInside::Contents) {
         collect_layout_children_with_wrap(doc, child_id, out, wrap);
+        return;
+    }
+    // BGMail: a text node can't be a layout child (it has no layout data, so the first
+    // pass over it panics), and without a wrap context nothing will box it.
+    if wrap.is_none() && child.data.kind() == NodeKind::Text {
         return;
     }
     if let Some(wrap_ctx) = wrap {
@@ -571,7 +577,13 @@ fn collect_layout_children_with_wrap(
             sort_layout_children_by_order(&doc.nodes, &mut out.children);
         }
 
-        DisplayInside::Table => {
+        // BGMail: a replaced element is never a table: its special data is the image, which
+        // the table context would overwrite while layout still takes it for replaced.
+        DisplayInside::Table
+            if !doc.nodes[container_node_id]
+                .element_data()
+                .is_some_and(|element| is_replaced_element(&element.name.local)) =>
+        {
             let (table_context, tlayout_children, anonymous_cells) =
                 build_table_context(doc, container_node_id);
             // BGMail: anonymous cell wrappers are deallocated with the table's
@@ -587,11 +599,23 @@ fn collect_layout_children_with_wrap(
                 .downcast_element_mut()
                 .unwrap()
                 .special_data = data;
-            if let Some(before) = doc.nodes[container_node_id].before() {
+            // BGMail: a `display:contents` pseudo has no box of its own to lay out, only its
+            // text; pushing it left a text node as a layout child of the table.
+            let boxed_pseudo = |doc: &BaseDocument, id: NodeId| {
+                !matches!(
+                    doc.nodes[id].display_style().map(|d| d.inside()),
+                    Some(DisplayInside::Contents)
+                )
+            };
+            if let Some(before) = doc.nodes[container_node_id].before()
+                && boxed_pseudo(doc, before)
+            {
                 out.push(before, doc);
             }
             out.extend(&tlayout_children, doc);
-            if let Some(after) = doc.nodes[container_node_id].after() {
+            if let Some(after) = doc.nodes[container_node_id].after()
+                && boxed_pseudo(doc, after)
+            {
                 out.push(after, doc);
             }
         }
@@ -742,7 +766,9 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
                     .insert(NodeFlags::IS_IN_DOCUMENT);
             }
 
-            if let Some(text) = pe_content_text(pe_style) {
+            if let Some(text) =
+                pe_content_text(pe_style).filter(|text| doc.take_generated_text(text.len()))
+            {
                 let text_node_id = doc.create_text_node(&text);
                 doc.nodes[text_node_id].parent = Some(new_node_id);
                 doc.nodes[new_node_id].children.push(text_node_id);
@@ -773,7 +799,8 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
             // the style-pointer comparison below, as the pseudo-element's style may
             // already have been updated by `sync_pseudo_element_styles` during the
             // style traversal without the text having been updated.
-            let new_text = pe_content_text(&pe_style);
+            let new_text =
+                pe_content_text(&pe_style).filter(|text| doc.take_generated_text(text.len()));
             let existing_text_node_id = doc.nodes[pe_node_id]
                 .children
                 .first()
@@ -1047,7 +1074,8 @@ pub(crate) fn find_inline_layout_embedded_boxes(
     fn flush_inline_pseudos_recursive(doc: &mut BaseDocument, node_id: NodeId) {
         doc.iter_children_mut(node_id, |child_id, doc| {
             flush_pseudo_elements(doc, child_id);
-            let display = doc.nodes[node_id]
+            // BGMail: the child's, not the parent's, or nested inlines never got their pseudos.
+            let display = doc.nodes[child_id]
                 .display_style()
                 .unwrap_or(Display::inline());
             let do_recurse = match (display.outside(), display.inside()) {
@@ -1086,6 +1114,9 @@ pub(crate) fn find_inline_layout_embedded_boxes(
                 match (display.outside(), display.inside()) {
                     (DisplayOutside::None, DisplayInside::None) => {
                         node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+                        // BGMail: its boxes aren't rebuilt, so walks over inline roots must
+                        // not take the ones it had as current.
+                        node.flags.remove(NodeFlags::IS_INLINE_ROOT);
                     }
                     (DisplayOutside::None, DisplayInside::Contents) => {
                         node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);

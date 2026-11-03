@@ -215,14 +215,39 @@ impl RichText {
         let suffix = common_suffix(&old[start..], &new[start..]);
         let removed = start..old.len() - suffix;
         let inserted = &new[start..new.len() - suffix];
+        self.apply_edit_at(old, removed, inserted, typed);
+    }
 
+    /// Follows the edit that replaced `removed` of `old` with `inserted`. With repeated
+    /// text only the real range tells which of the copies changed.
+    pub fn apply_edit_at(
+        &mut self,
+        old: &str,
+        removed: std::ops::Range<usize>,
+        inserted: &str,
+        typed: CharStyle,
+    ) {
+        // A line break on both sides isn't an edit of the line after it.
+        let (removed, inserted) = match inserted.strip_suffix('\n') {
+            Some(shorter) if old[removed.clone()].ends_with('\n') => {
+                (removed.start..removed.end - 1, shorter)
+            }
+            _ => (removed, inserted),
+        };
+        let start = removed.start;
         let line = old[..start].matches('\n').count();
         let removed_lines = old[removed.clone()].matches('\n').count();
-        let style = self.paras[line];
-        self.paras.splice(
-            line + 1..=line + removed_lines,
-            std::iter::repeat_n(style, inserted.matches('\n').count()),
-        );
+        let at_line_start = start == 0 || old.as_bytes()[start - 1] == b'\n';
+        if at_line_start && inserted.is_empty() {
+            // Whole lines went: what remains is the last of them, with its own style.
+            self.paras.drain(line..line + removed_lines);
+        } else {
+            let style = self.paras[line];
+            self.paras.splice(
+                line + 1..=line + removed_lines,
+                std::iter::repeat_n(style, inserted.matches('\n').count()),
+            );
+        }
 
         self.split_at(removed.start);
         self.split_at(removed.end);
@@ -526,6 +551,36 @@ mod tests {
             .into_iter()
             .map(|(range, style)| (text[range].to_string(), style.bold))
             .collect()
+    }
+
+    #[test]
+    fn replacing_a_whole_line_leaves_the_next_one_alone() {
+        let text = "AAA\nBBB\nCCC";
+        for inserted in ["\n", "X\n"] {
+            let mut rich = RichText::new(text);
+            rich.update_paras(1..2, |para| para.align = Align::Center);
+            rich.update_paras(2..3, |para| para.align = Align::Right);
+            rich.apply_edit_at(text, 4..8, inserted, CharStyle::default());
+            assert_eq!(rich.para(2).align, Align::Right, "{inserted:?}");
+        }
+    }
+
+    #[test]
+    fn with_repeated_text_the_real_range_says_which_copy_changed() {
+        let text = "foo foo";
+        let mut rich = RichText::new(text);
+        rich.update_chars(4..7, |style| style.bold = true);
+        rich.apply_edit_at(text, 0..4, "", CharStyle::default());
+        assert!(
+            rich.all_chars(0..3, |style| style.bold),
+            "the bold one stays"
+        );
+
+        let text = "Item\nItem";
+        let mut rich = RichText::new(text);
+        rich.update_paras(1..2, |para| para.list = Some(ListKind::Bullet));
+        rich.apply_edit_at(text, 0..5, "", CharStyle::default());
+        assert_eq!(rich.para(0).list, Some(ListKind::Bullet));
     }
 
     #[test]

@@ -119,6 +119,11 @@ pub fn bind_app_shortcuts(cx: &mut App) {
         ),
         KeyBinding::new(DELETE_MESSAGE_MAC, MessageDelete, None),
         KeyBinding::new(DELETE_MESSAGE_OTHER, MessageDelete, None),
+        // In a text field, this is a key for deleting text, never a message.
+        KeyBinding::new(DELETE_MESSAGE_MAC, gpui::NoAction, Some("TextInput")),
+        KeyBinding::new(DELETE_MESSAGE_OTHER, gpui::NoAction, Some("TextInput")),
+        KeyBinding::new(DELETE_MESSAGE_MAC, gpui::NoAction, Some("TextArea")),
+        KeyBinding::new(DELETE_MESSAGE_OTHER, gpui::NoAction, Some("TextArea")),
         KeyBinding::new(ARCHIVE_MAC, MessageArchive, None),
         KeyBinding::new(ARCHIVE_OTHER, MessageArchive, None),
         KeyBinding::new(MARK_JUNK_MAC, MessageMarkJunk, None),
@@ -192,6 +197,53 @@ const GLOBAL_CHORDS: [(&str, &str); 17] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Something to hold the focus, under a key context or none.
+    struct Focused {
+        focus: gpui::FocusHandle,
+        context: Option<&'static str>,
+    }
+
+    impl gpui::Render for Focused {
+        fn render(
+            &mut self,
+            window: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{InteractiveElement, ParentElement};
+            window.focus(&self.focus);
+            let mut element = gpui::div().track_focus(&self.focus);
+            if let Some(context) = self.context {
+                element = element.key_context(context);
+            }
+            element.child("x")
+        }
+    }
+
+    #[gpui::test]
+    fn the_delete_shortcut_leaves_text_fields_alone(cx: &mut gpui::TestAppContext) {
+        let deleted = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|cx| {
+            bind_app_shortcuts(cx);
+            let deleted = deleted.clone();
+            cx.on_action(move |_: &MessageDelete, _| deleted.set(deleted.get() + 1));
+        });
+        let key = if cfg!(target_os = "macos") {
+            "cmd-backspace"
+        } else {
+            "ctrl-backspace"
+        };
+        for (context, expected) in [(Some("TextInput"), 0), (Some("TextArea"), 0), (None, 1)] {
+            deleted.set(0);
+            let (_, cx) = cx.add_window_view(|_, cx| Focused {
+                focus: cx.focus_handle(),
+                context,
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes(key);
+            assert_eq!(deleted.get(), expected, "{context:?}");
+        }
+    }
 
     #[gpui::test]
     fn plus_minus_and_zero_zoom_the_app_from_anywhere(cx: &mut gpui::TestAppContext) {

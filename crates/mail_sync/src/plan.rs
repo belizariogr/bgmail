@@ -91,17 +91,35 @@ impl FolderPlan {
     }
 }
 
+/// How deep a folder is, not counting a leading `INBOX` (some servers keep every
+/// folder under it).
+fn folder_depth(folder: &RemoteFolder) -> usize {
+    let Some(delimiter) = folder.delimiter.as_deref().filter(|d| !d.is_empty()) else {
+        return 0;
+    };
+    let mut segments = folder.name.split(delimiter).peekable();
+    if segments
+        .peek()
+        .is_some_and(|first| first.eq_ignore_ascii_case("inbox"))
+    {
+        segments.next();
+    }
+    segments.count()
+}
+
 /// Diffs the server folder list against the local one. Local-only folders
 /// (`remote_name == None`) are never touched.
 pub fn plan_folders(remote: &[RemoteFolder], local: &[Folder]) -> FolderPlan {
-    // Archive-role folders must claim the archive path before All Mail does,
-    // and a folder the server declares (SPECIAL-USE) before one that only has
-    // a matching name: Gmail's `[Gmail]/Rascunhos` over a label `Rascunhos`.
+    // A folder the server declares (SPECIAL-USE) goes before one that only has a
+    // matching name: Gmail's `[Gmail]/Rascunhos` over a label `Rascunhos`, and All Mail
+    // over a label `Archive`. A declared Archive goes before All Mail. Among names, the
+    // one nearest the top: `Sent` over `Old/Sent`.
     let mut ordered: Vec<&RemoteFolder> = remote.iter().collect();
     ordered.sort_by_key(|folder| {
         (
-            folder.role == Some(FolderRole::All),
             role_from_special_use(&folder.attributes).is_none(),
+            folder.role == Some(FolderRole::All),
+            folder_depth(folder),
         )
     });
 
@@ -467,7 +485,12 @@ pub fn new_remote_message(header: &RemoteHeader, parsed: &ParsedMessage) -> NewR
         reply_to: format_address_list(&parsed.reply_to),
         message_id_hdr: parsed.message_id.clone(),
         in_reply_to: parsed.in_reply_to.clone(),
-        references_hdr: parsed.references.join(" "),
+        // One per line: an id can hold spaces.
+        references_hdr: parsed
+            .references
+            .iter()
+            .map(|id| format!("{id}\n"))
+            .collect(),
         thread_id,
         date_ts,
         received_at: received_at(date_ts),
@@ -632,13 +655,13 @@ mod tests {
         let plan = plan_folders(&server, &local);
         assert_eq!(plan.deletes, vec![3]);
         let paths: Vec<_> = plan.upserts.iter().map(|u| u.path.as_str()).collect();
-        assert_eq!(paths, vec![system::SENT, "user:Work", system::ARCHIVE]);
+        assert_eq!(paths, vec![system::SENT, system::ARCHIVE, "user:Work"]);
         let sent = &plan.upserts[0];
         assert!(sent.reset, "Sent now points at another mailbox");
         assert_eq!(sent.remote_name, "[Gmail]/Sent Mail");
         assert_eq!(sent.role.as_deref(), Some("sent"));
-        assert!(!plan.upserts[2].reset);
-        assert_eq!(plan.upserts[2].role.as_deref(), Some("all"));
+        assert!(!plan.upserts[1].reset);
+        assert_eq!(plan.upserts[1].role.as_deref(), Some("all"));
         assert!(!plan.is_empty());
     }
 
@@ -648,6 +671,47 @@ mod tests {
         let plan = plan_folders(&server, &[]);
         assert_eq!(plan.upserts.len(), 1);
         assert_eq!(plan.upserts[0].remote_name, "Archive");
+    }
+
+    #[test]
+    fn a_label_named_archive_does_not_take_the_place_of_all_mail() {
+        let mut label = remote("Arquivo", &[]);
+        label.role = mail_core::role_from_name("Arquivo", None);
+        assert_eq!(label.role, Some(FolderRole::Archive));
+        let plan = plan_folders(&[remote("[Gmail]/All Mail", &["\\All"]), label], &[]);
+        let archive = plan
+            .upserts
+            .iter()
+            .find(|upsert| upsert.path == system::ARCHIVE)
+            .expect("an archive");
+        assert_eq!(archive.remote_name, "[Gmail]/All Mail");
+    }
+
+    #[test]
+    fn a_name_near_the_top_takes_the_system_path() {
+        let named = |name: &str, role| {
+            let mut folder = remote(name, &[]);
+            folder.delimiter = Some("/".into());
+            folder.role = Some(role);
+            folder
+        };
+        let plan = plan_folders(
+            &[
+                named("Old/Sent", FolderRole::Sent),
+                named("Sent", FolderRole::Sent),
+                named("Old/Trash", FolderRole::Trash),
+                named("INBOX/Trash", FolderRole::Trash),
+            ],
+            &[],
+        );
+        let remote_of = |path: &str| {
+            plan.upserts
+                .iter()
+                .find(|upsert| upsert.path == path)
+                .map(|upsert| upsert.remote_name.as_str())
+        };
+        assert_eq!(remote_of(system::SENT), Some("Sent"));
+        assert_eq!(remote_of(system::TRASH), Some("INBOX/Trash"));
     }
 
     #[test]
@@ -1070,7 +1134,7 @@ Content-Type: multipart/mixed;\r\n boundary=\"x\"\r\n\r\n";
         assert_eq!(message.in_reply_to.as_deref(), Some("parent@example.com"));
         assert_eq!(
             message.references_hdr,
-            "root@example.com parent@example.com"
+            "root@example.com\nparent@example.com\n"
         );
         assert_eq!(message.thread_id.as_deref(), Some("root@example.com"));
         assert_eq!(message.date_ts, 1_700_000_000);

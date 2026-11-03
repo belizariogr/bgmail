@@ -29,6 +29,12 @@ pub struct PaintCache {
     gradients: HashMap<(String, u32, u32), Arc<RenderImage>>,
     /// Colour glyph bitmaps by (font blob, face index, glyph, strike ppem).
     color_glyphs: HashMap<(u64, u32, u32, u32), Option<ColorGlyphImage>>,
+    /// Bytes held by `images` and `gradients` (see [`MAX_CACHED_PIXEL_BYTES`]).
+    cached_pixel_bytes: u64,
+    /// Bytes of them the frame being painted has used.
+    frame_pixel_bytes: u64,
+    /// Image tiles the frame being painted has drawn (see [`MAX_FRAME_TILES`]).
+    frame_tiles: usize,
     known_families: Option<HashSet<String>>,
     /// GPUI family of each registered web font file, by (blob id, face index).
     web_font_families: HashMap<(u64, u32), String>,
@@ -41,6 +47,27 @@ pub struct PaintCache {
 }
 
 impl PaintCache {
+    fn evict_pixels(&mut self) {
+        self.images.clear();
+        self.gradients.clear();
+        self.cached_pixel_bytes = 0;
+    }
+
+    /// Accounts for `bytes` of new pixels the frame needs, starting over if they don't fit.
+    /// `false` if the frame alone is past the limit: what comes after it isn't drawn, or each
+    /// repaint would make the same textures again and fill the GPU with them.
+    fn make_room(&mut self, bytes: u64) -> bool {
+        if self.frame_pixel_bytes + bytes > MAX_CACHED_PIXEL_BYTES {
+            return false;
+        }
+        self.frame_pixel_bytes += bytes;
+        if self.cached_pixel_bytes + bytes > MAX_CACHED_PIXEL_BYTES {
+            self.evict_pixels();
+        }
+        self.cached_pixel_bytes += bytes;
+        true
+    }
+
     /// How long until an animated image painted by the last replay changes
     /// frame (`None`: nothing animates); the host repaints then.
     pub fn next_animation_frame(&self) -> Option<Duration> {
@@ -51,8 +78,7 @@ impl PaintCache {
     /// gradients, colour glyphs, animations) so a long session doesn't keep
     /// every message's pixels. Font registrations stay: GPUI keeps the fonts.
     pub fn forget_document(&mut self) {
-        self.images.clear();
-        self.gradients.clear();
+        self.evict_pixels();
         self.color_glyphs.clear();
         self.animations.clear();
         self.animation_starts.clear();
@@ -317,15 +343,40 @@ pub fn to_bgra_straight(brush: &ImageBrush) -> Vec<u8> {
     data
 }
 
+/// The largest image side uploaded. GPU atlases fail above their own limit, 16384 on Metal
+/// and DirectX, panicking in some paths; a message's image can declare 65535.
+const MAX_UPLOAD_SIDE: u32 = 8192;
+
+/// Most image tiles a frame draws, about 0.25 s of them; a 16 px tile fills a large window with
+/// 9000. Boxes stacked on each other multiply them: 3 took 43 s per frame.
+const MAX_FRAME_TILES: usize = 64_000;
+
+/// Most bytes of decoded and sampled pixels kept for a document, and drawn in a frame; past
+/// them the cache starts over, or a frame leaves out what doesn't fit.
+const MAX_CACHED_PIXEL_BYTES: u64 = 512 << 20;
+
 /// Size to pre-downscale an image to before upload, when it is drawn at less
 /// than half its size (`target` in device pixels). GPUI samples textures
 /// bilinearly without mipmaps, so larger reductions alias (moiré, jagged
-/// icons); browsers filter them.
+/// icons); browsers filter them. Sizes are the source's halved: it is what
+/// `shrinks` already accepts, and a message drawing an image at thousands of
+/// widths would otherwise keep a copy of each.
 pub fn downscaled_size(source: (u32, u32), target: (f64, f64)) -> Option<(u32, u32)> {
     let (w, h) = (target.0.ceil().max(1.0), target.1.ceil().max(1.0));
     let shrinks = |src: u32, dst: f64| src as f64 > 2.0 * dst;
-    (shrinks(source.0, w) || shrinks(source.1, h))
-        .then(|| ((w as u32).min(source.0), (h as u32).min(source.1)))
+    let halved = |src: u32, dst: f64| {
+        let mut size = src;
+        while (size / 2) as f64 >= dst && size / 2 >= 1 {
+            size /= 2;
+        }
+        while size > MAX_UPLOAD_SIDE {
+            size /= 2;
+        }
+        size
+    };
+    let oversized = source.0 > MAX_UPLOAD_SIDE || source.1 > MAX_UPLOAD_SIDE;
+    (oversized || shrinks(source.0, w) || shrinks(source.1, h))
+        .then(|| (halved(source.0, w), halved(source.1, h)))
 }
 
 /// Resizes straight-alpha 4-channel pixels with an area-averaging filter,
@@ -372,8 +423,12 @@ fn render_image(
         upload.0,
         upload.1,
     );
-    if let Some(found) = cache.images.get(&key) {
-        return Some(found.clone());
+    if let Some(found) = cache.images.get(&key).cloned() {
+        cache.frame_pixel_bytes += upload.0 as u64 * upload.1 as u64 * 4;
+        return Some(found);
+    }
+    if !cache.make_room(upload.0 as u64 * upload.1 as u64 * 4) {
+        return None;
     }
     let mut buffer =
         image::RgbaImage::from_raw(image.width, image.height, to_bgra_straight(brush))?;
@@ -626,11 +681,32 @@ fn paint_sampled_gradient(
     if area.width() <= 0.0 || area.height() <= 0.0 {
         return;
     }
+    // Sampling is the costly part, and nothing has to be kept for what can't be seen.
+    let bounds = to_bounds(area, origin);
+    if !bounds.intersects(&window.content_mask().bounds) {
+        return;
+    }
     let (w, h) = gradient_texture_size(area, window.scale_factor());
-    let key = (format!("{gradient:?}{transform:?}{area:?}"), w, h);
-    let image = match cache.gradients.get(&key) {
-        Some(image) => image.clone(),
+    // Relative to the box, so equal boxes share one texture wherever they are.
+    let box_transform = Affine::translate((-area.x0, -area.y0)) * *transform;
+    let key = (
+        format!(
+            "{gradient:?}{box_transform:?}{:?}",
+            (area.width(), area.height())
+        ),
+        w,
+        h,
+    );
+    let bytes = w as u64 * h as u64 * 4;
+    let image = match cache.gradients.get(&key).cloned() {
+        Some(image) => {
+            cache.frame_pixel_bytes += bytes;
+            image
+        }
         None => {
+            if !cache.make_room(bytes) {
+                return;
+            }
             let pixels = crate::gradient::rasterize(gradient, transform, area, w, h);
             let Some(buffer) = image::RgbaImage::from_raw(w, h, pixels) else {
                 return;
@@ -643,7 +719,7 @@ fn paint_sampled_gradient(
         }
     };
     window
-        .paint_image(to_bounds(area, origin), corner_radii, image, 0, false)
+        .paint_image(bounds, corner_radii, image, 0, false)
         .ok();
 }
 
@@ -658,6 +734,11 @@ fn paint_image_fill(
     cache: &mut PaintCache,
     window: &mut Window,
 ) {
+    // Before anything is decoded or counted: what can't be seen needs neither, and a long
+    // message would use up the frame's pixels on its first screens.
+    if !to_bounds(area, origin).intersects(&window.content_mask().bounds) {
+        return;
+    }
     let tile = transform.transform_rect_bbox(Rect::new(
         0.0,
         0.0,
@@ -677,8 +758,21 @@ fn paint_image_fill(
     // GPUI images have no opacity input in 0.2.2; layer alpha is not applied.
     let repeat_x = brush.sampler.x_extend == Extend::Repeat;
     let repeat_y = brush.sampler.y_extend == Extend::Repeat;
-    let xs = tile_starts(tile.x0, tile.width(), area.x0, area.x1, repeat_x);
-    let ys = tile_starts(tile.y0, tile.height(), area.y0, area.y1, repeat_y);
+    // Only what shows: a small tile on a large box is thousands of images per frame.
+    let mask = window.content_mask().bounds;
+    let visible = Rect::new(
+        f32::from(mask.left() - origin.x) as f64,
+        f32::from(mask.top() - origin.y) as f64,
+        f32::from(mask.right() - origin.x) as f64,
+        f32::from(mask.bottom() - origin.y) as f64,
+    )
+    .intersect(area);
+    // A tile under a pixel is drawn once, stretched: tiles this small all land on one pixel,
+    // which covered nothing and took 20 s per frame.
+    let (repeat_x, tile) = stretched_tile(repeat_x, tile, brush.image.width, area, scale, true);
+    let (repeat_y, tile) = stretched_tile(repeat_y, tile, brush.image.height, area, scale, false);
+    let xs = tile_starts(tile.x0, tile.width(), visible.x0, visible.x1, repeat_x);
+    let ys = tile_starts(tile.y0, tile.height(), visible.y0, visible.y1, repeat_y);
     window.with_content_mask(
         Some(ContentMask {
             bounds: to_bounds(area, origin),
@@ -686,6 +780,10 @@ fn paint_image_fill(
         |window| {
             for &y in &ys {
                 for &x in &xs {
+                    if cache.frame_tiles >= MAX_FRAME_TILES {
+                        return;
+                    }
+                    cache.frame_tiles += 1;
                     let rect = Rect::new(x, y, x + tile.width(), y + tile.height());
                     // Rounded corners apply when the image covers the box (or the
                     // rounded clip it is drawn into, e.g. `<img>` with radius).
@@ -712,14 +810,41 @@ fn paint_image_fill(
     );
 }
 
+/// Whether an axis of `tile` still repeats, and the tile, as wide or tall as `area` if it doesn't
+/// because it is under a device pixel on that axis.
+fn stretched_tile(
+    repeat: bool,
+    tile: Rect,
+    source_pixels: u32,
+    area: Rect,
+    scale: f64,
+    horizontal: bool,
+) -> (bool, Rect) {
+    let length = if horizontal {
+        tile.width()
+    } else {
+        tile.height()
+    };
+    if !repeat || (length * scale >= 1.0 && source_pixels > 1) {
+        return (repeat, tile);
+    }
+    let stretched = if horizontal {
+        Rect::new(area.x0, tile.y0, area.x1, tile.y1)
+    } else {
+        Rect::new(tile.x0, area.y0, tile.x1, area.y1)
+    };
+    (false, stretched)
+}
+
 /// Start offsets of the tiles needed to cover `[from, to)`.
 pub fn tile_starts(start: f64, len: f64, from: f64, to: f64, repeat: bool) -> Vec<f64> {
     if !repeat {
         return vec![start];
     }
-    let mut x = start - ((start - from) / len).ceil().max(0.0) * len;
+    // Forward too: rows above the window would use up the limit before reaching it.
+    let mut x = start - ((start - from) / len).ceil() * len;
     let mut out = Vec::new();
-    while x < to && out.len() < 512 {
+    while x < to && out.len() < MAX_FRAME_TILES {
         out.push(x);
         x += len;
     }
@@ -772,6 +897,38 @@ fn paint_commands(
                     window.paint_path(path, color);
                 }
             }
+            Command::Dots {
+                bounds,
+                radius,
+                color,
+                centers,
+            } => {
+                let mask = window.content_mask().bounds;
+                if !to_bounds(*bounds, origin).intersects(&mask) {
+                    continue;
+                }
+                let corner = Corners::all(px(*radius as f32));
+                let color = to_hsla(*color, layer.alpha);
+                for center in centers {
+                    let dot = Rect::new(
+                        center.x - radius,
+                        center.y - radius,
+                        center.x + radius,
+                        center.y + radius,
+                    );
+                    let dot = to_bounds(dot, origin);
+                    if dot.intersects(&mask) {
+                        window.paint_quad(PaintQuad {
+                            bounds: dot,
+                            corner_radii: corner,
+                            background: color.into(),
+                            border_widths: Edges::default(),
+                            border_color: gpui::transparent_black(),
+                            border_style: BorderStyle::default(),
+                        });
+                    }
+                }
+            }
             Command::BoxShadow {
                 rect,
                 color,
@@ -810,6 +967,8 @@ pub fn paint_display_list(
 ) {
     cache.animations.clone_from(&list.animations);
     cache.next_frame = None;
+    cache.frame_pixel_bytes = 0;
+    cache.frame_tiles = 0;
     let mut index = 0;
     while index < list.commands.len() {
         // A stray Pop at top level is skipped instead of ending the replay.
@@ -879,11 +1038,26 @@ mod tests {
 
     #[test]
     fn downscales_only_large_reductions() {
-        assert_eq!(downscaled_size((1180, 2048), (16.0, 26.0)), Some((16, 26)));
+        assert_eq!(downscaled_size((1180, 2048), (16.0, 26.0)), Some((18, 32)));
         assert_eq!(downscaled_size((600, 300), (400.0, 200.0)), None);
         // Never upscales a side when only the other one shrinks a lot.
-        assert_eq!(downscaled_size((1000, 10), (100.0, 20.0)), Some((100, 10)));
+        assert_eq!(downscaled_size((1000, 10), (100.0, 20.0)), Some((125, 10)));
         assert_eq!(downscaled_size((100, 100), (0.2, 0.2)), Some((1, 1)));
+        // Past the limit a frame leaves pixels out instead of clearing what it used.
+        let mut cache = PaintCache::default();
+        assert!(cache.make_room(MAX_CACHED_PIXEL_BYTES));
+        assert!(!cache.make_room(1));
+        assert_eq!(cache.cached_pixel_bytes, MAX_CACHED_PIXEL_BYTES);
+        cache.frame_pixel_bytes = 0;
+        assert!(cache.make_room(1));
+        assert_eq!(cache.cached_pixel_bytes, 1);
+        // An image past what GPUs take shrinks whatever it is drawn at, and the sizes of
+        // an image stay few however many widths a message asks for.
+        assert_eq!(downscaled_size((65535, 1), (65535.0, 1.0)), Some((8191, 1)));
+        let sizes: HashSet<_> = (1..4000)
+            .filter_map(|width| downscaled_size((8000, 8000), (width as f64, 100.0)))
+            .collect();
+        assert!(sizes.len() < 14, "{}", sizes.len());
     }
 
     #[test]
@@ -997,6 +1171,29 @@ mod tests {
             tile_starts(10.0, 5.0, 0.0, 20.0, true),
             vec![0.0, 5.0, 10.0, 15.0]
         );
+        // Starting where the window is, whatever came before it, and without stopping at 512.
+        assert_eq!(
+            tile_starts(0.0, 8.0, 5000.0, 5016.0, true),
+            vec![5000.0, 5008.0]
+        );
+        assert_eq!(tile_starts(0.0, 1.0, 0.0, 600.0, true).len(), 600);
+        // Under a pixel it stretches, per axis; a tile of a device pixel still repeats.
+        let area = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let small = Rect::new(0.0, 0.0, 0.01, 0.01);
+        let (repeat, wide) = stretched_tile(true, small, 8, area, 1.0, true);
+        assert!(!repeat && wide.width() == 800.0 && wide.height() == 0.01);
+        let (repeat, both) = stretched_tile(true, wide, 8, area, 1.0, false);
+        assert!(!repeat && both == area);
+        let pixel = Rect::new(0.0, 0.0, 1.0, 1.0);
+        assert_eq!(
+            stretched_tile(true, pixel, 8, area, 1.0, true),
+            (true, pixel)
+        );
+        assert!(stretched_tile(true, Rect::new(0.0, 0.0, 0.5, 1.0), 8, area, 2.0, true).0);
+        // A source a pixel across is the same stretched as repeated, at any size.
+        let line = Rect::new(0.0, 0.0, 1.0, 40.0);
+        let (repeat, wide) = stretched_tile(true, line, 1, area, 1.0, true);
+        assert!(!repeat && wide.width() == 800.0 && wide.height() == 40.0);
     }
 
     fn brush(format: ImageFormat, alpha_type: ImageAlphaType, px: [u8; 4]) -> ImageBrush {

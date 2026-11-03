@@ -6,11 +6,11 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, fill, point, px, relative, App, Bounds, ClipboardItem, Context, CursorStyle,
-    DispatchPhase, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine, SharedString,
-    Style, TextRun, UTF16Selection, Window,
+    actions, fill, point, px, relative, App, Bounds, ClipboardItem, ContentMask, Context,
+    CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window,
 };
 use theme::ActiveTheme;
 use unicode_segmentation::UnicodeSegmentation;
@@ -263,6 +263,8 @@ pub struct TextInput {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
+    /// How far the text is scrolled to keep the caret in view.
+    scroll_x: Pixels,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
     /// Password field: draws bullets and refuses copy/cut.
@@ -282,6 +284,7 @@ impl TextInput {
             selection_reversed: false,
             marked_range: None,
             last_layout: None,
+            scroll_x: px(0.0),
             last_bounds: None,
             is_selecting: false,
             masked: false,
@@ -334,6 +337,11 @@ impl TextInput {
         self.selected_range = self.content.len()..self.content.len();
         self.marked_range = None;
         cx.notify();
+    }
+
+    /// The placeholder shown when the field is empty.
+    pub fn placeholder(&self) -> &SharedString {
+        &self.placeholder
     }
 
     /// Updates the placeholder shown when the field is empty.
@@ -471,7 +479,13 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
+            // In a password, a line break copied along isn't part of it.
+            let text = if self.masked {
+                text.replace(['\r', '\n'], "")
+            } else {
+                single_line(&text)
+            };
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
@@ -519,7 +533,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        self.content_offset(line.closest_index_for_x(position.x - bounds.left()))
+        self.content_offset(line.closest_index_for_x(position.x - bounds.left() + self.scroll_x))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -672,8 +686,21 @@ impl EntityInputHandler for TextInput {
         }
         self.selected_range = new_selected_range_utf16
             .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            // Relative to the new text, in UTF-16 like everything from the platform.
+            .map(|selected| {
+                let within = |utf16: usize| {
+                    new_text
+                        .char_indices()
+                        .scan(0, |units, (offset, c)| {
+                            let at = (*units, offset);
+                            *units += c.len_utf16();
+                            Some(at)
+                        })
+                        .find(|(units, _)| *units >= utf16)
+                        .map_or(new_text.len(), |(_, offset)| offset)
+                };
+                range.start + within(selected.start)..range.start + within(selected.end)
+            })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         if !(range.is_empty() && new_text.is_empty()) {
             cx.emit(TextInputEvent::Changed);
@@ -692,11 +719,13 @@ impl EntityInputHandler for TextInput {
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(self.display_offset(range.start)),
+                bounds.left() + last_layout.x_for_index(self.display_offset(range.start))
+                    - self.scroll_x,
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(self.display_offset(range.end)),
+                bounds.left() + last_layout.x_for_index(self.display_offset(range.end))
+                    - self.scroll_x,
                 bounds.bottom(),
             ),
         ))
@@ -710,7 +739,8 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = self.content_offset(last_layout.index_for_x(point.x - line_point.x)?);
+        let utf8_index =
+            self.content_offset(last_layout.index_for_x(point.x - line_point.x + self.scroll_x)?);
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -806,7 +836,9 @@ impl Element for TextInputElement {
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
 
-        let cursor_pos = line.x_for_index(input.display_offset(cursor));
+        let caret_x = line.x_for_index(input.display_offset(cursor));
+        let scroll = scrolled_to_caret(input.scroll_x, caret_x, line.width, bounds.size.width);
+        let cursor_pos = caret_x - scroll;
         let (selection, cursor) = if selected_range.is_empty() {
             let caret_top = bounds.top() + px(4.0);
             let caret_bottom = bounds.bottom() - px(4.0);
@@ -825,12 +857,12 @@ impl Element for TextInputElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left()
+                            bounds.left() - scroll
                                 + line.x_for_index(input.display_offset(selected_range.start)),
                             bounds.top(),
                         ),
                         point(
-                            bounds.left()
+                            bounds.left() - scroll
                                 + line.x_for_index(input.display_offset(selected_range.end)),
                             bounds.bottom(),
                         ),
@@ -840,6 +872,7 @@ impl Element for TextInputElement {
                 None,
             )
         };
+        self.input.update(cx, |input, _| input.scroll_x = scroll);
         PrepaintState {
             line: Some(line),
             cursor,
@@ -870,27 +903,46 @@ impl Element for TextInputElement {
                 dragged.update(cx, |input, cx| input.on_mouse_move(event, window, cx));
             }
         });
-        // Only the focused field shows its selection, as there is one at a time.
-        if focus_handle.is_focused(window) {
-            if let Some(selection) = prepaint.selection.take() {
-                window.paint_quad(selection);
-            }
-        }
+        let scroll = self.input.read(cx).scroll_x;
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .unwrap();
-
-        if focus_handle.is_focused(window) {
-            if let Some(cursor) = prepaint.cursor.take() {
-                window.paint_quad(cursor);
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            // Only the focused field shows its selection, as there is one at a time.
+            if focus_handle.is_focused(window) {
+                if let Some(selection) = prepaint.selection.take() {
+                    window.paint_quad(selection);
+                }
             }
-        }
+            let origin = point(bounds.origin.x - scroll, bounds.origin.y);
+            line.paint(origin, window.line_height(), window, cx)
+                .unwrap();
+
+            if focus_handle.is_focused(window) {
+                if let Some(cursor) = prepaint.cursor.take() {
+                    window.paint_quad(cursor);
+                }
+            }
+        });
 
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
         });
     }
+}
+
+/// The scroll that shows the caret, moving as little as possible from `scroll`, and with no
+/// empty room after the text once it fits or shrinks.
+fn scrolled_to_caret(scroll: Pixels, caret: Pixels, line: Pixels, width: Pixels) -> Pixels {
+    const CARET_WIDTH: Pixels = px(2.0);
+    let furthest = (line + CARET_WIDTH - width).max(px(0.0));
+    let shown = if caret < scroll {
+        caret
+    } else if caret + CARET_WIDTH > scroll + width {
+        caret + CARET_WIDTH - width
+    } else {
+        scroll
+    };
+    shown.min(furthest).max(px(0.0))
 }
 
 impl Render for TextInput {
@@ -1010,6 +1062,32 @@ mod focus_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::scrolled_to_caret;
+    use gpui::px;
+
+    #[test]
+    fn the_caret_stays_in_view() {
+        let (width, line) = (px(100.0), px(300.0));
+        // Fits: no scroll, wherever it comes from.
+        assert_eq!(
+            scrolled_to_caret(px(50.0), px(10.0), px(40.0), width),
+            px(0.0)
+        );
+        // Past the right edge, then within view: it doesn't move again.
+        assert_eq!(
+            scrolled_to_caret(px(0.0), px(300.0), line, width),
+            px(202.0)
+        );
+        assert_eq!(
+            scrolled_to_caret(px(202.0), px(250.0), line, width),
+            px(202.0)
+        );
+        // Back past the left edge.
+        assert_eq!(
+            scrolled_to_caret(px(202.0), px(50.0), line, width),
+            px(50.0)
+        );
+    }
     use super::{
         click_selection, masked_offset, masked_text, next_word_start, previous_word_start,
         single_line, unmasked_offset,

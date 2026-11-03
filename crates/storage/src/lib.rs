@@ -17,11 +17,12 @@ mod test_support;
 mod types;
 
 pub use contacts::Contact;
-pub use database::{database_path, global_folder_path, Database};
+pub use database::{database_path, global_folder_path, is_corrupt, Database};
 pub use folder::{
     folders_csv, is_manual_move_destination_forbidden, is_system_path, system, user_folder_path,
     SYSTEM_PREFIX, USER_PREFIX,
 };
+pub use message_ops::{message_has_folder, parse_folders_csv};
 pub use schema::SCHEMA_VERSION;
 pub use search::{build_search_text, fold_for_search, search_like_pattern};
 pub use seed::{

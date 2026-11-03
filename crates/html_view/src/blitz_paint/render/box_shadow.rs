@@ -7,6 +7,9 @@ use peniko::{Compose, Fill, Mix};
 
 impl ElementCx<'_, '_> {
     pub(super) fn draw_outset_box_shadow(&self, scene: &mut crate::display_list::DisplayList) {
+        if scene.exhausted() {
+            return;
+        }
         let box_shadow = &self.style.get_effects().box_shadow.0;
         let has_outset_shadow = box_shadow.iter().any(|s| !s.inset);
         if !has_outset_shadow {
@@ -89,6 +92,9 @@ impl ElementCx<'_, '_> {
     }
 
     pub(super) fn draw_inset_box_shadow(&self, scene: &mut crate::display_list::DisplayList) {
+        if scene.exhausted() {
+            return;
+        }
         let current_color = self.style.clone_color();
         let box_shadow = &self.style.get_effects().box_shadow.0;
         let has_inset_shadow = box_shadow.iter().any(|s| s.inset);

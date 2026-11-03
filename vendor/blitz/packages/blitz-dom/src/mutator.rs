@@ -258,16 +258,20 @@ impl DocumentMutator<'_> {
         node.insert_damage(ALL_DAMAGE);
         let element_data = node.element_data_mut().expect("Not an element");
 
-        let existing_names = element_data
-            .attrs
-            .iter()
-            .map(|e| e.name.clone())
-            .collect::<HashSet<_>>();
-
-        for attr in attrs
+        // BGMail: `<html a0><html a1>...` lands here once per tag, which hashed all attributes
+        // so far each time. Limited as hosts limit those of one tag, the search is bounded.
+        const MAX_MERGED_ATTRS: usize = 1024;
+        let mut room = MAX_MERGED_ATTRS.saturating_sub(element_data.attrs.len());
+        let missing: Vec<Attribute> = attrs
             .into_iter()
-            .filter(|attr| !existing_names.contains(&attr.name))
-        {
+            .filter(|attr| !element_data.attrs.iter().any(|e| e.name == attr.name))
+            .take_while(|_| {
+                let fits = room > 0;
+                room = room.saturating_sub(1);
+                fits
+            })
+            .collect();
+        for attr in missing {
             self.set_attribute(node_id, attr.name, &attr.value);
         }
     }
@@ -1285,7 +1289,10 @@ impl<'doc> DocumentMutator<'doc> {
         let node = &self.doc.nodes[target_id];
         if let Some(raw_src) = node.attr(local_name!("src")) {
             if !raw_src.is_empty() {
-                let src = self.doc.resolve_url(raw_src);
+                // BGMail: a `src` that doesn't parse (`ftp://`) stays unloaded, not a panic.
+                let Some(src) = self.doc.url.resolve_relative(raw_src) else {
+                    return;
+                };
                 let src_string = src.as_str();
 
                 // Check cache first
@@ -1323,7 +1330,7 @@ impl<'doc> DocumentMutator<'doc> {
                         self.doc.id(),
                         None, // Don't pass node_id, we'll handle it via pending_images
                         self.doc.shell_provider.clone(),
-                        ImageHandler::new(ImageType::Image),
+                        ImageHandler::new(ImageType::Image, self.doc.image_budget.clone()),
                     ),
                 );
             }

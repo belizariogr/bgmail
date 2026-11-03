@@ -144,10 +144,15 @@ const NAME_ROLES: &[(FolderRole, &[&str])] = &[
 
 /// Guesses a role from a folder's name using only its last path segment, so
 /// `INBOX.Sent` and `[Gmail]/Sent Mail` both resolve. `INBOX` is matched on the
-/// whole name only (a nested `Archive/Inbox` is a user folder).
+/// whole name only (a nested `Archive/Inbox` is a user folder). Only at the top, under
+/// `INBOX` or under Gmail's own folder: anywhere else it is a folder of the user's that
+/// happens to be called that, like `Projects/Trash` (user decision).
 pub fn role_from_name(name: &str, delimiter: Option<&str>) -> Option<FolderRole> {
     if name.trim().eq_ignore_ascii_case("inbox") {
         return Some(FolderRole::Inbox);
+    }
+    if !is_where_system_folders_live(name, delimiter) {
+        return None;
     }
     let decoded = decode_imap_utf7(last_segment(name, delimiter));
     let folded = fold(&decoded);
@@ -189,6 +194,21 @@ impl RemoteFolder {
     /// Human name: last path segment, modified UTF-7 decoded.
     pub fn display_name(&self) -> String {
         decode_imap_utf7(last_segment(&self.name, self.delimiter.as_deref()))
+    }
+}
+
+fn is_where_system_folders_live(name: &str, delimiter: Option<&str>) -> bool {
+    let Some(delimiter) = delimiter.filter(|d| !d.is_empty()) else {
+        return true;
+    };
+    let mut parents: Vec<&str> = name.split(delimiter).collect();
+    parents.pop();
+    match parents[..] {
+        [] => true,
+        [parent] => ["inbox", "[gmail]", "[google mail]"]
+            .iter()
+            .any(|known| parent.eq_ignore_ascii_case(known)),
+        _ => false,
     }
 }
 
@@ -374,6 +394,18 @@ mod tests {
         assert_eq!(role_from_name("inbox", None), Some(FolderRole::Inbox));
         assert_eq!(role_from_name("INBOX", Some("/")), Some(FolderRole::Inbox));
         assert_eq!(role_from_name("Work/Inbox", Some("/")), None);
+        assert_eq!(role_from_name("Projetos/Lixeira", Some("/")), None);
+        assert_eq!(role_from_name("Clientes/Sent", Some("/")), None);
+        assert_eq!(role_from_name("INBOX/Trash/Sent", Some("/")), None);
+        assert_eq!(
+            role_from_name("INBOX/Trash", Some("/")),
+            Some(FolderRole::Trash)
+        );
+        assert_eq!(
+            role_from_name("[Google Mail]/Trash", Some("/")),
+            Some(FolderRole::Trash)
+        );
+        assert_eq!(role_from_name("Trash", Some("/")), Some(FolderRole::Trash));
         assert_eq!(
             role_from_name("INBOX.Sent", Some(".")),
             Some(FolderRole::Sent)

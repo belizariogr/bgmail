@@ -17,8 +17,8 @@ use gpui::{
     Subscription, Task, WeakEntity, Window, WindowBounds,
 };
 use html_view::{
-    Appearance as PageAppearance, DetachedDocument, DocumentOptions, HtmlDocument, HtmlView,
-    Resources,
+    has_too_many_tags, with_render_stack, Appearance as PageAppearance, DetachedDocument,
+    DocumentOptions, HtmlDocument, HtmlView, Resources,
 };
 use mail_core::{Address, Draft, OutgoingAttachment};
 use storage::Contact;
@@ -37,8 +37,9 @@ use ui::{
 use crate::actions::{ComposeAttach, ComposeClose, ComposeDiscard, ComposeSend};
 use crate::app_menus;
 use crate::attachments::{file_family, human_size};
+use crate::crash_guard::CrashGuard;
 use crate::locale::{ActiveLanguage, Key, Language};
-use crate::root::RootView;
+use crate::root::{clipped_text, RootView};
 
 /// Default width of the compose window on first open, in pixels.
 pub const COMPOSE_DEFAULT_WIDTH: f32 = 790.0;
@@ -150,6 +151,9 @@ enum FormatMenu {
 /// Width the quoted original is first laid out at, before the real one is known.
 const QUOTE_FIRST_LAYOUT_WIDTH: f32 = 800.0;
 
+/// Longest the quote's first layout can take before it shows as text.
+const QUOTE_LAYOUT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The original message of a reply: its `> ` quote for the plain-text version
 /// and its HTML, ready to be sent on.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,6 +163,18 @@ pub struct QuotedOriginal {
     pub html: String,
     /// Whether the user allows remote images for the original.
     pub load_remote: bool,
+    /// What marks the original while its formatted HTML renders, as in the reader; `None`
+    /// when rendering it already closed the app, and it shows as text.
+    pub render_guard: Option<(CrashGuard, i64)>,
+}
+
+/// Keeps a quote's render marker for as long as the formatted quote exists.
+struct QuoteGuard(CrashGuard, i64);
+
+impl Drop for QuoteGuard {
+    fn drop(&mut self) {
+        self.0.finish_if(self.1);
+    }
 }
 
 /// The recipient fields that are validated as address lists.
@@ -295,6 +311,7 @@ pub struct ComposeView {
     /// The quoted original, parsed the first time it is shown.
     quote_view: Option<Entity<HtmlView>>,
     _quote_task: Option<Task<()>>,
+    _quote_guard: Option<QuoteGuard>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -382,6 +399,7 @@ impl ComposeView {
             format_menu: None,
             quote_view: None,
             _quote_task: None,
+            _quote_guard: None,
             _subscriptions: subscriptions,
         };
         view.apply_init(init, window, cx);
@@ -422,6 +440,7 @@ impl ComposeView {
         self.quote_expanded = false;
         self.quote_view = None;
         self._quote_task = None;
+        self._quote_guard = None;
         self.errors = ComposeErrors::default();
         self.from_menu_open = false;
         self.format_menu = None;
@@ -477,22 +496,46 @@ impl ComposeView {
                 accent: theme.accent,
             }
         };
+        // Dropped first: the guard it replaces clears the marker of the same message.
+        self._quote_guard = None;
+        self._quote_guard = quoted.render_guard.clone().map(|(guard, id)| {
+            guard.begin(id);
+            QuoteGuard(guard, id)
+        });
         let build = cx.background_spawn(async move {
-            let body = MessageBody::Html(quoted.html.into());
-            let rendered = email_document(colors, &body, quoted.load_remote);
-            let options = DocumentOptions {
-                appearance: if colors.is_dark() {
-                    PageAppearance::Dark
+            with_render_stack(move || {
+                // Text costs the same as in the reader, so it is clipped the same way.
+                let block = clipped_text(&quoted.block).unwrap_or(&quoted.block);
+                let text = MessageBody::Text(block.to_string().into());
+                let body = if quoted.render_guard.is_some() && !has_too_many_tags(&quoted.html) {
+                    MessageBody::Html(quoted.html.into())
                 } else {
-                    PageAppearance::Light
-                },
-                resources: Resources::new().allow_remote(quoted.load_remote),
-                dark_page: colors.dark_page(),
-                ..Default::default()
-            };
-            let mut document = HtmlDocument::parse(&rendered.html, options);
-            document.prepare(QUOTE_FIRST_LAYOUT_WIDTH);
-            DetachedDocument::new(document)
+                    text.clone()
+                };
+                let rendered = email_document(colors, &body, quoted.load_remote);
+                let options = || DocumentOptions {
+                    appearance: if colors.is_dark() {
+                        PageAppearance::Dark
+                    } else {
+                        PageAppearance::Light
+                    },
+                    resources: Resources::new().allow_remote(quoted.load_remote),
+                    dark_page: colors.dark_page(),
+                    ..Default::default()
+                };
+                // What the reader would refuse shows as text here too.
+                let mut document = HtmlDocument::try_parse(&rendered.html, options())
+                    .unwrap_or_else(|_| {
+                        let fallback = email_document(colors, &text, false);
+                        HtmlDocument::parse(&fallback.html, options())
+                    });
+                if !document.prepare_within(QUOTE_FIRST_LAYOUT_WIDTH, QUOTE_LAYOUT_LIMIT) {
+                    let fallback = email_document(colors, &text, false);
+                    document = HtmlDocument::parse(&fallback.html, options());
+                    document.prepare(QUOTE_FIRST_LAYOUT_WIDTH);
+                }
+                DetachedDocument::new(document)
+            })
         });
         self._quote_task = Some(cx.spawn(async move |this, cx| {
             let document = build.await;
@@ -512,9 +555,30 @@ impl ComposeView {
         }
     }
 
+    /// Replaces the accounts offered as From, keeping the chosen one: they can change while
+    /// the window stays open, and a reply needs the account it answers from.
+    pub(crate) fn set_accounts(&mut self, accounts: Vec<ComposeAccount>) {
+        let chosen = self
+            .accounts
+            .get(self.from_account)
+            .map(|account| account.id);
+        self.accounts = accounts;
+        self.from_account = account_index(&self.accounts, chosen);
+    }
+
+    /// The unsent message this one was opened to edit.
+    pub(crate) fn replaces_outgoing(&self) -> Option<i64> {
+        self.replaces_outgoing
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_edited_for_tests(&mut self, cx: &mut Context<Self>) {
+        self.mark_edited(cx);
+    }
+
     /// Whether the user typed something that replacing the content would lose.
     pub(crate) fn has_edits(&self) -> bool {
-        self.edited
+        self.edited || self.pending_attachment_loads > 0
     }
 
     fn mark_edited(&mut self, cx: &mut Context<Self>) {
@@ -710,7 +774,7 @@ impl ComposeView {
     /// Discards the message: closes right away when nothing was edited,
     /// otherwise after the user confirms.
     pub(crate) fn discard_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.edited {
+        if !self.has_edits() {
             self.close_window(window, cx);
             return;
         }
@@ -1716,6 +1780,13 @@ fn compose_body_colors(white_background: bool) -> (Option<Hsla>, Option<Hsla>) {
 
 impl Render for ComposeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = cx.language();
+        self.to.update(cx, |to, cx| {
+            to.set_placeholder(Key::ComposeFieldPlaceholder.tr(language), cx);
+        });
+        self.body.update(cx, |body, _| {
+            body.set_placeholder(Key::ComposeBodyPlaceholder.tr(language));
+        });
         if let WindowBounds::Windowed(bounds) = window.window_bounds() {
             let origin = bounds.origin;
             let size = bounds.size;
@@ -1756,7 +1827,7 @@ impl Render for ComposeView {
                 this.discard_draft(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ComposeClose, window, cx| {
-                this.close_window(window, cx);
+                this.discard_draft(window, cx);
             }))
             .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -1920,19 +1991,30 @@ fn build_draft(
         errors.banner = Some(Key::ComposeLocalAccount.tr(language).to_string());
         return Err(errors);
     };
+    let text = reply_text(reply, &fields.body);
+    // Same structure as Gmail's replies, which it collapses in conversations.
+    let html = message_html(reply, fields);
+    if body_over_limit(&text, html.as_deref()) {
+        errors.banner = Some(Key::ComposeBodyTooLarge.tr(language).to_string());
+        return Err(errors);
+    }
     Ok(Draft {
         from: Address::new(Some(account.name.clone()), account.email.clone()),
         to,
         cc,
         bcc,
         subject: fields.subject.trim().to_string(),
-        text: reply_text(reply, &fields.body),
-        // Same structure as Gmail's replies, which it collapses in conversations.
-        html: message_html(reply, fields),
+        text,
+        html,
         in_reply_to: reply.in_reply_to.clone(),
         references: reply.references.clone(),
         attachments: attachments.to_vec(),
     })
+}
+
+/// Whether a message's body is over the limit for all mail, attachments apart.
+fn body_over_limit(text: &str, html: Option<&str>) -> bool {
+    text.len() + html.map_or(0, str::len) > mail_core::MAX_BODY_BYTES
 }
 
 /// Total bytes of `attachments`.
@@ -2028,7 +2110,7 @@ fn attachment_error_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::point;
+    use gpui::{point, WindowHandle};
 
     fn account(id: i64, can_send: bool) -> ComposeAccount {
         ComposeAccount {
@@ -2054,6 +2136,180 @@ mod tests {
             mime_type: mail_core::guess_mime_type(name).into(),
             data: vec![0; len],
         }
+    }
+
+    fn subject_init(subject: &str) -> ComposeInit {
+        ComposeInit {
+            draft: mail_core::Draft {
+                subject: subject.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A main window with the compose window open on `subject`.
+    fn composing<'a>(
+        subject: &str,
+        path: &std::path::Path,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (
+        Entity<RootView>,
+        WindowHandle<ComposeView>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            crate::locale::init(Language::default(), cx);
+        });
+        let (root, cx) = cx.add_window_view(|_, _| RootView::for_tests(path));
+        root.update_in(cx, |root, window, cx| {
+            root.open_compose_with(Some(subject_init(subject)), window, cx);
+        });
+        cx.run_until_parked();
+        let compose = root.read_with(cx, |root, _| root.compose_window_for_tests());
+        (root, compose.expect("the compose window opened"), cx)
+    }
+
+    fn subject_of(compose: WindowHandle<ComposeView>, cx: &mut gpui::VisualTestContext) -> String {
+        compose
+            .update(cx, |view, _, cx| {
+                view.subject.read(cx).content().to_string()
+            })
+            .expect("open")
+    }
+
+    #[gpui::test]
+    fn the_accounts_offered_can_change_keeping_the_chosen_one(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_root, compose, cx) = composing("First", &dir.path().join("mail.db"), cx);
+        compose
+            .update(cx, |view, _, _| {
+                view.set_accounts(vec![account(1, true), account(2, true)]);
+                view.from_account = 1;
+                view.set_accounts(vec![account(3, true), account(1, true), account(2, true)]);
+                assert_eq!(view.accounts[view.from_account].id, 2);
+            })
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn closing_from_the_main_window_leaves_compose_alone(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (root, _compose, cx) = composing("First", &dir.path().join("mail.db"), cx);
+        root.update_in(cx, |_, window, _| window.activate_window());
+        cx.run_until_parked();
+        root.update(cx, |root, cx| root.close_focused_auxiliary_window(cx));
+        cx.run_until_parked();
+        assert!(root.read_with(cx, |root, _| root.compose_window_for_tests().is_some()));
+    }
+
+    #[test]
+    fn a_body_over_the_limit_cannot_be_sent() {
+        let half = "x".repeat(mail_core::MAX_BODY_BYTES / 2);
+        assert!(!body_over_limit(&half, Some(&half)));
+        assert!(body_over_limit(&half, Some(&format!("{half}x"))));
+        assert!(!body_over_limit("short", None));
+    }
+
+    #[gpui::test]
+    fn an_attachment_being_read_counts_as_an_edit(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (root, compose, cx) = composing("First", &dir.path().join("mail.db"), cx);
+        compose
+            .update(cx, |view, _, _| view.pending_attachment_loads = 1)
+            .expect("open");
+        root.update_in(cx, |root, window, cx| {
+            root.open_compose_with(Some(subject_init("Second")), window, cx);
+        });
+        assert_eq!(subject_of(compose, cx), "First");
+
+        // Closing and quitting ask too, rather than dropping it.
+        assert!(!root.update(cx, |root, cx| root.may_quit(cx)));
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        assert!(root.read_with(cx, |root, _| root.compose_window_for_tests().is_some()));
+    }
+
+    #[gpui::test]
+    fn a_reply_replaces_only_an_untouched_message(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (root, compose, cx) = composing("First", &dir.path().join("mail.db"), cx);
+        root.update_in(cx, |root, window, cx| {
+            root.open_compose_with(Some(subject_init("Second")), window, cx);
+        });
+        assert_eq!(subject_of(compose, cx), "Second");
+
+        compose
+            .update(cx, |view, _, cx| view.mark_edited(cx))
+            .expect("open");
+        root.update_in(cx, |root, window, cx| {
+            root.open_compose_with(Some(subject_init("Third")), window, cx);
+            assert!(root.status_note_for_tests().is_some());
+        });
+        assert_eq!(subject_of(compose, cx), "Second");
+        compose
+            .update(cx, |view, _, _| assert!(view.has_edits()))
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn closing_a_message_being_written_asks_first(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let (root, compose, cx) = composing("First", &path, cx);
+        compose
+            .update(cx, |view, _, cx| view.mark_edited(cx))
+            .expect("open");
+        compose
+            .update(cx, |_, window, cx| {
+                window.dispatch_action(Box::new(ComposeClose), cx);
+            })
+            .expect("open");
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer(Key::ComposeCancelButton.tr(Language::default()));
+        cx.run_until_parked();
+        assert!(root.read_with(cx, |root, _| root.compose_window_for_tests().is_some()));
+
+        // Quitting asks too, and doesn't go ahead by itself.
+        let may_quit = root.update(cx, |root, cx| root.may_quit(cx));
+        assert!(!may_quit);
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer(Key::ComposeDiscardButton.tr(Language::default()));
+        cx.run_until_parked();
+        assert!(root.read_with(cx, |root, _| root.compose_window_for_tests().is_none()));
+        assert!(root.update(cx, |root, cx| root.may_quit(cx)));
+    }
+
+    #[gpui::test]
+    fn an_untouched_message_closes_and_quits_without_asking(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let (root, _compose, cx) = composing("First", &path, cx);
+        assert!(root.update(cx, |root, cx| root.may_quit(cx)));
+        assert!(!cx.has_pending_prompt());
+    }
+
+    #[gpui::test]
+    fn the_placeholders_follow_the_language(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_root, compose, cx) = composing("First", &dir.path().join("mail.db"), cx);
+        cx.update(|_, cx| crate::locale::set_language(Language::Portuguese, cx));
+        cx.run_until_parked();
+        compose
+            .update(cx, |view, _, cx| {
+                assert_eq!(
+                    view.body.read(cx).placeholder().as_ref(),
+                    Key::ComposeBodyPlaceholder.tr(Language::Portuguese)
+                );
+                assert_eq!(
+                    view.to.read(cx).placeholder().as_ref(),
+                    Key::ComposeFieldPlaceholder.tr(Language::Portuguese)
+                );
+            })
+            .expect("open");
     }
 
     #[test]
@@ -2176,6 +2432,18 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_guard_clears_only_its_own_marker_when_it_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = CrashGuard::beside_for_quotes(&dir.path().join("mail.db"));
+        guard.begin(1);
+        drop(QuoteGuard(guard.clone(), 1));
+        assert_eq!(guard.take_unfinished(), None);
+        guard.begin(2);
+        drop(QuoteGuard(guard.clone(), 1));
+        assert_eq!(guard.take_unfinished(), Some(2));
+    }
+
+    #[test]
     fn a_reply_is_sent_with_the_quote_kept_out_of_the_editor() {
         let reply = ReplyHeaders {
             in_reply_to: Some("parent@x".into()),
@@ -2184,6 +2452,7 @@ mod tests {
                 attribution: "Ann wrote:".into(),
                 html: "<b>Hello</b>".into(),
                 load_remote: false,
+                render_guard: None,
             }),
             ..Default::default()
         };

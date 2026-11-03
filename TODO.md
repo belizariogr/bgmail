@@ -182,9 +182,8 @@
         document/redirect/external-resource heads (`base`/`meta`/`link`); and misc
         scripting surfaces (`canvas`/`dialog`/`portal`). `head`/`title` are kept so
         full-document e-mails don't lose their `<style>`.
-      - **`svg` is kept** (inline vector art), but its scriptable parts are removed:
-        `script`, `foreignObject` and the SMIL family (`animate`/`animatetransform`/
-        `animatemotion`/`set`).
+      - **`svg` and `math` are removed** (user decision, review round 5): the sanitizer's
+        parser and a browser disagree on where they end, so what follows could hide tags.
       - **Attribute neutralization**: every inline event handler (`on*`),
         `contenteditable`, dangerous URL schemes on link/source attrs
         (`javascript:`/`vbscript:`, and non-image `data:` incl. `image/svg+xml` —
@@ -383,8 +382,249 @@
       (`app_zoom`, content scale patched into `vendor/gpui`).
 - ✅ Each mailbox remembers its selected messages for the session.
 - ✅ Removing the open message leaves nothing open, as in Gmail.
-- ⬜ Persist the UI language (`locale` always starts in English, so the setup does
-      too); consider a language picker on the welcome step.
+- ✅ The UI language persists, with a picker on the first-run welcome step.
+- ✅ Whole-project adversarial review, round 1: folder membership by exact match
+      (`instr`, commas encoded, schema v6), literal short searches, Reply-To and
+      partial To/Cc without a body, `//host` links, emptied multiple selection,
+      guarded compose (replace, close, quit), chosen column widths kept across
+      zoom, escaped notification bodies on markup servers, live placeholders and
+      settings title, handoff files out of Linux's shared temp directory.
+- ✅ One BGMail per profile: a later launch activates the running window and exits
+      (`instance::lock_profile`), since two processes undid each other's Moves.
+- ✅ "Open" refuses attachments that can run code; Save still works.
+- ✅ Review round 2: a Content-ID alone no longer hides an attachment (rows stored
+      before keep `inline`); `\All` over a label named Archive and shallow folder
+      names over nested ones in the role mapping; temporary `NO` to LOGIN retries;
+      transparent mail text stays hidden on dark pages; bulk actions off the UI
+      thread; a forward waits for the body.
+- ✅ Archive with Gmail labels only leaves the Inbox.
+- ✅ A message still being retried shows in the unsent panel, with Edit and Discard.
+- ✅ Review round 3: Archive leaves Spam on labeled accounts, compose-busy check before
+      stopping a retry, no retry of a message being edited, search no longer held to
+      its starting folder's rules, whole-token `cid:` match.
+- ✅ Messages stuck in the queue for 5 minutes show in the unsent panel, whatever the
+      cause; retries stop at 3 days of age, counted from creation or the last Retry.
+- ✅ Review round 4: an SVG in a message can't read local files (a device could freeze
+      the app); a doctype with markup can't move the print page's CSP; `math` and
+      `template` dropped and attributes judged decoded in the sanitizer; an image too
+      big to embed stays an attachment; rich-text edits follow the real range.
+- ✅ Discovery ignores servers without encryption, so the login test never sends a
+      password in clear (user decision); no encryption stays a manual choice.
+- ✅ Review round 5: replacing a whole line keeps the next one's style; forwards carry
+      what the reader lists; `noscript` dropped; backoff grows when a server fails right
+      after login; Sent syncs after sending; a pending attachment read counts as an
+      edit; dragging a row no longer scans the list.
+- ✅ Review round 6: every body part of a message counts, not only the first of each
+      type; text attachments keep their bytes and charset; a press that moved a little
+      still clicks its row; a quoted name with a comma stays one recipient, and the
+      exact address comes first among suggestions; a secret shared with another
+      account survives a removal; a search can't return to a removed account's folder.
+- ✅ Review round 7: a charset that isn't a plain token doesn't go back into a forward;
+      an attached `.eml` is that message rather than the one around it; other renderings
+      of a body aren't attachments; ids lose what a header can't carry; `mailto:` keeps
+      a quoted name next to an invalid address.
+- ✅ Review round 8: ids keep their spaces, losing only control characters; only known
+      renderings leave the attachments; MIME types kept as plain tokens; text after an
+      unclosed `<head>` and a literal `<` survive `html_to_text`; a long name can't hide
+      `.exe` from `runs_code`; replies keep runs of spaces and the thread's root.
+- ✅ A certificate on a loopback address isn't validated, so Proton Bridge's preset works
+      (user decision). Confirm it with a real Bridge: only tested against a local server.
+- ✅ Review round 9: a message the client can't parse no longer stops a folder's sync;
+      `html_to_text` is linear; the database is private to its user; the delete shortcut
+      leaves text fields and other windows alone; borders aren't backgrounds for the
+      contrast pass, and bullets are adapted; compose's accounts stay current; a click
+      forgets a pending style; a comma stays inside typed quotes; the find bar keeps its
+      place; an abandoned build clears its crash marker.
+- ⬜ Search text of mail stored before round 9 keeps its line breaks: phrases across a
+      line break are only found in newer mail (rebuilding needs a background pass).
+- ✅ A folder gets a system role by name only at the top, under `INBOX` or under Gmail's
+      own folder; an action with no folder to go to says so (user decisions).
+- ✅ Review round 10: an unreadable last message no longer leaves the account offline;
+      a hostile font can't multiply in memory; other shortcuts on messages only act from
+      the main window; discovery keeps its login; IME selection stays inside the text;
+      pasting cleans line breaks; single-line fields scroll and clip; `EHLO` doesn't
+      send the machine's name, as Thunderbird (decided from its behavior).
+- ✅ Review round 14: resizing across `@media` no longer rounds freed hoisted boxes; a body of
+  repeated `cid:` no longer copies itself per marker during sync; the parser also budgets comments,
+  text (4 MiB), attributes (64 MiB) and depth, so large HTML text opens clipped as text; custom
+  properties can't carry layout through a hover; 30k style spans per inline context; forced layouts
+  are limited by node visits; `lol_html` 3.0.1 stops the quadratic unmatched end tags, and a scan
+  refuses over 500k tags or 1024 attributes in one, also when printing; a frame past 512 MiB of
+  pixels leaves the rest out instead of remaking textures; the sync thread has 16 MiB of stack; a
+  hostile `COPYUID` isn't expanded.
+- ✅ Review round 19 (146000 render seeds with no panic, 671000 on the sanitizer with no violation):
+  huge curves aren't recorded, as flattening one froze the window (80 bytes of dashed corner under
+  `scale(1e16)`: 10 s); parts declaring boundaries they never use stay linear (3.2 MB: 51 s, now
+  0.1 s during sync), and boundaries over 256 bytes are ignored; GPUI's `BoundsTree` balances by
+  rotation, which also removes its recursion over a list; anonymous table rows have no color, as
+  a first cell's filled the whole row; a `<tr style=display:contents>` is a row of its own; `form`
+  and `button` become `div` and `span`, so what they hide stays hidden. Round 18's fixes for ties
+  and for `form` were incomplete.
+- ✅ Review round 20 (202000 render seeds with no panic, 690000 on the sanitizer with no violation):
+  a first layout past 2 s on the UI thread or 30 s in the background opens as text, a last resort for
+  what no limit caught. Grid tracks stop on rounding (297 bytes took 3 s). `content` and
+  markers share 256 KB per pass (61 KB took over 8 GB). Curves cost their segments, as 112 KB of round
+  borders made 7.5 GB of triangles. `BoundsTree` rotates with slack, as at every level it slowed
+  grids down. `form` and `button` are written out by hand, as renaming also renamed the parent's end
+  tag. Rows of `contents` in separate groups stay apart. Searches stop at 1024 characters, and only 2
+  MiB of a body is indexed (128 MB took 21 s during sync). A damaged `mail.db` is kept aside instead
+  of aborting at every start. Long names fit 240 bytes. A multipart read no further is text in
+  the body. Past 8 failed boundaries it stops searching. Bad percent escapes stay as written.
+- ✅ Review round 21 (179000 render seeds, one panic, no sanitizer violation): `<p bgcolor="#日">` no
+  longer aborts; sibling selectors walk once per pass, with a budget, as 24 KB of `x~p` took 16 s
+  before layout could give up; inline padding saturates (77 bytes made 1.4 GB of corners), and a
+  first recording is under the deadline; a damaged database that fails on first load is replaced
+  too, keeping `accounts` and `outbox`; a nested multipart without its boundary is the body if none
+  was found.
+- ✅ Review round 22 (110000 render seeds with no HTML panic, no sanitizer violation): web fonts only
+  load from `fonts.gstatic.com`, as a changed byte in a font aborted the app and another filled 3.8 GB;
+  decided from Gmail dropping `@font-face` and Thunderbird sanitizing fonts, which isn't available
+  here. Floats in tables no longer double per level (801 bytes: 11 s on resizing). Painters stop when
+  the budget is out. At most 64 font families per style. CSS animations are off, as nothing runs
+  their clock and they redid styles each pass. A subject that isn't text shows a replacement character
+  instead of losing the database, and recovery copies the columns both versions have.
+- ✅ Review round 23 (140000 render seeds with no panic, no sanitizer violation; the first checked
+  against Chromium): undid round 20's 1000-track grid limit, which piled up rows of long tables, and
+  round 22's lost float height in cells (results that place floats aren't cached). Dotted borders are
+  quads: 500 rows went from 884 ms to 13 ms per frame, and 20000 px from 5 s. Captions span the table.
+  Text past a cell's fixed height can be reached. Stopping animations is only paid for where they
+  can be.
+- Lesson of rounds 20 to 23: limits added against hostile mail broke legitimate mail, and only a
+  comparison against Chromium found it. A new limit needs a legitimate case just past it, checked
+  against a browser; the corpus should grow long tables, tall floats in cells, captions.
+- ✅ Review round 24 (161643 render seeds and 376001 sanitizer ones clean; fidelity against Chromium
+  over the template corpus and hand-written legitimate documents): legacy colors follow the standard (`#fff` drew almost black, since
+  `#rgb` wasn't expanded), and `bgcolor` and `background` reach only what takes them in a browser.
+  `background` and `bordercolor` now work, and a long message draws its local background images on
+  the first recording. Tables: percentages widen one without a width; a cell's `min-width` and
+  `max-width` bound its column's ask; captions wrap and come first; text directly in `display:table`
+  keeps its row (a call-to-action lost its label). A long log keeps its line breaks up to 64000.
+- ⬜ Known limits of round 24. `display:table-cell` runs outside a table don't sit together.
+  A closed `<details>` measures taller than in a browser. An `inline-block` around a float and a float
+  in a fixed-height `div` in a cell measure wrong. `text-overflow:ellipsis` only clips. `<body
+  bgcolor>` and `<body background>` lose to the reader's own page color (author-level CSS). A tile
+  of 2 px or more past 64000 per frame loses later rows. `<br>` past 64000 stops breaking. A selector
+  like `h2~p` or `tr:first-child~tr` past the sibling budget (12000 `<p>`, 9000 rows) opens as text.
+- ⬜ Known limits of round 22. Layouts after the first have no deadline: a cost that only shows on
+  resizing or clicking isn't stopped. Giving up there needs a last good frame kept, and a switch to
+  text from `HtmlView`, not done. An animation's final state doesn't show, as none runs. Recording has
+  no deadline, only its budget. Recovery of a damaged database doesn't work from a directory whose
+  name isn't UTF-8. Icon fonts that aren't Google's show as missing glyphs.
+- ⬜ Known limits of round 23. Over 10000 rows pile up. `caption-side` isn't in this Stylo, so captions
+  are always on top, inside the table's border and background. `body` with 1750 dotted rows passes the
+  budget, and later ones lose their dots.
+- ⬜ Known limits of round 21. A database locked by another program, a full disk or no permission
+  aborts with only a message on stderr (should be a dialog). `bgcolor` doesn't follow the standard's
+  legacy parsing: `#FFFFF` is ignored instead of read as `#FFFFF0`. Past their budget, sibling selectors
+  don't match, so such a message may lose styles when resized. 2800 big dotted round boxes pass the
+  path budget, and the last ones lose their borders.
+- ⬜ A panic while rendering aborts, and a message opens as text only at the next start. Unwinding with
+  `catch_unwind` around the document would make it text at once, but reverses a past decision (`panic
+  = "abort"`, above), so it's left to the owner.
+- ⬜ Known limits of round 20. The deadline only covers a first layout: later ones (resizing, hover)
+  and painting aren't bound by time. A message opening as text on a very loaded machine is possible
+  at the 2 s limit. `<button><div hidden>x</button><p>` still hides what follows, as `</span>` doesn't
+  close a block. A replaced `mail.db` starts empty, including accounts, as `.corrupt` stays beside it.
+- ⬜ Known limits of round 19. `form{display:none}` no longer matches, as the tag is a `section`. An
+  image with both `style` and a stray `=` attribute loses the tag once allowed.
+- ✅ Review round 18 (75000 render seeds, one panic; 1.2 M seeds on the sanitizer against the real tree
+  builder, no real violation): a group no longer clears its cells' construction damage, which kept
+  a stale inline layout and aborted, and `<tr style=display:contents>` keeps its text and place.
+  `mail-parser` is vendored, with continuations in linear time on every path, which removes the scan
+  of the raw message that kept being evaded. GPUI's `BoundsTree` balances identical bounds: stacked
+  boxes went from 7.7 s to 15 ms per frame, and tiles under a pixel stretch (20 s to under 1 ms). A
+  stray `=` no longer drops a tag that isn't rewritten, nor its content. `form` and `button` keep
+  what they hold, decided from Gmail and Thunderbird showing forms (caniemail); controls still don't
+  exist. Media types are read as browsers read them. Ids over 900 bytes stay out of replies.
+- ✅ Review round 17 (159000 render seeds with no panic, 4.3 M on the sanitizer): the sanitizer's output
+  is read back with the parser's tokenizer, and what still has active content becomes text; a tag
+  with `=` starting a later attribute goes; a tag left open at the end is closed before checking;
+  quotes remove doctypes by the tokenizer, and keep a body after an unclosed `<head>`; print adds
+  `form-action` and `base-uri`. Form controls no longer exist in any document (user decision). What
+  isn't a row or cell in a table gets an anonymous row and cell, so `tbody{display:block}` in a media
+  query no longer blanks a message, and a media query changing result rebuilds every box once.
+  RFC 2231 limits only touch those headers, so a body keeps its `2*3=6`. End tags are read as the
+  tokenizer reads them. Repeated backgrounds start where the window is. `vertical-align` lays out
+  again, and nested inlines keep `::before`/`::after`.
+- ⬜ Known limits of round 17. Links in print and in a sent quote only refuse `javascript`, `vbscript`
+  and `data` (`file:` and the like remain, needing a click). `strip_css_urls` is textual: `url&#40;`
+  and `\\75rl(` survive it, and only `Resources` and print's CSP stop the fetch. A caption sits in the
+  first column instead of spanning; text directly in `display:table` is lost. Resizing with no
+  `@media` can lose a word (`<label style="transform:scale(2)">`, cause unproven).
+- ✅ Review round 16 (590000 fuzz seeds, one panic, one abort): text the tokenizer kept as `<` is
+  written back as `&lt;`, since `<<script></script>script>` came out of the sanitizer as `<script>`
+  (it predates this review), and a tag over 1024 attributes goes with its content; a property test
+  reads the sanitizer's output back with the parser's tokenizer. The tag scan no longer follows
+  tokenizers: it counts everything that could be a tag, and the words of end tags. A label's
+  click reaches its control once. A box that becomes a leaf clears its hoisted list, and one back
+  in flow forgets its containing block, so text no longer vanishes after a width crosses `@media`.
+  `line-height` saturates. Image tiles only draw what shows, up to 64000 per frame. Layout budgets
+  count text, not visits alone. Over 4096 RFC 2231 continuations aren't joined. NUL stays out of
+  search. Round 15's `window.drop_image` is gone: it aborted on a texture with uploads pending.
+- ⬜ Known limits of round 16. Textures of past messages stay in GPUI's sprite atlas until the
+  window closes: `window.drop_image` destroys one with uploads pending, and freeing them safely
+  takes a sync point in all three atlases, of which only Blade can be tested here. Tiles past 64000
+  in a frame aren't drawn (a 1x1 tile on a very large box). `display:contents` on a `<td>` loses its
+  text. `tr{display:block}` stacks its cells (a browser keeps them side by side).
+- ⬜ Known limits of round 14, by the rule below. Forwarding puts the whole body in the editor, which
+  shapes every line (over 2 MiB should forward as `message/rfc822`, as Thunderbird). Text with
+  negative spacing past its own width isn't drawn. `store_body` of 200 MB holds the write lock
+  10 s, and another connection can fail with `database is locked`. `References` has no cap (1.1 MB
+  replying to 50000). A hostile server: an IMAP line or `FETCH` is unbounded (6.7 GB in 3 s), and
+  `BODYSTRUCTURE` parses recursively (16 MiB of stack covers what servers relay).
+- Renderer rule from round 14: a panic or abort, and any cost during sync, is always fixed. Cost in
+  the renderer is fixed above 2 s on the UI thread for messages under 256 KB, or 30 s and 2 GB in
+  the background; below that it is recorded here with its number. The same goes for cost on the
+  UI thread outside the renderer. A hostile server is recorded unless the fix is a few lines. The
+  review stops after two rounds in a row with no panic in at least 100000 fuzz seeds, nothing over
+  these limits and no regression from the round before.
+- ✅ Review round 15 (211000 fuzz seeds, one panic): a hidden box no longer runs the layout it had
+  when shown; radii saturate, so 2 KB of huge dotted decorations no longer freeze the window for
+  minutes; `<html a0><html a1>...` is bounded; the tag scan follows the tokenizer's quotes and
+  counts end tags, and the sanitizer drops tags over 1024 attributes; off-screen images use no
+  frame pixels, so long newsletters keep their last images; `repair_stale_previews` runs once per account (it rewrote matching messages at every
+  start); forwarding parses once, and replying to many addresses is linear; a fetched header block
+  is cut at 1 MiB; `NUL.tar.gz` is a device name for saving.
+- ✅ Review round 13: nested `message/rfc822` no longer overflow the sync thread's stack on
+  every start; a table's `calc()` no longer reads freed styles; rules on `:hover` and other
+  states keep only paint properties (from Gmail, which keeps hover for colors), so the pointer
+  can't create or free a box; walks up tolerate freed boxes; 60k style spans per inline context,
+  and a long word of many styles records in linear time; parsing stops at 500k nodes, and a scan
+  refuses over 16k open tags before sanitizing; nested inline tables have a layout budget; the
+  display list also charges gradient stops, shadows and layers, with a 2 M budget; images upload
+  in halved sizes up to 8192 px, gradients only when visible, with a 512 MiB pixel cache; WOFF1
+  and per-document font limits; `space` tiles limited; documents build on an 8 MiB stack; plain
+  text shows up to 2 MiB with a notice and builds in the background; MIME parsing is linear in
+  parts and references.
+- ⬜ Parsing a reply's original (`reply_to_selected`) and sanitizing its quote still run on the
+  UI thread; both are linear now, but a large message delays the window.
+- ⬜ Rendering in a child process would contain every renderer failure (panic, memory, hang),
+  at the cost of IPC for hover, selection, find and zoom, and of moving fonts and pixels across
+  processes on three platforms. Build it if a review finds a panic of a new class, or a hang over
+  10 s on the UI thread under 256 KB that no generic budget can cover. Try first a non-incremental
+  layout pass on transitions (`mark_all_damaged` when a width crosses `@media`, on zoom and on
+  `<details>`), as most panics so far came from stale state after rebuilding boxes.
+- ✅ Review round 12 (hostile HTML, measured under a memory cap): a 113-byte GIF no longer
+  allocates the canvas it declares (decoder limits, 256 MiB per image, 2 GiB per document);
+  dotted/dashed borders and text decorations are bounded per line and per document, drawn
+  solid past that; `colspan`, `<col span>`, columns and rows are limited, and their `u16`
+  sums no longer wrap; lengths saturate at `nscoord_MAX`, so Parley's assert can't trip;
+  `display:contents` pseudos of tables, replaced elements styled as tables, boxes freed by
+  `:hover` and selections older than their text no longer panic. `try_parse` refuses over
+  2 M tags or 2 M cells added by spans (`TooComplex`). The crash guard now stays armed
+  while a message shows (a kill makes it open once as text), and reply quotes have their
+  own guard and text fallback.
+- ✅ Review round 11: `@import url()` and an `<img src>` that doesn't parse no longer abort
+      the app; imports have a total budget; an image arriving between timer and paint
+      is drawn; Close from the main window leaves compose alone; a menu over a
+      scrollbar's track gets its click.
+- ✅ A body over 256 MB, attachments apart, is rejected, received or sent (user decision).
+- ✅ A search gives the mailbox's selection back; a complete typed address beats the
+      suggestion on Enter and Tab; the Sent copy records the Bcc (user decisions).
+- ✅ Inline `svg` and `math` removed from mail, in passes before the sanitizer (user
+      decision), which closes the mXSS through foreign content.
+- ✅ Remote images can't reach this machine or link-local addresses, resolved by IP;
+      private ranges stay reachable for intranet images (user decision).
 
 ## Stage 4 — Client features (see scope in PLANEJAMENTO.md §6)
 - ✅ Read / mark read-unread (opening marks read on the server; toggle via
@@ -690,9 +930,7 @@
       in Zed), so the two no longer share a chord.
 - ✅ CSS `url(...)` is blanked only in `style` attributes and `<style>`
       contents (lol_html handlers), never in the message's text.
-- ⬜ GPUI's sprite atlas still keeps textures of past messages (needs
-      `window.drop_image` when the paint cache forgets them); `HtmlDocument::
-      layout` re-resolves and walks the tree for overflow on every frame.
+- ⬜ `HtmlDocument::layout` re-resolves and walks the tree for overflow on every frame.
 - ⬜ Upstream the `vendor/blitz` and `vendor/taffy` fixes (each is marked
       `BGMail`), then drop the vendored copies. Either way: behind a `crates/html_view` API, with
       "Open in browser" as the escape hatch.

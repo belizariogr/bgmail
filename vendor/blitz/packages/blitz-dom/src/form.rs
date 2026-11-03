@@ -95,7 +95,10 @@ impl BaseDocument {
         )
         .unwrap_or_default();
 
-        let mut parsed_action = self.resolve_url(action);
+        // BGMail: `resolve_url` would panic on a bad one.
+        let Some(mut parsed_action) = self.url.resolve_relative(action) else {
+            return;
+        };
 
         let scheme = parsed_action.scheme();
 

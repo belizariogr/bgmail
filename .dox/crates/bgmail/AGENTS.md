@@ -53,7 +53,25 @@ wiring to `storage`.
   decision). The arrow keys open the row that took its place.
 - Each mailbox remembers its selection for the session (`remembered_selections`,
   user decision): switching away and back selects the same rows again if still
-  listed, without marking them read. Not persisted; searches don't record one.
+  listed, without marking them read. Not persisted. A search records none of its own:
+  it remembers the mailbox's when it starts and gives it back when it ends, unless a
+  result the user opened is listed there too (user decision).
+- The UI language persists as `Config::language` (`Language::code`, a string so an
+  unknown value loses only the language). Change it through `RootView::set_language`,
+  from Settings or the first-run welcome step (`settings::language_picker`).
+- Commands on messages only act from the main window (`schedule_message_command`), and
+  the delete shortcut never from a text field (`NoAction` in `TextInput`/`TextArea`).
+- Recipients (user decision): Enter and Tab take a complete typed address (with a dot
+  in the domain) over the highlighted suggestion; picking one with the arrows still
+  wins.
+- One process per profile (user decision): a later launch activates the running window
+  and exits; a build from another worktree needs its own `HOME` to run alongside one.
+- "Open" on an attachment refuses types that can run code (`attachments::runs_code`,
+  user decision); Save still works.
+- A message being written is never lost silently: Close (shortcut, X, menu), quitting
+  and closing the main window ask through `ComposeView::discard_draft`, and a reply,
+  forward or `mailto:` doesn't replace it (`Key::StatusComposeBusy`). Drafts stay a
+  TODO item.
 - Zoom of the whole app (user decision): Ctrl/Cmd `+`/`-`/`0` (global actions
   `AppZoomIn`/`AppZoomOut`/`AppZoomReset`, also in the View menu) step
   `app_zoom`'s levels (75%–200%) through `RootView::zoom_app`, applied to every open
@@ -100,8 +118,23 @@ wiring to `storage`.
   wins); smaller ones build in place, so no placeholder flashes. No parsed
   document cache: measured, the largest real message builds in about 180 ms, so a
   cache would only save that on reopening at a memory cost. Bodies
-  `html_view` refuses (too deep) show as plain text, and a message whose formatted rendering was interrupted by a crash (the
-  `crash_guard` marker survived) as plain text, each with a notice. The
+  `html_view` refuses (too deep or too complex) show as plain text, and a message that was
+  showing formatted when the app crashed or was killed (the `crash_guard` marker survived,
+  armed for as long as it shows) as plain text, each with a notice. Reply quotes follow the
+  same rules with a marker of their own. A plain-text body shows up to `MAX_SHOWN_TEXT_BYTES`
+  (2 MiB, cut at a line, with a notice; decided from Gmail clipping at about 102 KB and
+  Thunderbird hanging on huge bodies); replying and forwarding use all of it. A first layout past
+  2 s on the UI thread (`UI_LAYOUT_LIMIT`) or 30 s in the background also opens as text, the last
+  resort for what no other limit caught. A `mail.db` that can't be opened or give the first frame what
+  it needs is kept beside as `mail.db.corrupt`, and a new one starts with what could be read of
+  `accounts` and `outbox` (`Database::replace_corrupt`), with a status note. A page lost elsewhere
+  shows as missing mail, as moving everything for it isn't proportional. The sanitizer's
+  output is read back with the parser's tokenizer (`mail_html::reads_as_safe`, the last check): if it
+  finds what the sanitizer removes, the body shows as text and the quote is left out. `form` and
+  `button` are written out as `section` and `span`, keeping what they hold and its style (a whole ASP.NET message
+  comes in a `<form>`; Gmail and Thunderbird show it); other controls go with their content. A later attribute name starting with `=` drops
+  the tag only if the tag would be rewritten. Documents build
+  off the pool's stack (`with_render_stack`). The
   release profile keeps `panic = "abort"` (decided with two opposing
   reviews): unwinding through Blitz/GPUI state isn't safe and stack overflow
   or OOM can't be caught anyway.
@@ -128,8 +161,8 @@ wiring to `storage`.
   - `mail_html` — e-mail HTML sanitizing (`lol_html`), remote image policy,
     the themed document handed to `html_view`, and the plain-text fallback.
   - `crash_guard` — marker of the message being rendered (crash loops).
-  - `print` — private print pages in the temp dir (Unix 0700/0600, stale
-    pages removed on the next print).
+  - `print` — private print pages (`handoff_dir`: user cache on Linux, temp dir
+    elsewhere; Unix 0700/0600, stale pages removed on the next print).
   - `attachments` — attachment chip presentation (family icon, human size)
     and file writing: sanitized names, never-overwrite ` (n)` dedupe,
     private temp copies for Open (Unix 0700/0600, stale after a day).
@@ -159,7 +192,8 @@ wiring to `storage`.
     stays to be fixed.
   - `default_mail_app` — status and registration as the system's mail app, with
     OS-specific code behind one API (`unsafe` only for LaunchServices on macOS).
-  - `instance` — hand-off of `mailto:` links between launches.
+  - `instance` — one process per profile: lock file, and hand-off of links or
+    "show the window" from later launches.
   - `dates` — local-time list/reader dates (chrono `clock`).
   - `notifications` — desktop notifications (`notify-rust`) on a short-lived
     thread; bursts summarized.
@@ -171,7 +205,7 @@ wiring to `storage`.
   message in the outbox (`RootView::send_draft`). A failed action shows a
   localized status note (`StatusActionFailed: {error}`), never only a log.
 - Unsent mail is never silently stuck: outbox rows that stopped retrying
-  (`storage::Database::failed_outgoing`: `failed` / `maybe_sent`) show as
+  (`storage::Database::unsent_outgoing`: `failed`, `maybe_sent`, or stuck in the queue; `RootView::watch_unsent` rereads it every minute) show as
   "N unsent" (`Color::Warning`) in the status bar, refreshed on reload and on
   `Sent`/`SendFailed`. Clicking it opens a panel listing subject (parsed from
   the raw), recipients, last error and, for `maybe_sent`, "May already have
@@ -203,9 +237,9 @@ wiring to `storage`.
 - `mailto:` links arrive as a process argument (Linux, Windows) or through
   `on_open_urls` (macOS bundle) and become a prefilled compose window
   (`RootView::open_mailto`); they never send and never replace a message with
-  edits. A launch with a link hands it to the running instance and exits
-  (`instance`: loopback TCP, private `~/.config/BGMail/instance` file with port
-  and random token). Plain launches are unchanged.
+  edits. Any later launch hands its link, or a request to show the window, to the
+  running instance and exits (`instance`: `instance.lock` file lock, loopback TCP,
+  private `~/.config/BGMail/instance` file with port and random token).
 - Message list: virtualized with GPUI `uniform_list` (uniform row height;
   only visible rows are built) and the `ui::Scrollbar` on the list handle's
   `base_handle`. It owns a focus handle with key context `MessageList`

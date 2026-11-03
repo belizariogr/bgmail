@@ -276,6 +276,9 @@ pub enum DocumentEvent {
     },
 }
 
+/// BGMail: see `BaseDocument::generated_text_left`.
+pub(crate) const MAX_GENERATED_TEXT_BYTES: usize = 256 << 10;
+
 pub struct BaseDocument {
     /// ID of the document
     id: usize,
@@ -422,6 +425,31 @@ pub struct BaseDocument {
     /// dedicated storage on the node because their style changed (populated by
     /// the style traversal and by pseudo-element box construction).
     pub(crate) pending_style_image_nodes: Vec<NodeId>,
+    /// BGMail: decoded bytes this document's images may still take.
+    pub(crate) image_budget: Arc<std::sync::atomic::AtomicU64>,
+    /// BGMail: a node was freed since the last paint tree, whose lists may still hold it.
+    pub(crate) paint_tree_stale: bool,
+    /// BGMail: nodes visited by this layout pass.
+    pub(crate) layout_visits: usize,
+    /// BGMail: the parser stopped at a budget, so the document is partial (see
+    /// `blitz_html`'s sink); hosts refuse it.
+    pub parse_refused: bool,
+    /// BGMail: bytes of `content` and list markers this pass can still generate. They come from
+    /// style, past what the parser counts: 61 KB of them took over 8 GB.
+    pub(crate) generated_text_left: std::cell::Cell<usize>,
+    /// BGMail: when the running layout gives up, returning empty boxes (see
+    /// `layout_timed_out`). Thread can't be stopped from outside, so layout checks it itself.
+    pub layout_deadline: Option<std::time::Instant>,
+    /// BGMail: the deadline passed, so the layout is incomplete; hosts discard the document.
+    pub layout_timed_out: bool,
+    /// BGMail: visits since the deadline was last compared.
+    pub(crate) deadline_visits: u32,
+    /// BGMail: a media query changed result, so the next pass rebuilds every box.
+    pub(crate) rebuild_boxes_once: bool,
+    /// BGMail: a click on a label is being passed on to its control.
+    pub(crate) in_label_click: bool,
+    /// BGMail: bytes of web fonts this document has registered.
+    font_bytes: u64,
 
     // Tracks in-flight "critical" resources (e.g. stylesheets linked from the `<head>`),
     // keyed by request id
@@ -560,6 +588,17 @@ impl BaseDocument {
             image_cache: HashMap::new(),
             pending_images: HashMap::new(),
             pending_style_image_nodes: Vec::new(),
+            image_budget: crate::net::new_image_budget(),
+            paint_tree_stale: false,
+            layout_visits: 0,
+            parse_refused: false,
+            font_bytes: 0,
+            in_label_click: false,
+            rebuild_boxes_once: false,
+            generated_text_left: std::cell::Cell::new(MAX_GENERATED_TEXT_BYTES),
+            layout_deadline: None,
+            layout_timed_out: false,
+            deadline_visits: 0,
             pending_critical_resources: HashSet::new(),
             line_height_quirk: false,
             controls_to_form: HashMap::new(),
@@ -930,8 +969,21 @@ impl BaseDocument {
     /// Remove a node from the node tree, clearing any interaction state
     /// (hover/active/focus/mousedown/selection/drag/scrollbar) that references
     /// it so that stale NodeIds are never dereferenced after the slot is freed.
+    /// BGMail: bytes of web fonts this document holds.
+    pub fn web_font_bytes(&self) -> u64 {
+        self.font_bytes
+    }
+
+    /// BGMail: takes `bytes` of generated text from this pass's budget, if it still has them.
+    pub(crate) fn take_generated_text(&self, bytes: usize) -> bool {
+        let left = self.generated_text_left.get();
+        self.generated_text_left.set(left.saturating_sub(bytes));
+        bytes <= left
+    }
+
     pub(crate) fn remove_node_from_tree(&mut self, node_id: NodeId) -> Option<Node> {
         self.clear_interaction_state_for_removed_node(node_id);
+        self.paint_tree_stale = true;
         self.nodes.remove(node_id)
     }
 
@@ -1153,15 +1205,6 @@ impl BaseDocument {
         node
     }
 
-    pub(crate) fn resolve_url(&self, raw: &str) -> url::Url {
-        self.url.resolve_relative(raw).unwrap_or_else(|| {
-            panic!(
-                "to be able to resolve {raw} with the base_url: {:?}",
-                *self.url
-            )
-        })
-    }
-
     pub fn print_tree(&self) {
         crate::util::walk_tree(0, self.root_node());
     }
@@ -1181,7 +1224,10 @@ impl BaseDocument {
                 if let Some(href) = element.attr(local_name!("href")) {
                     // println!("Node {node_id} {href} {href_to_reload} {} {}", resolved_href.as_str(), resolved_href.as_str() == url_to_reload);
                     if href == href_to_reload {
-                        let resolved_href = self.resolve_url(href);
+                        // BGMail: `resolve_url` would panic on a bad one.
+                        let Some(resolved_href) = self.url.resolve_relative(href) else {
+                            continue;
+                        };
                         self.net_provider.fetch(
                             self.id(),
                             self.build_request(resolved_href.clone()),
@@ -1257,11 +1303,15 @@ impl BaseDocument {
                 shell_provider: self.shell_provider.clone(),
                 abort_signal: self.abort_signal.clone(),
                 import_depth: 0,
+                import_budget: crate::net::new_import_budget(),
             }),
             None,
             QuirksMode::NoQuirks,
             AllowImportRules::Yes,
         );
+        if origin == Origin::Author {
+            crate::net::keep_only_paint_in_state_rules(&data, &self.guard);
+        }
 
         DocumentStyleSheet(ServoArc::new(data))
     }
@@ -1315,17 +1365,21 @@ impl BaseDocument {
         }
     }
 
-    pub fn handle_messages(&mut self) {
+    /// BGMail: whether there were any, as what they load changes what was drawn.
+    pub fn handle_messages(&mut self) -> bool {
         // Remove event Reciever from the Document so that we can process events
         // without holding a borrow to the Document
         let rx = self.rx.take().unwrap();
 
+        let mut handled = false;
         while let Ok(msg) = rx.try_recv() {
             self.handle_message(msg);
+            handled = true;
         }
 
         // Put Reciever back
         self.rx = Some(rx);
+        handled
     }
 
     pub fn handle_message(&mut self, msg: DocumentEvent) {
@@ -1417,6 +1471,11 @@ impl BaseDocument {
                 self.apply_iframe_html(node_id, res.request_id, res.resolved_url, &html);
             }
             Resource::Font(bytes, overrides) => {
+                // BGMail: past the document's budget a font is left to its fallbacks.
+                if self.font_bytes + bytes.len() as u64 > crate::net::MAX_DOCUMENT_FONT_BYTES {
+                    return;
+                }
+                self.font_bytes += bytes.len() as u64;
                 let font = Blob::new(Arc::new(bytes));
 
                 // Build a `FontInfoOverride` from the `@font-face` descriptors
@@ -2276,6 +2335,7 @@ impl BaseDocument {
         // full restyle on every viewport resize.
         if !origins.is_empty() {
             self.stylist.force_stylesheet_origins_dirty(origins);
+            self.rebuild_boxes_once = true;
         }
 
         // Styles that resolve viewport units (vw/vh/etc) still need recomputing
@@ -2346,7 +2406,10 @@ impl BaseDocument {
                 return Some(CursorIcon::Pointer);
             }
 
-            maybe_node = node.layout_parent.get().map(|node_id| node.with(node_id));
+            maybe_node = node
+                .layout_parent
+                .get()
+                .and_then(|node_id| self.nodes.get(node_id));
         }
 
         // Return text cursor for text nodes
@@ -2757,14 +2820,16 @@ impl BaseDocument {
             let element_data = node.element_data()?;
             let inline_layout = element_data.inline_layout_data.as_ref()?;
 
-            if *end > inline_layout.text.len() {
+            // BGMail: the offsets can be older than the text (`:hover` can change it), so
+            // they may be past its end or inside a character.
+            let Some(text) = inline_layout.text.get(*start..*end) else {
                 continue;
-            }
+            };
 
             if !result.is_empty() {
                 result.push(' ');
             }
-            result.push_str(&inline_layout.text[*start..*end]);
+            result.push_str(text);
         }
 
         if result.is_empty() {

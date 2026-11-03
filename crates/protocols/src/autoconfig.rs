@@ -82,8 +82,10 @@ struct Server {
 
 /// Parses a clientConfig document: for `incomingServer type="imap"` and
 /// `outgoingServer type="smtp"` the first usable encrypted (SSL/TLS or
-/// STARTTLS) entry in file order (preferred ones come first); a cleartext
-/// (`plain`) entry is used only when no encrypted one exists.
+/// STARTTLS) entry in file order (preferred ones come first). A cleartext (`plain`)
+/// entry is skipped: the login test runs right after discovery, and the password
+/// mustn't go out unencrypted before anyone has seen the settings. The user can still
+/// choose no encryption by hand.
 /// `%EMAILADDRESS%` / `%EMAILLOCALPART%` / `%EMAILDOMAIN%` are substituted
 /// in the username. `None` unless both are present.
 pub fn parse_autoconfig(xml: &str, email: &str) -> Option<AccountConfig> {
@@ -97,7 +99,7 @@ pub fn parse_autoconfig(xml: &str, email: &str) -> Option<AccountConfig> {
             .filter(|node| node.has_tag_name(tag) && node.attribute("type") == Some(kind))
             .filter_map(|node| parse_server(node, email))
             .collect();
-        prefer_encrypted(servers)
+        servers.into_iter().next()
     };
     let imap = pick("incomingServer", "imap")?;
     let smtp = pick("outgoingServer", "smtp")?;
@@ -111,15 +113,6 @@ pub fn parse_autoconfig(xml: &str, email: &str) -> Option<AccountConfig> {
     })
 }
 
-/// The first encrypted server, else the first one (cleartext).
-fn prefer_encrypted(servers: Vec<Server>) -> Option<Server> {
-    let encrypted = servers
-        .iter()
-        .position(|server| server.config.security != Security::None);
-    let index = encrypted.unwrap_or(0);
-    servers.into_iter().nth(index)
-}
-
 fn parse_server(node: roxmltree::Node<'_, '_>, email: &str) -> Option<Server> {
     let text = |tag: &str| {
         node.children()
@@ -130,7 +123,6 @@ fn parse_server(node: roxmltree::Node<'_, '_>, email: &str) -> Option<Server> {
     let security = match text("socketType")?.to_ascii_uppercase().as_str() {
         "SSL" | "TLS" => Security::Tls,
         "STARTTLS" => Security::StartTls,
-        "PLAIN" => Security::None,
         _ => return None,
     };
     let host = substitute(&text("hostname")?, email);
@@ -215,15 +207,29 @@ mod tests {
         assert!(parse_autoconfig(pop_only, "a@x").is_none());
         let odd = r#"<clientConfig><emailProvider id="x">
             <incomingServer type="imap"><hostname>imap.x</hostname><port>abc</port><socketType>SSL</socketType></incomingServer>
-            <incomingServer type="imap"><hostname>imap2.%EMAILDOMAIN%</hostname><port>143</port><socketType>plain</socketType></incomingServer>
+            <incomingServer type="imap"><hostname>imap2.%EMAILDOMAIN%</hostname><port>143</port><socketType>STARTTLS</socketType></incomingServer>
             <outgoingServer type="smtp"><hostname>smtp.x</hostname><port>25</port><socketType>weird</socketType></outgoingServer>
             <outgoingServer type="smtp"><hostname>smtp.x</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer>
             </emailProvider></clientConfig>"#;
         let config = parse_autoconfig(odd, "a@x.org").unwrap();
         assert_eq!(config.imap.host, "imap2.x.org");
-        assert_eq!(config.imap.security, Security::None);
+        assert_eq!(config.imap.security, Security::StartTls);
         assert_eq!(config.username, "a@x.org");
         assert_eq!(config.smtp.port, 587);
+    }
+
+    #[test]
+    fn a_document_offering_only_cleartext_is_not_used() {
+        let imap_plain = r#"<clientConfig><emailProvider id="x">
+            <incomingServer type="imap"><hostname>imap.x</hostname><port>143</port><socketType>plain</socketType></incomingServer>
+            <outgoingServer type="smtp"><hostname>smtp.x</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer>
+            </emailProvider></clientConfig>"#;
+        assert!(parse_autoconfig(imap_plain, "a@x").is_none());
+        let smtp_plain = r#"<clientConfig><emailProvider id="x">
+            <incomingServer type="imap"><hostname>imap.x</hostname><port>993</port><socketType>SSL</socketType></incomingServer>
+            <outgoingServer type="smtp"><hostname>smtp.x</hostname><port>25</port><socketType>plain</socketType></outgoingServer>
+            </emailProvider></clientConfig>"#;
+        assert!(parse_autoconfig(smtp_plain, "a@x").is_none());
     }
 
     #[test]

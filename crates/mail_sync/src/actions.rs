@@ -11,7 +11,8 @@
 
 use mail_core::MessageFlags;
 use storage::{
-    is_manual_move_destination_forbidden, system, Account, Database, MessageDetail, PROVIDER_LOCAL,
+    is_manual_move_destination_forbidden, parse_folders_csv, system, Account, Database,
+    MessageDetail, PROVIDER_LOCAL,
 };
 
 use crate::plan::PendingAction;
@@ -23,12 +24,15 @@ pub struct ActionOutcome {
     pub changed: bool,
     /// A server op was queued (send `Command::ProcessQueue`).
     pub needs_sync: bool,
+    /// Nothing happened: the server has no folder to move it to.
+    pub no_destination: bool,
 }
 
 impl ActionOutcome {
     const LOCAL: Self = Self {
         changed: true,
         needs_sync: false,
+        no_destination: false,
     };
 }
 
@@ -97,7 +101,7 @@ fn unresolved_folder(
     Ok(primary_folders(message).into_iter().find_map(|path| {
         folders
             .iter()
-            .find(|folder| folder.path == path)
+            .find(|folder| folder.path == *path)
             .and_then(|folder| folder.remote_name.clone())
     }))
 }
@@ -196,6 +200,7 @@ pub fn set_read(db: &Database, message_id: i64, read: bool) -> rusqlite::Result<
     Ok(ActionOutcome {
         changed: true,
         needs_sync,
+        no_destination: false,
     })
 }
 
@@ -224,15 +229,15 @@ pub fn set_starred(
     Ok(ActionOutcome {
         changed: true,
         needs_sync,
+        no_destination: false,
     })
 }
 
 /// Non-flagged folders the message is shown in.
-fn primary_folders(message: &MessageDetail) -> Vec<&str> {
-    message
-        .folders_csv
-        .split(',')
-        .filter(|path| !path.is_empty() && *path != system::FLAGGED)
+fn primary_folders(message: &MessageDetail) -> Vec<String> {
+    parse_folders_csv(&message.folders_csv)
+        .into_iter()
+        .filter(|path| path != system::FLAGGED)
         .collect()
 }
 
@@ -249,6 +254,7 @@ fn with_cas_retry(
     Ok(round()?.unwrap_or(ActionOutcome {
         changed: true,
         needs_sync: true,
+        no_destination: false,
     }))
 }
 
@@ -292,7 +298,10 @@ fn move_to_folder_round(
         .iter()
         .find(|f| f.path == target_path && f.remote_name.is_some())
     else {
-        return Ok(Some(ActionOutcome::default()));
+        return Ok(Some(ActionOutcome {
+            no_destination: true,
+            ..Default::default()
+        }));
     };
     let to = target.remote_name.clone().unwrap_or_default();
     let removes_everywhere = matches!(target_path, system::TRASH | system::JUNK);
@@ -401,12 +410,94 @@ fn move_to_folder_round(
     Ok(Some(ActionOutcome {
         changed: true,
         needs_sync,
+        no_destination: false,
     }))
 }
 
-/// Moves to the Archive folder (Gmail: All Mail, which sync maps there).
+/// Moves to the Archive folder (Gmail: All Mail, which sync maps there). A message
+/// with labels only leaves the Inbox and keeps them, as in Gmail (user decision).
 pub fn archive(db: &Database, message_id: i64) -> rusqlite::Result<ActionOutcome> {
+    if let Some(outcome) = archive_keeping_labels(db, message_id)? {
+        return Ok(outcome);
+    }
     move_to_folder(db, message_id, system::ARCHIVE)
+}
+
+/// [`archive`] for a message of an All Mail account that also has labels; `None`
+/// for any other, or with moves queued elsewhere, which [`move_to_folder`] re-points.
+fn archive_keeping_labels(
+    db: &Database,
+    message_id: i64,
+) -> rusqlite::Result<Option<ActionOutcome>> {
+    let Some((message, account)) = context(db, message_id)? else {
+        return Ok(None);
+    };
+    if is_local(&account) {
+        return Ok(None);
+    }
+    let folders = db.list_folders(account.id)?;
+    let Some(all_mail) = folders.iter().find(|folder| {
+        folder.path == system::ARCHIVE
+            && folder.role.as_deref() == Some("all")
+            && folder.remote_name.is_some()
+    }) else {
+        return Ok(None);
+    };
+    let inbox = folders.iter().find(|folder| folder.path == system::INBOX);
+    let locations = db.message_locations(message_id)?;
+    // Spam and Trash are where a message is, not labels: it is archived out of them.
+    let has_label = locations.iter().any(|location| {
+        folders.iter().any(|folder| {
+            folder.id == location.folder_id
+                && !matches!(
+                    folder.path.as_str(),
+                    system::INBOX | system::ARCHIVE | system::JUNK | system::TRASH
+                )
+        })
+    });
+    if !has_label {
+        return Ok(None);
+    }
+    let queued = pending_moves(db, account.id, message_id)?;
+    if !queued.is_empty() {
+        // Already on its way out of the Inbox: going on would take the labels too.
+        let archiving = queued.iter().all(|queued| {
+            matches!(&queued.action, PendingAction::Move { to, .. }
+                if Some(to) == all_mail.remote_name.as_ref())
+        });
+        return Ok(archiving.then(ActionOutcome::default));
+    }
+    let Some(location) = locations
+        .iter()
+        .find(|location| inbox.is_some_and(|i| i.id == location.folder_id))
+    else {
+        // Out of the Inbox already: archived, as far as labels go.
+        return Ok(Some(ActionOutcome::default()));
+    };
+    let Some(from) = location.remote_name.clone() else {
+        return Ok(None);
+    };
+    let action = PendingAction::Move {
+        from,
+        uid: location.uid,
+        to: all_mail.remote_name.clone().unwrap_or_default(),
+        to_folder_id: all_mail.id,
+        uid_validity: db.folder_sync_state(location.folder_id)?.uid_validity,
+        message_id_hdr: message.message_id_hdr.clone(),
+    };
+    db.enqueue_op(
+        account.id,
+        action.kind(),
+        Some(message_id),
+        &action.encode(),
+    )?;
+    db.detach_location(message_id, location.folder_id)?;
+    db.swap_message_folder(message_id, system::INBOX, system::ARCHIVE)?;
+    Ok(Some(ActionOutcome {
+        changed: true,
+        needs_sync: true,
+        no_destination: false,
+    }))
 }
 
 /// Moves to Trash; a message already in Trash is deleted permanently.
@@ -514,6 +605,7 @@ fn delete_permanently_round(
     Ok(Some(ActionOutcome {
         changed,
         needs_sync,
+        no_destination: false,
     }))
 }
 
@@ -618,6 +710,7 @@ mod tests {
     const QUEUED: ActionOutcome = ActionOutcome {
         changed: true,
         needs_sync: true,
+        no_destination: false,
     };
 
     #[test]
@@ -729,8 +822,10 @@ mod tests {
         let nothing = ActionOutcome::default();
         assert_eq!(move_to_folder(&fx.db, id, "user:Work").unwrap(), nothing);
         assert_eq!(move_to_folder(&fx.db, id, system::SENT).unwrap(), nothing);
-        assert_eq!(move_to_folder(&fx.db, id, "user:Nope").unwrap(), nothing);
-        assert_eq!(move_to_folder(&fx.db, id, "user:Local").unwrap(), nothing);
+        for target in ["user:Nope", "user:Local"] {
+            let outcome = move_to_folder(&fx.db, id, target).unwrap();
+            assert!(outcome.no_destination && !outcome.changed && !outcome.needs_sync);
+        }
         assert_eq!(
             move_to_folder(&fx.db, 9999, system::TRASH).unwrap(),
             nothing
@@ -808,6 +903,75 @@ mod tests {
             .all(|(_, action)| matches!(action, PendingAction::Move { to, .. } if to == "Trash")));
         assert!(fx.db.message_locations(id).unwrap().is_empty());
         assert_eq!(csv(&fx, id), ",sys:trash,");
+    }
+
+    /// A Gmail message in the Inbox and the `work` label.
+    fn labeled(fx: &Fx) -> i64 {
+        let id = message(fx, fx.inbox, 5, "a");
+        fx.db.attach_location(id, fx.work, 6).unwrap();
+        id
+    }
+
+    #[test]
+    fn archiving_only_takes_a_labeled_message_out_of_the_inbox() {
+        let fx = fixture(PROVIDER_GMAIL);
+        let id = labeled(&fx);
+        assert_eq!(archive(&fx.db, id).unwrap(), QUEUED);
+        let queued = ops(&fx);
+        assert_eq!(queued.len(), 1);
+        assert!(
+            matches!(&queued[0].1, PendingAction::Move { from, to, .. } if from == "INBOX" && to == "[Gmail]/All Mail")
+        );
+        assert_eq!(csv(&fx, id), ",sys:archive,user:Work,");
+        let locations = fx.db.message_locations(id).unwrap();
+        assert!(locations.iter().any(|l| l.folder_id == fx.work));
+        assert!(!locations.iter().any(|l| l.folder_id == fx.inbox));
+
+        // Already out of the Inbox: nothing left to do, and the label stays.
+        assert_eq!(archive(&fx.db, id).unwrap(), ActionOutcome::default());
+        assert_eq!(ops(&fx).len(), 1, "the queued move is enough");
+
+        let queued = ops(&fx).remove(0).0;
+        fx.db.complete_op(queued.id).unwrap();
+        assert_eq!(archive(&fx.db, id).unwrap(), ActionOutcome::default());
+        assert_eq!(csv(&fx, id), ",sys:archive,user:Work,");
+    }
+
+    #[test]
+    fn spam_is_not_a_label_to_keep_when_archiving() {
+        let fx = fixture(PROVIDER_GMAIL);
+        let junk = fx
+            .db
+            .list_folders(fx.account)
+            .unwrap()
+            .into_iter()
+            .find(|folder| folder.path == system::JUNK)
+            .unwrap();
+        let id = message(&fx, junk.id, 5, "a");
+        assert_eq!(archive(&fx.db, id).unwrap(), QUEUED);
+        assert_eq!(csv(&fx, id), ",sys:archive,");
+    }
+
+    #[test]
+    fn a_missing_destination_is_reported_and_nothing_changes() {
+        let fx = fixture(PROVIDER_IMAP);
+        let id = message(&fx, fx.inbox, 5, "a");
+        fx.db
+            .conn()
+            .execute("DELETE FROM folders WHERE id = ?1", [fx.trash])
+            .unwrap();
+        let outcome = trash(&fx.db, id).unwrap();
+        assert!(outcome.no_destination);
+        assert!(!outcome.changed);
+        assert_eq!(csv(&fx, id), ",sys:inbox,");
+    }
+
+    #[test]
+    fn moving_and_trashing_still_leave_every_label() {
+        let fx = fixture(PROVIDER_GMAIL);
+        let id = labeled(&fx);
+        assert_eq!(trash(&fx.db, id).unwrap(), QUEUED);
+        assert_eq!(ops(&fx).len(), 2);
     }
 
     #[test]

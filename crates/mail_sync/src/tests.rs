@@ -772,14 +772,14 @@ fn send_failures_retry_then_become_permanent() {
     h.sync();
     assert!(sender.sent().is_empty());
     assert_eq!(h.db.outbox_count().unwrap(), 0);
-    let failed = h.db.failed_outgoing().unwrap();
+    let failed = h.db.unsent_outgoing().unwrap();
     assert_eq!(failed.len(), 1);
     assert_eq!(failed[0].state, storage::OutgoingState::Failed);
     // The user retries: sent on the next cycle.
     h.db.retry_outgoing(outbox_id).unwrap();
     h.run(Command::ProcessQueue);
     assert_eq!(sender.sent().len(), 1);
-    assert!(h.db.failed_outgoing().unwrap().is_empty());
+    assert!(h.db.unsent_outgoing().unwrap().is_empty());
 }
 
 #[test]
@@ -1496,6 +1496,170 @@ fn transient_send_failures_back_off_without_using_attempts() {
 }
 
 #[test]
+fn a_message_three_days_old_is_not_sent_any_more() {
+    let h = Harness::imap().started();
+    let id =
+        h.db.enqueue_outgoing(
+            h.account,
+            "me@example.com",
+            &strings(&["b@x.com"]),
+            b"raw",
+            None,
+        )
+        .unwrap();
+    let age = crate::worker::SEND_GIVE_UP_AFTER.as_secs() as i64;
+    h.db.conn()
+        .execute(
+            "UPDATE outbox SET created_at = ?1 WHERE id = ?2",
+            [crate::worker::unix_now() - age, id],
+        )
+        .unwrap();
+    let events = h.run(Command::ProcessQueue);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        SyncEvent::SendFailed {
+            permanent: true,
+            ..
+        }
+    )));
+    assert_eq!(h.connector.sender().sends(), 0);
+    let row = &h.db.outbox(h.account).unwrap()[0];
+    assert_eq!(row.state, storage::OutgoingState::Failed);
+}
+
+#[test]
+fn only_the_sent_copy_records_the_bcc() {
+    let h = Harness::imap().started();
+    let raw = mail("outgoing", 9);
+    h.db.enqueue_outgoing(
+        h.account,
+        "me@example.com",
+        &strings(&["hidden@x.com"]),
+        &raw,
+        None,
+    )
+    .unwrap();
+    h.run(Command::ProcessQueue);
+    assert_eq!(h.connector.sender().sent()[0].raw, raw);
+    let copy = &h.server.messages("Sent")[0];
+    let parsed = mail_core::parse_message(&copy.raw).unwrap();
+    assert_eq!(parsed.bcc[0].email, "hidden@x.com");
+}
+
+#[test]
+fn a_message_the_client_cannot_parse_does_not_stop_the_sync() {
+    let h = Harness::imap();
+    h.server.deliver("INBOX", &mail("a", 1), unread());
+    h.server.on_next_call("fetch_headers INBOX 1", {
+        let server = h.server.clone();
+        move || server.fail_next(RemoteErrorKind::Unreadable)
+    });
+    let h = h.started();
+    assert!(h
+        .server
+        .calls()
+        .iter()
+        .any(|call| call == "fetch_headers_plain INBOX 1"));
+    assert_eq!(h.subjects(system::INBOX), strings(&["a"]));
+}
+
+#[test]
+fn without_a_sent_folder_the_lost_copy_is_reported() {
+    let h = Harness::imap().started();
+    assert!(h.server.remove_folder("Sent"));
+    h.sync();
+    h.db.enqueue_outgoing(
+        h.account,
+        "me@example.com",
+        &strings(&["b@x.com"]),
+        &mail("outgoing", 9),
+        None,
+    )
+    .unwrap();
+    let events = h.run(Command::ProcessQueue);
+    assert_eq!(h.connector.sender().sent().len(), 1);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SyncEvent::SentCopyFailed { .. })));
+}
+
+#[test]
+fn a_message_unreadable_every_way_is_skipped_and_the_rest_syncs() {
+    let h = Harness::imap();
+    h.server.deliver("INBOX", &mail("a", 1), unread());
+    for call in [
+        "fetch_headers INBOX 1",
+        "fetch_headers_plain INBOX 1",
+        "fetch_headers_plain INBOX 1",
+    ] {
+        h.server.on_next_call(call, {
+            let server = h.server.clone();
+            move || server.fail_next(RemoteErrorKind::Unreadable)
+        });
+    }
+    h.server.deliver("Archive", &mail("b", 2), unread());
+    let h = h.started();
+    assert_eq!(h.subjects(system::ARCHIVE), strings(&["b"]));
+}
+
+#[test]
+fn a_body_over_the_limit_is_rejected_and_not_downloaded_again() {
+    let options = EngineOptions {
+        max_message_body: 1,
+        ..test_options()
+    };
+    let h = Harness::new(PROVIDER_IMAP, "{}", options);
+    h.server.deliver("INBOX", &mail("a", 1), unread());
+    let h = h.started();
+    let id = h.id_of("a");
+    let wait_rejected = || {
+        h.wait_for(
+            "BodyRejected",
+            |event| matches!(event, SyncEvent::BodyRejected { message_id } if *message_id == id),
+        )
+    };
+    assert!(h.engine.send(h.account, Command::FetchBody(id)));
+    wait_rejected();
+    let fetches = || {
+        h.server
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("fetch_body"))
+            .count()
+    };
+    assert_eq!(fetches(), 1);
+    assert_eq!(
+        h.db.get_message(id).unwrap().unwrap().body_state,
+        storage::BODY_STATE_HEADERS
+    );
+
+    assert!(h.engine.send(h.account, Command::FetchBody(id)));
+    wait_rejected();
+    assert_eq!(fetches(), 1);
+}
+
+#[test]
+fn a_sent_message_is_listed_in_sent_right_away() {
+    let h = Harness::imap().started();
+    h.db.enqueue_outgoing(
+        h.account,
+        "me@example.com",
+        &strings(&["b@x.com"]),
+        &mail("outgoing", 9),
+        None,
+    )
+    .unwrap();
+    h.run(Command::ProcessQueue);
+    let sent =
+        h.db.list_folders(h.account)
+            .unwrap()
+            .into_iter()
+            .find(|folder| folder.path == system::SENT)
+            .unwrap();
+    assert!(!h.db.folder_uids(sent.id).unwrap().is_empty());
+}
+
+#[test]
 fn uncertain_sends_are_never_resent_automatically() {
     let h = Harness::imap().started();
     let id =
@@ -1517,12 +1681,12 @@ fn uncertain_sends_are_never_resent_automatically() {
     h.sync();
     h.sync();
     assert_eq!(sender.sent().len(), 1, "delivered once, never resent");
-    let stuck = h.db.failed_outgoing().unwrap();
+    let stuck = h.db.unsent_outgoing().unwrap();
     assert_eq!(stuck.len(), 1);
     assert_eq!(stuck[0].state, storage::OutgoingState::MaybeSent);
     // The user discards it.
     h.db.delete_outgoing(id).unwrap();
-    assert!(h.db.failed_outgoing().unwrap().is_empty());
+    assert!(h.db.unsent_outgoing().unwrap().is_empty());
 }
 
 #[test]

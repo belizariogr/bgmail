@@ -146,6 +146,9 @@ impl ElementCx<'_, '_> {
         self.draw_solid_bg(scene, &background_clip_path);
 
         for idx in (0..layer_count).rev() {
+            if scene.exhausted() {
+                break;
+            }
             let layer = ImageLayerStyles::from_background(bg_styles, image_data, idx);
             if layer.text_clip != text_run {
                 if text_run {
@@ -308,7 +311,7 @@ impl ElementCx<'_, '_> {
             .map(|row| {
                 [
                     row.group.and_then(background_color),
-                    background_color(row.node_id),
+                    row.node_id.and_then(background_color),
                 ]
             })
             .collect();
@@ -570,6 +573,11 @@ impl ElementCx<'_, '_> {
                 x: x.translate,
                 y: y.translate,
             });
+        // BGMail: as for gradients below; `space` draws each tile.
+        if x.count as u64 * y.count as u64 > 500 {
+            return;
+        }
+
         let tile_rect = Rect::new(0.0, 0.0, x.rect_len, y.rect_len);
 
         if let Some(animation) = &image_data.animation {

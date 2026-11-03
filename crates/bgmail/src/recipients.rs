@@ -7,7 +7,7 @@ use gpui::{
     deferred, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, KeyDownEvent, MouseButton, Render, SharedString, Stateful, Subscription, Window,
 };
-use mail_core::{format_address_list, parse_address_list, same_email, Address};
+use mail_core::{format_address_list, parse_address_list, same_email, split_tokens, Address};
 use storage::{fold_for_search, Contact};
 use theme::ActiveTheme;
 use ui::prelude::*;
@@ -38,10 +38,15 @@ fn matching_contacts(contacts: &[Contact], added: &[Address], query: &str) -> Ve
     let rank = |contact: &Contact| {
         let name = fold_for_search(&contact.name);
         let email = fold_for_search(&contact.email);
-        if email.starts_with(&query) || name.split_whitespace().any(|w| w.starts_with(&query)) {
+        if email == query {
+            // What was typed, before anything that merely starts with it.
             Some(0)
-        } else if email.contains(&query) || name.contains(&query) {
+        } else if email.starts_with(&query)
+            || name.split_whitespace().any(|w| w.starts_with(&query))
+        {
             Some(1)
+        } else if email.contains(&query) || name.contains(&query) {
+            Some(2)
         } else {
             None
         }
@@ -71,12 +76,32 @@ fn with_known_name(address: Address, contacts: &[Contact]) -> Address {
     Address::new(name, address.email)
 }
 
+fn in_open_quotes(typed: &str) -> bool {
+    typed.matches('"').count() % 2 == 1
+}
+
+/// Whether Enter and Tab take what was typed rather than the highlighted suggestion:
+/// a complete address is what the user means, and swapping it for a longer one in the
+/// catalog would send the message elsewhere, with only a name on the card. Picking a
+/// suggestion with the arrows still wins.
+fn typed_wins(typed: &str, highlighted: usize) -> bool {
+    highlighted == 0
+        && parse_address_list(typed.trim()).is_ok_and(|addresses| {
+            matches!(&addresses[..], [address] if address
+            .email
+            .rsplit_once('@')
+            .is_some_and(|(_, domain)| {
+                domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
+            }))
+        })
+}
+
 /// Splits typed text into the addresses that are valid and the rest, which stays
 /// in the field for the user to fix.
 fn split_typed(text: &str) -> (Vec<Address>, String) {
     let mut valid = Vec::new();
     let mut rest = Vec::new();
-    for token in text.split([',', ';']) {
+    for token in split_tokens(text) {
         let token = token.trim();
         if token.is_empty() {
             continue;
@@ -179,6 +204,22 @@ impl RecipientInput {
     }
 
     /// The hint only makes sense while there are no cards.
+    /// The hint shown while the field has no cards.
+    #[cfg(test)]
+    pub fn placeholder(&self) -> &SharedString {
+        &self.placeholder
+    }
+
+    /// Changes the hint shown while the field has no cards.
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder = placeholder.into();
+        self.sync_placeholder(cx);
+    }
+
     fn sync_placeholder(&mut self, cx: &mut Context<Self>) {
         let placeholder = placeholder_for(&self.placeholder, &self.addresses);
         self.input.update(cx, |input, cx| {
@@ -295,10 +336,16 @@ impl RecipientInput {
                     (self.highlighted + self.suggestions.len() - 1) % self.suggestions.len();
             }
             "escape" if open => self.suggestions.clear(),
-            "enter" if open => self.accept(self.highlighted, window, cx),
+            "enter" if open && !typed_wins(&self.typed(cx), self.highlighted) => {
+                self.accept(self.highlighted, window, cx);
+            }
+            "enter" if open => self.commit_typed(cx),
             "enter" if !self.typed(cx).trim().is_empty() => self.commit_typed(cx),
             // With Shift it is another character (`<`, `:`): a name being typed.
-            "," | ";" if !keystroke.modifiers.shift => self.commit_typed(cx),
+            // Nor inside quotes, where it belongs to the name.
+            "," | ";" if !keystroke.modifiers.shift && !in_open_quotes(&self.typed(cx)) => {
+                self.commit_typed(cx);
+            }
             _ => return,
         }
         cx.stop_propagation();
@@ -412,7 +459,11 @@ impl Render for RecipientInput {
             .on_key_down(cx.listener(Self::on_key_down))
             .capture_action(cx.listener(|this, _: &FocusNext, window, cx| {
                 if !this.suggestions.is_empty() {
-                    this.accept(this.highlighted, window, cx);
+                    if typed_wins(&this.typed(cx), this.highlighted) {
+                        this.commit_typed(cx);
+                    } else {
+                        this.accept(this.highlighted, window, cx);
+                    }
                     cx.stop_propagation();
                 }
             }))
@@ -465,6 +516,50 @@ mod tests {
         );
         assert!(matching_contacts(&contacts, &[], "  ").is_empty());
         assert!(matching_contacts(&contacts, &[], "zzz").is_empty());
+    }
+
+    #[test]
+    fn a_complete_address_beats_the_suggestion_unless_one_was_picked() {
+        assert!(typed_wins("joao@empresa.com", 0));
+        assert!(typed_wins("João <joao@empresa.com>", 0));
+        assert!(!typed_wins("joao@empresa.com", 1));
+        for partial in [
+            "joao",
+            "joao@",
+            "joao@empresa",
+            "joao@empresa.",
+            "a@b.c, d@e.f",
+            "",
+        ] {
+            assert!(!typed_wins(partial, 0), "{partial}");
+        }
+    }
+
+    #[test]
+    fn a_comma_inside_quotes_belongs_to_the_name() {
+        assert!(in_open_quotes("\"Silva"));
+        assert!(!in_open_quotes("\"Silva, João\" <j@x.test>"));
+        assert!(!in_open_quotes("ann@x.test"));
+    }
+
+    #[test]
+    fn the_exact_address_comes_first() {
+        let contacts = [
+            contact("João", "joao@empresa.com.br"),
+            contact("", "joao@empresa.com"),
+        ];
+        assert_eq!(
+            emails(&matching_contacts(&contacts, &[], "joao@empresa.com"))[0],
+            "joao@empresa.com"
+        );
+    }
+
+    #[test]
+    fn a_quoted_name_with_a_comma_stays_one_address() {
+        let (valid, rest) = split_typed("\"Doe, John\" <j@x.test>; ann@y.test, nope");
+        assert_eq!(valid.len(), 2);
+        assert_eq!(valid[0].email, "j@x.test");
+        assert_eq!(rest, "nope");
     }
 
     #[test]

@@ -21,10 +21,13 @@ pub mod reply;
 pub mod thread;
 
 pub use account::{AccountConfig, AuthKind, Security, ServerConfig, DEFAULT_SYNC_WINDOW};
-pub use address::{format_address_list, parse_address_list, same_email, Address};
+pub use address::{
+    format_address_list, parse_address_list, same_email, split_tokens, valid_addresses, Address,
+};
 pub use cancel::{CancelGuard, CancelToken};
 pub use compose::{
-    build_message, envelope_recipients, guess_mime_type, new_message_id, Draft, OutgoingAttachment,
+    build_message, envelope_recipients, guess_mime_type, new_message_id, sent_copy, Draft,
+    OutgoingAttachment,
 };
 pub use flags::MessageFlags;
 pub use folder::{
@@ -33,8 +36,9 @@ pub use folder::{
 };
 pub use mailto::draft_from_mailto;
 pub use parse::{
-    attachment_content, has_attachments, inline_images, parse_message, AttachmentInfo,
-    ParsedMessage,
+    attachment_content, attachment_contents, cid_skip_len, cid_value_len, has_attachments,
+    html_references_cid, inline_images, parse_header_block, parse_message, referenced_cids,
+    AttachmentInfo, ParsedMessage, MAX_BODY_BYTES,
 };
 pub use remote::{
     Capabilities, FolderStatus, IdleOutcome, MailConnector, MailRemote, MailSender, RemoteError,

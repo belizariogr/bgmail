@@ -475,24 +475,36 @@ pub(crate) fn style(
     let itext_styles = style.get_inherited_text();
 
     // Convert font size and line height
-    let font_size = font_styles.font_size.used_size.0.px();
+    // BGMail: saturated like the lengths layout takes; see `MAX_LENGTH_PX`.
+    let font_size = stylo_taffy::convert::saturate_px(font_styles.font_size.used_size.0.px());
     let line_height = match font_styles.line_height {
         stylo::LineHeight::Normal => parley::LineHeight::NORMAL,
-        stylo::LineHeight::Number(num) => parley::LineHeight::FontSizeRelative(num.0),
-        stylo::LineHeight::Length(value) => parley::LineHeight::Absolute(value.0.px()),
+        // BGMail: saturated as `font_size` above.
+        stylo::LineHeight::Number(num) => parley::LineHeight::FontSizeRelative(
+            num.0
+                .min(stylo_taffy::convert::MAX_LENGTH_PX / font_size.max(1.0)),
+        ),
+        stylo::LineHeight::Length(value) => {
+            parley::LineHeight::Absolute(stylo_taffy::convert::saturate_px(value.0.px()))
+        }
     };
     let vertical_align = self::vertical_align(style);
 
-    let letter_spacing = itext_styles
-        .letter_spacing
-        .0
-        .resolve(Length::new(font_size))
-        .px();
+    // BGMail: saturated like the lengths layout takes; see `MAX_LENGTH_PX`.
+    let letter_spacing = stylo_taffy::convert::saturate_px(
+        itext_styles
+            .letter_spacing
+            .0
+            .resolve(Length::new(font_size))
+            .px(),
+    );
 
-    let word_spacing = itext_styles
-        .word_spacing
-        .resolve(Length::new(font_size))
-        .px();
+    let word_spacing = stylo_taffy::convert::saturate_px(
+        itext_styles
+            .word_spacing
+            .resolve(Length::new(font_size))
+            .px(),
+    );
 
     // Convert Bold/Italic
     let mut font_weight = self::font_weight(font_styles.font_weight);
@@ -507,6 +519,8 @@ pub(crate) fn style(
         .families
         .list
         .iter()
+        // BGMail: done per style, and 60000 names in 8000 paragraphs took 38 s.
+        .take(64)
         .enumerate()
         .map(|(index, family)| match family {
             stylo::SingleFontFamily::FamilyName(name) => {

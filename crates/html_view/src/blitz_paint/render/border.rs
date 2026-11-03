@@ -15,6 +15,10 @@ use crate::blitz_paint::{
     render::{ElementCx, PhysicalTracks},
 };
 
+/// BGMail: the most dots of one border edge, whose length a message sets at will; past it
+/// the edge is drawn as dashes, whose limit is the display list's.
+const MAX_BORDER_DOTS: f64 = 16384.0;
+
 /// A darker version of a colour (mirrors WebKit/Blink's `Color::Dark`): the
 /// brightest channel is reduced by a fixed amount and the others scaled to match,
 /// preserving hue.
@@ -128,6 +132,9 @@ fn sample_points_along_path(path: &BezPath, spacing: f64, count: usize) -> Vec<P
 impl ElementCx<'_, '_> {
     /// Draw all borders for a node
     pub(crate) fn draw_border(&self, scene: &mut crate::display_list::DisplayList) {
+        if scene.exhausted() {
+            return;
+        }
         let style = &*self.style;
         let border = style.get_border();
         let current_color = style.clone_color();
@@ -441,7 +448,7 @@ impl ElementCx<'_, '_> {
         }
         let radius = thickness / 2.0;
 
-        let mut path = BezPath::new();
+        let mut centers = Vec::new();
         if self.frame.has_border_radius() {
             // Rounded corners: dots spaced evenly around the rounded centre line so
             // the ring wraps seamlessly around the corners.
@@ -452,9 +459,12 @@ impl ElementCx<'_, '_> {
                 return;
             }
             let count = (perimeter / (2.0 * thickness)).round().max(1.0);
+            if count > MAX_BORDER_DOTS {
+                return self.draw_dashed_border_edge(scene, edge, color);
+            }
             let spacing = perimeter / count;
             for center in sample_points_along_path(&centerline, spacing, count as usize) {
-                path.extend(Circle::new(center, radius).path_elements(0.1));
+                centers.push(center);
             }
         } else {
             // Square corners: a dot is anchored in each corner (both ends of the
@@ -481,22 +491,26 @@ impl ElementCx<'_, '_> {
             if span <= 0.0 {
                 // Edge too short to fit two dots; place a single centred dot.
                 let center = dot_center(length / 2.0);
-                path.extend(Circle::new(center, radius).path_elements(0.1));
+                centers.push(center);
             } else {
                 // Aim for a centre-to-centre spacing of about two dot diameters,
                 // then adjust it so the first and last dots land in the corners.
-                let gaps = (span / (2.0 * thickness)).round().max(1.0) as usize;
+                let gaps = (span / (2.0 * thickness)).round().max(1.0);
+                if gaps > MAX_BORDER_DOTS {
+                    return self.draw_dashed_border_edge(scene, edge, color);
+                }
+                let gaps = gaps as usize;
                 let spacing = span / gaps as f64;
                 for i in 0..=gaps {
                     let center = dot_center(radius + i as f64 * spacing);
-                    path.extend(Circle::new(center, radius).path_elements(0.1));
+                    centers.push(center);
                 }
             }
         }
 
         let clip = self.frame.border_edge_shape(edge);
         scene.push_clip_layer(Fill::NonZero, self.transform, &clip);
-        scene.fill(Fill::NonZero, self.transform, color, None, &path);
+        scene.push_dots(self.transform, color, radius, &centers);
         scene.pop_layer();
     }
 
@@ -640,6 +654,9 @@ impl ElementCx<'_, '_> {
     /// ✅ none - Defines no border
     /// ✅ hidden - Defines a hidden border
     pub(crate) fn draw_outline(&self, scene: &mut crate::display_list::DisplayList) {
+        if scene.exhausted() {
+            return;
+        }
         let outline = self.style.get_outline();
 
         let current_color = self.style.clone_color();

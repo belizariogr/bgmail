@@ -126,6 +126,8 @@ pub fn human_size(bytes: u64, language: Language) -> String {
     format!("{number} {}", UNITS[unit])
 }
 
+const MAX_NAME_BYTES: usize = 240;
+
 /// A file name safe to create on every platform: only the last path segment
 /// of `name`, with control characters and `/ \ : * ? " < > |` replaced by
 /// `_`, surrounding spaces and dots trimmed, Windows device names (`CON`,
@@ -150,12 +152,42 @@ pub fn sanitize_filename(name: &str) -> String {
         return FALLBACK_NAME.to_string();
     }
     let (stem, extension) = split_extension(trimmed);
-    let mut stem: String = stem.chars().take(MAX_STEM_CHARS).collect();
-    let device = stem.to_ascii_uppercase();
-    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ((device.starts_with("COM") || device.starts_with("LPT"))
-            && device.len() == 4
-            && device.as_bytes()[3].is_ascii_digit());
+    let mut stem: String = stem
+        .chars()
+        .take(MAX_STEM_CHARS)
+        .collect::<String>()
+        // The cut may leave a dot or space at the end, which Windows drops, turning
+        // `x.exe.` into `x.exe` after `runs_code` read no extension.
+        .trim_end_matches(|c: char| c.is_whitespace() || c == '.')
+        .to_string();
+    // Windows takes a device by what comes before the first dot, ignoring spaces after it:
+    // `NUL.tar.gz` and `NUL .txt` are NUL, and what is saved there is lost.
+    // What most file systems allow is 255 bytes, whatever the characters: 84 in CJK didn't save.
+    // Less, for the ` (n)` a name in use gets.
+    let room = MAX_NAME_BYTES.saturating_sub(extension.map_or(0, |ext| ext.len() + 1));
+    if stem.len() > room {
+        let mut end = room;
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        stem.truncate(end);
+        stem.truncate(
+            stem.trim_end_matches(|c: char| c.is_whitespace() || c == '.')
+                .len(),
+        );
+    }
+    let device = stem
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    let reserved = matches!(
+        device.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ((device.starts_with("COM") || device.starts_with("LPT"))
+        && device.len() == 4
+        && device.as_bytes()[3].is_ascii_digit());
     if reserved {
         stem.insert(0, '_');
     }
@@ -196,7 +228,7 @@ pub fn extract(raw: &[u8], part_index: u32) -> io::Result<Vec<u8>> {
 
 /// Directory holding attachments opened from the reader.
 pub fn open_dir() -> PathBuf {
-    std::env::temp_dir().join("bgmail-attachments")
+    crate::print::handoff_dir("attachments")
 }
 
 /// Where "Save" dialogs start and "Save to Downloads" writes: the user's
@@ -252,10 +284,123 @@ pub fn write_unique(dir: &Path, filename: &str, data: &[u8], private: bool) -> i
     ))
 }
 
+/// Whether a file of this name runs code rather than being read, on some system.
+/// "Open" refuses these: anyone can send them, and the name is all the system goes
+/// by. Saving stays possible for who really means to run one. Judged on the name the
+/// file would get, whose last extension is what counts (`fatura.pdf.exe`).
+pub fn runs_code(filename: &str) -> bool {
+    const EXTENSIONS: &[&str] = &[
+        // Windows
+        "application",
+        "appref-ms",
+        "appx",
+        "appxbundle",
+        "bat",
+        "cab",
+        "chm",
+        "cmd",
+        "com",
+        "cpl",
+        "dll",
+        "exe",
+        "gadget",
+        "hlp",
+        "hta",
+        "inf",
+        "ins",
+        "isp",
+        "iso",
+        "img",
+        "jar",
+        "jnlp",
+        "js",
+        "jse",
+        "lnk",
+        "msc",
+        "msi",
+        "msix",
+        "msixbundle",
+        "msp",
+        "mst",
+        "ocx",
+        "pif",
+        "ps1",
+        "ps1xml",
+        "ps2",
+        "psc1",
+        "psd1",
+        "psm1",
+        "reg",
+        "scf",
+        "scr",
+        "sct",
+        "settingcontent-ms",
+        "shb",
+        "shs",
+        "url",
+        "vb",
+        "vbe",
+        "vbs",
+        "vhd",
+        "vhdx",
+        "ws",
+        "wsc",
+        "wsf",
+        "wsh",
+        "xbap",
+        "diagcab",
+        "msu",
+        "xll",
+        // macOS
+        "action",
+        "app",
+        "command",
+        "dmg",
+        "osax",
+        "pkg",
+        "scpt",
+        "scptd",
+        "terminal",
+        "tool",
+        "workflow",
+        "mpkg",
+        // Linux and scripts anywhere
+        "appimage",
+        "bash",
+        "bin",
+        "csh",
+        "deb",
+        "desktop",
+        "fish",
+        "ksh",
+        "pl",
+        "py",
+        "pyw",
+        "rb",
+        "rpm",
+        "run",
+        "sh",
+        "zsh",
+    ];
+    let name = sanitize_filename(filename);
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    // Invisible characters don't change how a system reads the extension.
+    let extension: String = extension
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-')
+        .flat_map(char::to_lowercase)
+        .collect();
+    EXTENSIONS.contains(&extension.as_str())
+}
+
 /// Writes an attachment the user is opening into the private [`open_dir`]
 /// (after removing stale ones); returns the file to hand to the system.
 pub fn write_for_open(filename: &str, data: &[u8]) -> io::Result<PathBuf> {
     let dir = open_dir();
+    // First: cleaning up must not run in a directory that turns out not to be ours.
+    crate::print::create_private_dir(&dir)?;
     remove_stale_files(&dir, SystemTime::now(), STALE_AFTER);
     write_unique(&dir, filename, data, true)
 }
@@ -281,6 +426,23 @@ pub fn remove_stale_files(dir: &Path, now: SystemTime, age: Duration) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn devices_are_recognized_before_the_first_dot() {
+        assert_eq!(super::sanitize_filename("NUL.tar.gz"), "_NUL.tar.gz");
+        assert_eq!(super::sanitize_filename("nul .txt"), "_nul.txt");
+        assert_eq!(super::sanitize_filename("nul .tar.gz"), "_nul .tar.gz");
+        assert_eq!(super::sanitize_filename("CONIN$.log"), "_CONIN$.log");
+        assert_eq!(super::sanitize_filename("console.tar.gz"), "console.tar.gz");
+    }
+
+    #[test]
+    fn long_names_fit_in_bytes_at_a_character() {
+        let name = super::sanitize_filename(&format!("{}.pdf", "漢".repeat(84)));
+        assert!(name.len() <= 240 && name.ends_with(".pdf"), "{name}");
+        let name = super::sanitize_filename(&format!("{}.pdf", "😀".repeat(64)));
+        assert!(name.len() <= 240 && name.ends_with(".pdf"), "{name}");
+    }
+
     use super::*;
 
     #[test]
@@ -449,7 +611,34 @@ JVBERi0xLjQ=\r\n\
     }
 
     #[test]
-    fn open_dir_lives_in_the_temp_dir() {
-        assert!(open_dir().starts_with(std::env::temp_dir()));
+    fn files_that_run_code_are_told_apart_by_their_last_extension() {
+        for name in [
+            "fatura.pdf.exe",
+            "SETUP.EXE",
+            "run.bat. ",
+            "a.hta",
+            "b.js",
+            "c.lnk",
+            "d.command",
+            "e.desktop",
+            "f.sh",
+            "g.ex\u{200b}e",
+            // Cut at the limit right after the `.exe`.
+            &format!("{}.exe.{}", "A".repeat(115), "B".repeat(20)),
+            "h.msu",
+            "i.diagcab",
+            "j.xll",
+            "k.mpkg",
+        ] {
+            assert!(runs_code(name), "{name}");
+        }
+        for name in ["fatura.pdf", "exe", "photo.exe.png", "notes", "report.docx"] {
+            assert!(!runs_code(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn open_dir_is_named_for_attachments() {
+        assert!(open_dir().ends_with("attachments") || open_dir().ends_with("bgmail-attachments"));
     }
 }

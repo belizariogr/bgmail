@@ -1465,7 +1465,9 @@ fn distribute_space_up_to_limits(
         }
         let track_distribution_proportion_sum: f32 = tracks
             .iter()
-            .filter(|track| track_affected_property(track) + track.item_incurred_increase < track_limit(track))
+            // BGMail: with room for more than rounding. A track `f32` can't get closer to its limit
+            // made no progress and kept the loop going, quadratic in 20000 tracks: 3 s for 297 bytes.
+            .filter(|track| track_limit(track) - track_affected_property(track) - track.item_incurred_increase > THRESHOLD)
             .filter(|track| track_is_affected(track))
             .map(&track_distribution_proportion)
             .sum();
@@ -1477,7 +1479,9 @@ fn distribute_space_up_to_limits(
         // Compute item-incurred increase for this iteration
         let min_increase_limit = tracks
             .iter()
-            .filter(|track| track_affected_property(track) + track.item_incurred_increase < track_limit(track))
+            // BGMail: with room for more than rounding. A track `f32` can't get closer to its limit
+            // made no progress and kept the loop going, quadratic in 20000 tracks: 3 s for 297 bytes.
+            .filter(|track| track_limit(track) - track_affected_property(track) - track.item_incurred_increase > THRESHOLD)
             .filter(|track| track_is_affected(track))
             .map(|track| {
                 (track_limit(track) - track_affected_property(track) - track.item_incurred_increase)
@@ -1488,6 +1492,7 @@ fn distribute_space_up_to_limits(
         let iteration_item_incurred_increase =
             f32_min(min_increase_limit, space_to_distribute / track_distribution_proportion_sum);
 
+        let space_before = space_to_distribute;
         for track in tracks.iter_mut().filter(|track| track_is_affected(track)) {
             let increase = iteration_item_incurred_increase * track_distribution_proportion(track);
             if increase > 0.0
@@ -1497,6 +1502,9 @@ fn distribute_space_up_to_limits(
                 track.item_incurred_increase += increase;
                 space_to_distribute -= increase;
             }
+        }
+        if space_to_distribute == space_before {
+            break;
         }
     }
 

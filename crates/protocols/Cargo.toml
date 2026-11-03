@@ -15,7 +15,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # OS trust store (Keychain / Windows cert store / system bundle) on all platforms.
 rustls-platform-verifier = "0.7"
 # SMTP transport only (`send_raw`); messages are built by mail_core.
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls", "ring", "rustls-platform-verifier", "hostname"] }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls", "ring", "rustls-platform-verifier"] }
 # OAuth token endpoint + autoconfig lookups (same major as html_view).
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
 serde = { workspace = true }

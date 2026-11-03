@@ -5,10 +5,11 @@
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
+use crate::folder::folder_csv_needle;
 use crate::schema::{
     CREATE_ACCOUNTS, CREATE_FOLDERS, CREATE_MESSAGES, CREATE_META, INDEX_MESSAGES_ACCOUNT,
     INDEX_MESSAGES_FOLDERS, INDEX_MESSAGES_SEARCH, SCHEMA_VERSION, V2_COLUMNS, V2_OBJECTS,
-    V3_COLUMNS, V3_OBJECTS, V4_OBJECTS, V5_COLUMNS,
+    V3_COLUMNS, V3_OBJECTS, V4_OBJECTS, V5_COLUMNS, V7_COLUMNS,
 };
 
 /// Brings the database to [`SCHEMA_VERSION`] inside one `IMMEDIATE` transaction,
@@ -49,6 +50,16 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         }
         version = 5;
     }
+    if version < 6 {
+        encode_commas_in_folders_csv(&tx)?;
+        version = 6;
+    }
+    if version < 7 {
+        for (table, column, definition) in V7_COLUMNS {
+            add_column_if_missing(&tx, table, column, definition)?;
+        }
+        version = 7;
+    }
     if version != start || schema_version(&tx)?.is_none() {
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
@@ -58,6 +69,28 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     debug_assert!(version >= SCHEMA_VERSION);
     tx.commit()
+}
+
+/// v6: a `,` inside a path no longer reads as a separator of `folders_csv`. Longest
+/// first: `,Reports, 2024,` would also match inside `,Reports, 2024, Q1,`.
+fn encode_commas_in_folders_csv(conn: &Connection) -> rusqlite::Result<()> {
+    let mut folders = conn.prepare(
+        "SELECT account_id, path FROM folders WHERE instr(path, ',') > 0
+         ORDER BY length(path) DESC",
+    )?;
+    let folders = folders
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (account_id, path) in folders {
+        conn.execute(
+            "UPDATE messages SET folders_csv = replace(folders_csv, ?1, ?2)
+             WHERE account_id = ?3",
+            params![format!(",{path},"), folder_csv_needle(&path), account_id],
+        )?;
+    }
+    Ok(())
 }
 
 /// Reads `meta.schema_version` (`None` when absent or unparsable).
@@ -242,6 +275,87 @@ mod tests {
         assert_eq!((rows[0].attempts, rows[0].deferrals), (2, 0));
         assert_eq!(rows[0].next_attempt_at, 0);
         assert_eq!(rows[0].raw, b"R");
+    }
+
+    #[test]
+    fn v6_encodes_commas_of_folder_paths_in_folders_csv() {
+        let file = NamedTempFile::new().unwrap();
+        let id = {
+            let db = Database::open(file.path()).unwrap();
+            let account = db.create_account("W", "w@test.com", "imap", "{}").unwrap();
+            let folder = db
+                .upsert_remote_folder(account, "user:Clients, VIP", "", "Clients, VIP", None)
+                .unwrap();
+            let id = db
+                .insert_remote_message(
+                    account,
+                    folder,
+                    1,
+                    &crate::test_support::remote_message("m", None),
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE messages SET folders_csv = ',sys:inbox,user:Clients, VIP,' WHERE id = ?1",
+                    params![id],
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE meta SET value = '5' WHERE key = 'schema_version'",
+                    [],
+                )
+                .unwrap();
+            id
+        };
+        let db = Database::open(file.path()).unwrap();
+        assert_eq!(schema_version(db.conn()).unwrap(), Some(SCHEMA_VERSION));
+        let message = db.get_message(id).unwrap().unwrap();
+        assert_eq!(
+            crate::parse_folders_csv(&message.folders_csv),
+            ["sys:inbox", "user:Clients, VIP"]
+        );
+    }
+
+    #[test]
+    fn v6_keeps_a_path_apart_from_a_longer_one_it_starts() {
+        let file = NamedTempFile::new().unwrap();
+        let id = {
+            let db = Database::open(file.path()).unwrap();
+            let account = db.create_account("W", "w@test.com", "imap", "{}").unwrap();
+            db.upsert_remote_folder(account, "user:Reports, 2024", "", "A", None)
+                .unwrap();
+            let long = db
+                .upsert_remote_folder(account, "user:Reports, 2024, Q1", "", "B", None)
+                .unwrap();
+            let id = db
+                .insert_remote_message(
+                    account,
+                    long,
+                    1,
+                    &crate::test_support::remote_message("m", None),
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE messages SET folders_csv = ',user:Reports, 2024, Q1,' WHERE id = ?1",
+                    params![id],
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE meta SET value = '5' WHERE key = 'schema_version'",
+                    [],
+                )
+                .unwrap();
+            id
+        };
+        let db = Database::open(file.path()).unwrap();
+        let message = db.get_message(id).unwrap().unwrap();
+        assert_eq!(
+            crate::parse_folders_csv(&message.folders_csv),
+            ["user:Reports, 2024, Q1"]
+        );
     }
 
     #[test]

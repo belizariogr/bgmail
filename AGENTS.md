@@ -78,7 +78,7 @@ BGMail/
 ├── assets/ ← shared icons, fonts, app icon (+ generated PNG/ICO/ICNS)
 ├── script/ ← Linux bundle, install and uninstall scripts (Zed's layout)
 ├── spikes/ ← throwaway evaluations (own workspaces, not shipped)
-├── vendor/ ← patched third-party crates (serde_fmt, Blitz, Taffy)
+├── vendor/ ← patched third-party crates (serde_fmt, Blitz, Taffy, GPUI, mail-parser)
 └── crates/
     ├── theme/ ← themes and colors (light/dark)
     ├── ui/ ← reusable visual components
@@ -217,6 +217,16 @@ When the user requests a durable behavior change, record it here or in the relev
   control flow over narration. Tests (`#[cfg(test)]`) are included when they
   encode behavioral contracts.
 
+- **Product questions:** don't ask the user. Research how Thunderbird and Gmail handle
+  it, decide from that, and report the decision with its source. Only what the user
+  alone can do (credentials, external access) goes to them.
+
+- **Fuzzers and hostile-input experiments:** run them in the background with a log, under
+  a memory cap (`systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0`), one at
+  a time, with builds out of `/tmp`. Check every 5 minutes whether it is still running
+  and advancing or has hung, and never wait on it blindly: a hung one is stopped and
+  reported with its last input, so a test can't abort with nothing to show.
+
 ## Child DOX Index
 
 | Scope | Doc | Owns |
@@ -228,4 +238,4 @@ When the user requests a durable behavior change, record it here or in the relev
 | `.github/` | [`.dox/.github/AGENTS.md`](.dox/.github/AGENTS.md) | CI checks and release packaging workflows (cargo-packager), their secrets |
 | `script/` | [`.dox/script/AGENTS.md`](.dox/script/AGENTS.md) | Linux bundle, install and uninstall scripts |
 | `spikes/` | [`.dox/spikes/AGENTS.md`](.dox/spikes/AGENTS.md) | Throwaway technical evaluations (self-contained, never built with the workspace) |
-| `vendor/` | [`.dox/vendor/AGENTS.md`](.dox/vendor/AGENTS.md) | Patched third-party crates (serde_fmt, Blitz subset, Taffy) and their BGMail fixes |
+| `vendor/` | [`.dox/vendor/AGENTS.md`](.dox/vendor/AGENTS.md) | Patched third-party crates (serde_fmt, Blitz subset, Taffy, GPUI, mail-parser) and their BGMail fixes |

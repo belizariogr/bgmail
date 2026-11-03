@@ -8,10 +8,13 @@
 
 use blitz_traits::net::{Bytes, NetHandler};
 use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
 /// Fetch threads (requests beyond these wait in the queue).
 const WORKERS: usize = 4;
@@ -45,9 +48,15 @@ impl RemoteLoads {
         self.in_flight.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Whether a load finished since [`Self::take_arrived`] last cleared it.
+    pub fn has_arrived(&self) -> bool {
+        self.arrived.load(Ordering::Acquire)
+    }
+
     fn finish(&self) {
-        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        // In this order: seeing nothing pending then means the arrival is already marked.
         self.arrived.store(true, Ordering::Release);
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -99,14 +108,62 @@ fn queue() -> &'static Mutex<Sender<Job>> {
     })
 }
 
+/// Whether a message may make the app connect to `ip`: not to this machine or the
+/// link-local range (cloud metadata). Private ranges stay reachable, for intranet
+/// images in corporate mail (user decision).
+fn is_reachable_from_mail(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(ip) => !(ip.is_loopback() || ip.is_link_local() || ip.octets()[0] == 0),
+        IpAddr::V6(ip) => {
+            !(ip.is_loopback() || ip.is_unspecified() || ip.segments()[0] & 0xffc0 == 0xfe80)
+        }
+    }
+}
+
+/// Resolves as usual, dropping what [`is_reachable_from_mail`] refuses: by address, as
+/// a name or a redirect can lead to any of them. A proxy the user set up is exempt.
+#[derive(Debug, Default)]
+struct OffThisMachine(DefaultResolver);
+
+impl Resolver for OffThisMachine {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let resolved = self.0.resolve(uri, config, timeout)?;
+        let is_proxy = config
+            .proxy()
+            .is_some_and(|proxy| Some(proxy.host()) == uri.host());
+        if is_proxy {
+            return Ok(resolved);
+        }
+        let mut allowed = self.empty();
+        for address in resolved.iter() {
+            if is_reachable_from_mail(address.ip()) {
+                allowed.push(*address);
+            }
+        }
+        if allowed.is_empty() {
+            return Err(ureq::Error::HostNotFound);
+        }
+        Ok(allowed)
+    }
+}
+
 fn worker(rx: Arc<Mutex<Receiver<Job>>>) {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .user_agent("Mozilla/5.0 (compatible; BGMail)")
         // Status codes are checked below; error bodies are not wanted.
         .http_status_as_error(true)
-        .build()
-        .into();
+        .build();
+    let agent = ureq::Agent::with_parts(
+        config,
+        DefaultConnector::default(),
+        OffThisMachine::default(),
+    );
     loop {
         let job = match rx.lock().map(|rx| rx.recv()) {
             Ok(Ok(job)) => job,
@@ -179,7 +236,52 @@ fn cache() -> &'static Mutex<BodyCache> {
 
 #[cfg(test)]
 mod tests {
+    use super::RemoteLoads;
+
+    #[test]
+    fn a_finished_load_shows_as_arrived_until_taken() {
+        let loads = RemoteLoads::default();
+        loads.start();
+        assert!(loads.pending() && !loads.has_arrived());
+        loads.finish();
+        assert!(!loads.pending() && loads.has_arrived());
+        assert!(loads.take_arrived());
+        assert!(!loads.has_arrived());
+    }
+
     use super::*;
+
+    #[test]
+    fn mail_cannot_reach_this_machine_or_the_link_local_range() {
+        for blocked in [
+            "127.0.0.1",
+            "127.8.8.8",
+            "169.254.169.254",
+            "0.0.0.0",
+            "::1",
+            "::",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+        ] {
+            assert!(
+                !is_reachable_from_mail(blocked.parse().unwrap()),
+                "{blocked}"
+            );
+        }
+        for allowed in [
+            "8.8.8.8",
+            "10.0.0.1",
+            "192.168.1.1",
+            "172.16.0.1",
+            "2606:4700::1",
+        ] {
+            assert!(
+                is_reachable_from_mail(allowed.parse().unwrap()),
+                "{allowed}"
+            );
+        }
+    }
 
     #[test]
     fn body_cache_evicts_oldest_past_its_cap() {

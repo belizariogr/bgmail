@@ -19,6 +19,20 @@ use std::sync::Arc;
 /// Flattening tolerance (CSS px) used when a shape has to become a path.
 const PATH_TOLERANCE: f64 = 0.1;
 
+/// Most dashes of one stroked path; past it the path is drawn solid. A message sets the
+/// length of its borders at will, and the dashes are split on the CPU.
+const MAX_DASHES: f64 = 16384.0;
+
+/// Most path elements, gradient stops, shadows and layers recorded for a document; what comes
+/// after them isn't drawn. The limit of one line or border alone is multiplied by however many
+/// a message has, and a real message is far below this. A command counts as at least
+/// [`MIN_SHAPE_COST`].
+const MAX_PATH_ELEMENTS: usize = 2 << 20;
+const MIN_SHAPE_COST: usize = 4;
+
+/// Widest or tallest curve recorded, in px.
+const MAX_CURVE_EXTENT: f64 = 16384.0;
+
 /// Geometry of a filled shape, in document coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Geometry {
@@ -136,6 +150,13 @@ pub enum Command {
         width: f64,
         brush: Brush,
     },
+    /// Round dots, drawn each as a quad; see [`DisplayList::push_dots`].
+    Dots {
+        bounds: Rect,
+        radius: f64,
+        color: Color,
+        centers: Vec<Point>,
+    },
     BoxShadow {
         rect: Rect,
         color: Color,
@@ -154,11 +175,68 @@ pub struct DisplayList {
     /// Animated images, by the id of their first frame's data (what the
     /// commands draw): replay shows the current frame instead.
     pub animations: HashMap<u64, Arc<blitz_dom::node::AnimationFrames>>,
+    /// Path elements recorded so far (see [`MAX_PATH_ELEMENTS`]).
+    path_elements: usize,
+    /// Layers refused by the budget still open, whose `Pop`s must not reach the list.
+    refused_layers: usize,
 }
 
 impl DisplayList {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Records round dots of `radius` at `centers`, as a dotted border is. Dots in one path took
+    /// seconds to tessellate per frame, with all of them on a scanline: a border 20000 px wide took
+    /// 5 s, and 500 ordinary dotted rows 0.9 s. Under a rotation or skew they stay a path.
+    pub fn push_dots(&mut self, transform: Affine, color: Color, radius: f64, centers: &[Point]) {
+        if self.exhausted() || centers.is_empty() {
+            return;
+        }
+        let [scale, _, _, scale_y, ..] = transform.as_coeffs();
+        // Circles only while the scale is the same both ways: quads are round, not oval.
+        if !is_axis_aligned(&transform) || scale.abs() != scale_y.abs() {
+            let mut path = BezPath::new();
+            for center in centers {
+                path.extend(kurbo::Circle::new(*center, radius).path_elements(PATH_TOLERANCE));
+            }
+            return self.fill(Fill::NonZero, transform, color, None, &path);
+        }
+        let centers: Vec<Point> = centers.iter().map(|center| transform * *center).collect();
+        let radius = radius * scale.abs();
+        let finite =
+            radius.is_finite() && centers.iter().all(|p| p.x.is_finite() && p.y.is_finite());
+        if !finite || !self.charge(centers.len().saturating_mul(MIN_SHAPE_COST)) {
+            return;
+        }
+        let bounds = centers
+            .iter()
+            .fold(Rect::from_points(centers[0], centers[0]), |all, p| {
+                all.union_pt(*p)
+            });
+        self.commands.push(Command::Dots {
+            bounds: bounds.inflate(radius, radius),
+            radius,
+            color,
+            centers,
+        });
+    }
+
+    /// Whether the budget ran out, so that nothing else would be recorded. Painters building a lot
+    /// to be refused check it first.
+    pub fn exhausted(&self) -> bool {
+        self.path_elements >= MAX_PATH_ELEMENTS
+    }
+
+    /// Takes a command of `elements` from the budget, if it still fits. Once one doesn't
+    /// fit nothing does, so a document isn't drawn with holes further on.
+    fn charge(&mut self, elements: usize) -> bool {
+        let total = self
+            .path_elements
+            .saturating_add(elements.max(MIN_SHAPE_COST));
+        let fits = total <= MAX_PATH_ELEMENTS;
+        self.path_elements = if fits { total } else { MAX_PATH_ELEMENTS };
+        fits
     }
 
     /// Notes that images drawing `first_frame` animate through `frames`.
@@ -172,7 +250,7 @@ impl DisplayList {
 
     /// Records colour-bitmap glyphs (emoji).
     pub fn push_color_glyphs(&mut self, run: ColorGlyphRun) {
-        if !run.glyphs.is_empty() {
+        if !run.glyphs.is_empty() && self.refused_layers == 0 {
             self.commands.push(Command::ColorGlyphs(run));
         }
     }
@@ -180,7 +258,7 @@ impl DisplayList {
     /// Records a text run (called by the vendored text painter in place of
     /// `draw_glyphs`, whenever the source text is known).
     pub fn push_text(&mut self, run: TextRun) {
-        if !run.words.is_empty() {
+        if !run.words.is_empty() && self.refused_layers == 0 {
             self.commands.push(Command::Text(run));
         }
     }
@@ -408,14 +486,90 @@ pub fn is_finite_geometry(geometry: &Geometry) -> bool {
 }
 
 /// Whether every point of `path` is finite.
+/// What a brush costs on top of its shape: each command keeps its own copy of the stops.
+fn gradient_stops(brush: &Brush) -> usize {
+    match brush {
+        Brush::Gradient { gradient, .. } => gradient.stops.len(),
+        Brush::Solid(_) | Brush::Image { .. } => 0,
+    }
+}
+
+/// Whether `style`'s dashes on `path` are few enough to split. Written so NaN and infinite
+/// lengths don't dash either: `kurbo::dash` wouldn't return from them.
+fn should_dash(path: &BezPath, style: &kurbo::Stroke) -> bool {
+    if style.dash_pattern.is_empty() {
+        return false;
+    }
+    let period: f64 = style.dash_pattern.iter().sum();
+    let dashes = path.perimeter(PATH_TOLERANCE) / period;
+    period > 0.0 && dashes <= MAX_DASHES
+}
+
 pub fn is_finite_path(path: &BezPath) -> bool {
     let ok = |p: &Point| p.x.is_finite() && p.y.is_finite();
+    let mut from = Point::ZERO;
     path.elements().iter().all(|el| match el {
-        PathEl::MoveTo(a) | PathEl::LineTo(a) => ok(a),
-        PathEl::QuadTo(a, b) => ok(a) && ok(b),
-        PathEl::CurveTo(a, b, c) => ok(a) && ok(b) && ok(c),
+        PathEl::MoveTo(a) | PathEl::LineTo(a) => {
+            from = *a;
+            ok(a)
+        }
+        PathEl::QuadTo(a, b) => {
+            let fits = ok(a) && ok(b) && curve_fits(&[from, *a, *b]);
+            from = *b;
+            fits
+        }
+        PathEl::CurveTo(a, b, c) => {
+            let fits = ok(a) && ok(b) && ok(c) && curve_fits(&[from, *a, *b, *c]);
+            from = *c;
+            fits
+        }
         PathEl::ClosePath => true,
     })
+}
+
+/// What a path costs: its elements, and for each curve the segments flattening it takes, which
+/// grow with the square root of its size. By elements alone, 112 KB of big round borders took
+/// 7.5 GB of triangles.
+fn path_cost(path: &BezPath) -> usize {
+    let curve = |points: &[Point]| {
+        let extent = |value: fn(&Point) -> f64| {
+            let values = points.iter().map(value);
+            values.clone().fold(f64::MIN, f64::max) - values.fold(f64::MAX, f64::min)
+        };
+        (extent(|p| p.x).max(extent(|p| p.y)) / PATH_TOLERANCE).sqrt() as usize
+    };
+    let mut from = Point::ZERO;
+    path.elements()
+        .iter()
+        .map(|element| match element {
+            PathEl::MoveTo(a) | PathEl::LineTo(a) => {
+                from = *a;
+                1
+            }
+            PathEl::QuadTo(a, b) => {
+                let cost = curve(&[from, *a, *b]);
+                from = *b;
+                1 + cost
+            }
+            PathEl::CurveTo(a, b, c) => {
+                let cost = curve(&[from, *a, *b, *c]);
+                from = *c;
+                1 + cost
+            }
+            PathEl::ClosePath => 1,
+        })
+        .sum()
+}
+
+/// Whether a curve is small enough to flatten. The segments it takes grow with its size, whatever
+/// part of it shows: a dashed corner under `scale(1e16)` froze the window for 10 s. No
+/// message means a curve this big, and it isn't drawn.
+fn curve_fits(points: &[Point]) -> bool {
+    let extent = |value: fn(&Point) -> f64| {
+        let values = points.iter().map(value);
+        values.clone().fold(f64::MIN, f64::max) - values.fold(f64::MAX, f64::min)
+    };
+    extent(|p| p.x) <= MAX_CURVE_EXTENT && extent(|p| p.y) <= MAX_CURVE_EXTENT
 }
 
 /// Whether a path is made only of straight segments (cheap check used by tests
@@ -453,6 +607,10 @@ impl PaintScene for DisplayList {
             .map(filter_effects)
             .unwrap_or((false, 1.0));
         let geometry = transform_geometry(clip, transform);
+        if self.refused_layers > 0 || !self.charge(0) {
+            self.refused_layers += 1;
+            return;
+        }
         self.commands.push(Command::PushLayer {
             clip: geometry.bounds(),
             radii: layer_radii(&geometry),
@@ -463,6 +621,10 @@ impl PaintScene for DisplayList {
 
     fn push_clip_layer(&mut self, _fill: Fill, transform: Affine, clip: &impl Shape) {
         let geometry = transform_geometry(clip, transform);
+        if self.refused_layers > 0 || !self.charge(0) {
+            self.refused_layers += 1;
+            return;
+        }
         self.commands.push(Command::PushLayer {
             clip: geometry.bounds(),
             radii: layer_radii(&geometry),
@@ -472,6 +634,10 @@ impl PaintScene for DisplayList {
     }
 
     fn pop_layer(&mut self) {
+        if self.refused_layers > 0 {
+            self.refused_layers -= 1;
+            return;
+        }
         self.commands.push(Command::Pop);
     }
 
@@ -483,15 +649,19 @@ impl PaintScene for DisplayList {
         brush_transform: Option<Affine>,
         shape: &impl Shape,
     ) {
+        if self.path_elements >= MAX_PATH_ELEMENTS {
+            return;
+        }
         let mut path = shape.into_path(PATH_TOLERANCE);
-        if !style.dash_pattern.is_empty() {
+        if should_dash(&path, style) {
             // GPUI strokes solid paths; split the dashes on the CPU instead.
             path = BezPath::from_vec(
                 kurbo::dash(path.iter(), style.dash_offset, &style.dash_pattern).collect(),
             );
         }
         path.apply_affine(transform);
-        if !is_finite_path(&path) {
+        let brush = convert_paint(brush.into(), transform, brush_transform);
+        if !is_finite_path(&path) || !self.charge(path_cost(&path) + gradient_stops(&brush)) {
             return;
         }
         let [a, b, c, d, _, _] = transform.as_coeffs();
@@ -500,7 +670,7 @@ impl PaintScene for DisplayList {
         self.commands.push(Command::Stroke {
             path,
             width: style.width * scale,
-            brush: convert_paint(brush.into(), transform, brush_transform),
+            brush,
         });
     }
 
@@ -512,12 +682,22 @@ impl PaintScene for DisplayList {
         brush_transform: Option<Affine>,
         shape: &impl Shape,
     ) {
+        if self.path_elements >= MAX_PATH_ELEMENTS {
+            return;
+        }
         let brush = convert_paint(brush.into(), transform, brush_transform);
         if matches!(brush, Brush::Solid(color) if color.components[3] == 0.0) {
             return;
         }
         let geometry = transform_geometry(shape, transform);
-        if is_finite_geometry(&geometry) {
+        if !is_finite_geometry(&geometry) {
+            return;
+        }
+        let elements = match &geometry {
+            Geometry::Path(path) => path_cost(path),
+            Geometry::Rect(_) | Geometry::RoundedRect(..) => 0,
+        } + gradient_stops(&brush);
+        if self.charge(elements) {
             self.commands.push(Command::Fill { geometry, brush });
         }
     }
@@ -536,6 +716,10 @@ impl PaintScene for DisplayList {
         _glyph_transform: Option<Affine>,
         glyphs: impl Iterator<Item = Glyph> + Clone,
     ) {
+        // Drawn without the clip of a refused layer, it could land anywhere.
+        if self.refused_layers > 0 {
+            return;
+        }
         let color = match brush.into() {
             Paint::Solid(color) => color.multiply_alpha(brush_alpha),
             _ => Color::BLACK,
@@ -557,6 +741,9 @@ impl PaintScene for DisplayList {
         radius: f64,
         std_dev: f64,
     ) {
+        if self.refused_layers > 0 || !self.charge(0) {
+            return;
+        }
         let rect = transform.transform_rect_bbox(rect);
         self.commands.push(Command::BoxShadow {
             rect,

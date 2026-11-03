@@ -19,6 +19,9 @@ presets, Thunderbird autoconfig, guess).
 
 ## Local Contracts
 
+- **Certificates:** always validated, except on a literal loopback address
+  (`ConnectOptions::for_host`, user decision), for Proton Bridge's self-signed one.
+  Applied per host in `connect_tls` and `SmtpSender::new`.
 - **Blocking, no async runtime.** Callers run every call on a background
   thread. No GPUI. `#![forbid(unsafe_code)]`.
 - **Dependencies (decided stack):** `imap = "3.0.0-alpha.15"` with
@@ -26,7 +29,8 @@ presets, Thunderbird autoconfig, guess).
   (parses raw command responses); `rustls 0.23` with the **ring** provider
   only; `rustls-platform-verifier 0.7` (OS trust store on Windows/macOS/Linux);
   `lettre 0.11` with `default-features = false` and `smtp-transport`,
-  `rustls`, `ring`, `rustls-platform-verifier`, `hostname` — transport only
+  `rustls`, `ring`, `rustls-platform-verifier` (no `hostname`, so `EHLO` is `[127.0.0.1]`: the machine's
+  name would reach `Received:`) — transport only
   (`send_raw`); `ureq 3` (`rustls`, `platform-verifier`, `json`) for OAuth and
   autoconfig; `sha2`, `base64 0.22`, `getrandom 0.3`, `roxmltree 0.21`.
   **Never** add native-tls/OpenSSL, aws-lc, an `oauth2` crate or a second

@@ -141,7 +141,8 @@ impl LinkCapture {
 impl NavigationProvider for LinkCapture {
     fn navigate_to(&self, options: NavigationOptions) {
         if let Ok(mut link) = self.0.lock() {
-            *link = Some(options.url.to_string());
+            let web = crate::resources::protocol_relative_web_url(&options.url);
+            *link = Some(web.unwrap_or(options.url).to_string());
         }
     }
 }
@@ -197,5 +198,13 @@ mod tests {
         capture.navigate_to(NavigationOptions::new(url, None, 0));
         assert_eq!(capture.take().as_deref(), Some("https://example.com/a"));
         assert_eq!(capture.take(), None);
+    }
+
+    #[test]
+    fn a_protocol_relative_link_opens_on_the_web() {
+        let capture = LinkCapture::default();
+        let url = url::Url::parse("bgmail://example.com/offer").unwrap();
+        capture.navigate_to(NavigationOptions::new(url, None, 0));
+        assert_eq!(capture.take().as_deref(), Some("https://example.com/offer"));
     }
 }

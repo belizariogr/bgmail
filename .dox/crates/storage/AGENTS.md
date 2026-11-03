@@ -22,7 +22,9 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
 
 - DB path: `~/.config/BGMail/mail.db` via `database_path` (portable home
   resolution; no GPUI).
-- **Schema v3** (`schema.rs`, `SCHEMA_VERSION = 3`). `migration.rs` applies
+- The database and its config directory are private to the user (`keep_private`, Unix).
+- **Schema v7** (`schema.rs`, `SCHEMA_VERSION = 7`; v4 = contacts, v5 = columns, v6 =
+  commas of folder paths encoded in `folders_csv`, v7 = `outbox.retry_from`). `migration.rs` applies
   steps by `meta.schema_version` inside one `BEGIN IMMEDIATE` transaction:
   base v1 DDL (`CREATE … IF NOT EXISTS`), then v1→v2 = `ALTER TABLE ADD COLUMN`
   (skipped when the column exists) + new tables/indexes/FTS + FTS `rebuild`,
@@ -47,7 +49,7 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
   `fail_outgoing`: permanent, `attempts + 1`, `failed` at the caller's
   limit) / `maybe_sent` (`mark_outgoing_maybe_sent`, or a lease older than
   the caller's cutoff via `expire_outgoing_leases`). `failed` and
-  `maybe_sent` are terminal until the user acts: `failed_outgoing` lists
+  `maybe_sent` are terminal until the user acts: `unsent_outgoing` lists
   them (all accounts), `retry_outgoing` resets to `queued`,
   `delete_outgoing` discards. `outbox_count` = `queued` + `sending`. Retry
   policy (delays, limits) belongs to the caller (`mail_sync`).

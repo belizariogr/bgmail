@@ -34,6 +34,10 @@ use crate::stylo_to_parley;
 /// (e.g. 150.016px in a 150px column) still fits on one line in browsers.
 const LINE_FIT_TOLERANCE: f32 = 1.0 / 32.0;
 
+/// BGMail: nodes visited and bytes of text laid out in a pass that still force full layouts
+/// for baselines; see their use. Not counting layouts, as one can hold a table of any size.
+const MAX_LAYOUT_VISITS_FOR_BASELINES: usize = 4_000_000;
+
 fn subtract_margins(mut child_inputs: LayoutInput, margin: taffy::Rect<f32>) -> LayoutInput {
     child_inputs.available_space = child_inputs
         .available_space
@@ -472,14 +476,18 @@ impl LayoutPassState<'_> {
                 && !contain_layout
                 && !is_table_element;
             let mut box_inputs = inline_box_inputs(style.size().width, margin, child_inputs);
+            drop(style);
             // BGMail: Taffy only reports baselines from a full layout. Measuring
             // the line (`ComputeSize`) with a baseline-less box would sit it on
             // its bottom edge and make the line taller than the final one (e.g.
             // a table row sized around an inline-block button).
-            if exports_baseline {
+            //
+            // A full layout skips Taffy's measure cache, so nested inline tables cost about
+            // 4x per level: a 600-byte message froze the app for seconds. Past the budget a
+            // box is measured, and may sit on its bottom edge instead of its baseline.
+            if exports_baseline && self.layout_visits < MAX_LAYOUT_VISITS_FOR_BASELINES {
                 box_inputs.run_mode = taffy::RunMode::PerformLayout;
             }
-            drop(style);
 
             if is_out_of_flow || is_floated {
                 ibox.width = 0.0;
@@ -718,6 +726,9 @@ impl LayoutPassState<'_> {
                 .break_all_lines(Some(width + LINE_FIT_TOLERANCE));
         }
 
+        // BGMail: its cost for the budget of forced layouts is in its text, not its one visit.
+        self.layout_visits += inline_layout.text.len();
+
         // Out-of-flow candidates bubbled up from this container and its in-flow subtree.
         // These are laid out by the out-of-flow positioning pass (`compute_oof_layout`).
         let mut oof_candidates = OofCandidates::new();
@@ -729,8 +740,18 @@ impl LayoutPassState<'_> {
             let initial_slot = block_ctx.find_content_slot(0.0, Clear::None, None);
             let mut has_active_floats = initial_slot.segment_id.is_some();
             let state = breaker.state_mut();
-            state.set_layout_max_advance(width + LINE_FIT_TOLERANCE);
-            state.set_line_max_advance(initial_slot.width * scale + LINE_FIT_TOLERANCE);
+            // BGMail: Parley asserts, also in release, that a line isn't wider than the layout.
+            // Both come from different `f32` sums, which round apart at huge lengths and can
+            // be NaN.
+            let layout_max = if width.is_nan() {
+                f32::INFINITY
+            } else {
+                width + LINE_FIT_TOLERANCE
+            };
+            let line_max =
+                |slot_width: f32| (slot_width * scale + LINE_FIT_TOLERANCE).min(layout_max);
+            state.set_layout_max_advance(layout_max);
+            state.set_line_max_advance(line_max(initial_slot.width));
             state.set_line_x(initial_slot.x * scale);
             state.set_line_y((initial_slot.y * scale) as f64);
 
@@ -755,13 +776,12 @@ impl LayoutPassState<'_> {
                                 block_ctx.find_content_slot(min_y as f32, Clear::None, None);
                             has_active_floats = next_slot.segment_id.is_some();
 
-                            state
-                                .set_line_max_advance(next_slot.width * scale + LINE_FIT_TOLERANCE);
+                            state.set_line_max_advance(line_max(next_slot.width));
                             state.set_line_x(next_slot.x * scale);
                             state.set_line_y((next_slot.y * scale) as f64);
                         } else {
                             state.set_line_x(0.0);
-                            state.set_line_max_advance(width + LINE_FIT_TOLERANCE);
+                            state.set_line_max_advance(layout_max);
                         }
 
                         continue;
@@ -780,7 +800,8 @@ impl LayoutPassState<'_> {
                             let direction = match style.float() {
                                 Float::Left => taffy::FloatDirection::Left,
                                 Float::Right => taffy::FloatDirection::Right,
-                                Float::None => unreachable!(),
+                                // BGMail: a layout older than the style; this used to abort.
+                                Float::None => taffy::FloatDirection::Left,
                             };
                             (
                                 direction,
@@ -814,7 +835,7 @@ impl LayoutPassState<'_> {
                             block_ctx.find_content_slot(min_y as f32, Clear::None, None);
                         has_active_floats = next_slot.segment_id.is_some();
 
-                        state.set_line_max_advance(next_slot.width * scale + LINE_FIT_TOLERANCE);
+                        state.set_line_max_advance(line_max(next_slot.width));
                         state.set_line_x(next_slot.x * scale);
                         state.set_line_y((next_slot.y * scale) as f64);
 

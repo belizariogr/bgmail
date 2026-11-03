@@ -137,6 +137,8 @@ pub struct Node {
     /// Written by the style traversal from the node's new primary style, so that layout
     /// passes can test it without reading styles.
     pub out_of_flow: AtomicBool,
+    /// BGMail: where this node was last found in its parent's children.
+    sibling_hint: std::sync::atomic::AtomicU32,
 
     /// Node type (Element, TextNode, etc) specific data.
     ///
@@ -434,6 +436,7 @@ impl Node {
 
             flags: NodeFlags::empty(),
             out_of_flow: AtomicBool::new(false),
+            sibling_hint: std::sync::atomic::AtomicU32::new(0),
             data,
         }
     }
@@ -1035,6 +1038,26 @@ impl Node {
         self.children.iter().position(|id| *id == child_id)
     }
 
+    /// BGMail: [`Self::child_index`] that remembers where it found each sibling. Checked against
+    /// the list on each use, so a list that changed only costs searching again.
+    pub(crate) fn sibling_index(&self) -> Option<usize> {
+        let siblings = &self.tree().get(self.parent?)?.children;
+        let hint = self.sibling_hint.load(Ordering::Relaxed) as usize;
+        if siblings.get(hint) == Some(&self.id) {
+            return Some(hint);
+        }
+        let mut found = None;
+        for (index, id) in siblings.iter().enumerate() {
+            if let Some(sibling) = self.tree().get(*id) {
+                sibling.sibling_hint.store(index as u32, Ordering::Relaxed);
+            }
+            if *id == self.id {
+                found = Some(index);
+            }
+        }
+        found
+    }
+
     // Get the index of the current node in the parents child list
     pub fn child_index(&self) -> Option<usize> {
         self.tree()[self.parent?]
@@ -1286,8 +1309,13 @@ impl Node {
     /// Record in [`Node::out_of_flow`] whether `style` (the node's new primary style)
     /// makes its box out of flow.
     pub(crate) fn record_out_of_flow(&self, style: &ComputedValues) {
-        self.out_of_flow
-            .store(style_is_out_of_flow(style), Ordering::Relaxed);
+        let out_of_flow = style_is_out_of_flow(style);
+        self.out_of_flow.store(out_of_flow, Ordering::Relaxed);
+        // BGMail: no one rewrites this for a box back in flow, and painting would still
+        // leave it to the containing block it had, whose list no longer holds it.
+        if !out_of_flow {
+            self.oof_containing_block.set(None);
+        }
     }
 
     pub fn text_content(&self) -> String {
@@ -1672,7 +1700,7 @@ impl Node {
                 return Some(node);
             }
             let id = node.layout_parent.get()?;
-            node = self.with(id);
+            node = self.tree().get(id)?;
         }
     }
 
@@ -1738,9 +1766,11 @@ impl Node {
     /// `oof_containing_block` for a hoisted out-of-flow box, otherwise the
     /// `layout_parent`.
     pub fn containing_block(&self) -> Option<NodeId> {
+        // BGMail: between a restyle and the next layout these can name a freed box.
         self.oof_containing_block
             .get()
             .or_else(|| self.layout_parent.get())
+            .filter(|id| self.tree().contains_key(*id))
     }
 
     /// Computes the Document-relative coordinates of the `Node`
@@ -1817,7 +1847,8 @@ impl Node {
                 if id == inline_root_id {
                     return false;
                 }
-                match self.with(id).parent {
+                // BGMail: a laid out run can name a box freed since.
+                match self.tree().get(id).and_then(|node| node.parent) {
                     Some(parent) => id = parent,
                     None => return false,
                 }
