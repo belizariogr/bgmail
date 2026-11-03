@@ -26,6 +26,7 @@ use crate::{
     traversal::{iter_children, iter_children_and_pseudos},
 };
 
+use super::replaced::is_replaced_element;
 use super::{
     damage::ALL_DAMAGE, list::collect_list_item_children, replaced::is_inline_box_element,
     table::build_table_context,
@@ -236,6 +237,11 @@ fn push_hoisted_child(
     let child_display = child.display_style().unwrap_or(Display::inline());
     if matches!(child_display.inside(), DisplayInside::Contents) {
         collect_layout_children_with_wrap(doc, child_id, out, wrap);
+        return;
+    }
+    // BGMail: a text node can't be a layout child (it has no layout data, so the first
+    // pass over it panics), and without a wrap context nothing will box it.
+    if wrap.is_none() && child.data.kind() == NodeKind::Text {
         return;
     }
     if let Some(wrap_ctx) = wrap {
@@ -571,7 +577,13 @@ fn collect_layout_children_with_wrap(
             sort_layout_children_by_order(&doc.nodes, &mut out.children);
         }
 
-        DisplayInside::Table => {
+        // BGMail: a replaced element is never a table: its special data is the image, which
+        // the table context would overwrite while layout still takes it for replaced.
+        DisplayInside::Table
+            if !doc.nodes[container_node_id]
+                .element_data()
+                .is_some_and(|element| is_replaced_element(&element.name.local)) =>
+        {
             let (table_context, tlayout_children, anonymous_cells) =
                 build_table_context(doc, container_node_id);
             // BGMail: anonymous cell wrappers are deallocated with the table's
@@ -587,11 +599,23 @@ fn collect_layout_children_with_wrap(
                 .downcast_element_mut()
                 .unwrap()
                 .special_data = data;
-            if let Some(before) = doc.nodes[container_node_id].before() {
+            // BGMail: a `display:contents` pseudo has no box of its own to lay out, only its
+            // text; pushing it left a text node as a layout child of the table.
+            let boxed_pseudo = |doc: &BaseDocument, id: NodeId| {
+                !matches!(
+                    doc.nodes[id].display_style().map(|d| d.inside()),
+                    Some(DisplayInside::Contents)
+                )
+            };
+            if let Some(before) = doc.nodes[container_node_id].before()
+                && boxed_pseudo(doc, before)
+            {
                 out.push(before, doc);
             }
             out.extend(&tlayout_children, doc);
-            if let Some(after) = doc.nodes[container_node_id].after() {
+            if let Some(after) = doc.nodes[container_node_id].after()
+                && boxed_pseudo(doc, after)
+            {
                 out.push(after, doc);
             }
         }

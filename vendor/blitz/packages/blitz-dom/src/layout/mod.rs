@@ -491,7 +491,9 @@ impl LayoutPassState<'_> {
                                 default_object_size,
                             )
                         }
-                        _ => unreachable!(),
+                        // BGMail: anything else a hostile style reaches is sized as if it had
+                        // no special data, since this used to abort the process.
+                        _ => tag_intrinsic_sizes(&element_data.name.local, attr_size),
                     };
 
                     #[cfg(feature = "writing-mode")]
