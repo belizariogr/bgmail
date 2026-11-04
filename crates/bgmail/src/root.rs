@@ -286,6 +286,19 @@ fn selection_range(list: &[i64], from: i64, to: i64) -> Vec<i64> {
     list[from.min(to)..=from.max(to)].to_vec()
 }
 
+/// The row to open once `removed` leave `list`: the first one kept after the first
+/// removed row (the only sensible "next" for a selection with gaps, as in Thunderbird),
+/// or else the one before it.
+fn row_after_removal(list: &[i64], removed: &[i64]) -> Option<i64> {
+    let removed: HashSet<i64> = removed.iter().copied().collect();
+    let first = list.iter().position(|id| removed.contains(id))?;
+    list[first..]
+        .iter()
+        .find(|id| !removed.contains(id))
+        .or_else(|| list[..first].last())
+        .copied()
+}
+
 /// Width the subject of a list row gives up for its action buttons, while hovered.
 fn row_actions_room(hovered: bool) -> Pixels {
     if hovered {
@@ -1840,7 +1853,8 @@ impl RootView {
 
     /// Runs `action` on every row of a multiple selection, even if one fails (the
     /// first error is reported), and leaves nothing selected: opening the next message
-    /// would mark it read without it being asked for. The rows leave the list now.
+    /// would mark it read without it being asked for (deleting asks for it, in
+    /// [`Self::delete_selection`]). The rows leave the list now.
     fn apply_action_to_selection(
         &mut self,
         action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome> + Send + 'static,
@@ -1985,9 +1999,10 @@ impl RootView {
         cx.notify();
     }
 
-    /// Runs `action` on message `id` and refreshes the list. As in Gmail, a selected
-    /// message that left the list leaves nothing open, rather than opening the next one
-    /// and marking it read; the arrow keys carry on from the row that took its place.
+    /// Runs `action` on message `id` and refreshes the list. A selected message that
+    /// left the list leaves nothing open, rather than opening the next one and marking
+    /// it read; the arrow keys carry on from the row that took its place. Deleting goes
+    /// on to the next row itself: see [`Self::delete_message`].
     fn apply_message_action(
         &mut self,
         id: i64,
@@ -3123,14 +3138,63 @@ impl RootView {
             .into_iter()
             .filter(|id| self.row_can_be_trashed(*id))
             .collect();
-        self.run_message_action(cx, mail_actions::trash);
+        self.delete_selection(cx, mail_actions::trash);
+    }
+
+    /// Runs a deleting `action` on the selection, then opens the row after it.
+    fn delete_selection(
+        &mut self,
+        cx: &mut Context<Self>,
+        action: impl Fn(&storage::Database, i64) -> rusqlite::Result<ActionOutcome> + Send + 'static,
+    ) {
+        if self.multi_selection.is_empty() {
+            if let Some(id) = self.selected_message_id {
+                self.delete_message(id, cx, action);
+            }
+            return;
+        }
+        let next = row_after_removal(&self.list_ids(), &self.multi_selection);
+        self.apply_action_to_selection(action, cx);
+        self.open_row_after_delete(next, cx);
+    }
+
+    /// Runs a deleting `action` on message `id`. As in Thunderbird, deleting the open
+    /// message opens the next row, or the previous one after the last; deleting any
+    /// other row leaves the selection alone.
+    fn delete_message(
+        &mut self,
+        id: i64,
+        cx: &mut Context<Self>,
+        action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
+    ) {
+        let next = if self.selected_message_id == Some(id) {
+            row_after_removal(&self.list_ids(), &[id])
+        } else {
+            None
+        };
+        self.run_action_on_message(id, cx, action);
+        self.open_row_after_delete(next, cx);
+    }
+
+    /// Opens `next`, unless the deleted message is still selected: the action failed,
+    /// or a search still lists it.
+    fn open_row_after_delete(&mut self, next: Option<i64>, cx: &mut Context<Self>) {
+        if self.selected_message_id.is_some() {
+            return;
+        }
+        let Some(next) = next.filter(|id| self.list_messages.iter().any(|m| m.id == *id)) else {
+            return;
+        };
+        self.select_only(next);
+        self.reveal_selected_message();
+        self.on_message_selection_changed(cx);
     }
 
     /// Delete button of a list row: acts on that row, leaving the selection
     /// alone. What is already in the Trash goes for good, once confirmed.
     fn delete_row_message(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         if self.row_can_be_trashed(id) {
-            self.run_action_on_message(id, cx, mail_actions::trash);
+            self.delete_message(id, cx, mail_actions::trash);
         } else {
             self.confirm_delete_forever(vec![id], window, cx);
         }
@@ -3211,10 +3275,10 @@ impl RootView {
                     .filter(|id| this.db.message_is_in_trash(*id) == Ok(true))
                     .collect();
                 if let [id] = in_trash[..] {
-                    this.run_action_on_message(id, cx, mail_actions::delete_permanently);
+                    this.delete_message(id, cx, mail_actions::delete_permanently);
                 } else if in_trash.len() > 1 {
                     this.multi_selection = std::mem::take(&mut in_trash);
-                    this.run_message_action(cx, mail_actions::delete_permanently);
+                    this.delete_selection(cx, mail_actions::delete_permanently);
                 }
             })
             .ok();
@@ -8830,6 +8894,138 @@ mod tests {
         assert_eq!(view.selected_message_id, None);
         assert!(view.selected_detail.is_none());
         assert!(view.db.get_message(neighbor).unwrap().unwrap().unread);
+    }
+
+    #[test]
+    fn the_row_after_a_removal_is_the_next_one_or_else_the_previous() {
+        let list = [1, 2, 3, 4, 5];
+        assert_eq!(row_after_removal(&list, &[2]), Some(3));
+        assert_eq!(row_after_removal(&list, &[5]), Some(4));
+        assert_eq!(row_after_removal(&list, &[2, 3]), Some(4));
+        assert_eq!(row_after_removal(&list, &[2, 4]), Some(3));
+        assert_eq!(row_after_removal(&list, &[4, 5]), Some(3));
+        assert_eq!(row_after_removal(&list, &[1, 2, 3, 4, 5]), None);
+        assert_eq!(row_after_removal(&list, &[9]), None);
+        assert_eq!(row_after_removal(&[], &[1]), None);
+    }
+
+    /// A view with row `index` of its list as the only selected message.
+    fn view_with_row_selected(
+        dir: &TempDir,
+        index: Option<usize>,
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<RootView>, Vec<i64>) {
+        let (view, _) = bulk_view(dir, cx);
+        let ids = view.update(cx, |view, _| {
+            view.clear_message_selection();
+            let ids = view.list_ids();
+            let row = index.unwrap_or(ids.len() - 1);
+            view.select_only(ids[row]);
+            view.reload_selected_detail();
+            ids
+        });
+        (view, ids)
+    }
+
+    #[gpui::test]
+    fn deleting_the_open_message_opens_the_next_one(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = view_with_row_selected(&dir, Some(0), cx);
+        view.update(cx, |view, cx| {
+            view.db.set_message_unread(ids[1], true).unwrap();
+            view.delete_message_to_trash(cx);
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+            assert_eq!(view.selection_focus, Some(ids[1]));
+            let detail = view.selected_detail.as_ref().expect("it is open");
+            assert_eq!(detail.id, ids[1]);
+            assert!(!detail.unread);
+            assert_eq!(view.db.message_is_in_trash(ids[0]), Ok(true));
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_the_last_row_opens_the_previous_one(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = view_with_row_selected(&dir, None, cx);
+        view.update(cx, |view, cx| {
+            view.delete_message_to_trash(cx);
+            assert_eq!(view.selected_message_id, Some(ids[ids.len() - 2]));
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_every_row_leaves_nothing_open(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = view_with_row_selected(&dir, Some(0), cx);
+        view.update(cx, |view, cx| {
+            for _ in &ids {
+                view.delete_message_to_trash(cx);
+            }
+            assert!(view.list_messages.is_empty());
+            assert_eq!(view.selected_message_id, None);
+            assert!(view.selected_detail.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn a_delete_that_fails_keeps_the_message_open(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = view_with_row_selected(&dir, Some(0), cx);
+        view.update(cx, |view, cx| {
+            view.delete_message(ids[0], cx, |_, _| Err(rusqlite::Error::InvalidQuery));
+            assert_eq!(view.selected_message_id, Some(ids[0]));
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_another_row_keeps_the_open_message(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = view_with_row_selected(&dir, Some(0), cx);
+        view.update(cx, |view, cx| {
+            view.delete_message(ids[1], cx, mail_actions::trash);
+            assert_eq!(view.selected_message_id, Some(ids[0]));
+            assert!(!view.list_ids().contains(&ids[1]));
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_a_row_with_nothing_open_opens_nothing(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = view_with_row_selected(&dir, Some(0), cx);
+        view.update(cx, |view, cx| {
+            view.clear_message_selection();
+            view.delete_message(ids[0], cx, mail_actions::trash);
+            assert_eq!(view.selected_message_id, None);
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_a_multiple_selection_opens_the_row_after_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, chosen) = bulk_view(&dir, cx);
+        let next = view.read_with(cx, |view, _| view.list_ids()[2]);
+        view.update(cx, |view, cx| {
+            view.delete_message_to_trash(cx);
+            assert!(view.multi_selection.is_empty());
+            assert_eq!(view.selected_message_id, Some(next));
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.selected_message_id, Some(next));
+            for id in &chosen {
+                assert_eq!(view.db.message_is_in_trash(*id), Ok(true));
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn archiving_the_open_message_still_leaves_nothing_open(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _) = view_with_row_selected(&dir, Some(0), cx);
+        view.update(cx, |view, cx| {
+            view.archive_message(cx);
+            assert_eq!(view.selected_message_id, None);
+        });
     }
 
     #[test]
