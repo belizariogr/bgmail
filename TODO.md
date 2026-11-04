@@ -381,7 +381,9 @@
 - ✅ Zoom of the whole app with Ctrl/Cmd `+`/`-`/`0` in every window, persisted
       (`app_zoom`, content scale patched into `vendor/gpui`).
 - ✅ Each mailbox remembers its selected messages for the session.
-- ✅ Removing the open message leaves nothing open, as in Gmail.
+- ✅ Deleting the open message (or a multiple selection) opens the next row, or the
+      previous one after the last, as in Thunderbird. Archive, Junk and Move still
+      leave nothing open.
 - ✅ The UI language persists, with a picker on the first-run welcome step.
 - ✅ Whole-project adversarial review, round 1: folder membership by exact match
       (`instr`, commas encoded, schema v6), literal short searches, Reply-To and
