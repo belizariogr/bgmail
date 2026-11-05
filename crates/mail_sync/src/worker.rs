@@ -2301,7 +2301,11 @@ mod tests {
         }
         // 40 + 80 + 160 ms: at the base delay it would take 120 ms.
         assert!(started.elapsed() >= Duration::from_millis(280));
-        server.deliver("INBOX", b"Subject: x\r\n\r\n", MessageFlags::default());
+        // A change made before the IDLE starts is no change to it: poke until it wakes.
+        while !handle.is_finished() {
+            server.deliver("INBOX", b"Subject: x\r\n\r\n", MessageFlags::default());
+            std::thread::sleep(Duration::from_millis(20));
+        }
         handle.join().unwrap();
     }
 

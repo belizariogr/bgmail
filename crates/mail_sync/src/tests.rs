@@ -152,6 +152,29 @@ impl Harness {
         self.wait_idle()
     }
 
+    /// Processes the queue until nothing is pending. A round that finds the queue already
+    /// emptied by one still running says nothing, so each round waits for an `Idle` or an
+    /// empty queue, whichever comes first.
+    fn process_queue_until_empty(&self, what: &str) {
+        let deadline = Instant::now() + WAIT;
+        let pending = || !self.db.pending_ops(self.account).unwrap().is_empty();
+        while pending() {
+            assert!(Instant::now() < deadline, "{what}");
+            assert!(self.engine.send(self.account, Command::ProcessQueue));
+            let round = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < round && pending() {
+                match self.events.try_recv() {
+                    Ok(SyncEvent::Status {
+                        status: AccountStatus::Idle { .. },
+                        ..
+                    }) => break,
+                    Ok(_) => {}
+                    Err(_) => std::thread::sleep(Duration::from_millis(1)),
+                }
+            }
+        }
+    }
+
     fn sync(&self) -> Vec<SyncEvent> {
         self.run(Command::SyncNow)
     }
@@ -606,11 +629,7 @@ fn a_folder_change_waits_for_what_was_queued_before_it() {
     // A refusal the first time: the move stays queued, for a retry.
     h.server.fail_next(RemoteErrorKind::Protocol);
     process_queue(&h);
-    let deadline = Instant::now() + WAIT;
-    while !h.db.pending_ops(h.account).unwrap().is_empty() {
-        assert!(Instant::now() < deadline, "the queue never emptied");
-        process_queue(&h);
-    }
+    h.process_queue_until_empty("the queue never emptied");
     assert_eq!(
         h.server.messages("Other").len(),
         1,
@@ -646,11 +665,7 @@ fn what_is_queued_after_a_rename_follows_it() {
     actions::move_to_folder(&h.db, message, &old).unwrap();
     actions::rename_folder(&h.db, h.account, &old, "New").unwrap();
     actions::set_starred(&h.db, message, true).unwrap();
-    let deadline = Instant::now() + WAIT;
-    while !h.db.pending_ops(h.account).unwrap().is_empty() {
-        assert!(Instant::now() < deadline, "the queue never emptied");
-        process_queue(&h);
-    }
+    h.process_queue_until_empty("the queue never emptied");
     let there = h.server.messages("New");
     assert_eq!(there.len(), 1);
     assert!(there[0].flags.flagged, "the star reached it");
@@ -1934,11 +1949,7 @@ fn trash_then_restore_while_the_move_runs_converges_to_inbox() {
     });
     h.run(Command::ProcessQueue);
     // The compensating move runs right after.
-    let deadline = Instant::now() + WAIT;
-    while !h.db.pending_ops(h.account).unwrap().is_empty() {
-        assert!(Instant::now() < deadline, "compensating move never ran");
-        h.run(Command::ProcessQueue);
-    }
+    h.process_queue_until_empty("compensating move never ran");
     assert_eq!(h.server_subjects("INBOX"), strings(&["m"]));
     assert!(h.server.messages("Trash").is_empty());
     assert_eq!(h.subjects(system::INBOX), strings(&["m"]));
@@ -1966,11 +1977,7 @@ fn retargeting_a_move_while_it_runs_converges_to_the_new_target() {
         strings(&["m"]),
         "UI intent kept"
     );
-    let deadline = Instant::now() + WAIT;
-    while !h.db.pending_ops(h.account).unwrap().is_empty() {
-        assert!(Instant::now() < deadline, "retargeted move never ran");
-        h.run(Command::ProcessQueue);
-    }
+    h.process_queue_until_empty("retargeted move never ran");
     assert_eq!(h.server_subjects("Archive"), strings(&["m"]));
     assert!(h.server.messages("Trash").is_empty());
     h.sync();
