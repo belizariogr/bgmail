@@ -48,9 +48,13 @@ wiring to `storage`.
     exists; unpackaged runs keep notify-rust's PowerShell id (Windows drops
     toasts from an unregistered id). WiX shortcuts are assumed to carry the
     same id.
-- After removing the open message (delete, archive, junk, move), nothing is open and
-  the next message isn't marked read, as in Gmail without auto-advance (user
-  decision). The arrow keys open the row that took its place.
+- Deleting the open message or a multiple selection opens the next row, or the
+  previous one after the last, as in Thunderbird.
+- After archive, junk or move nothing is open and the next message isn't marked read,
+  as in Gmail without auto-advance (user decision). The arrow keys open the row that
+  took its place.
+- A click on the empty space of the message list changes nothing in the selection
+  (user decision); a multiple selection stays too, for the same behavior in both.
 - Each mailbox remembers its selection for the session (`remembered_selections`,
   user decision): switching away and back selects the same rows again if still
   listed, without marking them read. Not persisted. A search records none of its own:

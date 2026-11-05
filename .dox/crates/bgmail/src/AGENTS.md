@@ -1920,7 +1920,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_message_list`** (private, L2766)
   - Signature: `fn render_message_list(&mut self, cx) -> impl IntoElement`
   - Purpose: Renders the virtualized message list column.
-  - Behavior: Optional list header when sidebar undocked; GPUI `uniform_list` over `list_messages` (only visible rows are built; uniform row height measured from the first row) tracked by `list_scroll: UniformListScrollHandle`; the existing `ui::Scrollbar` reads its `base_handle`. A click below the rows clears the selection; search with no results shows "No results". The column tracks `list_focus`, sets key context `MessageList` and handles `SelectNextMessage` / `SelectPreviousMessage`.
+  - Behavior: Optional list header when sidebar undocked; GPUI `uniform_list` over `list_messages` (only visible rows are built; uniform row height measured from the first row) tracked by `list_scroll: UniformListScrollHandle`; the existing `ui::Scrollbar` reads its `base_handle`. A click below the rows keeps the selection (single or multiple), and the column still takes focus; search with no results shows "No results". The column tracks `list_focus`, sets key context `MessageList` and handles `SelectNextMessage` / `SelectPreviousMessage`.
 
 - **`render_message_row`** (private, L2847)
   - Signature: `fn render_message_row(&self, message, cx) -> impl IntoElement`
@@ -2206,6 +2206,8 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Signature: `fn command_context_reflects_trash_state()`
   - Purpose: Test: command_context trash detection.
   - Behavior: After trash move, message_in_trash true in context.
+
+- **`a_click_below_the_last_row_keeps_the_selection`** (test): a real click in the empty space under the rows leaves the open message and a multiple selection as they were.
 
 - **`sidebar_orders_system_folders_then_user_folders_alphabetically`** / **`adjacent_index_clamps_and_starts_from_the_ends`** / **`keyboard_selection_moves_through_the_list`** / **`attachments_follow_the_selected_message_body`** (tests): sidebar folder order and ranks; row-step clamping; arrow-key selection over the seeded list (no wrap); chips list only non-inline attachments, none for headers-only bodies, cleared with the selection.
 
