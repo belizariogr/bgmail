@@ -93,13 +93,13 @@ fn schedule_menu_command(id: CommandId, cx: &mut App) {
     });
 }
 
-/// [`schedule_menu_command`] for what acts on the selected messages: from another window,
-/// they aren't what is in front of the user.
+/// [`schedule_menu_command`] for what acts on the selected messages, or on the row of an
+/// open right-click menu: from another window, they aren't what is in front of the user.
 fn schedule_message_command(id: CommandId, cx: &mut App) {
     let main = cx.global::<MainWindow>().0;
     cx.defer(move |cx| {
         let _ = main.update(cx, |view, window, cx| {
-            let ctx = view.command_context();
+            let ctx = view.shortcut_context();
             if window.is_window_active() && commands::command_enabled(&id, &ctx) {
                 view.execute_command(&id, window, cx);
             }

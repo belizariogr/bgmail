@@ -773,6 +773,22 @@ struct AttachmentMenu {
     attachment: AttachmentRow,
 }
 
+/// The right-click menu of a list row. It holds the focus while open, so the list's
+/// keys can't act on another message behind it. The app's other shortcuts act on what
+/// the menu is about: see [`RootView::shortcut_context`].
+struct RowMenu {
+    position: Point<Pixels>,
+    /// The row clicked: the menu acts on the selection if that row is part of it,
+    /// otherwise on the row alone. See [`RootView::row_menu_context`].
+    id: i64,
+    focus: FocusHandle,
+    /// Move was chosen: the menu lists the folders instead of the actions.
+    choosing_folder: bool,
+    /// The window has been in the foreground since the menu opened. A right-click can
+    /// open it on a window that is still in the background.
+    window_was_active: bool,
+}
+
 /// The reader's find bar: query field and the current match.
 struct FindBar {
     input: Entity<TextInput>,
@@ -939,6 +955,11 @@ pub struct RootView {
     filter_menu: Option<Point<Pixels>>,
     /// Where the Move button's menu is open.
     move_menu: Option<Point<Pixels>>,
+    /// The open right-click menu of a list row.
+    row_menu: Option<RowMenu>,
+    /// The focus handle of the last row menu and what had the focus when it opened,
+    /// to give it back on closing (as Zed's `ContextMenu` does).
+    row_menu_focus_return: Option<(FocusHandle, Option<FocusHandle>)>,
     /// Rows of a selection of two or more, in list order. While it is set,
     /// `selected_message_id` is `None`: the reader has no single message.
     multi_selection: Vec<i64>,
@@ -1041,6 +1062,37 @@ pub struct RootView {
     pub(crate) command_palette: Option<CommandPaletteState>,
     /// Focus the palette search field once after open.
     command_palette_focus_pending: bool,
+}
+
+/// A list row as a detail with no body, for deciding what can be done with it: the
+/// commands only look at its folders and flags, and reading the body of a message
+/// nobody opened could take megabytes per frame of an open menu.
+fn detail_of_row(row: &MessageListItem) -> MessageDetail {
+    MessageDetail {
+        id: row.id,
+        account_id: row.account_id,
+        sender: row.sender.clone(),
+        sender_email: row.sender_email.clone(),
+        subject: row.subject.clone(),
+        plain_text: String::new(),
+        raw_content: String::new(),
+        raw_format: String::new(),
+        received_at: row.received_at.clone(),
+        date_ts: row.date_ts,
+        to_addrs: String::new(),
+        cc_addrs: String::new(),
+        reply_to: String::new(),
+        message_id_hdr: None,
+        in_reply_to: None,
+        references_hdr: String::new(),
+        thread_id: row.thread_id.clone(),
+        body_state: storage::BODY_STATE_HEADERS,
+        unread: row.unread,
+        starred: row.starred,
+        answered: false,
+        has_attachment: row.has_attachment,
+        folders_csv: row.folders_csv.clone(),
+    }
 }
 
 /// The ids of a stored `References`: one per line, or space-separated in rows from
@@ -1461,6 +1513,8 @@ impl RootView {
             list_filter: ListFilter::All,
             filter_menu: None,
             move_menu: None,
+            row_menu: None,
+            row_menu_focus_return: None,
             multi_selection: Vec::new(),
             multi_preview: None,
             selection_anchor: None,
@@ -1980,6 +2034,8 @@ impl RootView {
         cx: &mut Context<Self>,
         action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
     ) {
+        // Rebuilding the reader for a message it isn't showing would lose its scroll.
+        let shown = self.row_is_selected(id);
         let no_destination = Cell::new(false);
         let result = self.apply_message_action(id, |db, id| {
             let outcome = action(db, id)?;
@@ -1995,7 +2051,9 @@ impl RootView {
             self.set_status_note(Key::StatusNoDestination.tr(cx.language()), cx);
         }
         self.sync_app_menus(cx);
-        self.last_reader_sig = None;
+        if shown {
+            self.last_reader_sig = None;
+        }
         cx.notify();
     }
 
@@ -2009,16 +2067,29 @@ impl RootView {
         action: impl FnOnce(&storage::Database, i64) -> rusqlite::Result<ActionOutcome>,
     ) -> rusqlite::Result<()> {
         let position = self.list_messages.iter().position(|m| m.id == id);
-        let was_selected = self.selected_message_id == Some(id);
+        // The keys can be on a row that isn't selected: with nothing open, they carry on
+        // from it, and Ctrl-clicking a row off leaves them there.
+        let keys_on_it = self.selected_message_id == Some(id) || self.selection_focus == Some(id);
         let result = self.act_on_message(id, action);
         self.reload_message_list();
-        if was_selected && self.selected_message_id.is_none() {
-            self.selection_focus = position.and_then(|ix| {
-                self.list_messages
-                    .get(ix)
-                    .or_else(|| self.list_messages.last())
-                    .map(|m| m.id)
-            });
+        let left_the_list = !self.list_messages.iter().any(|m| m.id == id);
+        if keys_on_it && left_the_list {
+            // The first of several is also the row the reader falls back on showing.
+            let selected = self
+                .selected_message_id
+                .or(self.multi_selection.first().copied());
+            self.selection_focus = match selected {
+                Some(selected) => Some(selected),
+                None => position.and_then(|ix| {
+                    self.list_messages
+                        .get(ix)
+                        .or_else(|| self.list_messages.last())
+                        .map(|m| m.id)
+                }),
+            };
+        }
+        if left_the_list && self.selection_anchor == Some(id) {
+            self.selection_anchor = self.selection_focus;
         }
         result
     }
@@ -2719,11 +2790,25 @@ impl RootView {
 
     /// Builds the command context snapshot used by menus and the palette.
     pub(crate) fn command_context(&self) -> CommandContext {
+        self.command_context_of(
+            self.selected_message_id,
+            self.selected_detail.clone(),
+            self.bulk_selection(),
+        )
+    }
+
+    /// [`Self::command_context`] for the given target instead of the selection.
+    fn command_context_of(
+        &self,
+        selected_message_id: Option<i64>,
+        message_detail: Option<MessageDetail>,
+        bulk: Option<BulkSelection>,
+    ) -> CommandContext {
         CommandContext {
-            selected_message_id: self.selected_message_id,
-            message_detail: self.selected_detail.clone(),
+            selected_message_id,
+            message_detail,
             folders_by_account: self.folders_by_account.clone(),
-            bulk: self.bulk_selection(),
+            bulk,
             list_in_trash: self.showing_trash(),
             list_in_sent: self.showing_sent(),
         }
@@ -2734,7 +2819,8 @@ impl RootView {
         if self.compose_window_open_and_active(cx) {
             return;
         }
-        let ctx = self.command_context();
+        // While the row menu is open, the commands of the menu bar act on what it is about.
+        let ctx = self.shortcut_context();
         let language = cx.language();
         app_menus::sync_menus(cx, &ctx, language);
     }
@@ -2919,6 +3005,20 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A shortcut behind the row menu: the ones it shows run on what it is about.
+        if let Some(menu) = self.row_menu.take() {
+            cx.notify();
+            match id {
+                CommandId::ComposeNew
+                | CommandId::OpenSettings
+                | CommandId::ToggleSidebar
+                | CommandId::SyncNow => {}
+                CommandId::MoveToFolder(path) => {
+                    return self.move_from_row_menu(menu.id, path.as_ref(), cx)
+                }
+                _ => return self.run_row_menu_command(menu.id, id, window, cx),
+            }
+        }
         match id {
             CommandId::ComposeNew => self.open_compose(window, cx),
             CommandId::OpenSettings => self.open_settings(window, cx),
@@ -2988,6 +3088,12 @@ impl RootView {
             return;
         };
         let language = cx.language();
+        // A message without its body would print as a blank page.
+        if detail.body_state == storage::BODY_STATE_HEADERS {
+            self.request_selected_body();
+            self.set_status_note(Key::StatusPrintNeedsBody.tr(language), cx);
+            return;
+        }
         let from = if detail.sender_email.is_empty() {
             detail.sender.clone()
         } else {
@@ -3289,11 +3395,13 @@ impl RootView {
     /// The Delete command wherever it comes from (toolbar, key, menu): to the
     /// Trash, or for good, with confirmation, for what is already there.
     pub(crate) fn request_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ctx = self.command_context();
-        if commands::command_enabled(&CommandId::MessageDelete, &ctx) {
-            self.delete_message_to_trash(cx);
-        } else if commands::command_enabled(&CommandId::MessageDeletePermanent, &ctx) {
-            self.confirm_delete_forever(self.selected_ids(), window, cx);
+        let ctx = self.shortcut_context();
+        let trash = CommandId::MessageDelete;
+        let forever = CommandId::MessageDeletePermanent;
+        if commands::command_enabled(&trash, &ctx) {
+            self.execute_command(&trash, window, cx);
+        } else if commands::command_enabled(&forever, &ctx) {
+            self.execute_command(&forever, window, cx);
         }
     }
 
@@ -5842,6 +5950,10 @@ impl RootView {
         // The subject, on the line the action buttons sit on, gives way to them.
         // The sender/date line above and the preview below never move.
         let room_for_actions = row_actions_room(self.hovered_row == Some(message_id));
+        let menu_target = self
+            .row_menu
+            .as_ref()
+            .is_some_and(|menu| menu.id == message_id);
         h_flex()
             .id(("message", message_id as u64))
             .group(MESSAGE_ROW_GROUP)
@@ -5855,7 +5967,16 @@ impl RootView {
             .border_color(border)
             .when(selected, |el| el.bg(bg_selected))
             .when(!selected, |el| el.hover(move |el| el.bg(hover)))
+            // The pointer goes off to the menu: this says which row it is for.
+            .when(!selected && menu_target, |el| el.bg(hover))
             .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_row_menu(message_id, event.position, window, cx);
+                }),
+            )
             // Keeps the list column from taking focus on press: a row takes it
             // on click, so starting a drag leaves focus where it was.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -5949,6 +6070,282 @@ impl RootView {
         }
         self.select_only(id);
         self.on_message_selection_changed(cx);
+    }
+
+    /// Opens the right-click menu of a row. As in Thunderbird, this changes neither
+    /// the selection nor what the reader shows: an unread message stays unread.
+    fn open_row_menu(
+        &mut self,
+        id: i64,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus = cx.focus_handle();
+        // From another row's open menu, the focus to give back is still the one it kept.
+        let before = match self.row_menu_focus_return.take() {
+            Some((open, before)) if open.is_focused(window) => before,
+            _ => window.focused(cx),
+        };
+        self.row_menu_focus_return = Some((focus.clone(), before));
+        window.focus(&focus);
+        self.row_menu = Some(RowMenu {
+            position,
+            id,
+            focus,
+            choosing_folder: false,
+            window_was_active: window.is_window_active(),
+        });
+        self.sync_app_menus(cx);
+        cx.notify();
+    }
+
+    /// What a shortcut acts on: what the row menu is about while it is open, as the
+    /// shortcuts it shows beside its entries promise, otherwise the selection.
+    pub(crate) fn shortcut_context(&self) -> CommandContext {
+        self.row_menu
+            .as_ref()
+            .and_then(|menu| self.row_menu_context(menu.id))
+            .unwrap_or_else(|| self.command_context())
+    }
+
+    /// What the commands of a row's menu apply to: the selection if the row is part
+    /// of it, otherwise that row alone. `None` once the row has left the list.
+    fn row_menu_context(&self, id: i64) -> Option<CommandContext> {
+        let row = self.list_messages.iter().find(|m| m.id == id)?;
+        Some(if self.multi_selection.contains(&id) {
+            self.command_context_of(None, None, self.bulk_selection())
+        } else {
+            self.command_context_of(Some(id), Some(detail_of_row(row)), None)
+        })
+    }
+
+    /// Closes the row menu once it has nothing left to do: the window lost the
+    /// foreground, the focus went elsewhere (a menu of the menu bar opened the find
+    /// bar), its row left the list, or no folder is left to choose from.
+    fn sync_row_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let language = cx.language();
+        let active = window.is_window_active();
+        let Some(menu) = &mut self.row_menu else {
+            // An action may have sent the focus somewhere on purpose: only take back
+            // what the menu still holds.
+            if let Some((menu_focus, before)) = self.row_menu_focus_return.take() {
+                self.sync_app_menus(cx);
+                if menu_focus.is_focused(window) {
+                    // With no message in the reader, its find bar isn't on screen.
+                    let before = before.filter(|_| self.reader_detail().is_some());
+                    if let Some(focus) = before.or_else(|| self.list_focus.clone()) {
+                        window.focus(&focus);
+                    }
+                }
+            }
+            return;
+        };
+        let id = menu.id;
+        let lost_foreground = menu.window_was_active && !active;
+        menu.window_was_active |= active;
+        let (focus, choosing_folder) = (menu.focus.clone(), menu.choosing_folder);
+        let keep = !lost_foreground
+            && focus.is_focused(window)
+            && self.list_messages.iter().any(|m| m.id == id)
+            && (!choosing_folder
+                || self
+                    .row_menu_context(id)
+                    .is_some_and(|ctx| !ctx.move_targets(language).is_empty()));
+        if !keep {
+            self.row_menu = None;
+            self.sync_row_menu(window, cx);
+        }
+    }
+
+    /// Runs an action of the menu of row `id`, on what [`Self::row_menu_context`]
+    /// says. On a row outside the selection, the selection stays as it is, except
+    /// for what needs the message open, as with the Reply button of a row.
+    fn run_row_menu_command(
+        &mut self,
+        id: i64,
+        command: &CommandId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.notify();
+        if matches!(command, CommandId::MoveToFolder(_)) {
+            if let Some(menu) = &mut self.row_menu {
+                menu.choosing_folder = true;
+            }
+            return;
+        }
+        self.row_menu = None;
+        self.keep_row_menu_focus();
+        // The list may have changed under the menu since it was drawn.
+        let Some(ctx) = self
+            .row_menu_context(id)
+            .filter(|ctx| commands::command_enabled(command, ctx))
+        else {
+            return;
+        };
+        if self.row_is_selected(id) {
+            self.execute_command(command, window, cx);
+            return;
+        }
+        let (unread, starred) = (ctx.message_unread(), ctx.message_starred());
+        match command {
+            CommandId::MessageReply
+            | CommandId::MessageReplyAll
+            | CommandId::MessageForward
+            | CommandId::MessagePrint => {
+                self.select_message_row(id, window, cx);
+                self.execute_command(command, window, cx);
+            }
+            CommandId::MessageDelete | CommandId::MessageDeletePermanent => {
+                self.delete_row_message(id, window, cx)
+            }
+            CommandId::MessageRestore => {
+                self.run_action_on_message(id, cx, mail_actions::restore_from_trash)
+            }
+            CommandId::MessageArchive => self.run_action_on_message(id, cx, mail_actions::archive),
+            CommandId::MessageMarkJunk => self.run_action_on_message(id, cx, mail_actions::junk),
+            CommandId::MessageToggleFlag => self.run_action_on_message(id, cx, |db, id| {
+                mail_actions::set_starred(db, id, !starred)
+            }),
+            CommandId::MessageToggleRead => {
+                self.run_action_on_message(id, cx, |db, id| mail_actions::set_read(db, id, unread))
+            }
+            // Not actions on a message, or handled above: listed so that a new
+            // command has to be decided on here.
+            CommandId::ComposeNew
+            | CommandId::OpenSettings
+            | CommandId::ToggleSidebar
+            | CommandId::SyncNow
+            | CommandId::MoveToFolder(_) => {}
+        }
+    }
+
+    /// After an action, the focus returns to the list instead of what had it: the action
+    /// may have removed that (the reader's find bar goes with its message).
+    fn keep_row_menu_focus(&mut self) {
+        if let Some((_, before)) = &mut self.row_menu_focus_return {
+            *before = None;
+        }
+    }
+
+    /// Moves what the menu of row `id` applies to into the chosen folder, if it can
+    /// still go there: the list may have changed under the menu.
+    fn move_from_row_menu(&mut self, id: i64, folder_path: &str, cx: &mut Context<Self>) {
+        self.row_menu = None;
+        self.keep_row_menu_focus();
+        cx.notify();
+        let allowed = self.row_menu_context(id).is_some_and(|ctx| {
+            ctx.move_targets(cx.language())
+                .iter()
+                .any(|(_, path)| path.as_ref() == folder_path)
+        });
+        if !allowed {
+            return;
+        }
+        if self.row_is_selected(id) {
+            self.move_message_to_folder(folder_path, cx);
+        } else {
+            self.move_messages_to_folder(&[id], folder_path, cx);
+        }
+    }
+
+    /// The list row under `position`, for a mouse event the rows can't see because the
+    /// menu's backdrop covers them. Rows have a uniform height.
+    fn list_row_at(&self, position: Point<Pixels>) -> Option<i64> {
+        let scroll = self.list_scroll.0.borrow();
+        let bounds = scroll.base_handle.bounds();
+        if !bounds.contains(&position) || self.list_messages.is_empty() {
+            return None;
+        }
+        let contents = scroll.last_item_size?.contents.height;
+        let row_height = contents / self.list_messages.len() as f32;
+        let y = position.y - bounds.top() - scroll.base_handle.offset().y;
+        let row = (y / row_height).floor();
+        if row < 0.0 {
+            return None;
+        }
+        self.list_messages.get(row as usize).map(|m| m.id)
+    }
+
+    /// The menu of a list row: its actions, or the folders once Move was chosen.
+    fn render_row_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some((menu, ctx)) = self
+            .row_menu
+            .as_ref()
+            .and_then(|menu| Some((menu, self.row_menu_context(menu.id)?)))
+        else {
+            return div().into_any_element();
+        };
+        let language = cx.language();
+        let root = cx.weak_entity();
+        let id = menu.id;
+        let mut items = ui::ContextMenu::new();
+        if menu.choosing_folder {
+            for (label, path) in ctx.move_targets(language) {
+                let root = root.clone();
+                items = items.entry(label, move |event, _, cx| {
+                    // The folders take the place of the actions: the second click of
+                    // a double-click on Move must not choose one.
+                    if event.click_count() > 1 {
+                        return;
+                    }
+                    let _ = root.update(cx, |this, cx| this.move_from_row_menu(id, &path, cx));
+                });
+            }
+        } else {
+            for group in commands::row_menu_groups(language, &ctx) {
+                for entry in group {
+                    let root = root.clone();
+                    let command = entry.id;
+                    let hint = commands::row_menu_shortcut(&command).map(|(mac, other)| {
+                        shortcuts::format_binding(shortcuts::primary_binding(mac, other))
+                    });
+                    let run = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                        let _ = root.update(cx, |this, cx| {
+                            this.run_row_menu_command(id, &command, window, cx)
+                        });
+                    };
+                    items = match hint {
+                        Some(hint) => items.entry_with_key_hint(entry.label, hint, run),
+                        None => items.entry(entry.label, run),
+                    };
+                }
+                items = items.separator();
+            }
+        }
+        div()
+            .absolute()
+            .inset_0()
+            .track_focus(&menu.focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.row_menu = None;
+                    cx.notify();
+                }
+            }))
+            .child(Self::render_dropdown(
+                "row-menu",
+                menu.position,
+                items,
+                |this, event, window, cx| {
+                    // The second click of a double-click on Move, past a shorter folder
+                    // list: the user is still choosing.
+                    let choosing = this.row_menu.as_ref().is_some_and(|m| m.choosing_folder);
+                    if choosing && event.click_count > 1 {
+                        return;
+                    }
+                    this.row_menu = None;
+                    // As with a native menu, a right-click on another row moves it there.
+                    if event.button == MouseButton::Right {
+                        if let Some(id) = this.list_row_at(event.position) {
+                            this.open_row_menu(id, event.position, window, cx);
+                        }
+                    }
+                },
+                cx,
+            ))
+            .into_any_element()
     }
 
     /// Reply and Delete, centered at the right of a row while the mouse is on it.
@@ -6422,20 +6819,20 @@ impl RootView {
     }
 
     /// A dropdown over the window at `position`; a mouse-down outside it runs
-    /// `close`.
+    /// `on_outside`.
     fn render_dropdown(
         id: &'static str,
         position: Point<Pixels>,
         items: ui::ContextMenu,
-        close: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        on_outside: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
             .absolute()
             .inset_0()
             .occlude()
-            .on_any_mouse_down(cx.listener(move |this, _, _, cx| {
-                close(this, cx);
+            .on_any_mouse_down(cx.listener(move |this, event, window, cx| {
+                on_outside(this, event, window, cx);
                 cx.notify();
             }))
             .child(deferred(
@@ -6480,7 +6877,7 @@ impl RootView {
             "filter-menu",
             position,
             items,
-            |this, _| this.filter_menu = None,
+            |this, _, _, _| this.filter_menu = None,
             cx,
         )
     }
@@ -6506,7 +6903,7 @@ impl RootView {
             "move-menu",
             position,
             items,
-            |this, _| this.move_menu = None,
+            |this, _, _, _| this.move_menu = None,
             cx,
         )
     }
@@ -7217,6 +7614,7 @@ impl Render for RootView {
             return self.render_onboarding(window, cx);
         }
 
+        self.sync_row_menu(window, cx);
         // Make sure the scrollbar state entities exist before the panels render.
         self.ensure_scrollbar_states(cx);
         // Keyboard navigation lives on the message list: give it focus
@@ -7392,6 +7790,9 @@ impl Render for RootView {
             })
             .when_some(self.move_menu, |el, position| {
                 el.child(self.render_move_menu(position, cx))
+            })
+            .when(self.row_menu.is_some(), |el| {
+                el.child(self.render_row_menu(cx))
             })
             .when(self.unsent_panel_open, |el| {
                 el.child(self.render_unsent_panel(cx))
@@ -8809,6 +9210,797 @@ mod tests {
                 assert!(!view.list_messages.iter().any(|m| m.id == *id));
             }
         });
+    }
+
+    /// A window on the sample mailbox, with `selected` open.
+    fn row_menu_window<'a>(
+        dir: &TempDir,
+        selected: usize,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (
+        gpui::Entity<RootView>,
+        Vec<i64>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+            ui::bind_keys(cx);
+            html_view::init(cx);
+            shortcuts::bind_app_shortcuts(cx);
+        });
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        view.update_in(cx, |_, window, _| window.activate_window());
+        view.update(cx, |view, cx| view.mark_content_ready(cx));
+        cx.run_until_parked();
+        let ids = view.update(cx, |view, cx| {
+            let ids = view.list_ids();
+            view.set_selection(vec![ids[selected]], cx);
+            ids
+        });
+        cx.run_until_parked();
+        (view, ids, cx)
+    }
+
+    /// Right-clicks the first row of the list.
+    fn right_click_first_row(view: &gpui::Entity<RootView>, cx: &mut gpui::VisualTestContext) {
+        let position = view.update(cx, |view, _| {
+            point(view.sidebar_width + view.list_width / 2.0, px(80.0))
+        });
+        cx.simulate_mouse_down(position, MouseButton::Right, Default::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, Default::default());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn right_clicking_a_row_leaves_the_selection_and_escape_closes_the_menu(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        view.update(cx, |view, _| {
+            view.db.set_message_unread(ids[0], true).unwrap();
+            view.reload_message_list();
+        });
+        right_click_first_row(&view, cx);
+        view.update_in(cx, |view, window, _| {
+            let menu = view.row_menu.as_ref().expect("the menu opened");
+            assert_eq!(menu.id, ids[0]);
+            assert!(menu.focus.is_focused(window));
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+            assert!(view.list_messages[0].unread);
+        });
+        assert!(cx.debug_bounds("context-menu-entry-0").is_some());
+
+        // The list's keys don't reach it while the menu is open.
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert!(view.row_menu.is_none());
+            assert!(view.list_focus.as_ref().unwrap().is_focused(window));
+        });
+
+        // With the menu closed, that same key does move the selection.
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.selected_message_id, Some(ids[2]));
+        });
+    }
+
+    #[gpui::test]
+    fn losing_the_focus_closes_the_row_menu(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 1, cx);
+        right_click_first_row(&view, cx);
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.row_menu.is_some());
+            view.focus_search_input(window, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.row_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn the_folder_list_closes_once_the_row_cannot_move(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        let row = ids[1];
+        view.update_in(cx, |view, window, cx| {
+            view.open_row_menu(row, point(px(10.0), px(10.0)), window, cx);
+            view.run_row_menu_command(
+                row,
+                &CommandId::MoveToFolder(SharedString::default()),
+                window,
+                cx,
+            );
+            // A search still lists it, but in the Trash it can't be moved.
+            view.db.move_message_to_trash(row).unwrap();
+            view.list_messages
+                .iter_mut()
+                .find(|m| m.id == row)
+                .unwrap()
+                .folders_csv = format!(",{},", storage::system::TRASH);
+            view.move_from_row_menu(row, storage::system::ARCHIVE, cx);
+            assert_eq!(view.db.message_is_in_trash(row), Ok(true));
+
+            view.open_row_menu(row, point(px(10.0), px(10.0)), window, cx);
+            view.row_menu.as_mut().unwrap().choosing_folder = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.row_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn printing_waits_for_the_body(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _) = view_with_row_selected(&dir, Some(0), cx);
+        view.update(cx, |view, cx| {
+            view.selected_detail.as_mut().unwrap().body_state = storage::BODY_STATE_HEADERS;
+            view.print_message(cx);
+            let note = view.status_note_for_tests().map(|note| note.to_string());
+            assert_eq!(
+                note.as_deref(),
+                Some(Key::StatusPrintNeedsBody.tr(Language::default()))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_click_outside_closes_the_row_menu_without_acting(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        right_click_first_row(&view, cx);
+        cx.simulate_click(point(px(600.0), px(500.0)), Default::default());
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert!(view.row_menu.is_none());
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+            assert!(view.list_focus.as_ref().unwrap().is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn a_menu_entry_acts_on_the_row_clicked(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        let starred = |view: &RootView, id: i64| {
+            view.list_messages
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap()
+                .starred
+        };
+        let before = view.read_with(cx, |view, _| [starred(view, ids[0]), starred(view, ids[1])]);
+        right_click_first_row(&view, cx);
+        // Reply, Reply all, Forward, separator, Delete, Archive, Junk, separator, Star.
+        let star = cx.debug_bounds("context-menu-entry-8").expect("Star entry");
+        cx.simulate_click(star.center(), Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.row_menu.is_none());
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+            assert_eq!(starred(view, ids[0]), !before[0]);
+            assert_eq!(starred(view, ids[1]), before[1]);
+        });
+    }
+
+    #[gpui::test]
+    fn the_row_menu_only_targets_the_selection_from_inside_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = bulk_view(&dir, cx);
+        let outside = view.read_with(cx, |view, _| view.list_ids()[2]);
+        view.read_with(cx, |view, _| {
+            assert!(view.row_menu_context(ids[1]).unwrap().bulk.is_some());
+            let ctx = view.row_menu_context(outside).unwrap();
+            assert!(ctx.bulk.is_none());
+            assert_eq!(ctx.selected_message_id, Some(outside));
+            assert_eq!(ctx.message_detail.unwrap().id, outside);
+            assert!(view.row_menu_context(-1).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn menu_actions_outside_the_selection_leave_it_alone(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        let (selected, row) = (ids[0], ids[1]);
+        view.update_in(cx, |view, window, cx| {
+            let read_before = view
+                .list_messages
+                .iter()
+                .find(|m| m.id == row)
+                .unwrap()
+                .unread;
+            view.run_row_menu_command(row, &CommandId::MessageToggleRead, window, cx);
+            let read_after = view
+                .list_messages
+                .iter()
+                .find(|m| m.id == row)
+                .unwrap()
+                .unread;
+            assert_ne!(read_before, read_after);
+
+            view.run_row_menu_command(row, &CommandId::MessageArchive, window, cx);
+            assert!(!view.list_ids().contains(&row));
+            assert_eq!(view.selected_message_id, Some(selected));
+
+            let next = view.list_ids()[1];
+            view.run_row_menu_command(next, &CommandId::MessageDelete, window, cx);
+            assert_eq!(view.db.message_is_in_trash(next), Ok(true));
+            assert_eq!(view.selected_message_id, Some(selected));
+        });
+    }
+
+    #[gpui::test]
+    fn menu_actions_inside_a_selection_cover_every_row(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.apply_selection(ids[..2].to_vec());
+            view.run_row_menu_command(ids[1], &CommandId::MessageDelete, window, cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.db.message_is_in_trash(ids[0]), Ok(true));
+            assert_eq!(view.db.message_is_in_trash(ids[1]), Ok(true));
+        });
+    }
+
+    #[gpui::test]
+    fn replying_from_the_menu_opens_the_row(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.apply_selection(vec![ids[2], ids[3]]);
+            view.run_row_menu_command(ids[1], &CommandId::MessageReply, window, cx);
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+            assert!(view.multi_selection.is_empty());
+            assert!(view.compose_window_for_tests().is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn move_in_the_menu_lists_the_folders_and_moves_the_row(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        let row = ids[1];
+        view.update_in(cx, |view, window, cx| {
+            view.open_row_menu(row, point(px(10.0), px(10.0)), window, cx);
+            let move_to = CommandId::MoveToFolder(SharedString::default());
+            view.run_row_menu_command(row, &move_to, window, cx);
+            assert!(view.row_menu.as_ref().unwrap().choosing_folder);
+            let ctx = view.row_menu_context(row).unwrap();
+            let (_, path) = ctx
+                .move_targets(Language::default())
+                .into_iter()
+                .find(|(_, path)| path.as_ref() == storage::system::ARCHIVE)
+                .expect("Archive is a target");
+            view.move_from_row_menu(row, &path, cx);
+            assert!(view.row_menu.is_none());
+            assert!(!view.list_ids().contains(&row));
+            assert_eq!(view.selected_message_id, Some(ids[0]));
+        });
+    }
+
+    #[gpui::test]
+    fn the_row_menu_closes_when_its_row_leaves_the_list(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.open_row_menu(ids[1], point(px(10.0), px(10.0)), window, cx);
+            view.reload_message_list();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            assert!(view.row_menu.is_some());
+            view.db.move_message_to_trash(ids[1]).unwrap();
+            view.reload_message_list();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.row_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_shortcut_behind_the_row_menu_acts_on_its_row(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        let at = point(px(10.0), px(10.0));
+        view.update_in(cx, |view, window, cx| {
+            view.open_row_menu(ids[0], at, window, cx);
+            assert_eq!(view.shortcut_context().selected_message_id, Some(ids[0]));
+            view.execute_command(&CommandId::MessageArchive, window, cx);
+            assert!(view.row_menu.is_none());
+            assert!(!view.list_ids().contains(&ids[0]));
+            assert!(view.list_ids().contains(&ids[1]));
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+
+            view.open_row_menu(ids[2], at, window, cx);
+            view.request_delete(window, cx);
+            assert!(view.row_menu.is_none());
+            assert_eq!(view.db.message_is_in_trash(ids[2]), Ok(true));
+            assert_eq!(view.db.message_is_in_trash(ids[1]), Ok(false));
+
+            // With the menu closed, they act on the selection again.
+            assert_eq!(view.shortcut_context().selected_message_id, Some(ids[1]));
+            view.request_delete(window, cx);
+            assert_eq!(view.db.message_is_in_trash(ids[1]), Ok(true));
+        });
+    }
+
+    #[gpui::test]
+    fn a_shortcut_works_on_the_row_menu_with_nothing_selected(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.clear_message_selection();
+            assert!(!commands::command_enabled(
+                &CommandId::MessageArchive,
+                &view.shortcut_context()
+            ));
+            view.open_row_menu(ids[0], point(px(10.0), px(10.0)), window, cx);
+            assert!(commands::command_enabled(
+                &CommandId::MessageArchive,
+                &view.shortcut_context()
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn the_menu_bar_move_behind_the_row_menu_moves_its_row(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.open_row_menu(ids[0], point(px(10.0), px(10.0)), window, cx);
+            let path = SharedString::from(storage::system::ARCHIVE);
+            view.execute_command(&CommandId::MoveToFolder(path), window, cx);
+            assert!(view.row_menu.is_none());
+            assert!(!view.list_ids().contains(&ids[0]));
+            assert!(view.list_ids().contains(&ids[1]));
+        });
+    }
+
+    #[gpui::test]
+    fn an_action_on_a_row_that_stays_leaves_the_keys_on_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.apply_selection(vec![ids[0], ids[3]]);
+            view.selection_focus = Some(ids[2]);
+            view.selection_anchor = Some(ids[2]);
+            view.run_row_menu_command(ids[2], &CommandId::MessageToggleFlag, window, cx);
+            assert_eq!(view.selection_focus, Some(ids[2]));
+            assert_eq!(view.selection_anchor, Some(ids[2]));
+        });
+    }
+
+    #[gpui::test]
+    fn removing_the_keys_row_with_another_message_open_moves_them_to_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            // What Ctrl-clicking the second row off a selection of two leaves.
+            view.selection_focus = Some(ids[1]);
+            view.selection_anchor = Some(ids[1]);
+            view.run_row_menu_command(ids[1], &CommandId::MessageArchive, window, cx);
+            assert_eq!(view.selected_message_id, Some(ids[0]));
+            assert_eq!(view.selection_focus, Some(ids[0]));
+            assert_eq!(view.selection_anchor, Some(ids[0]));
+        });
+    }
+
+    #[gpui::test]
+    fn the_focus_goes_to_the_list_once_the_reader_has_emptied(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 1, cx);
+        let in_the_reader = view.update_in(cx, |_, window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus);
+            focus
+        });
+        cx.run_until_parked();
+        right_click_first_row(&view, cx);
+        view.update(cx, |view, _| view.clear_message_selection());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert!(!in_the_reader.is_focused(window));
+            assert!(view.list_focus.as_ref().unwrap().is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn an_action_from_the_menu_sends_the_focus_to_the_list(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        let elsewhere = view.update_in(cx, |_, window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus);
+            focus
+        });
+        cx.run_until_parked();
+        right_click_first_row(&view, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.run_row_menu_command(ids[0], &CommandId::MessageToggleFlag, window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert!(!elsewhere.is_focused(window));
+            assert!(view.list_focus.as_ref().unwrap().is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn removing_the_anchor_row_moves_the_anchor_to_the_keys(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.apply_selection(vec![ids[2], ids[3]]);
+            view.selection_anchor = Some(ids[1]);
+            view.selection_focus = Some(ids[3]);
+            view.run_row_menu_command(ids[1], &CommandId::MessageArchive, window, cx);
+            assert_eq!(view.selection_anchor, Some(ids[3]));
+            assert_eq!(view.selection_focus, Some(ids[3]));
+        });
+    }
+
+    #[gpui::test]
+    fn removing_the_open_row_leaves_no_stale_anchor(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.selection_anchor = Some(ids[0]);
+            view.selection_focus = Some(ids[0]);
+            view.run_row_menu_command(ids[0], &CommandId::MessageArchive, window, cx);
+            assert_eq!(view.selection_focus, Some(ids[1]));
+            assert_eq!(view.selection_anchor, Some(ids[1]));
+        });
+    }
+
+    #[gpui::test]
+    fn the_row_under_the_pointer_is_found_while_scrolled(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.read_with(cx, |view, _| {
+            let scroll = view.list_scroll.0.borrow();
+            let bounds = scroll.base_handle.bounds();
+            let x = bounds.left() + px(10.0);
+            let contents = scroll.last_item_size.expect("laid out").contents.height;
+            let row = contents / view.list_messages.len() as f32;
+            let first = point(x, bounds.top() + px(1.0));
+            let second = point(x, bounds.top() + row + px(1.0));
+            scroll.base_handle.set_offset(point(px(0.0), px(0.0)));
+            drop(scroll);
+            assert_eq!(view.list_row_at(first), Some(ids[0]));
+            assert_eq!(view.list_row_at(second), Some(ids[1]));
+            // Outside the list, or past its last row, there is no row.
+            assert_eq!(view.list_row_at(point(px(1.0), first.y)), None);
+            let scroll = view.list_scroll.0.borrow();
+            scroll.base_handle.set_offset(point(px(0.0), -contents));
+            drop(scroll);
+            assert_eq!(view.list_row_at(first), None);
+
+            let scroll = view.list_scroll.0.borrow();
+            scroll.base_handle.set_offset(point(px(0.0), -row));
+            drop(scroll);
+            assert_eq!(view.list_row_at(first), Some(ids[1]));
+            let scroll = view.list_scroll.0.borrow();
+            scroll.base_handle.set_offset(point(px(0.0), px(0.0)));
+        });
+    }
+
+    #[gpui::test]
+    fn right_clicking_elsewhere_only_closes_the_row_menu(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 1, cx);
+        right_click_first_row(&view, cx);
+        let reader = point(px(900.0), px(400.0));
+        cx.simulate_mouse_down(reader, MouseButton::Right, Default::default());
+        cx.simulate_mouse_up(reader, MouseButton::Right, Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.row_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn right_clicking_another_row_moves_the_menu_there(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        let elsewhere = view.update_in(cx, |_, window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus);
+            focus
+        });
+        cx.run_until_parked();
+        right_click_first_row(&view, cx);
+        let row_height = view.read_with(cx, |view, _| {
+            let sizes = view.list_scroll.0.borrow().last_item_size;
+            let contents = sizes.expect("the list was laid out").contents.height;
+            contents / view.list_messages.len() as f32
+        });
+        let position = view.update(cx, |view, _| {
+            // To the left of the menu, which opened under the first click.
+            point(view.sidebar_width + px(20.0), px(80.0) + row_height)
+        });
+        cx.simulate_mouse_down(position, MouseButton::Right, Default::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.row_menu.as_ref().expect("reopened").id, ids[1]);
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+        });
+        // A left click on a row only closes it, and the focus goes back past both menus.
+        cx.simulate_click(position, Default::default());
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert!(view.row_menu.is_none());
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+            assert!(elsewhere.is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn a_left_click_on_a_row_behind_the_menu_does_not_select_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        right_click_first_row(&view, cx);
+        // To the left of the menu, which opened under the click.
+        let position = view.update(cx, |view, _| point(view.sidebar_width + px(20.0), px(80.0)));
+        cx.simulate_click(position, Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.row_menu.is_none());
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+        });
+    }
+
+    #[gpui::test]
+    fn the_app_menus_follow_the_row_menu_target(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.db.set_message_unread(ids[0], true).unwrap();
+            view.db.set_message_unread(ids[1], false).unwrap();
+            view.reload_message_list();
+            assert!(!view.shortcut_context().message_unread());
+            view.open_row_menu(ids[0], point(px(10.0), px(10.0)), window, cx);
+            assert!(view.shortcut_context().message_unread());
+        });
+    }
+
+    #[gpui::test]
+    fn a_row_menu_opened_on_a_background_window_stays_open(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        cx.deactivate_window();
+        view.update_in(cx, |view, window, cx| {
+            view.open_row_menu(ids[0], point(px(10.0), px(10.0)), window, cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.row_menu.is_some()));
+    }
+
+    #[gpui::test]
+    fn removing_the_keys_row_outside_a_multiple_selection_keeps_them_on_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.apply_selection(vec![ids[0], ids[3]]);
+            view.selection_focus = Some(ids[2]);
+            view.selection_anchor = Some(ids[2]);
+            let preview = view.multi_preview.as_ref().map(|detail| detail.id);
+            view.run_row_menu_command(ids[2], &CommandId::MessageArchive, window, cx);
+            assert_eq!(view.selection_focus, Some(ids[0]));
+            assert_eq!(view.multi_selection, vec![ids[0], ids[3]]);
+            assert_eq!(view.multi_preview.as_ref().map(|d| d.id), preview);
+            assert_eq!(view.selection_anchor, Some(ids[0]));
+        });
+    }
+
+    #[gpui::test]
+    fn commands_not_on_messages_still_run_behind_the_row_menu(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        view.update_in(cx, |view, window, cx| {
+            let sidebar = view.show_sidebar;
+            view.open_row_menu(ids[0], point(px(10.0), px(10.0)), window, cx);
+            view.execute_command(&CommandId::ToggleSidebar, window, cx);
+            assert!(view.row_menu.is_none());
+            assert_ne!(view.show_sidebar, sidebar);
+        });
+    }
+
+    #[gpui::test]
+    fn a_double_click_on_move_chooses_no_folder(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        right_click_first_row(&view, cx);
+        view.update_in(cx, |view, window, cx| {
+            let move_to = CommandId::MoveToFolder(SharedString::default());
+            view.run_row_menu_command(ids[0], &move_to, window, cx);
+        });
+        cx.run_until_parked();
+        let folder = cx
+            .debug_bounds("context-menu-entry-0")
+            .expect("a folder entry")
+            .center();
+        let click = |count: usize, cx: &mut gpui::VisualTestContext| {
+            cx.simulate_event(MouseDownEvent {
+                position: folder,
+                button: MouseButton::Left,
+                modifiers: Default::default(),
+                click_count: count,
+                first_mouse: false,
+            });
+            cx.simulate_event(gpui::MouseUpEvent {
+                position: folder,
+                button: MouseButton::Left,
+                modifiers: Default::default(),
+                click_count: count,
+            });
+            cx.run_until_parked();
+        };
+        click(2, cx);
+        view.read_with(cx, |view, _| {
+            assert!(view.row_menu.is_some());
+            assert!(view.list_ids().contains(&ids[0]));
+        });
+        // A click of its own does choose it.
+        click(1, cx);
+        view.read_with(cx, |view, _| {
+            assert!(view.row_menu.is_none());
+            assert!(!view.list_ids().contains(&ids[0]));
+        });
+    }
+
+    #[gpui::test]
+    fn a_double_click_on_move_past_a_short_folder_list_keeps_it_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        right_click_first_row(&view, cx);
+        view.update_in(cx, |view, window, cx| {
+            let move_to = CommandId::MoveToFolder(SharedString::default());
+            view.run_row_menu_command(ids[0], &move_to, window, cx);
+        });
+        cx.run_until_parked();
+        let outside = point(px(900.0), px(500.0));
+        cx.simulate_event(MouseDownEvent {
+            position: outside,
+            button: MouseButton::Left,
+            modifiers: Default::default(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.row_menu.is_some()));
+        // A click of its own does close it.
+        cx.simulate_click(outside, Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.row_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_shortcut_reaches_the_row_menu_through_the_app_handler(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        let handle = view
+            .update_in(cx, |_, window, _| window.window_handle())
+            .downcast::<RootView>()
+            .expect("the root view");
+        cx.update(|_, cx| cx.set_global(crate::MainWindow(handle)));
+        view.update_in(cx, |view, window, cx| {
+            // Nothing selected: only the menu's row makes the command available.
+            view.clear_message_selection();
+            view.open_row_menu(ids[0], point(px(10.0), px(10.0)), window, cx);
+        });
+        cx.update(|_, cx| crate::schedule_message_command(CommandId::MessageArchive, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.row_menu.is_none());
+            assert!(!view.list_ids().contains(&ids[0]));
+        });
+    }
+
+    #[gpui::test]
+    fn the_search_field_is_not_what_the_row_menu_gives_the_focus_back_to(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 1, cx);
+        view.update_in(cx, |view, window, cx| view.focus_search_input(window, cx));
+        cx.run_until_parked();
+        right_click_first_row(&view, cx);
+        view.read_with(cx, |view, _| {
+            let (_, before) = view.row_menu_focus_return.as_ref().expect("opened");
+            assert!(before.is_none(), "a click takes the focus off the search");
+        });
+    }
+
+    #[gpui::test]
+    fn the_row_menu_closes_when_the_window_loses_the_foreground(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 1, cx);
+        right_click_first_row(&view, cx);
+        view.read_with(cx, |view, _| assert!(view.row_menu.is_some()));
+        cx.deactivate_window();
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.row_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn removing_the_row_the_keys_are_on_moves_them_to_the_next(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            // Archiving the open message leaves the keys on the row after it.
+            view.archive_message(cx);
+            assert_eq!(view.selected_message_id, None);
+            assert_eq!(view.selection_focus, Some(ids[1]));
+            // That row isn't selected, but it is where the keys are.
+            view.run_row_menu_command(ids[1], &CommandId::MessageArchive, window, cx);
+            assert_eq!(view.selection_focus, Some(ids[2]));
+        });
+    }
+
+    #[gpui::test]
+    fn closing_the_row_menu_gives_the_focus_back(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 1, cx);
+        let elsewhere = view.update_in(cx, |_, window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus);
+            focus
+        });
+        right_click_first_row(&view, cx);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert!(view.row_menu.is_none());
+            assert!(elsewhere.is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn an_action_on_another_row_leaves_the_reader_as_it_is(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.last_reader_sig.is_some(), "the reader was built");
+            view.run_row_menu_command(ids[1], &CommandId::MessageToggleFlag, window, cx);
+            assert!(view.last_reader_sig.is_some());
+            view.run_row_menu_command(ids[0], &CommandId::MessageToggleFlag, window, cx);
+            assert!(view.last_reader_sig.is_none(), "the open message changed");
+        });
+    }
+
+    #[test]
+    fn a_row_stands_in_for_its_detail_without_a_body() {
+        let (_dir, view) = test_view();
+        let row = &view.list_messages[0];
+        let detail = detail_of_row(row);
+        assert_eq!(detail.id, row.id);
+        assert_eq!(detail.account_id, row.account_id);
+        assert_eq!(detail.unread, row.unread);
+        assert_eq!(detail.starred, row.starred);
+        assert_eq!(detail.folders_csv, row.folders_csv);
+        assert!(detail.raw_content.is_empty());
     }
 
     #[gpui::test]
