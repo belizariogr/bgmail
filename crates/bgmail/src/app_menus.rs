@@ -68,7 +68,6 @@ pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu> {
     let move_items: Vec<MenuItem> = ctx
         .move_targets(language)
         .into_iter()
-        .filter(|(_, path)| commands::command_enabled(&CommandId::MoveToFolder(path.clone()), ctx))
         .map(|(label, path)| MenuItem::action(label, MoveMessageToFolder { path }))
         .collect();
 

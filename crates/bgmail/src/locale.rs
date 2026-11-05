@@ -174,6 +174,7 @@ pub enum Key {
     StatusBodyRejected,
     ComposeBodyTooLarge,
     StatusForwardNeedsBody,
+    StatusPrintNeedsBody,
     StatusMessageSent,
     StatusSendFailed,
     StatusSentCopyFailed,
@@ -568,6 +569,8 @@ impl Key {
             (ComposeBodyTooLarge, P) => "O corpo da mensagem é limitado a 256 MB.",
             (StatusForwardNeedsBody, E) => "The message is still downloading. Try forwarding it again in a moment.",
             (StatusForwardNeedsBody, P) => "A mensagem ainda está sendo baixada. Tente encaminhar de novo em instantes.",
+            (StatusPrintNeedsBody, E) => "The message is still downloading. Try printing it again in a moment.",
+            (StatusPrintNeedsBody, P) => "A mensagem ainda está sendo baixada. Tente imprimir de novo em instantes.",
             (StatusMessageSent, E) => "Message sent",
             (StatusMessageSent, P) => "Mensagem enviada",
             (StatusSentCopyFailed, E) => "Sent, but no copy could be saved in Sent",
@@ -1057,7 +1060,7 @@ mod tests {
         assert_eq!(Language::from_code(""), Language::default());
     }
 
-    const ALL_KEYS: [Key; 254] = [
+    const ALL_KEYS: [Key; 255] = [
         Key::StatusDatabaseReplaced,
         Key::ViewZoomIn,
         Key::ViewZoomOut,
@@ -1160,6 +1163,7 @@ mod tests {
         Key::StatusBodyRejected,
         Key::ComposeBodyTooLarge,
         Key::StatusForwardNeedsBody,
+        Key::StatusPrintNeedsBody,
         Key::StatusMessageSent,
         Key::StatusSendFailed,
         Key::StatusSentCopyFailed,

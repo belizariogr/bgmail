@@ -739,6 +739,15 @@
       **macOS and Windows jobs never ran yet** (check the first CI run);
       signing/notarization secrets are optional and unset
 
+- ✅ Right-click menu on list rows: the toolbar's actions in the toolbar's order and
+      blocks (reply / delete / flag-read-move), plus Restore and Print. As in
+      Thunderbird it doesn't change the selection: it acts on the selection if the
+      row is part of it, otherwise on that row alone (Reply, Reply all, Forward and
+      Print open the row first, like its Reply button, since they need the message)
+      (`commands::row_menu_groups`, `RootView::render_row_menu`)
+- ⬜ Keyboard navigation in `ui::ContextMenu` (up/down/enter, as in Zed): every menu
+      of the app only takes the mouse and, in the row menu, Escape
+
 ## Notes / open decisions
 - ✅ **Mail stack decided** (two opposing reviews, 2026-10-31):
       sync std threads per account (IDLE + command thread, IDLE cancelled by

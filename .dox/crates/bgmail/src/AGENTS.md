@@ -34,7 +34,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ## API Catalog
 
-_736 functions/methods documented._
+_749 functions/methods documented._
 
 ### `src/account_setup.rs`
 
@@ -128,7 +128,7 @@ _(No functions — only action types.)_
 - **`build_menus`** (pub, L65)
   - Signature: `pub fn build_menus(ctx: &CommandContext, language: Language) -> Vec<Menu>`
   - Purpose: Builds the full menu tree for the main mail window.
-  - Behavior: Assembles App, File (compose + settings), Edit, View (sidebar toggle + command palette), Mailbox (Get New Mail → `GetNewMail`, always) and Message menus. Message starts with Reply / Reply All / Forward / Mark as Read|Unread (label from `ctx.message_unread()`), a separator, then the delete group (separator after it when non-empty), archive/junk/flag/print and Move To. Message actions are added only when `commands::command_enabled` allows them; move-to-folder items come from `ctx.move_targets()` filtered the same way. Flag label switches between flag/unflag based on `ctx.message_starred()`. Move targets appear in a submenu when non-empty.
+  - Behavior: Assembles App, File (compose + settings), Edit, View (sidebar toggle + command palette), Mailbox (Get New Mail → `GetNewMail`, always) and Message menus. Message starts with Reply / Reply All / Forward / Mark as Read|Unread (label from `ctx.message_unread()`), a separator, then the delete group (separator after it when non-empty), archive/junk/flag/print and Move To. Message actions are added only when `commands::command_enabled` allows them; move-to-folder items come from `ctx.move_targets()`, which applies the same rule. Flag label switches between flag/unflag based on `ctx.message_starred()`. Move targets appear in a submenu when non-empty.
 
 - **`build_compose_menus`** (pub, L158)
   - Signature: `pub fn build_compose_menus(language: Language) -> Vec<Menu>`
@@ -283,7 +283,7 @@ _(No functions — only action types.)_
 - **`move_targets`** (pub, L59)
   - Signature: `pub fn move_targets(&self, language: Language) -> Vec<(SharedString, SharedString)>` (localized labels; skips the folders the message is in, except Archive)
   - Purpose: Eligible move destinations for the selected message.
-  - Behavior: Returns `(display_name, path)` pairs for folders in the message's account, excluding forbidden manual-move destinations (sent, drafts, flagged, etc.).
+  - Behavior: Empty unless `command_enabled(MoveToFolder)` allows moving (not in the Trash or Sent). Otherwise returns `(display_name, path)` pairs for folders in the message's account, excluding forbidden manual-move destinations (sent, drafts, flagged, etc.).
 
 ##### Context: `module`
 
@@ -307,6 +307,13 @@ _(No functions — only action types.)_
   - Signature: `pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool`
   - Purpose: Whether a command can run in the current context.
   - Behavior: Always enables compose/settings/sidebar. Message commands require a selection and apply folder-state rules (e.g. delete disabled in trash, restore only in trash, archive disabled when already archived or in trash).
+- **`row_menu_groups`** (pub)
+  - Signature: `pub fn row_menu_groups(language: Language, ctx: &CommandContext) -> Vec<Vec<CommandEntry>>`
+  - Purpose: Actions of a list row's right-click menu, by block, in toolbar order (reply; restore/delete/archive/junk; flag/read/move; print).
+  - Behavior: Lists only what `command_enabled` allows; Move (`MoveToFolder` with an empty path, labeled `ToolbarMove`) needs a non-empty `move_targets`; empty blocks are dropped.
+- **`row_menu_shortcut`** (pub)
+  - Signature: `pub fn row_menu_shortcut(id: &CommandId) -> Option<(&'static str, &'static str)>`
+  - Purpose: (macOS, other) chords shown beside a menu action, the same as its toolbar button; `None` for Restore and Move.
 - **`palette_commands`** (pub, L163)
   - Signature: `pub fn palette_commands(language: Language, ctx: &CommandContext) -> Vec<CommandEntry>`
   - Purpose: Builds the filtered command palette list.
@@ -1553,7 +1560,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`print_message`** (pub(crate))
   - Signature: `pub(crate) fn print_message(&mut self, cx: &mut Context<Self>)`
   - Purpose: Prints the selected message through the system browser.
-  - Behavior: Builds the `PrintHeader` (sender with address, `received_at`), the print page (`mail_html::print_document` with a fresh `print::nonce`, remote images when allowed for the message), writes it with `print::write_print_page` and opens it with `cx.open_with_system` (errors logged).
+  - Behavior: Builds the `PrintHeader` (sender with address, `received_at`), the print page (`mail_html::print_document` with a fresh `print::nonce`, remote images when allowed for the message), writes it with `print::write_print_page` and opens it with `cx.open_with_system` (errors logged). A message with only its headers isn't printed: it requests the body and notes `StatusPrintNeedsBody`.
 
 - **`delete_message_to_trash`** (pub(crate), L830)
   - Signature: `pub(crate) fn delete_message_to_trash(&mut self, cx: &mut Context<Self>)`
@@ -1939,7 +1946,16 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`set_account_names`** (`pub(crate)`) / **`begin_names_edit`** / **`save_names`** (`settings`, private): editing an account's names.
 - **`recipients`**: `RecipientInput` (`new`, `set_contacts`, `set_addresses`, `content`), event `RecipientsChanged`; private `matching_contacts`, `with_known_name`, `placeholder_for`, `sync_placeholder`, `split_typed`, `add_unique`, `card_label`, `on_typed`, `commit_typed`, `accept`, `remove`, `on_key_down`, `render_card`, `render_suggestions`.
 - **`drag_counts`** / **`DragProgress`** / **`DraggedMessages`** (`can_drop_on`) / **`DragPreview`** / **`dragged_messages`** / **`move_messages_to_folder`** (private): dragging list rows onto folders.
-- **`render_dropdown`** / **`render_filter_menu`** / **`render_move_menu`** (private): reader card stack for a multiple selection and the toolbar dropdowns.
+- **`render_dropdown`** (`on_outside` receives the mouse-down) / **`render_filter_menu`** / **`render_move_menu`** (private): reader card stack for a multiple selection and the toolbar dropdowns.
+- **`RowMenu`** / **`open_row_menu`** / **`render_row_menu`** (private): right-click menu of a list row. Opening changes neither the selection nor the read state; it holds a focus handle of its own, so the list's keys stay off while open, and Escape closes it; its backdrop occludes like the other menus (`render_dropdown`), and a right-click on another row moves the menu there (**`list_row_at`** finds the row from the list's geometry), while any other click only closes it; closing without an action returns the focus to what had it (`row_menu_focus_return`).
+- **`shortcut_context`** (pub(crate)): what shortcuts act on: the row menu's target while it is open, otherwise the selection. With the menu open, `request_delete` and `execute_command` run on that target; commands not on messages close it and still run; `MoveToFolder` (menu bar) moves that target. `sync_app_menus` builds the menu bar from it too.
+- **`sync_row_menu`** (private): run on each render; closes the menu when the window went inactive after having been active (it can open on a background window), it lost the focus, its row left the list, or the folder list ran out of folders, and restores the earlier focus.
+- **`command_context_of`** (private): `command_context` for an explicit target, so the row menu doesn't clone the selected body.
+- **`row_menu_context`** (private): `CommandContext` of the menu: the multiple selection when the row is part of it, otherwise that row alone (from **`detail_of_row`**, a body-less `MessageDetail`, so no body is read or cloned per frame); `None` once the row left the list.
+- **`run_row_menu_command`** (private): runs a menu action. Inside the selection: `execute_command`. Outside: acts on the row and keeps the selection, except Reply/Reply all/Forward/Print, which open the row first. Move switches the menu to the folder list (`choosing_folder`).
+- **`keep_row_menu_focus`** (private): after a menu action, the focus returns to the list rather than to what had it, which the action may have removed.
+- **`move_from_row_menu`** (private): closes the menu and moves the selection or the row into the chosen folder, if `move_targets` still offers it.
+- Row menu tests (`root::tests`): opening keeps the selection and read state; Escape, an outside click, losing the focus or foreground, and the row leaving the list close it; entries act on the row clicked or on the whole selection containing it; a shortcut behind it acts on its target; closing returns the focus.
 - **`select_message_row`** (private)
   - Signature: `fn select_message_row(&mut self, id: i64, window, cx)`
   - Purpose: Selects and opens a list row (focuses the list first).
@@ -1958,9 +1974,10 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Behavior: The selected mailbox is an account's Trash folder.
 - **`run_action_on_message`** (private)
   - Signature: `fn run_action_on_message(&mut self, id: i64, cx, action)`
-  - Purpose: Runs a message action on any message; failures become a localized status note. `run_message_action` delegates here with the selected id.
+  - Purpose: Runs a message action on any message; failures become a localized status note. `run_message_action` delegates here with the selected id. Resets the reader signature only for a selected row, so acting on another row keeps the reader and its scroll.
 - **`apply_message_action`** (private)
   - Signature: `fn apply_message_action(&mut self, id: i64, action) -> rusqlite::Result<()>`
+  - Keys: when the row left the list and it held `selection_focus` (selected or not), focus moves to the open message, the first of a multiple selection, or else the row that took its place. An anchor on a row that left follows the focus.
   - Behavior: Runs the action, wakes the account's queue when needed, reloads the list. A selected message that left the list leaves nothing open and marks nothing read (as in Gmail); `selection_focus` goes to the row that took its place, where the arrow keys carry on.
 - **`palette_traps_tab`** (private)
   - Signature: `fn palette_traps_tab(&self) -> bool`

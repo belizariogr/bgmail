@@ -9,6 +9,7 @@ use storage::{
 
 use crate::data::MailboxKind;
 use crate::locale::{Key, Language};
+use crate::shortcuts;
 
 /// Identifies a command shown in the palette or menus.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -148,10 +149,11 @@ impl CommandContext {
         }
     }
 
-    /// Folders the selected message can move to, as (label, path): not the
-    /// ones it is already in, except Archive, where Gmail keeps all its mail.
+    /// Folders the selected message can move to, as (label, path): none where it
+    /// can't move at all, and not the ones it is already in, except Archive, where
+    /// Gmail keeps all its mail.
     pub fn move_targets(&self, language: Language) -> Vec<(SharedString, SharedString)> {
-        if !self.selection_movable() {
+        if !command_enabled(&CommandId::MoveToFolder(SharedString::default()), self) {
             return Vec::new();
         }
         if let Some(bulk) = &self.bulk {
@@ -294,6 +296,79 @@ pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool {
     }
 }
 
+/// The actions of a message's right-click menu, one list per block: the toolbar's
+/// groups in the toolbar's order, then Restore (in the Trash) and Print, which it
+/// doesn't have. Only what can run is listed, as in the palette; a block left with
+/// nothing is dropped.
+pub fn row_menu_groups(language: Language, ctx: &CommandContext) -> Vec<Vec<CommandEntry>> {
+    let move_to = CommandId::MoveToFolder(SharedString::default());
+    let groups = [
+        vec![
+            CommandId::MessageReply,
+            CommandId::MessageReplyAll,
+            CommandId::MessageForward,
+        ],
+        vec![
+            CommandId::MessageRestore,
+            CommandId::MessageDelete,
+            CommandId::MessageDeletePermanent,
+            CommandId::MessageArchive,
+            CommandId::MessageMarkJunk,
+        ],
+        vec![
+            CommandId::MessageToggleFlag,
+            CommandId::MessageToggleRead,
+            move_to.clone(),
+        ],
+        vec![CommandId::MessagePrint],
+    ];
+    let has_targets = !ctx.move_targets(language).is_empty();
+    groups
+        .into_iter()
+        .map(|group| {
+            group
+                .into_iter()
+                .filter(|id| command_enabled(id, ctx))
+                .filter(|id| *id != move_to || has_targets)
+                .map(|id| CommandEntry {
+                    // Stands for the list of folders, not for one of them.
+                    label: if id == move_to {
+                        Key::ToolbarMove.tr(language).into()
+                    } else {
+                        label_for(&id, language, ctx)
+                    },
+                    id,
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|group| !group.is_empty())
+        .collect()
+}
+
+/// The (macOS, other platforms) chords of a right-click menu action, the ones its
+/// toolbar button shows.
+pub fn row_menu_shortcut(id: &CommandId) -> Option<(&'static str, &'static str)> {
+    match id {
+        CommandId::MessageReply => Some((shortcuts::REPLY_MAC, shortcuts::REPLY_OTHER)),
+        CommandId::MessageReplyAll => Some((shortcuts::REPLY_ALL_MAC, shortcuts::REPLY_ALL_OTHER)),
+        CommandId::MessageForward => Some((shortcuts::FORWARD_MAC, shortcuts::FORWARD_OTHER)),
+        CommandId::MessageDelete | CommandId::MessageDeletePermanent => Some((
+            shortcuts::DELETE_MESSAGE_MAC,
+            shortcuts::DELETE_MESSAGE_OTHER,
+        )),
+        CommandId::MessageArchive => Some((shortcuts::ARCHIVE_MAC, shortcuts::ARCHIVE_OTHER)),
+        CommandId::MessageMarkJunk => Some((shortcuts::MARK_JUNK_MAC, shortcuts::MARK_JUNK_OTHER)),
+        CommandId::MessageToggleFlag => {
+            Some((shortcuts::TOGGLE_FLAG_MAC, shortcuts::TOGGLE_FLAG_OTHER))
+        }
+        CommandId::MessageToggleRead => {
+            Some((shortcuts::TOGGLE_READ_MAC, shortcuts::TOGGLE_READ_OTHER))
+        }
+        CommandId::MessagePrint => Some((shortcuts::PRINT_MAC, shortcuts::PRINT_OTHER)),
+        _ => None,
+    }
+}
+
 /// All commands for the palette, filtered by selection and availability.
 pub fn palette_commands(language: Language, ctx: &CommandContext) -> Vec<CommandEntry> {
     let has_message = ctx.selected_message_id.is_some() || ctx.bulk.is_some();
@@ -345,6 +420,140 @@ pub fn command_matches_query(label: &str, query: &str) -> bool {
 mod tests {
     use super::*;
     use storage::user_folder_path;
+
+    fn menu_ids(ctx: &CommandContext) -> Vec<Vec<CommandId>> {
+        row_menu_groups(Language::default(), ctx)
+            .into_iter()
+            .map(|group| group.into_iter().map(|entry| entry.id).collect())
+            .collect()
+    }
+
+    fn move_entry() -> CommandId {
+        CommandId::MoveToFolder(SharedString::default())
+    }
+
+    #[test]
+    fn the_row_menu_follows_the_toolbar_in_blocks() {
+        let ctx = ctx_with_message(false, false);
+        assert_eq!(
+            menu_ids(&ctx),
+            [
+                vec![
+                    CommandId::MessageReply,
+                    CommandId::MessageReplyAll,
+                    CommandId::MessageForward
+                ],
+                vec![
+                    CommandId::MessageDelete,
+                    CommandId::MessageArchive,
+                    CommandId::MessageMarkJunk
+                ],
+                vec![
+                    CommandId::MessageToggleFlag,
+                    CommandId::MessageToggleRead,
+                    move_entry()
+                ],
+                vec![CommandId::MessagePrint],
+            ]
+        );
+    }
+
+    #[test]
+    fn the_row_menu_labels_say_what_the_action_will_do() {
+        let ctx = ctx_with_message(false, false);
+        let groups = row_menu_groups(Language::default(), &ctx);
+        let label_of = |wanted: CommandId| {
+            groups
+                .iter()
+                .flatten()
+                .find(|entry| entry.id == wanted)
+                .map(|entry| entry.label.clone())
+                .expect("listed")
+        };
+        let language = Language::default();
+        assert_eq!(
+            label_of(move_entry()).as_ref(),
+            Key::ToolbarMove.tr(language)
+        );
+        assert_eq!(
+            label_of(CommandId::MessageToggleRead).as_ref(),
+            Key::CommandMarkUnread.tr(language)
+        );
+        assert_eq!(
+            label_of(CommandId::MessageToggleFlag).as_ref(),
+            Key::CommandFlag.tr(language)
+        );
+    }
+
+    #[test]
+    fn the_row_menu_in_the_trash_restores_or_deletes_for_good() {
+        let mut ctx = ctx_with_message(false, false);
+        ctx.message_detail.as_mut().unwrap().folders_csv = format!(",{},", system::TRASH);
+        let flat: Vec<CommandId> = menu_ids(&ctx).into_iter().flatten().collect();
+        assert!(flat.contains(&CommandId::MessageRestore));
+        assert!(flat.contains(&CommandId::MessageDeletePermanent));
+        assert!(!flat.contains(&CommandId::MessageDelete));
+        assert!(!flat.contains(&CommandId::MessageArchive));
+        assert!(!flat.contains(&move_entry()));
+    }
+
+    #[test]
+    fn the_row_menu_of_several_rows_leaves_out_what_takes_one_message() {
+        let ctx = CommandContext {
+            bulk: Some(BulkSelection {
+                account_ids: vec![1],
+                ..Default::default()
+            }),
+            selected_message_id: None,
+            message_detail: None,
+            ..ctx_with_message(false, false)
+        };
+        let groups = menu_ids(&ctx);
+        assert_eq!(groups[0][0], CommandId::MessageDelete);
+        let flat: Vec<CommandId> = groups.into_iter().flatten().collect();
+        assert!(flat.contains(&move_entry()));
+        for id in [
+            CommandId::MessageReply,
+            CommandId::MessageReplyAll,
+            CommandId::MessageForward,
+            CommandId::MessagePrint,
+        ] {
+            assert!(!flat.contains(&id), "{id:?} takes a single message");
+        }
+    }
+
+    #[test]
+    fn the_row_menu_offers_no_move_with_nowhere_to_go() {
+        let mut ctx = ctx_with_message(false, false);
+        ctx.folders_by_account.clear();
+        assert!(ctx.move_targets(Language::default()).is_empty());
+        let flat: Vec<CommandId> = menu_ids(&ctx).into_iter().flatten().collect();
+        assert!(!flat.contains(&move_entry()));
+    }
+
+    #[test]
+    fn a_message_in_the_trash_has_no_folders_to_move_to() {
+        assert!(!ctx_with_message(false, false)
+            .move_targets(Language::default())
+            .is_empty());
+        assert!(ctx_with_message(true, false)
+            .move_targets(Language::default())
+            .is_empty());
+    }
+
+    #[test]
+    fn the_row_menu_shows_the_toolbar_shortcuts() {
+        assert_eq!(
+            row_menu_shortcut(&CommandId::MessageReply),
+            Some((shortcuts::REPLY_MAC, shortcuts::REPLY_OTHER))
+        );
+        assert_eq!(
+            row_menu_shortcut(&CommandId::MessageDeletePermanent),
+            row_menu_shortcut(&CommandId::MessageDelete)
+        );
+        assert_eq!(row_menu_shortcut(&CommandId::MessageRestore), None);
+        assert_eq!(row_menu_shortcut(&move_entry()), None);
+    }
 
     fn only_moves_are_blocked(ctx: &CommandContext) {
         for id in [
