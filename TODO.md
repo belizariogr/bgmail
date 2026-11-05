@@ -384,6 +384,7 @@
 - ✅ Deleting the open message (or a multiple selection) opens the next row, or the
       previous one after the last, as in Thunderbird. Archive, Junk and Move still
       leave nothing open.
+- ✅ A click on the empty space of the message list keeps the selection.
 - ✅ The UI language persists, with a picker on the first-run welcome step.
 - ✅ Whole-project adversarial review, round 1: folder membership by exact match
       (`instr`, commas encoded, schema v6), literal short searches, Reply-To and

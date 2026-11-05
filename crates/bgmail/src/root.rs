@@ -5699,7 +5699,7 @@ impl RootView {
                 )
                 .into_any_element()
         } else {
-            let list = uniform_list(
+            uniform_list(
                 "message-list",
                 self.list_messages.len(),
                 cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
@@ -5717,19 +5717,8 @@ impl RootView {
             .track_scroll(self.list_scroll.clone())
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                 Self::note_scroll([this.list_scrollbar.clone()], cx);
-            }));
-            // A click below the last row (rows swallow their mouse-down)
-            // clears the selection.
-            div()
-                .id("message-list-area")
-                .size_full()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.clear_message_selection();
-                    this.sync_app_menus(cx);
-                    cx.notify();
-                }))
-                .child(list)
-                .into_any_element()
+            }))
+            .into_any_element()
         };
 
         let scroll_base = self.list_scroll.0.borrow().base_handle.clone();
@@ -5867,6 +5856,8 @@ impl RootView {
             .when(selected, |el| el.bg(bg_selected))
             .when(!selected, |el| el.hover(move |el| el.bg(hover)))
             .cursor_pointer()
+            // Keeps the list column from taking focus on press: a row takes it
+            // on click, so starting a drag leaves focus where it was.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .when_some(self.dragged_messages(message, selection), |row, dragged| {
                 row.on_drag(dragged, {
@@ -8817,6 +8808,53 @@ mod tests {
                 assert_eq!(view.db.message_is_in_trash(*id), Ok(true));
                 assert!(!view.list_messages.iter().any(|m| m.id == *id));
             }
+        });
+    }
+
+    #[gpui::test]
+    fn a_click_below_the_last_row_keeps_the_selection(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+            ui::bind_keys(cx);
+            html_view::init(cx);
+        });
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        view.update(cx, |view, cx| view.mark_content_ready(cx));
+        cx.run_until_parked();
+
+        // The inbox fills the window: cut the list so there is room below its rows.
+        let (ids, below_the_rows) = view.update_in(cx, |view, window, cx| {
+            view.list_messages.truncate(2);
+            let ids = view.list_ids();
+            view.set_selection(vec![ids[0]], cx);
+            let x = view.sidebar_width + view.list_width / 2.0;
+            let y = window.viewport_size().height - px(40.0);
+            view.focus_search_input(window, cx);
+            (ids, point(x, y))
+        });
+        cx.run_until_parked();
+        let selected = Some(ids[0]);
+
+        cx.simulate_click(below_the_rows, Default::default());
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert_eq!(view.selected_message_id, selected);
+            assert!(view.selected_detail.is_some());
+            // Also proves the click landed on the list column, not somewhere else.
+            assert!(view.list_focus.as_ref().unwrap().is_focused(window));
+        });
+
+        view.update(cx, |view, cx| view.set_selection(vec![ids[0], ids[1]], cx));
+        cx.run_until_parked();
+        cx.simulate_click(below_the_rows, Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.multi_selection, vec![ids[0], ids[1]]);
+            assert!(view.multi_preview.is_some());
         });
     }
 
