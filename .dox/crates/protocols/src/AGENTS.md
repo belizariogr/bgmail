@@ -351,3 +351,5 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`parse_autoconfig`** (pub) — `pub fn parse_autoconfig(xml: &str, email: &str) -> Option<AccountConfig>`: first usable `incomingServer type="imap"` and `outgoingServer type="smtp"` under `emailProvider`; username from the IMAP server; password auth; `None` unless both exist.
 - **`parse_server`** (private) — `socketType` SSL/TLS → `Tls`, STARTTLS → `StartTls`, anything else (cleartext too, user decision) → skip; hostname required (placeholders substituted); numeric port required; username substituted, default = email.
 - **`substitute`** (private) — expands `%EMAILADDRESS%`, `%EMAILLOCALPART%`, `%EMAILDOMAIN%` (lowercased domain).
+
+- **`ImapRemote::rename_folder`** / **`delete_folder`**: `RENAME` / `DELETE`, after **`leave_folder`** (selects the Inbox if the folder is what is selected: some servers refuse otherwise; not `CLOSE`, which would expunge).

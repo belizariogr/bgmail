@@ -124,7 +124,8 @@ wiring to `storage`.
   cache would only save that on reopening at a memory cost. Bodies
   `html_view` refuses (too deep or too complex) show as plain text, and a message that was
   showing formatted when the app crashed or was killed (the `crash_guard` marker survived,
-  armed for as long as it shows) as plain text, each with a notice. Reply quotes follow the
+  armed for as long as it shows) as plain text, each with a notice; after a crash the notice offers
+  "View normally", which rebuilds it formatted with the marker armed again. Reply quotes follow the
   same rules with a marker of their own. A plain-text body shows up to `MAX_SHOWN_TEXT_BYTES`
   (2 MiB, cut at a line, with a notice; decided from Gmail clipping at about 102 KB and
   Thunderbird hanging on huge bodies); replying and forwarding use all of it. A first layout past
@@ -204,8 +205,9 @@ wiring to `storage`.
 - Mail data flow: real profiles start empty (welcome screen → Settings ▸
   Accounts); sample mail is seeded only with `BGMAIL_DEMO`/`BGMAIL_SAMPLE_DIR`.
   Message actions call `mail_sync::actions` (local change + queued server
-  op) and then `Command::ProcessQueue`; opening a message marks it read and
-  fetches a missing body (`Command::FetchBody`). Sending enqueues the built
+  op) and then `Command::ProcessQueue`; opening a message fetches a missing
+  body (`Command::FetchBody`) and marks it read once it has stayed open for `MARK_READ_DELAY`
+  (2.5 s), so a quick look through the list leaves it unread. Sending enqueues the built
   message in the outbox (`RootView::send_draft`). A failed action shows a
   localized status note (`StatusActionFailed: {error}`), never only a log.
 - Unsent mail is never silently stuck: outbox rows that stopped retrying

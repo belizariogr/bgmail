@@ -113,6 +113,8 @@ pub enum MailListQuery {
     },
     /// Full-text search across all accounts/folders.
     Search(String),
+    /// Full-text search in these folders, of any account.
+    SearchInFolders { text: String, folders: Vec<String> },
 }
 
 /// IMAP synchronization checkpoint of one folder.

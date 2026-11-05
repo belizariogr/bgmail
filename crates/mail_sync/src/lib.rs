@@ -20,5 +20,5 @@ mod tests;
 pub use actions::ActionOutcome;
 pub use body::{body_content, BodyContent};
 pub use engine::{Engine, EngineOptions, STOP_TIMEOUT};
-pub use events::{AccountStatus, Command, NewMailNotice, SyncEvent};
+pub use events::{AccountStatus, Command, FolderRefusal, NewMailNotice, SyncEvent};
 pub use plan::PendingAction;

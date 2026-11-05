@@ -26,6 +26,8 @@ pub enum Color {
     Warning,
     /// Error state.
     Error,
+    /// What destroys (delete buttons).
+    Danger,
     /// Arbitrary color.
     Custom(Hsla),
 }
@@ -43,6 +45,7 @@ impl Color {
             Color::Success => colors.success,
             Color::Warning => colors.warning,
             Color::Error => colors.error,
+            Color::Danger => colors.danger,
             Color::Custom(color) => color,
         }
     }

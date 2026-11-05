@@ -163,7 +163,7 @@ _300 functions/methods documented._
   - Purpose: Resolves a semantic color to concrete theme pixels.
   - Behavior: Reads `cx.theme().colors()` and maps each variant to the matching
     theme field (`text`, `text_muted`, `text_disabled`, `text_accent`,
-    `text_on_accent`, `success`, `warning`, `error`). `Custom` passes through
+    `text_on_accent`, `success`, `warning`, `error`, `danger`). `Custom` passes through
     unchanged.
 
 ### `src/icon.rs`
@@ -174,7 +174,7 @@ _300 functions/methods documented._
   (12px), `Small` (14px, default), `Medium` (16px).
 - **enum `IconName`**: Stable icon identifiers for BGMail UI. Variants map to
   embedded SVG paths via `path()` — mailbox/actions (`Inbox`, `Sent`, `Drafts`,
-  `Trash`, `Junk`, `Archive`, `Star`, `StarFilled`, …), compose/navigation
+  `Trash`, `Junk`, `Archive`, `Star`, `StarFilled`, `Print`, `Restore`, …), compose/navigation
   (`Compose`, `Send`, `Search`, `ChevronRight`, `ChevronDown`, `ChevronUp`, …), chrome
   (`Sidebar`, `Settings`, `WindowMinimize`, `WindowMaximize`, `WindowRestore`,
   …), attachment families (`File`, `FileImage`, `FilePdf`, `FileArchive`,
@@ -330,7 +330,7 @@ _300 functions/methods documented._
 #### Types / constants
 
 - **type `EntryHandler`** (private): boxed click handler of an entry.
-- **enum `ContextMenuItem`** (pub): `Entry { label, key_hint, handler }` or
+- **enum `ContextMenuItem`** (pub): `Entry { label, icon, submenu, key_hint, font_family, handler }` or
   `Separator`.
 - **struct `ContextMenu`** (pub, `IntoElement` + `Default`): floating menu of
   actions named after Zed's `ContextMenu`; the host positions it (e.g.
@@ -342,14 +342,29 @@ _300 functions/methods documented._
 - **`ContextMenu::entry(label, handler)`**: appends an entry run on click.
 - **`ContextMenu::entry_with_key_hint(label, key_hint, handler)`**: entry with
   a muted shortcut hint at its end.
+- **`ContextMenu::icon(name)`**: shows a muted icon before the last entry's
+  label; without an entry, does nothing.
+- **`ContextMenu::submenu(open, bounds, on_hover)`**: makes the last entry lead to
+  a submenu the host draws: triangle (`IconName::CaretRight`), highlight while `open`, its bounds written to
+  `bounds` on every paint, `on_hover` as the mouse enters and leaves it.
+- **`ContextMenu::on_hover(handler)`**: called as the mouse enters and leaves the
+  menu (a wrapper can't see it: the menu occludes what is behind it).
+- **`submenu_anchor(trigger, viewport)`**: position and corner of a submenu, beside
+  the menu and level with its entry; on the left when the right has no room.
+- **`ContextMenu::scroll_first_section(visible, handle, scrollbar)`** /
+  **`ScrollSection::render`** (private): the entries before the first separator scroll
+  past `visible` of them, with an always-visible scrollbar; those after it stay in view.
+- **const `MENU_ENTRY_HEIGHT`** (pub): every entry's height (29px), so a menu can say
+  how many fit.
+- **`ContextMenu::icon_dot(dot)`**: the accent dot on the last entry's icon.
 - **`ContextMenu::separator`**: appends a separator only after an entry (no
   leading/double separators).
 - **`ContextMenu::items`** / **`ContextMenu::is_empty`**: rows; whether it has
   no entries.
 - **`RenderOnce for ContextMenu`**: occluding elevated surface (min 200px,
-  border, rounded, shadow); rows with hover background, small label and hint;
+  border, rounded, shadow); rows with hover background, optional icon, small label and hint;
   a trailing separator is dropped.
-- Tests: separators only follow entries; empty menus.
+- Tests: separators only follow entries; empty menus; icon and submenu go on the last entry; submenu side.
 
 ### `src/button.rs`
 
@@ -451,6 +466,8 @@ _300 functions/methods documented._
 - **`TextBuffer::undo_steps`** / **`can_undo`** / **`can_redo`** / **`add_undo_step`** (pub(crate)): history counters and an undo step without a text change.
 - **`IconButton::hover_color`** (pub): brightens the icon on hover instead of showing a background.
 - **`IconButton::compact`** (pub) / **`side`** (private): makes the button its icon's size / side of the button's square.
+- **`IconButton::dot`** (pub) / **`shows_dot`** (private): accent dot at the icon's corner (`icon_with_dot`, the dot of unread mail), not while disabled.
+- **`IconButton::opens_menu`** (pub) / **`width`** (private): marks a button that opens a menu: 18px wider, with a small solid triangle (`IconName::CaretDown`) 9px after the icon, in its color. Every button that opens a menu carries it.
 - **`Icon::group_hover_color`** (pub): icon color while the named group is hovered.
 - **`click_selection`** (private, `text_input`): range selected by a repeated click (word, or the whole field when masked or on a triple click).
 - **`Scrollbar::always_visible`** / **`Scrollbar::thumb_colors`** (pub): keep the thumb on screen whenever content overflows / override its theme colors.
@@ -883,6 +900,8 @@ _300 functions/methods documented._
   - Behavior: Allocates focus handle from context; empty content; placeholder
     stored; collapsed selection at 0; no marked text, layout, or selection drag.
 
+- **`TextInput::select_all_content`** (pub): selects all, for typing to replace it.
+- **`TextInput::selected_range`** (pub): the selection, in bytes of the content; empty at the caret.
 - **`content`** (pub, L222)
   - Signature: `pub fn content(&self) -> SharedString`
   - Purpose: Reads current field text.

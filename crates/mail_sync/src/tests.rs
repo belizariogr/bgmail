@@ -302,6 +302,573 @@ fn initial_sync_maps_folders_and_fills_lists_incrementally() {
     assert!(h.engine.is_running(h.account));
 }
 
+/// Runs what the UI queued, and waits for the folder list to settle.
+fn process_queue(h: &Harness) -> Vec<SyncEvent> {
+    h.engine.send(h.account, Command::ProcessQueue);
+    h.wait_idle()
+}
+
+#[test]
+fn a_new_folder_reaches_the_server() {
+    let h = Harness::imap().started();
+    let outcome = actions::create_folder(&h.db, h.account, None, "Minha Pasta").unwrap();
+    assert!(outcome.needs_sync);
+    assert!(h
+        .db
+        .list_folders(h.account)
+        .unwrap()
+        .iter()
+        .any(|f| f.display_name == "Minha Pasta"));
+    process_queue(&h);
+    assert!(h.server.folder_names().contains(&"Minha Pasta".to_string()));
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+}
+
+#[test]
+fn a_subfolder_goes_inside_its_parent_with_the_servers_encoding() {
+    let h = Harness::imap();
+    h.server.add_folder("Work", &[]);
+    let h = h.started();
+    let parent = storage::user_folder_path("Work");
+    actions::create_folder(&h.db, h.account, Some(&parent), "São").unwrap();
+    let displayed = |h: &Harness| -> Vec<String> {
+        h.db.list_folders(h.account)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.display_name)
+            .filter(|name| name.starts_with("Work"))
+            .collect()
+    };
+    assert_eq!(displayed(&h), ["Work", "Work/São"], "right away");
+    process_queue(&h);
+    assert!(h
+        .server
+        .folder_names()
+        .contains(&"Work/S&AOM-o".to_string()));
+    assert_eq!(displayed(&h), ["Work", "Work/São"], "after the sync");
+    // There is no subfolder of a system folder, or of what isn't there.
+    let outcome = actions::create_folder(&h.db, h.account, Some(system::INBOX), "x").unwrap();
+    assert!(!outcome.changed);
+}
+
+/// A server like Courier: `.` between levels, and `INBOX.` before everything.
+fn dotted_server() -> Harness {
+    let h = Harness::imap();
+    h.server.set_delimiter(".");
+    for name in h.server.folder_names() {
+        if name != "INBOX" {
+            h.server.remove_folder(&name);
+        }
+    }
+    h.server.add_folder("INBOX.Trash", &["\\Trash"]);
+    h.server.add_folder("INBOX.Work", &[]);
+    h.server.deliver("INBOX", &mail("moved", 1), seen());
+    h.started()
+}
+
+#[test]
+fn mail_moved_at_once_into_a_new_subfolder_reaches_it_whatever_the_delimiter() {
+    let h = dotted_server();
+    let parent = storage::user_folder_path("Work");
+    actions::create_folder(&h.db, h.account, Some(&parent), "Sub").unwrap();
+    let path = storage::user_folder_path("Work/Sub");
+    let folder = h.folder_id(&path);
+    let remote = h.db.folder_by_id(folder).unwrap().unwrap().remote_name;
+    assert_eq!(
+        remote.as_deref(),
+        Some("INBOX.Work.Sub"),
+        "before the server"
+    );
+
+    let query = MailListQuery::GlobalSystemFolder(system::INBOX.to_string());
+    let message = h.db.list_messages(&query).unwrap()[0].id;
+    actions::move_to_folder(&h.db, message, &path).unwrap();
+    process_queue(&h);
+    assert_eq!(h.server.messages("INBOX.Work.Sub").len(), 1);
+    assert_eq!(h.folder_id(&path), folder, "the same folder after the sync");
+}
+
+#[test]
+fn mail_moved_at_once_into_a_new_folder_reaches_it_under_the_servers_prefix() {
+    let h = dotted_server();
+    actions::create_folder(&h.db, h.account, None, "Nova").unwrap();
+    let path = storage::user_folder_path("Nova");
+    let folder = h.folder_id(&path);
+    let remote = h.db.folder_by_id(folder).unwrap().unwrap().remote_name;
+    assert_eq!(remote.as_deref(), Some("INBOX.Nova"), "before the server");
+
+    let query = MailListQuery::GlobalSystemFolder(system::INBOX.to_string());
+    let message = h.db.list_messages(&query).unwrap()[0].id;
+    actions::move_to_folder(&h.db, message, &path).unwrap();
+    process_queue(&h);
+    assert_eq!(h.server.messages("INBOX.Nova").len(), 1);
+    assert_eq!(h.folder_id(&path), folder, "the same folder after the sync");
+}
+
+#[test]
+fn renaming_on_a_dotted_server_keeps_its_prefix_and_parent() {
+    let h = dotted_server();
+    actions::rename_folder(&h.db, h.account, &storage::user_folder_path("Work"), "Job").unwrap();
+    process_queue(&h);
+    assert!(h.server.folder_names().contains(&"INBOX.Job".to_string()));
+}
+
+#[test]
+fn renaming_a_subfolder_leaves_it_in_its_parent() {
+    let h = Harness::imap();
+    h.server.add_folder("Work", &[]);
+    h.server.add_folder("Work/Acme", &[]);
+    h.server.deliver("Work/Acme", &mail("kept", 1), seen());
+    let h = h.started();
+    let path = storage::user_folder_path("Work/Acme");
+    actions::rename_folder(&h.db, h.account, &path, "Novo").unwrap();
+    process_queue(&h);
+    assert!(h.server.folder_names().contains(&"Work/Novo".to_string()));
+    assert_eq!(h.server.messages("Work/Novo").len(), 1);
+}
+
+#[test]
+fn renaming_a_folder_takes_its_subfolders_along_and_keeps_their_mail() {
+    let h = Harness::imap();
+    h.server.add_folder("Work", &[]);
+    h.server.add_folder("Work/Acme", &[]);
+    h.server.deliver("Work/Acme", &mail("kept", 1), seen());
+    let h = h.started();
+    let child = h.folder_id(&storage::user_folder_path("Work/Acme"));
+    actions::rename_folder(&h.db, h.account, &storage::user_folder_path("Work"), "Job").unwrap();
+    let query = MailListQuery::AccountFolder {
+        account_id: h.account,
+        folder_path: storage::user_folder_path("Job/Acme"),
+    };
+    process_queue(&h);
+    let names = h.server.folder_names();
+    assert!(names.contains(&"Job/Acme".to_string()), "{names:?}");
+    assert_eq!(h.folder_id(&storage::user_folder_path("Job/Acme")), child);
+    assert_eq!(
+        h.db.list_messages(&query).unwrap().len(),
+        1,
+        "after the sync"
+    );
+}
+
+#[test]
+fn folder_changes_queued_together_keep_each_folders_mail() {
+    let h = Harness::imap();
+    for name in ["A", "C"] {
+        h.server.add_folder(name, &[]);
+    }
+    h.server.deliver("C", &mail("kept", 1), seen());
+    let h = h.started();
+    let c = h.folder_id(&storage::user_folder_path("C"));
+    actions::rename_folder(&h.db, h.account, &storage::user_folder_path("A"), "B").unwrap();
+    actions::rename_folder(&h.db, h.account, &storage::user_folder_path("C"), "D").unwrap();
+    actions::create_folder(&h.db, h.account, None, "E").unwrap();
+    process_queue(&h);
+    let names = h.server.folder_names();
+    for name in ["B", "D", "E"] {
+        assert!(names.contains(&name.to_string()), "{name} in {names:?}");
+    }
+    // The same folder, not one downloaded again.
+    assert_eq!(h.folder_id(&storage::user_folder_path("D")), c);
+    let query = MailListQuery::AccountFolder {
+        account_id: h.account,
+        folder_path: storage::user_folder_path("D"),
+    };
+    assert_eq!(h.db.list_messages(&query).unwrap().len(), 1);
+}
+
+#[test]
+fn a_create_or_rename_the_server_had_done_before_a_lost_answer_is_no_failure() {
+    let h = Harness::imap();
+    h.server.add_folder("Old", &[]);
+    h.server.deliver("Old", &mail("kept", 1), seen());
+    let h = h.started();
+    let folder = h.folder_id(&storage::user_folder_path("Old"));
+    actions::rename_folder(&h.db, h.account, &storage::user_folder_path("Old"), "New").unwrap();
+    actions::create_folder(&h.db, h.account, None, "Made").unwrap();
+    // As if a first try had got through just before the connection dropped.
+    h.server.add_folder("New", &[]);
+    h.server.remove_folder("Old");
+    h.server.add_folder("Made", &[]);
+    let events = process_queue(&h);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SyncEvent::FolderActionFailed { .. })));
+    assert_eq!(h.folder_id(&storage::user_folder_path("New")), folder);
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+}
+
+#[test]
+fn a_level_left_with_nothing_to_open_is_no_folder_made_by_a_retry() {
+    let h = Harness::imap().started();
+    actions::create_folder(&h.db, h.account, None, "Level").unwrap();
+    // Another client left it as a level only: the server's own answer settles it.
+    h.server.add_folder("Level", &["\\Noselect"]);
+    let events = process_queue(&h);
+    assert!(h
+        .server
+        .calls()
+        .iter()
+        .any(|call| call == "create_folder Level"));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SyncEvent::FolderActionFailed { .. })));
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+}
+
+#[test]
+fn a_refused_rename_never_blocks_the_queue_even_if_the_old_name_is_taken() {
+    let h = Harness::imap();
+    h.server.add_folder("Work", &[]);
+    h.server.add_folder("Jobs", &[]);
+    let h = h.started();
+    let jobs = h.folder_id(&storage::user_folder_path("Jobs"));
+    h.db.delete_folder(jobs).unwrap();
+    actions::rename_folder(&h.db, h.account, &storage::user_folder_path("Work"), "Jobs").unwrap();
+    actions::create_folder(&h.db, h.account, None, "Work").unwrap();
+    let events = process_queue(&h);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SyncEvent::FolderActionFailed { .. })));
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+}
+
+#[test]
+fn deleting_a_folder_takes_its_subfolders_and_sends_their_mail_to_the_trash() {
+    let h = Harness::imap();
+    h.server.add_folder("Work", &[]);
+    h.server.add_folder("Work/Acme", &[]);
+    h.server.add_folder("Work 2", &[]);
+    h.server.deliver("Work/Acme", &mail("kept", 1), seen());
+    let h = h.started();
+    actions::delete_folder(&h.db, h.account, &storage::user_folder_path("Work")).unwrap();
+    process_queue(&h);
+    let names = h.server.folder_names();
+    assert!(!names.contains(&"Work".to_string()), "{names:?}");
+    assert!(!names.contains(&"Work/Acme".to_string()), "{names:?}");
+    assert!(names.contains(&"Work 2".to_string()), "{names:?}");
+    assert_eq!(h.server.messages("Trash").len(), 1);
+}
+
+#[test]
+fn a_folder_holding_a_system_folder_is_not_deleted() {
+    let h = Harness::imap();
+    h.server.add_folder("Mail", &[]);
+    h.server.add_folder("Mail/Bin", &["\\Junk"]);
+    h.server.deliver("Mail", &mail("kept", 1), seen());
+    let h = h.started();
+    actions::delete_folder(&h.db, h.account, &storage::user_folder_path("Mail")).unwrap();
+    let events = process_queue(&h);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SyncEvent::FolderActionFailed {
+            refusal: Some(crate::FolderRefusal::HoldsSystemFolder),
+            ..
+        }
+    )));
+    assert!(h.server.folder_names().contains(&"Mail".to_string()));
+    assert_eq!(h.server.messages("Mail").len(), 1);
+}
+
+#[test]
+fn a_folder_that_cant_be_opened_doesnt_stop_a_delete() {
+    let h = Harness::imap();
+    h.server.add_folder("Work", &[]);
+    h.server.add_folder("Work/Sub", &["\\Noselect"]);
+    h.server.add_folder("Work/Sub/X", &[]);
+    h.server.deliver("Work/Sub/X", &mail("kept", 1), seen());
+    let h = h.started();
+    actions::delete_folder(&h.db, h.account, &storage::user_folder_path("Work")).unwrap();
+    process_queue(&h);
+    assert!(!h
+        .server
+        .folder_names()
+        .iter()
+        .any(|n| n.starts_with("Work")));
+    assert_eq!(h.server.messages("Trash").len(), 1);
+}
+
+#[test]
+fn a_folder_change_waits_for_what_was_queued_before_it() {
+    let h = Harness::imap();
+    h.server.add_folder("Old", &[]);
+    h.server.add_folder("Other", &[]);
+    h.server.deliver("Old", &mail("filed", 1), seen());
+    let h = h.started();
+    let query = MailListQuery::AccountFolder {
+        account_id: h.account,
+        folder_path: storage::user_folder_path("Old"),
+    };
+    let message = h.db.list_messages(&query).unwrap()[0].id;
+    let other = storage::user_folder_path("Other");
+    actions::move_to_folder(&h.db, message, &other).unwrap();
+    actions::delete_folder(&h.db, h.account, &storage::user_folder_path("Old")).unwrap();
+    // A refusal the first time: the move stays queued, for a retry.
+    h.server.fail_next(RemoteErrorKind::Protocol);
+    process_queue(&h);
+    let deadline = Instant::now() + WAIT;
+    while !h.db.pending_ops(h.account).unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the queue never emptied");
+        process_queue(&h);
+    }
+    assert_eq!(
+        h.server.messages("Other").len(),
+        1,
+        "where the user filed it"
+    );
+    assert!(h.server.messages("Trash").is_empty());
+    assert!(!h.server.folder_names().contains(&"Old".to_string()));
+}
+
+#[test]
+fn a_folder_holding_a_system_folder_is_not_renamed() {
+    let h = Harness::imap();
+    h.server.add_folder("Mail", &[]);
+    h.server.remove_folder("Trash");
+    h.server.add_folder("Mail/Bin", &["\\Trash"]);
+    let h = h.started();
+    let path = storage::user_folder_path("Mail");
+    assert!(actions::holds_system_folder(&h.db, h.account, &path).unwrap());
+    let outcome = actions::rename_folder(&h.db, h.account, &path, "Box").unwrap();
+    assert!(!outcome.changed);
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+}
+
+#[test]
+fn what_is_queued_after_a_rename_follows_it() {
+    let h = Harness::imap();
+    h.server.add_folder("Old", &[]);
+    h.server.deliver("INBOX", &mail("filed", 1), seen());
+    let h = h.started();
+    let query = MailListQuery::GlobalSystemFolder(system::INBOX.to_string());
+    let message = h.db.list_messages(&query).unwrap()[0].id;
+    let old = storage::user_folder_path("Old");
+    actions::move_to_folder(&h.db, message, &old).unwrap();
+    actions::rename_folder(&h.db, h.account, &old, "New").unwrap();
+    actions::set_starred(&h.db, message, true).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while !h.db.pending_ops(h.account).unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the queue never emptied");
+        process_queue(&h);
+    }
+    let there = h.server.messages("New");
+    assert_eq!(there.len(), 1);
+    assert!(there[0].flags.flagged, "the star reached it");
+}
+
+#[test]
+fn a_rename_announces_the_new_path_and_a_refused_one_changes_nothing() {
+    let h = Harness::imap();
+    h.server.add_folder("Old", &[]);
+    h.server.add_folder("Taken", &[]);
+    let h = h.started();
+    let old = storage::user_folder_path("Old");
+    let new = storage::user_folder_path("New");
+    actions::rename_folder(&h.db, h.account, &old, "New").unwrap();
+    let events = process_queue(&h);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SyncEvent::FolderRenamed { old_path, new_path, .. } if *old_path == old && *new_path == new
+    )));
+
+    h.server.fail_next(RemoteErrorKind::Protocol);
+    let folder = h.folder_id(&new);
+    actions::rename_folder(&h.db, h.account, &new, "Other").unwrap();
+    let events = process_queue(&h);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SyncEvent::FolderRenamed { .. })));
+    assert_eq!(h.folder_id(&new), folder, "as it was");
+}
+
+#[test]
+fn a_gmail_account_with_an_app_password_keeps_the_mail_of_a_deleted_label() {
+    let h = Harness::imap();
+    h.server.set_capabilities(Capabilities {
+        gmail: true,
+        ..Default::default()
+    });
+    h.server.add_folder("Label", &[]);
+    h.server.deliver("Label", &mail("kept", 1), seen());
+    let h = h.started();
+    actions::delete_folder(&h.db, h.account, &storage::user_folder_path("Label")).unwrap();
+    process_queue(&h);
+    assert!(!h.server.folder_names().contains(&"Label".to_string()));
+    assert!(h.server.messages("Trash").is_empty());
+}
+
+#[test]
+fn the_same_rename_asked_twice_is_no_failure() {
+    let h = Harness::imap();
+    h.server.add_folder("A", &[]);
+    let h = h.started();
+    let path = storage::user_folder_path("A");
+    actions::rename_folder(&h.db, h.account, &path, "B").unwrap();
+    actions::rename_folder(&h.db, h.account, &path, "B").unwrap();
+    let events = process_queue(&h);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SyncEvent::FolderActionFailed { .. })));
+    assert!(h.server.folder_names().contains(&"B".to_string()));
+}
+
+#[test]
+fn what_is_queued_for_a_subfolder_follows_a_rename_whatever_the_delimiter() {
+    let h = dotted_server();
+    let work = storage::user_folder_path("Work");
+    actions::create_folder(&h.db, h.account, Some(&work), "Sub").unwrap();
+    process_queue(&h);
+    let sub = storage::user_folder_path("Work/Sub");
+    let query = MailListQuery::GlobalSystemFolder(system::INBOX.to_string());
+    let message = h.db.list_messages(&query).unwrap()[0].id;
+    actions::move_to_folder(&h.db, message, &sub).unwrap();
+    // Not to the server yet: both wait in the queue, the rename behind the move.
+    actions::rename_folder(&h.db, h.account, &work, "Job").unwrap();
+    process_queue(&h);
+    assert_eq!(h.server.messages("INBOX.Job.Sub").len(), 1);
+}
+
+#[test]
+fn a_new_folder_takes_the_prefix_even_before_the_first_list_stored_it() {
+    let h = dotted_server();
+    h.db.set_folder_prefix(h.account, "").unwrap();
+    actions::create_folder(&h.db, h.account, None, "Nova").unwrap();
+    // Queued under the name it was guessed to have, and following the real one.
+    let query = MailListQuery::GlobalSystemFolder(system::INBOX.to_string());
+    let message = h.db.list_messages(&query).unwrap()[0].id;
+    actions::move_to_folder(&h.db, message, &storage::user_folder_path("Nova")).unwrap();
+    process_queue(&h);
+    assert!(h.server.folder_names().contains(&"INBOX.Nova".to_string()));
+    assert_eq!(h.server.messages("INBOX.Nova").len(), 1);
+}
+
+#[test]
+fn renaming_a_folder_to_its_own_name_does_nothing() {
+    let h = Harness::imap();
+    h.server.add_folder("A", &[]);
+    let h = h.started();
+    let outcome =
+        actions::rename_folder(&h.db, h.account, &storage::user_folder_path("A"), "A").unwrap();
+    assert!(!outcome.changed);
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+}
+
+#[test]
+fn a_new_folder_the_server_refuses_says_so() {
+    let h = Harness::imap().started();
+    let path = storage::user_folder_path("Taken");
+    h.server.fail_next(RemoteErrorKind::Protocol);
+    actions::create_folder(&h.db, h.account, None, "Taken").unwrap();
+    let events = process_queue(&h);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SyncEvent::FolderActionFailed { .. })));
+    assert!(
+        h.db.list_folders(h.account)
+            .unwrap()
+            .iter()
+            .all(|f| f.path != path),
+        "the next list takes it away"
+    );
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+}
+
+#[test]
+fn deleting_a_folder_sends_all_its_mail_to_the_trash_first() {
+    let h = Harness::imap();
+    h.server.add_folder("Old", &[]);
+    h.server.deliver("Old", &mail("kept", 1), seen());
+    let h = h.started();
+    // Mail this client never saw would go with the folder too.
+    h.server.deliver("Old", &mail("unseen here", 2), seen());
+    let outcome =
+        actions::delete_folder(&h.db, h.account, &storage::user_folder_path("Old")).unwrap();
+    assert!(outcome.needs_sync);
+    process_queue(&h);
+    assert!(!h.server.folder_names().contains(&"Old".to_string()));
+    let trash = h.server.messages("Trash");
+    assert_eq!(trash.len(), 2, "nothing is lost");
+    // It takes one op, whatever the size of the folder, and the mail shows in the Trash.
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+    let query = MailListQuery::GlobalSystemFolder(system::TRASH.to_string());
+    let deadline = Instant::now() + WAIT;
+    while h.db.list_messages(&query).unwrap().len() < 2 {
+        assert!(Instant::now() < deadline, "the Trash never showed them");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!h
+        .db
+        .list_folders(h.account)
+        .unwrap()
+        .iter()
+        .any(|f| f.display_name == "Old"));
+}
+
+#[test]
+fn renaming_a_folder_reaches_the_server_and_keeps_its_mail() {
+    let h = Harness::imap();
+    h.server.add_folder("Old", &[]);
+    h.server.deliver("Old", &mail("kept", 1), seen());
+    let h = h.started();
+    actions::rename_folder(&h.db, h.account, &storage::user_folder_path("Old"), "New").unwrap();
+    let query = MailListQuery::AccountFolder {
+        account_id: h.account,
+        folder_path: storage::user_folder_path("New"),
+    };
+    assert!(
+        h.db.list_messages(&query).unwrap().is_empty(),
+        "the server first"
+    );
+    process_queue(&h);
+    let names = h.server.folder_names();
+    assert!(names.contains(&"New".to_string()) && !names.contains(&"Old".to_string()));
+    assert_eq!(h.server.messages("New").len(), 1);
+    assert_eq!(
+        h.db.list_messages(&query).unwrap().len(),
+        1,
+        "after the sync"
+    );
+}
+
+#[test]
+fn a_rename_the_server_refuses_puts_the_old_name_back() {
+    let h = Harness::imap();
+    h.server.add_folder("Old", &[]);
+    h.server.add_folder("Taken", &[]);
+    let h = h.started();
+    let taken =
+        h.db.list_folders(h.account)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.display_name == "Taken")
+            .unwrap();
+    h.db.delete_folder(taken.id).unwrap();
+    actions::rename_folder(&h.db, h.account, &storage::user_folder_path("Old"), "Taken").unwrap();
+    let events = process_queue(&h);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SyncEvent::FolderActionFailed { .. })));
+    let names: Vec<String> =
+        h.db.list_folders(h.account)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.display_name)
+            .collect();
+    assert!(names.contains(&"Old".to_string()), "{names:?}");
+}
+
+#[test]
+fn system_folders_are_never_deleted_or_renamed() {
+    let h = Harness::imap().started();
+    for path in [system::TRASH, system::INBOX, system::ARCHIVE, system::JUNK] {
+        let outcome = actions::delete_folder(&h.db, h.account, path).unwrap();
+        assert!(!outcome.changed, "{path}");
+        let outcome = actions::rename_folder(&h.db, h.account, path, "Other").unwrap();
+        assert!(!outcome.changed, "{path}");
+    }
+    assert!(h.db.pending_ops(h.account).unwrap().is_empty());
+}
+
 #[test]
 fn archive_role_wins_over_all_mail() {
     let h = Harness::imap();

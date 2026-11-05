@@ -61,7 +61,7 @@ fn user_display_name(remote: &RemoteFolder) -> String {
         None => vec![decode_imap_utf7(&remote.name)],
     };
     let skip = usize::from(segments.len() > 1 && segments[0].eq_ignore_ascii_case("inbox"));
-    segments[skip..].join("/")
+    segments[skip..].join(&storage::FOLDER_LEVEL_SEPARATOR.to_string())
 }
 
 /// One storage folder to create or update from the server list.
@@ -321,7 +321,69 @@ pub enum PendingAction {
     },
 }
 
+/// `name` once the server's folder `from` is called `to`: it, or one under it.
+pub fn name_after_rename(name: &str, from: &str, to: &str, delimiter: &str) -> Option<String> {
+    if name == from {
+        return Some(to.to_string());
+    }
+    if delimiter.is_empty() {
+        return None;
+    }
+    let rest = name.strip_prefix(from)?.strip_prefix(delimiter)?;
+    Some(format!("{to}{delimiter}{rest}"))
+}
+
+/// `name` up to and with its last delimiter: where a folder beside it starts.
+fn parent_part<'a>(name: &'a str, delimiter: &str) -> &'a str {
+    if delimiter.is_empty() {
+        return "";
+    }
+    name.rfind(delimiter)
+        .map_or("", |ix| &name[..ix + delimiter.len()])
+}
+
+fn follow_names(names: Vec<&mut String>, from: &str, to: &str, delimiter: &str) -> bool {
+    let mut changed = false;
+    for name in names {
+        if let Some(new) = name_after_rename(name, from, to, delimiter) {
+            *name = new;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// The payload of a queued op once it follows a rename of `from` to `to`, if it changes.
+pub fn payload_after_rename(
+    kind: &str,
+    payload: &str,
+    from: &str,
+    to: &str,
+    delimiter: &str,
+) -> Option<String> {
+    if kind == FOLDER_OP_KIND {
+        let mut action = FolderAction::decode(payload)?;
+        action
+            .follow_rename(from, to, delimiter)
+            .then(|| action.encode())
+    } else {
+        let mut action = PendingAction::decode(payload)?;
+        action
+            .follow_rename(from, to, delimiter)
+            .then(|| action.encode())
+    }
+}
+
 impl PendingAction {
+    /// Follows a rename of the server's folder `from` to `to`; whether anything changed.
+    pub fn follow_rename(&mut self, from: &str, to: &str, delimiter: &str) -> bool {
+        let names = match self {
+            Self::Flags { folder, .. } | Self::Delete { folder, .. } => vec![folder],
+            Self::Move { from: f, to: t, .. } => vec![f, t],
+        };
+        follow_names(names, from, to, delimiter)
+    }
+
     /// `pending_ops.kind` value.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -551,6 +613,109 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month, day)
 }
 
+/// What the server puts before the name of a new top-level folder, read from its list:
+/// `INBOX.` where every folder is inside the Inbox, as on Courier. The IMAP `NAMESPACE`
+/// command would say it, but the `imap` crate's parser takes the answer for a broken
+/// connection. With nothing but the Inbox to go by, no prefix.
+pub fn folder_prefix_of(remote: &[RemoteFolder]) -> String {
+    let is_inbox = |folder: &&RemoteFolder| folder.name.eq_ignore_ascii_case("INBOX");
+    let Some(inbox) = remote.iter().find(is_inbox) else {
+        return String::new();
+    };
+    let Some(delimiter) = inbox.delimiter.as_deref().filter(|d| !d.is_empty()) else {
+        return String::new();
+    };
+    let prefix = format!("{}{delimiter}", inbox.name);
+    // Shared and other users' folders live in namespaces of their own, beside the
+    // personal one.
+    let shared = |folder: &&RemoteFolder| {
+        let top = folder.name.split(delimiter).next().unwrap_or_default();
+        let top = top.trim_start_matches('#').to_ascii_lowercase();
+        matches!(
+            top.as_str(),
+            "shared"
+                | "public"
+                | "user"
+                | "users"
+                | "other users"
+                | "shared folders"
+                | "public folders"
+        )
+    };
+    let mut others = remote
+        .iter()
+        .filter(|folder| !is_inbox(folder) && !shared(folder))
+        .peekable();
+    if others.peek().is_some() && others.all(|folder| folder.name.starts_with(&prefix)) {
+        prefix
+    } else {
+        String::new()
+    }
+}
+
+/// `pending_ops.kind` of a [`FolderAction`].
+pub const FOLDER_OP_KIND: &str = "folder";
+
+/// A queued change to the account's folders on the server.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "folder_action", rename_all = "snake_case")]
+pub enum FolderAction {
+    /// `name` is one level, as the server writes it; `parent` the server's name of the
+    /// folder it goes in, whose delimiter only the server knows.
+    /// `guess` is what the local folder and the ops after this one call it until then.
+    Create {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        guess: String,
+    },
+    Delete {
+        name: String,
+    },
+    /// Server names, and the folder's new last level as the user reads it.
+    Rename {
+        from: String,
+        to: String,
+        leaf: String,
+    },
+}
+
+impl FolderAction {
+    /// Follows a rename, done just now, of the server's folder `from` to `to`.
+    pub fn follow_rename(&mut self, from: &str, to: &str, delimiter: &str) -> bool {
+        let names: Vec<&mut String> = match self {
+            Self::Create { parent, guess, .. } => {
+                parent.iter_mut().chain(std::iter::once(guess)).collect()
+            }
+            Self::Delete { name } => vec![name],
+            Self::Rename { from: f, to: t, .. } => {
+                // The folder itself moved, as when it was created with another name than
+                // the one guessed: its new name goes beside it, wherever it now is.
+                if *f == from && name_after_rename(t, from, to, delimiter).is_none() {
+                    let old_parent = parent_part(from, delimiter);
+                    if let Some(leaf) = t.strip_prefix(old_parent) {
+                        *t = format!("{}{leaf}", parent_part(to, delimiter));
+                    }
+                    *f = to.to_string();
+                    return true;
+                }
+                vec![f, t]
+            }
+        };
+        follow_names(names, from, to, delimiter)
+    }
+
+    /// JSON payload for `pending_ops.payload`.
+    pub fn encode(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// Parses a payload; `None` for anything this version did not write.
+    pub fn decode(payload: &str) -> Option<Self> {
+        serde_json::from_str(payload).ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,6 +743,125 @@ mod tests {
             remote_name: remote_name.map(str::to_string),
             role: role.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn the_prefix_of_new_folders_comes_from_where_the_others_are() {
+        let list = |names: &[&str], delimiter: &str| -> Vec<RemoteFolder> {
+            names
+                .iter()
+                .map(|name| RemoteFolder::new(name.to_string(), Some(delimiter), Vec::new()))
+                .collect()
+        };
+        assert_eq!(
+            folder_prefix_of(&list(&["INBOX", "INBOX.Sent", "INBOX.Trash"], ".")),
+            "INBOX."
+        );
+        // One folder outside the Inbox is enough to say there is no prefix.
+        assert_eq!(
+            folder_prefix_of(&list(&["INBOX", "INBOX.A", "Trash"], ".")),
+            ""
+        );
+        // Shared namespaces sit beside the personal one.
+        assert_eq!(
+            folder_prefix_of(&list(
+                &["INBOX", "INBOX.Sent", "shared.Team", "#public.News"],
+                "."
+            )),
+            "INBOX."
+        );
+        assert_eq!(folder_prefix_of(&list(&["INBOX", "Sent"], "/")), "");
+        assert_eq!(folder_prefix_of(&list(&["INBOX"], ".")), "");
+        assert_eq!(folder_prefix_of(&list(&["Sent"], ".")), "");
+    }
+
+    #[test]
+    fn queued_actions_follow_a_folder_rename() {
+        let mut moved = PendingAction::Move {
+            from: "A.B".into(),
+            uid: 1,
+            to: "A".into(),
+            to_folder_id: 1,
+            uid_validity: None,
+            message_id_hdr: None,
+        };
+        assert!(moved.follow_rename("A", "Z", "."));
+        assert!(
+            matches!(&moved, PendingAction::Move { from, to, .. } if from == "Z.B" && to == "Z")
+        );
+        assert!(!moved.follow_rename("Z.", "Y", "."));
+        assert_eq!(name_after_rename("AB", "A", "Z", "."), None);
+        assert_eq!(name_after_rename("AB", "A", "Z", ""), None);
+    }
+
+    #[test]
+    fn queued_folder_changes_follow_a_rename() {
+        let mut create = FolderAction::Create {
+            name: "C".into(),
+            parent: Some("A".into()),
+            guess: "A/C".into(),
+        };
+        assert!(create.follow_rename("A", "B", "/"));
+        assert_eq!(
+            create,
+            FolderAction::Create {
+                name: "C".into(),
+                parent: Some("B".into()),
+                guess: "B/C".into(),
+            }
+        );
+        let mut delete = FolderAction::Delete { name: "A/X".into() };
+        assert!(delete.follow_rename("A", "B", "/"));
+        assert_eq!(delete, FolderAction::Delete { name: "B/X".into() });
+        let mut other = FolderAction::Delete { name: "Z".into() };
+        assert!(!other.follow_rename("A", "B", "/"));
+        // Created elsewhere than guessed: its rename lands beside where it really is.
+        let mut rename = FolderAction::Rename {
+            from: "INBOX.New".into(),
+            to: "INBOX.Better".into(),
+            leaf: "Better".into(),
+        };
+        assert!(rename.follow_rename("INBOX.New", "New", "."));
+        assert_eq!(
+            rename,
+            FolderAction::Rename {
+                from: "New".into(),
+                to: "Better".into(),
+                leaf: "Better".into(),
+            }
+        );
+        // Under the renamed folder, both names move along.
+        let mut inner = FolderAction::Rename {
+            from: "A/X".into(),
+            to: "A/Y".into(),
+            leaf: "Y".into(),
+        };
+        assert!(inner.follow_rename("A", "B", "/"));
+        assert!(
+            matches!(&inner, FolderAction::Rename { from, to, .. } if from == "B/X" && to == "B/Y")
+        );
+    }
+
+    #[test]
+    fn folder_actions_round_trip_and_are_not_message_actions() {
+        for action in [
+            FolderAction::Create {
+                name: "A b".into(),
+                parent: Some("Work".into()),
+                guess: "Work/A b".into(),
+            },
+            FolderAction::Delete { name: "A b".into() },
+            FolderAction::Rename {
+                from: "A b".into(),
+                to: "C".into(),
+                leaf: "C".into(),
+            },
+        ] {
+            let payload = action.encode();
+            assert_eq!(FolderAction::decode(&payload).as_ref(), Some(&action));
+            assert_eq!(PendingAction::decode(&payload), None);
+        }
+        assert_eq!(FolderAction::decode("garbage"), None);
     }
 
     #[test]

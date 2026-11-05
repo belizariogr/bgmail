@@ -49,6 +49,7 @@ struct ServerState {
     /// Global modseq counter (monotonic across folders, like Dovecot/Gmail).
     modseq: u64,
     next_uid_validity: u32,
+    delimiter: String,
     failures: VecDeque<RemoteErrorKind>,
     calls: Vec<String>,
     selected: Option<String>,
@@ -161,6 +162,7 @@ impl FakeRemote {
                 },
                 modseq: 0,
                 next_uid_validity: 1,
+                delimiter: FAKE_DELIMITER.to_string(),
                 failures: VecDeque::new(),
                 calls: Vec::new(),
                 selected: None,
@@ -220,8 +222,11 @@ impl FakeRemote {
         self.lock().capabilities = capabilities;
     }
 
-    /// Creates `name` (no-op if it exists). `attributes` are LIST flags such
-    /// as `\Sent`; returns the folder's UIDVALIDITY.
+    /// Makes the server name folders with `delimiter`.
+    pub fn set_delimiter(&self, delimiter: &str) {
+        self.lock().delimiter = delimiter.to_string();
+    }
+
     /// Removes a folder, as if deleted elsewhere; `false` if there was none.
     pub fn remove_folder(&self, name: &str) -> bool {
         let mut state = self.lock();
@@ -230,6 +235,8 @@ impl FakeRemote {
         state.folders.len() != before
     }
 
+    /// Creates `name` (no-op if it exists). `attributes` are LIST flags such
+    /// as `\Sent`; returns the folder's UIDVALIDITY.
     pub fn add_folder(&self, name: &str, attributes: &[&str]) -> u32 {
         let mut state = self.lock();
         if let Ok(folder) = state.folder(name) {
@@ -398,7 +405,13 @@ impl MailRemote for FakeRemote {
         Ok(state
             .folders
             .iter()
-            .map(|f| RemoteFolder::new(f.name.clone(), Some(FAKE_DELIMITER), f.attributes.clone()))
+            .map(|f| {
+                RemoteFolder::new(
+                    f.name.clone(),
+                    Some(state.delimiter.as_str()),
+                    f.attributes.clone(),
+                )
+            })
             .collect())
     }
 
@@ -600,6 +613,35 @@ impl MailRemote for FakeRemote {
         }
         drop(state);
         self.add_folder(name, &[]);
+        Ok(())
+    }
+
+    fn rename_folder(&mut self, from: &str, to: &str) -> RemoteResult<()> {
+        let mut state = self.enter(format!("rename_folder {from} {to}"))?;
+        if state.folder(to).is_ok() {
+            return Err(RemoteError::new(
+                RemoteErrorKind::Protocol,
+                format!("folder {to} already exists"),
+            ));
+        }
+        state.folder_mut(from)?;
+        let delimiter = state.delimiter.clone();
+        let under = format!("{from}{delimiter}");
+        for folder in &mut state.folders {
+            if folder.name == from {
+                folder.name = to.to_string();
+            } else if let Some(rest) = folder.name.strip_prefix(&under) {
+                folder.name = format!("{to}{delimiter}{rest}");
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_folder(&mut self, name: &str) -> RemoteResult<()> {
+        let state = self.enter(format!("delete_folder {name}"))?;
+        state.folder(name)?;
+        drop(state);
+        self.remove_folder(name);
         Ok(())
     }
 

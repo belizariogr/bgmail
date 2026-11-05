@@ -19,8 +19,8 @@ mod types;
 pub use contacts::Contact;
 pub use database::{database_path, global_folder_path, is_corrupt, Database};
 pub use folder::{
-    folders_csv, is_manual_move_destination_forbidden, is_system_path, system, user_folder_path,
-    SYSTEM_PREFIX, USER_PREFIX,
+    child_display_name, folders_csv, is_manual_move_destination_forbidden, is_system_path, system,
+    user_folder_path, FOLDER_LEVEL_SEPARATOR, SYSTEM_PREFIX, USER_PREFIX,
 };
 pub use message_ops::{message_has_folder, parse_folders_csv};
 pub use schema::SCHEMA_VERSION;

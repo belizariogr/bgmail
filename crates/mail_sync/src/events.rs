@@ -39,6 +39,14 @@ pub struct NewMailNotice {
     pub subject: String,
 }
 
+/// Why the engine itself wouldn't go on with a folder change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderRefusal {
+    HoldsSystemFolder,
+    NoTrash,
+    MailKeepsArriving,
+}
+
 /// Engine → UI notifications. Ids are storage ids.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyncEvent {
@@ -81,6 +89,19 @@ pub enum SyncEvent {
         outbox_id: i64,
         error: String,
         permanent: bool,
+    },
+    /// A folder has its new name, the server having agreed; those under it moved too.
+    FolderRenamed {
+        account_id: i64,
+        old_path: String,
+        new_path: String,
+    },
+    /// The server refused to create, rename or delete a folder.
+    FolderActionFailed {
+        account_id: i64,
+        error: String,
+        /// Why, when it is not the server's own words.
+        refusal: Option<FolderRefusal>,
     },
     /// The message was delivered, but the engine gave up filing its copy in
     /// the Sent folder (the outbox row is gone).

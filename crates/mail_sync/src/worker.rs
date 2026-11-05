@@ -11,23 +11,26 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mail_core::{
-    parse_header_block, AccountConfig, CancelToken, IdleOutcome, MailConnector, MailRemote,
-    MailSender, MessageFlags, RemoteError, RemoteErrorKind, RemoteHeader, SendError, SendFailure,
-    DEFAULT_SYNC_WINDOW,
+    parse_header_block, AccountConfig, CancelToken, FolderRole, IdleOutcome, MailConnector,
+    MailRemote, MailSender, MessageFlags, RemoteError, RemoteErrorKind, RemoteFolder, RemoteHeader,
+    SendError, SendFailure, DEFAULT_SYNC_WINDOW,
 };
 use storage::{
     system, Database, Folder, FolderSyncState, NewRemoteMessage, OutgoingRow, OutgoingState,
     PendingOp, BODY_STATE_FULL, PROVIDER_LOCAL,
 };
 
+use crate::actions::{
+    account_folder_delimiter, apply_folder_rename, folders_are_labels, sibling_display_name,
+};
 use crate::body::{body_content_within, repair_stale_previews};
 use crate::contacts;
 use crate::engine::EngineOptions;
-use crate::events::{AccountStatus, Command, SyncEvent};
+use crate::events::{AccountStatus, Command, FolderRefusal, SyncEvent};
 use crate::plan::{
-    in_flight_uids, is_new_arrival, messages_with_pending_flags, new_remote_message,
-    notice_for_new, plan_folder, plan_folders, should_announce, sync_order, LocalFolderState,
-    PendingAction,
+    folder_prefix_of, in_flight_uids, is_new_arrival, messages_with_pending_flags,
+    new_remote_message, notice_for_new, payload_after_rename, plan_folder, plan_folders,
+    should_announce, sync_order, FolderAction, LocalFolderState, PendingAction, FOLDER_OP_KIND,
 };
 
 /// Headers fetched per round trip (progress + list refresh after each).
@@ -128,6 +131,18 @@ pub(crate) fn is_connection_error(kind: RemoteErrorKind) -> bool {
 pub(crate) fn emit(events: &async_channel::Sender<SyncEvent>, event: SyncEvent) {
     let _ = events.try_send(event);
 }
+
+/// Rounds of emptying a folder before giving up on deleting it.
+const EMPTY_FOLDER_ROUNDS: usize = 5;
+
+/// Why a folder change didn't go through.
+enum FolderFailure {
+    Remote(RemoteError),
+    Refused(FolderRefusal),
+}
+
+/// Messages moved at a time when a folder is emptied.
+const EMPTY_FOLDER_BATCH: usize = 500;
 
 /// Adds `command` to the pending queue, coalescing: duplicates are dropped,
 /// `SyncNow` absorbs queued `SyncFolder`/`ProcessQueue`, and `FetchBody`
@@ -588,7 +603,7 @@ impl Worker {
         self.sync_folder_list()?;
         for folder in sync_order(&self.db.list_folders(self.account_id)?) {
             self.check_interrupts()?;
-            match self.sync_folder(&folder) {
+            match self.sync_folder_unless_waiting(&folder) {
                 Ok(()) => {}
                 // The folder vanished or the server refused it: skip it.
                 Err(Abort::Remote(error)) if !is_connection_error(error.kind) => {
@@ -617,7 +632,7 @@ impl Worker {
         }
         if let Some(folder) = self.db.folder_by_id(folder_id)? {
             if folder.account_id == self.account_id && folder.remote_name.is_some() {
-                self.sync_folder(&folder)?;
+                self.sync_folder_unless_waiting(&folder)?;
                 // An IDLE-triggered Inbox refresh is the freshest check the
                 // user cares about; the status bar shows its time.
                 self.last_sync = unix_now();
@@ -703,6 +718,17 @@ impl Worker {
             let Some(op) = self.db.pending_op(id)? else {
                 continue;
             };
+            if op.kind == FOLDER_OP_KIND {
+                // After all queued before it, which may name the folder: one kept for a
+                // retry would find it renamed or gone. What is queued after it may need
+                // it, so that waits too.
+                let first = self.db.pending_ops(self.account_id)?.first().map(|o| o.id);
+                if first != Some(op.id) {
+                    break;
+                }
+                changed |= self.run_folder_op(&op)?;
+                continue;
+            }
             let Some(action) = PendingAction::decode(&op.payload) else {
                 self.db.complete_op(op.id)?;
                 continue;
@@ -743,6 +769,290 @@ impl Worker {
             }
         }
         Ok(changed)
+    }
+
+    /// Runs a queued folder change. Queued in order, so the moves made before it are
+    /// done. A refusal is final: the user hears of it and the next folder list shows
+    /// what is really there.
+    fn run_folder_op(&mut self, op: &PendingOp) -> Result<bool, Abort> {
+        let action = FolderAction::decode(&op.payload);
+        let result: Result<(), FolderFailure> = match &action {
+            Some(FolderAction::Create {
+                name,
+                parent,
+                guess,
+            }) => {
+                let created = self.create_remote_folder(name, parent.as_deref())?;
+                match created {
+                    Ok(full) => {
+                        // What was queued after it reaches the folder it really is.
+                        if full != *guess {
+                            let delimiter =
+                                account_folder_delimiter(&self.db, self.account_id, None)?;
+                            self.rewrite_queued_names(guess, &full, &delimiter)?;
+                        }
+                        Ok(())
+                    }
+                    Err(error) => Err(FolderFailure::Remote(error)),
+                }
+            }
+            Some(FolderAction::Delete { name }) => self.delete_remote_folder(name)?,
+            Some(FolderAction::Rename { from, to, .. }) => self
+                .rename_remote_folder(from, to)?
+                .map_err(FolderFailure::Remote),
+            None => Ok(()),
+        };
+        match result {
+            Ok(()) => {
+                if let Some(FolderAction::Rename { from, to, leaf }) = &action {
+                    if from != to {
+                        self.follow_remote_rename(from, to, leaf)?;
+                    }
+                }
+            }
+            Err(FolderFailure::Remote(error)) if is_connection_error(error.kind) => {
+                return Err(error.into())
+            }
+            Err(failure) => {
+                let (error, refusal) = match failure {
+                    FolderFailure::Remote(error) => (error.to_string(), None),
+                    FolderFailure::Refused(refusal) => (String::new(), Some(refusal)),
+                };
+                self.emit(SyncEvent::FolderActionFailed {
+                    account_id: self.account_id,
+                    error,
+                    refusal,
+                });
+            }
+        }
+        self.db.complete_op(op.id)?;
+        self.sync_folder_list()?;
+        // What the server moved there arrives with that folder's sync.
+        if matches!(action, Some(FolderAction::Delete { .. })) {
+            let trash = self
+                .db
+                .list_folders(self.account_id)?
+                .into_iter()
+                .find(|folder| folder.path == system::TRASH);
+            if let Some(trash) = trash {
+                enqueue_command(&mut self.queue, Command::SyncFolder(trash.id));
+            }
+        }
+        Ok(true)
+    }
+
+    /// The server has renamed `from` to `to`: the folder takes the name here too, and what
+    /// is queued, written with the old name, follows. In that order: what the UI queues from
+    /// here on reads the new name, and what it queued before gets rewritten.
+    fn follow_remote_rename(&mut self, from: &str, to: &str, leaf: &str) -> Result<(), Abort> {
+        let folder = self.db.folder_by_remote_name(self.account_id, from)?;
+        let delimiter = account_folder_delimiter(&self.db, self.account_id, folder.as_ref())?;
+        if let Some(folder) = folder {
+            let display = sibling_display_name(&folder.display_name, leaf);
+            // A name taken meanwhile is for the next folder list to settle: never to block
+            // the queue behind this op.
+            let renamed = apply_folder_rename(
+                &self.db,
+                self.account_id,
+                &folder.display_name,
+                &display,
+                Some(from),
+                Some(to),
+            );
+            if renamed.is_ok() {
+                self.emit(SyncEvent::FolderRenamed {
+                    account_id: self.account_id,
+                    old_path: folder.path,
+                    new_path: storage::user_folder_path(&display),
+                });
+                self.emit(SyncEvent::FoldersChanged {
+                    account_id: self.account_id,
+                });
+            }
+        }
+        self.rewrite_queued_names(from, to, &delimiter)
+    }
+
+    /// Points what is queued at the server's `to` where it says `from`.
+    fn rewrite_queued_names(&mut self, from: &str, to: &str, delimiter: &str) -> Result<(), Abort> {
+        for op in self.db.pending_ops(self.account_id)? {
+            let payload = payload_after_rename(&op.kind, &op.payload, from, to, delimiter);
+            if let Some(payload) = payload {
+                // Lost to a UI edit, the op was rewritten with the name it shows now.
+                self.db
+                    .update_op_if_unchanged(op.id, &op.kind, &op.payload, &op.kind, &payload)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Renames a folder on the server. A refusal that the server had in fact done it,
+    /// before a connection dropped ahead of its answer, is no refusal: `to` is there and
+    /// `from` isn't.
+    fn rename_remote_folder(
+        &mut self,
+        from: &str,
+        to: &str,
+    ) -> Result<Result<(), RemoteError>, Abort> {
+        // A rename queued twice, the second one following the first.
+        if from == to {
+            return Ok(Ok(()));
+        }
+        let remote = self.rm()?;
+        let error = match remote.rename_folder(from, to) {
+            Ok(()) => return Ok(Ok(())),
+            Err(error) if is_connection_error(error.kind) => return Ok(Err(error)),
+            Err(error) => error,
+        };
+        let folders = match remote.list_folders() {
+            Ok(folders) => folders,
+            // Only a dropped connection leaves it open whether it was done: retried, it says.
+            Err(list_error) if is_connection_error(list_error.kind) => return Ok(Err(list_error)),
+            Err(_) => return Ok(Err(error)),
+        };
+        let has = |name: &str| folders.iter().any(|folder| folder.name == name);
+        Ok(if has(to) && !has(from) {
+            Ok(())
+        } else {
+            Err(error)
+        })
+    }
+
+    /// Creates a folder on the server, inside `parent` with the delimiter the server uses,
+    /// or with the prefix it puts on everything: both from its list now, since the stored
+    /// ones may be missing yet. Already there, it is a retry after a connection dropped
+    /// ahead of the server's answer.
+    fn create_remote_folder(
+        &mut self,
+        name: &str,
+        parent: Option<&str>,
+    ) -> Result<Result<String, RemoteError>, Abort> {
+        let remote = self.rm()?;
+        let folders = match remote.list_folders() {
+            Ok(folders) => folders,
+            Err(error) => return Ok(Err(error)),
+        };
+        let full = match parent {
+            Some(parent) => {
+                let delimiter = folders
+                    .iter()
+                    .find(|folder| folder.name == parent)
+                    .and_then(|folder| folder.delimiter.clone())
+                    .filter(|delimiter| !delimiter.is_empty())
+                    .unwrap_or_else(|| "/".to_string());
+                format!("{parent}{delimiter}{name}")
+            }
+            None => format!("{}{name}", folder_prefix_of(&folders)),
+        };
+        // A level another client left, with nothing of its own, is no folder yet: some
+        // servers make it one on `CREATE`, the rest say why not.
+        if folders
+            .iter()
+            .any(|folder| folder.name == full && folder.selectable)
+        {
+            return Ok(Ok(full));
+        }
+        Ok(remote.create_folder(&full).map(|()| full))
+    }
+
+    /// Deletes a folder on the server without losing mail: what is in it goes to the
+    /// Trash first, even what was never downloaded, since `DELETE` takes it all. On Gmail
+    /// a folder is a label, and its mail stays in All Mail without it.
+    fn delete_remote_folder(&mut self, name: &str) -> Result<Result<(), FolderFailure>, Abort> {
+        let gmail = self.rm()?.capabilities().gmail
+            || self
+                .db
+                .get_account(self.account_id)?
+                .is_some_and(|account| folders_are_labels(&account));
+        let trash = self
+            .db
+            .list_folders(self.account_id)?
+            .into_iter()
+            .find(|folder| folder.path == system::TRASH)
+            .and_then(|folder| folder.remote_name);
+        let folders = match self.rm()?.list_folders() {
+            Ok(folders) => folders,
+            Err(error) => return Ok(Err(FolderFailure::Remote(error))),
+        };
+        let under = |folder: &&RemoteFolder| {
+            let delimiter = folder.delimiter.as_deref().filter(|d| !d.is_empty());
+            delimiter.is_some_and(|delimiter| {
+                folder
+                    .name
+                    .strip_prefix(name)
+                    .is_some_and(|rest| rest.starts_with(delimiter))
+            })
+        };
+        // A Trash or Sent that lives under it is never to go: not the mail in the Trash.
+        let holds_system_folder = folders
+            .iter()
+            .filter(under)
+            .any(|folder| folder.role.is_some_and(|role| role != FolderRole::Custom));
+        if holds_system_folder {
+            return Ok(Err(FolderFailure::Refused(
+                FolderRefusal::HoldsSystemFolder,
+            )));
+        }
+        // The folder goes with those under it, deepest first: a server would keep them
+        // or refuse, or take them with their mail.
+        let mut targets: Vec<(&str, bool)> = folders
+            .iter()
+            .filter(under)
+            .map(|folder| (folder.name.as_str(), folder.selectable))
+            .collect();
+        targets.sort_by_key(|(target, _)| std::cmp::Reverse(target.len()));
+        // Another client may have left it only as a level, with nothing of its own to open.
+        let selectable = folders
+            .iter()
+            .find(|folder| folder.name == name)
+            .is_none_or(|folder| folder.selectable);
+        targets.push((name, selectable));
+        for (target, selectable) in targets {
+            if !gmail && selectable {
+                if let Err(error) = self.empty_into_trash(target, trash.as_deref())? {
+                    return Ok(Err(error));
+                }
+            }
+            match self.rm()?.delete_folder(target) {
+                Err(error) if error.kind != RemoteErrorKind::NotFound => {
+                    return Ok(Err(FolderFailure::Remote(error)))
+                }
+                _ => {}
+            }
+        }
+        Ok(Ok(()))
+    }
+
+    /// Moves all that is in `folder` to the Trash, until nothing is left: mail can arrive
+    /// while the rest moves, and whatever is still there goes with the folder for good.
+    /// In batches, for a message the user opens meanwhile not to wait for all of it.
+    fn empty_into_trash(
+        &mut self,
+        folder: &str,
+        trash: Option<&str>,
+    ) -> Result<Result<(), FolderFailure>, Abort> {
+        for _ in 0..EMPTY_FOLDER_ROUNDS {
+            let uids = match self.rm()?.uids(folder) {
+                Ok(uids) => uids,
+                Err(error) if error.kind == RemoteErrorKind::NotFound => return Ok(Ok(())),
+                Err(error) => return Ok(Err(FolderFailure::Remote(error))),
+            };
+            if uids.is_empty() {
+                return Ok(Ok(()));
+            }
+            let Some(trash) = trash else {
+                return Ok(Err(FolderFailure::Refused(FolderRefusal::NoTrash)));
+            };
+            for batch in uids.chunks(EMPTY_FOLDER_BATCH) {
+                if let Err(error) = self.rm()?.move_messages(folder, batch, trash) {
+                    return Ok(Err(FolderFailure::Remote(error)));
+                }
+                self.check_interrupts()?;
+            }
+        }
+        Ok(Err(FolderFailure::Refused(
+            FolderRefusal::MailKeepsArriving,
+        )))
     }
 
     /// The UID the op must act on now, or `None` when the message is not in
@@ -1370,13 +1680,56 @@ impl Worker {
         Ok(())
     }
 
+    /// Remembers how the server writes folder names, for naming new ones.
+    fn save_folder_naming(&self, remote: &[RemoteFolder]) -> Result<(), Abort> {
+        self.db
+            .set_folder_prefix(self.account_id, &folder_prefix_of(remote))?;
+        let delimiters: Vec<(&str, Option<&str>)> = remote
+            .iter()
+            .map(|folder| {
+                let delimiter = folder.delimiter.as_deref().filter(|d| !d.is_empty());
+                (folder.name.as_str(), delimiter)
+            })
+            .collect();
+        self.db
+            .set_folder_delimiters(self.account_id, &delimiters)?;
+        Ok(())
+    }
+
+    fn folder_op_waiting(&self) -> Result<bool, Abort> {
+        Ok(self
+            .db
+            .pending_ops(self.account_id)?
+            .iter()
+            .any(|op| op.kind == FOLDER_OP_KIND))
+    }
+
+    /// Syncs a folder, unless a change still queued means the server doesn't have it yet.
+    fn sync_folder_unless_waiting(&mut self, folder: &Folder) -> Result<(), Abort> {
+        match self.sync_folder(folder) {
+            Err(Abort::Remote(error))
+                if error.kind == RemoteErrorKind::NotFound && self.folder_op_waiting()? =>
+            {
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
     /// Applies the server folder list; emits `FoldersChanged` on changes.
     fn sync_folder_list(&mut self) -> Result<(), Abort> {
         let remote = self.rm()?.list_folders()?;
         let local = self.db.list_folders(self.account_id)?;
+        // A folder change still queued is on the local list and not yet on the server's:
+        // going by the server's now would delete the local one, and its messages with it.
+        // Checked after both reads: changes queue before they touch the local list, so one
+        // not seen here isn't in what was read either.
+        if self.folder_op_waiting()? {
+            return Ok(());
+        }
         let plan = plan_folders(&remote, &local);
         if plan.is_empty() {
-            return Ok(());
+            return self.save_folder_naming(&remote);
         }
         let mut lost_mail = !plan.deletes.is_empty();
         for upsert in &plan.upserts {
@@ -1397,6 +1750,7 @@ impl Worker {
         for id in plan.deletes {
             self.db.delete_folder(id)?;
         }
+        self.save_folder_naming(&remote)?;
         self.emit(SyncEvent::FoldersChanged {
             account_id: self.account_id,
         });

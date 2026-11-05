@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use mail_core::{
-    AccountConfig, CancelToken, MailConnector, MailRemote, MailSender, RemoteError,
+    is_gmail_host, AccountConfig, CancelToken, MailConnector, MailRemote, MailSender, RemoteError,
     RemoteErrorKind, RemoteResult,
 };
 
@@ -210,15 +210,6 @@ impl MailConnector for ImapSmtpConnector {
     fn saves_sent_copy(&self) -> bool {
         is_gmail_host(&self.config.imap.host) || self.gmail_seen.load(Ordering::Relaxed)
     }
-}
-
-/// Whether `host` is Gmail's IMAP/SMTP endpoint.
-pub fn is_gmail_host(host: &str) -> bool {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    matches!(
-        host.as_str(),
-        "imap.gmail.com" | "imap.googlemail.com" | "smtp.gmail.com" | "smtp.googlemail.com"
-    )
 }
 
 /// Validates settings for the "Add account" dialog: logs in to IMAP (then

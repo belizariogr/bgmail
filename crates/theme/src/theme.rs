@@ -134,6 +134,8 @@ pub struct ThemeColors {
     pub warning: Hsla,
     /// Error color.
     pub error: Hsla,
+    /// What destroys: the delete buttons.
+    pub danger: Hsla,
 }
 
 /// A complete theme: identity + appearance + colors.
@@ -201,6 +203,7 @@ impl Theme {
                 success: hex(0x89d185),
                 warning: hex(0xcca700),
                 error: hex(0xf14c4c),
+                danger: hex(0xa64244),
             },
         }
     }
@@ -246,6 +249,7 @@ impl Theme {
                 success: hex(0x1a7f37),
                 warning: hex(0xbf8803),
                 error: hex(0xcc2936),
+                danger: hex(0xcc2936),
             },
         }
     }

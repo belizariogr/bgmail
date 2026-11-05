@@ -1061,8 +1061,8 @@ impl ComposeView {
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_format_menu(menu, cx)))
             .child(content)
             .child(
-                Icon::new(IconName::ChevronDown)
-                    .size(IconSize::XSmall)
+                Icon::new(IconName::CaretDown)
+                    .size(IconSize::XXSmall)
                     .color(Color::Muted),
             )
             .children(dropdown.filter(|_| self.format_menu == Some(menu)))
@@ -1418,8 +1418,8 @@ impl ComposeView {
                         )
                     })
                     .child(
-                        Icon::new(IconName::ChevronDown)
-                            .size(IconSize::XSmall)
+                        Icon::new(IconName::CaretDown)
+                            .size(IconSize::XXSmall)
                             .color(Color::Muted),
                     ),
             )

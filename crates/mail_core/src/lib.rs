@@ -20,7 +20,9 @@ pub mod remote;
 pub mod reply;
 pub mod thread;
 
-pub use account::{AccountConfig, AuthKind, Security, ServerConfig, DEFAULT_SYNC_WINDOW};
+pub use account::{
+    is_gmail_host, AccountConfig, AuthKind, Security, ServerConfig, DEFAULT_SYNC_WINDOW,
+};
 pub use address::{
     format_address_list, parse_address_list, same_email, split_tokens, valid_addresses, Address,
 };

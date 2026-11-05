@@ -316,6 +316,17 @@ impl TextInput {
         }
     }
 
+    /// Selects all the text, for what is typed next to replace it.
+    pub fn select_all_content(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.content.len();
+        cx.notify();
+    }
+
+    /// The selection, in bytes of the content; empty at the caret.
+    pub fn selected_range(&self) -> std::ops::Range<usize> {
+        self.selected_range.clone()
+    }
+
     /// Current text content.
     pub fn content(&self) -> SharedString {
         self.content.clone()

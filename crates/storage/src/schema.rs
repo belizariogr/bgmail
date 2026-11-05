@@ -3,7 +3,7 @@
 //! The v1 DDL below is the base every database starts from; later versions are
 //! applied as in-place steps by `migration.rs` so existing user data survives.
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 pub const CREATE_ACCOUNTS: &str = "
 CREATE TABLE IF NOT EXISTS accounts (
@@ -186,6 +186,12 @@ CREATE TABLE IF NOT EXISTS contacts (
 /// under. Blank until set: mail keeps going out with the account's name.
 pub const V5_COLUMNS: &[(&str, &str, &str)] =
     &[("accounts", "sender_name", "TEXT NOT NULL DEFAULT ''")];
+
+/// v8: how the server writes folder names, read from its list, for naming new ones.
+pub const V8_COLUMNS: &[(&str, &str, &str)] = &[
+    ("folders", "delimiter", "TEXT"),
+    ("accounts", "folder_prefix", "TEXT NOT NULL DEFAULT ''"),
+];
 
 /// v7: when the user last asked for a retry, from which an unsent message's age counts.
 pub const V7_COLUMNS: &[(&str, &str, &str)] =

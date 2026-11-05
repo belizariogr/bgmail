@@ -655,7 +655,7 @@
 - ⬜ Confirm the default mail app on macOS and Windows (only Linux was exercised)
 - ✅ Account name and sender name, both editable; contact catalog filled from mail; recipient fields with
       cards and suggestions
-- ✅ Drag messages from the list onto a folder, past 100 px
+- ✅ Drag messages from the list onto a folder, past 50 px or out of the list
 - ✅ Text fixed for a white page stays readable on a dark page
 - ⬜ Selection on a dark page is still translucent, so a translucent window
       shows the desktop through it
@@ -745,6 +745,36 @@
       row is part of it, otherwise on that row alone (Reply, Reply all, Forward and
       Print open the row first, like its Reply button, since they need the message)
       (`commands::row_menu_groups`, `RootView::render_row_menu`)
+- ✅ Row menu with icons, in the order of Gmail's: reply all/reply/forward; archive
+      (restore)/delete/read/star; move/junk; print in the place of Gmail's "open in a
+      new window" (`commands::row_menu_icon`, `ContextMenu::icon`)
+- ✅ Row menu: Move opens the folders as a submenu on hover (`ContextMenu::submenu`,
+      `RootView::hover_row_menu_folders`), and "Find emails from X" puts the sender's
+      address in the search field (`RootView::find_from_sender`)
+- ✅ Move menus (toolbar and row): a dozen folders with a scrollbar past that, and Junk,
+      Trash and Archive apart below them, as in Gmail (`RootView::move_menu_items`)
+- ✅ Move menus leave out the folder the list shows, also in a unified mailbox (not in a search)
+- ✅ Buttons that open a menu show a small triangle (`IconButton::opens_menu`): Move in the
+      toolbar and on a multiple selection, the list's filter, attachment chips, and compose's From and format menus
+- ✅ "View normally" on the notice of a message shown as text after a crash
+- ✅ Delete buttons in the theme's danger red (`ThemeColors::danger`, `ui::Color::Danger`)
+- ✅ Mark as unread shows the list's blue dot on its icon; Mark as read doesn't
+      (`IconButton::dot`, `ContextMenu::icon_dot`)
+- ✅ A message becomes read after 2.5 s open, not on opening (`RootView::pending_read`)
+- ✅ Search results: starred first, then by folder in sidebar order across all accounts,
+      newest first in each
+- ✅ The search field grows smoothly with the focus or text in it, when the toolbar has room
+- ✅ The sidebar marks no folder during a search
+- ✅ Search in one folder (`inbox: text`, by the folder's slug) and a sidebar menu to search
+      a folder, create, rename and delete folders of the user's (`search_scope`,
+      `mail_sync::actions::{create,rename,delete}_folder`, `FolderAction`): mail of a deleted
+      folder goes to the Trash first, even what was never downloaded; on Gmail, All Mail
+- ✅ Subfolders under their parent in the sidebar, indented; New subfolder in the menu, and
+      renaming asks only for the folder's own name; names go to the server in its encoding,
+      with its delimiter and prefix (`folders.delimiter`, `accounts.folder_prefix`; the prefix
+      is read from the folder list: the `imap` crate can't parse a `NAMESPACE` answer)
+- ⬜ Search recipients too (To/Cc aren't in `search_text`; needs a reindex), as Thunderbird
+      and Gmail do
 - ⬜ Keyboard navigation in `ui::ContextMenu` (up/down/enter, as in Zed): every menu
       of the app only takes the mouse and, in the row menu, Escape
 
