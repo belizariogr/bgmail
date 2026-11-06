@@ -62,8 +62,12 @@ so GPUI's `xcrun -sdk macosx metal` build step finds the installed toolchain.
 
 ## Install / Build packages
 
-Tagged releases (`v*`) build installable packages in GitHub Actions
-(`.github/workflows/release.yml`) and attach them to a draft GitHub Release:
+Releases are built by GitHub Actions (`.github/workflows/release.yml`): run the
+**Release** workflow by hand (Actions ▸ Release ▸ Run workflow) and it bumps the
+version in `Cargo.toml` (patch by default; minor/major, or an exact version, on
+request), builds every package, creates the `v*` tag and publishes the GitHub
+Release. Pushing a `v*` tag yourself makes a draft
+release instead.
 
 | OS | Packages |
 |---|---|
@@ -71,9 +75,9 @@ Tagged releases (`v*`) build installable packages in GitHub Actions
 | Linux x86_64 | `.deb`, `.AppImage`, pacman `.tar.gz` + `PKGBUILD` |
 | Windows x86_64 | NSIS `-setup.exe` (per-user, no admin) and WiX `.msi` |
 
-Until signing secrets are configured the builds are **unsigned**: on macOS
-right-click ▸ Open the first time (Gatekeeper), on Windows SmartScreen asks
-for confirmation. On Linux, account passwords are stored through the Secret
+Builds are signed (and on macOS notarized) only once the signing secrets are
+configured; unsigned, macOS needs right-click ▸ Open the first time (Gatekeeper)
+and Windows SmartScreen asks for confirmation. On Linux, account passwords are stored through the Secret
 Service, so a keyring (GNOME Keyring, KWallet ≥ 5.97, KeePassXC…) must be
 running.
 

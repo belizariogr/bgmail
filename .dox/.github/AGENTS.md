@@ -31,30 +31,58 @@ Continuous integration on the three desktop platforms and release packaging
     runs the ignored `protocols --test greenmail` and
     `mail_sync --test greenmail_e2e` tests with `BGMAIL_GREENMAIL=1`.
   - Reads no secrets.
-- **`release.yml`** (tags `v*`, manual):
-  Also packages (without publishing) on pull requests touching packaging files; `workflow_dispatch` works only once the file is on the default branch.
-  - macOS packaging retries up to 3 times: `hdiutil` fails now and then on runners ("Resource busy").
-  - `package` matrix: linux-x86_64 (ubuntu-22.04: deb, AppImage, pacman),
-    macos-aarch64 and macos-x86_64 (both macos-15; x86_64 cross-compiled via
-    `CARGO_BUILD_TARGET` + `--target`: app, dmg), windows-x86_64 (NSIS, WiX
-    msi). Installs `cargo-packager` (pinned `CARGO_PACKAGER_VERSION`), builds
-    the release binary before any secret is in the environment, runs
-    `cargo packager --release --formats …`, uploads the packages as
-    `BGMail-<name>` artifacts.
-  - `release` (tags only): downloads all artifacts and creates a **draft**
-    GitHub Release (`softprops/action-gh-release`, generated notes). Needs
-    `contents: write`; everything else is read-only.
+- **`release.yml`** (manual, tags `v*`; packages without publishing on pull
+  requests touching packaging files). `workflow_dispatch` works only once the
+  file is on the default branch.
+  - `prepare` (ubuntu, `contents: write`) decides the commit, tag and release
+    kind (outputs `sha`, `tag`, `publish`, `draft`, `prerelease`):
+    - Manual run with `publish` (default on): tag `v<version>`. `version` is
+      the `version` input (leading `v` dropped) or, when blank, the
+      `[workspace.package]` version in `Cargo.toml` bumped by the `bump` input
+      (`patch` default, `minor`, `major`; a prerelease's patch bump is its final
+      version, `1.0.0-beta.1` → `1.0.0`). Fails on anything but `X.Y.Z[-pre]`,
+      on an existing tag, or when run from a tag instead of a branch. A version
+      other than `Cargo.toml`'s is committed first (`Cargo.toml` + `Cargo.lock` via
+      `cargo metadata`, as `github-actions[bot]`, "Release vX.Y.Z") and pushed to
+      the dispatched branch, so the packages carry it; that push triggers no
+      other workflow (GITHUB_TOKEN). `draft` input (default off).
+    - Manual run without `publish`, pull requests: build only.
+    - Pushed `v*` tag: publishes a **draft** for that tag.
+    - A `-` in the tag makes it a prerelease.
+  - `package` matrix (checks out `prepare.sha`): linux-x86_64 (ubuntu-22.04:
+    deb, AppImage, pacman), macos-aarch64 and macos-x86_64 (both macos-15;
+    x86_64 cross-compiled via `CARGO_BUILD_TARGET` + `--target`: app, dmg),
+    windows-x86_64 (NSIS, WiX msi). Installs `cargo-packager` (pinned
+    `CARGO_PACKAGER_VERSION`), builds the release binary before any secret is
+    in the environment, runs `cargo packager --release --formats …`, uploads the
+    packages as `BGMail-<name>` artifacts. macOS packaging retries up to 3 times
+    (`hdiutil` fails now and then on runners: "Resource busy").
+  - `release` (when `prepare.publish`): downloads all artifacts, creates the tag
+    at `prepare.sha` through the API if missing (only after every package
+    built; a draft would otherwise leave it uncreated), then the GitHub Release
+    (`softprops/action-gh-release`, generated notes, `draft`/`prerelease` from
+    `prepare`).
+  - One run per event and ref at a time (`concurrency`; pull requests cancel the
+    older run).
   - Signing is optional and skipped when secrets are absent (unsigned builds
     still succeed). Secrets are only passed to the step that needs them:
-    - macOS signing: `APPLE_CERTIFICATE` (base64 .p12),
-      `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` (e.g.
-      `Developer ID Application: … (TEAMID)`; injected into the packager
-      config at build time, never committed).
-    - macOS notarization (needs signing): `APPLE_ID`, `APPLE_PASSWORD`
-      (app-specific password), `APPLE_TEAM_ID`.
+    - macOS signing: `APPLE_CERTIFICATE` (base64 .p12 of a **Developer ID
+      Application** certificate + key), `APPLE_CERTIFICATE_PASSWORD`,
+      `APPLE_SIGNING_IDENTITY` (e.g. `Developer ID Application: … (TEAMID)`;
+      injected into the packager config at build time, never committed).
+    - macOS notarization (needs signing), either `APPLE_ID` + `APPLE_PASSWORD`
+      (app-specific password) + `APPLE_TEAM_ID` (wins when both are set), or an
+      App Store Connect API key: `APPLE_API_KEY` (key id), `APPLE_API_ISSUER`,
+      `APPLE_API_PRIVATE_KEY` (the .p8 text, written to `$RUNNER_TEMP` for the
+      step only). cargo-packager notarizes and staples the `.app`; the workflow
+      then notarizes (`notarytool submit --wait`, fails unless `Accepted`,
+      prints the log) and staples each `.dmg`, which the packager only signs.
+      Signed without credentials: warning, not failure.
     - Windows Authenticode: `WINDOWS_CERTIFICATE` (base64 .pfx),
       `WINDOWS_CERTIFICATE_PASSWORD`; imported into the runner's user store and
-      its thumbprint injected as `certificate-thumbprint`.
+      its thumbprint injected as `certificate-thumbprint`. CAs no longer issue
+      exportable code-signing keys, so a real certificate needs a cloud signer
+      (SignPath, Certum SimplySign) in place of this step.
 - Toolchain comes from `rust-toolchain.toml` (`rustup toolchain install`);
   caches via `Swatinem/rust-cache@v2`.
 - macOS jobs set `TOOLCHAINS=com.apple.dt.toolchain.XcodeDefault` (runner
@@ -74,8 +102,9 @@ Continuous integration on the three desktop platforms and release packaging
 
 ## Verification
 
-- `python3 -c 'import yaml; [yaml.safe_load(open(f)) for f in [".github/workflows/ci.yml", ".github/workflows/release.yml"]]'`
-  (or `actionlint` when available).
+- `actionlint .github/workflows/*.yml` (release binary from
+  github.com/rhysd/actionlint), or at least
+  `python3 -c 'import yaml; [yaml.safe_load(open(f)) for f in [".github/workflows/ci.yml", ".github/workflows/release.yml"]]'`.
 - Locally mirror the Linux packaging job: `cargo packager --release`.
 
 ## Child DOX Index

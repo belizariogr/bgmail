@@ -738,6 +738,13 @@
       workflows (GitHub Actions matrix). deb/AppImage/pacman built locally;
       **macOS and Windows jobs never ran yet** (check the first CI run);
       signing/notarization secrets are optional and unset
+- ✅ One-click release: manual `Release` run bumps the version (patch/minor/major or exact), builds,
+      creates the `v*` tag and publishes the GitHub Release (draft optional)
+- 🔄 macOS signing + notarization: workflow notarizes/staples the .app and the .dmg
+      (Apple ID or App Store Connect key). Next: set the `APPLE_*` secrets and check
+      `spctl -a -vv` / `stapler validate` on a downloaded .dmg
+- ⬜ Windows signing: apply to SignPath Foundation (free for OSS) and swap the
+      PFX import step for its action
 
 - ✅ Right-click menu on list rows: the toolbar's actions in the toolbar's order and
       blocks (reply / delete / flag-read-move), plus Restore and Print. As in

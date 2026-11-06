@@ -1,7 +1,8 @@
 # Builds installable packages with cargo-packager (config:
-# [package.metadata.packager] in crates/bgmail/Cargo.toml) and, on `v*` tags,
-# attaches them to a draft GitHub Release. Signing/notarization run only when
-# their secrets exist. Contract: .dox/.github/AGENTS.md
+# [package.metadata.packager] in crates/bgmail/Cargo.toml) and publishes them as
+# a GitHub Release: from a manual run (which bumps the version and creates the
+# tag itself) or from a pushed `v*` tag (draft). Signing/notarization run only
+# when their secrets exist. Contract: .dox/.github/AGENTS.md
 name: Release
 
 on:
@@ -19,17 +20,120 @@ on:
       - rust-toolchain.toml
       - script/bundle-linux
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Create the tag and the GitHub Release (off = only build the packages)
+        type: boolean
+        default: true
+      bump:
+        description: Part of the Cargo.toml version to bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: Exact version instead of a bump, e.g. 1.0.0-beta.1 (blank = bump)
+        type: string
+        default: ""
+      draft:
+        description: Leave the release as a draft
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+# Two releases at once would race on the version bump and the tag.
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_PACKAGER_VERSION: 0.11.8
 
 jobs:
+  # Decides what is built and whether it is published. A manual publishing run
+  # commits the version bump here, so every package carries the new version and
+  # the tag points at the commit that was built.
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      tag: ${{ steps.plan.outputs.tag }}
+      publish: ${{ steps.plan.outputs.publish }}
+      draft: ${{ steps.plan.outputs.draft }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+
+      - name: Plan the release
+        id: plan
+        env:
+          PUBLISH_INPUT: ${{ inputs.publish }}
+          BUMP_INPUT: ${{ inputs.bump }}
+          VERSION_INPUT: ${{ inputs.version }}
+          DRAFT_INPUT: ${{ inputs.draft }}
+        run: |
+          sha="$GITHUB_SHA" tag="" publish=false draft=true
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            # Only `v*` tags trigger a push run.
+            tag="$GITHUB_REF_NAME" publish=true
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$PUBLISH_INPUT" = true ]; then
+            if [ "$GITHUB_REF_TYPE" != branch ]; then
+              echo "::error::Publish from a branch (the version bump is committed to it)."
+              exit 1
+            fi
+            current=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+            version="${VERSION_INPUT#v}"
+            if [ -z "$version" ]; then
+              # A prerelease's patch bump is its final version (1.0.0-beta.1 -> 1.0.0).
+              IFS=. read -r major minor patch <<<"${current%%-*}"
+              case "$BUMP_INPUT" in
+                major) version="$((major + 1)).0.0" ;;
+                minor) version="$major.$((minor + 1)).0" ;;
+                *) if [ "$current" != "${current%%-*}" ]; then version="${current%%-*}"
+                   else version="$major.$minor.$((patch + 1))"; fi ;;
+              esac
+            fi
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::\"$version\" is not a version like 1.2.3 or 1.2.3-beta.1."
+              exit 1
+            fi
+            tag="v$version"
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+              echo "::error::$tag already exists. Pick a new version."
+              exit 1
+            fi
+            if [ "$version" != "$current" ]; then
+              sed -i '/^\[workspace\.package\]/,/^\[/ s/^version = ".*"$/version = "'"$version"'"/' Cargo.toml
+              # Rewrites the workspace crates' entries in Cargo.lock.
+              cargo metadata --format-version 1 >/dev/null
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit --quiet -m "Release $tag" -- Cargo.toml Cargo.lock
+              git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+              sha=$(git rev-parse HEAD)
+            fi
+            publish=true draft="$DRAFT_INPUT"
+          fi
+          prerelease=false
+          if [[ "$tag" == *-* ]]; then prerelease=true; fi
+          {
+            echo "sha=$sha"
+            echo "tag=$tag"
+            echo "publish=$publish"
+            echo "draft=$draft"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $sha${tag:+ for $tag} (publish: $publish, draft: $draft, prerelease: $prerelease)"
+
   package:
     name: Package (${{ matrix.name }})
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -60,6 +164,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Install GPUI system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -132,29 +238,72 @@ jobs:
           BGMAIL_GOOGLE_CLIENT_ID: ${{ github.event_name != 'pull_request' && secrets.BGMAIL_GOOGLE_CLIENT_ID || '' }}
           BGMAIL_GOOGLE_CLIENT_SECRET: ${{ github.event_name != 'pull_request' && secrets.BGMAIL_GOOGLE_CLIENT_SECRET || '' }}
           # macOS: cargo-packager imports the certificate into a temporary
-          # keychain, signs, then notarizes when the notarization vars exist
-          # (Apple ID + app-specific password + team, or App Store Connect API key).
+          # keychain, signs, then notarizes and staples the .app when the
+          # notarization vars exist (Apple ID + app-specific password + team,
+          # or an App Store Connect API key).
           APPLE_CERTIFICATE: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE || '' }}
           APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
           APPLE_ID: ${{ runner.os == 'macOS' && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_API_KEY: ${{ runner.os == 'macOS' && secrets.APPLE_API_KEY || '' }}
+          APPLE_API_ISSUER: ${{ runner.os == 'macOS' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_PRIVATE_KEY: ${{ runner.os == 'macOS' && secrets.APPLE_API_PRIVATE_KEY || '' }}
         run: |
           # Empty values would be read as "set"; drop them so unsigned builds stay unsigned.
-          for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+          for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+                     APPLE_API_KEY APPLE_API_ISSUER APPLE_API_PRIVATE_KEY; do
             [ -n "${!var}" ] || unset "$var"
           done
+          # notarytool reads the App Store Connect key from a .p8 file.
+          if [ -n "${APPLE_API_PRIVATE_KEY:-}" ]; then
+            export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+            printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$APPLE_API_KEY_PATH"
+            trap 'rm -f "$APPLE_API_KEY_PATH"' EXIT
+            unset APPLE_API_PRIVATE_KEY
+          fi
+
           args=(--release --formats "${{ matrix.formats }}")
           if [ -n "${{ matrix.target }}" ]; then args+=(--target "${{ matrix.target }}"); fi
           # hdiutil fails now and then on macOS runners ("Resource busy").
           attempts=1
           if [ "$RUNNER_OS" = "macOS" ]; then attempts=3; fi
+          packaged=false
           for attempt in $(seq 1 "$attempts"); do
-            cargo packager "${args[@]}" && exit 0
+            if cargo packager "${args[@]}"; then packaged=true; break; fi
             echo "Packaging failed (attempt $attempt of $attempts)"
             if [ "$attempt" -lt "$attempts" ]; then sleep 30; fi
           done
-          exit 1
+          [ "$packaged" = true ] || exit 1
+
+          # cargo-packager only signs the .dmg; Gatekeeper checks the downloaded
+          # .dmg itself, so it is notarized and stapled too (same credentials,
+          # same precedence as the packager: Apple ID first, then API key).
+          [ "$RUNNER_OS" = macOS ] && [ -n "${APPLE_CERTIFICATE:-}" ] || exit 0
+          notary=()
+          if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+            notary=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+          elif [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ] && [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+            notary=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
+          fi
+          if [ "${#notary[@]}" -eq 0 ]; then
+            echo "::warning::Signed but not notarized: no notarization credentials."
+            exit 0
+          fi
+          dmgs=()
+          while IFS= read -r dmg; do dmgs+=("$dmg"); done < <(find target -path '*/release/*.dmg')
+          [ "${#dmgs[@]}" -gt 0 ] || { echo "::error::No .dmg to notarize."; exit 1; }
+          for dmg in "${dmgs[@]}"; do
+            echo "Notarizing $dmg"
+            result=$(xcrun notarytool submit "$dmg" --wait --output-format json "${notary[@]}")
+            if [ "$(jq -r .status <<<"$result")" != Accepted ]; then
+              echo "::error::Notarization of $dmg was not accepted: $(jq -r .message <<<"$result")"
+              xcrun notarytool log "$(jq -r .id <<<"$result")" "${notary[@]}" || true
+              exit 1
+            fi
+            xcrun stapler staple "$dmg"
+            xcrun stapler validate "$dmg"
+          done
 
       # The tarball script/install.sh downloads from the release.
       - name: Bundle the Linux tarball
@@ -180,9 +329,9 @@ jobs:
             script/install.sh
 
   release:
-    name: Draft GitHub Release
-    needs: package
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: GitHub Release
+    needs: [prepare, package]
+    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -193,8 +342,25 @@ jobs:
           merge-multiple: true
       - name: List packages
         run: find dist -type f -exec ls -l {} +
+      # Created only now, once every package built. A draft release would
+      # otherwise leave its tag uncreated until someone publishes it.
+      - name: Create the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then
+            echo "$TAG already exists"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" --silent
+            echo "Created $TAG at $SHA"
+          fi
       - uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ needs.prepare.outputs.sha }}
+          draft: ${{ needs.prepare.outputs.draft == 'true' }}
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
           generate_release_notes: true
           files: dist/**/*
