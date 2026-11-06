@@ -377,16 +377,13 @@ fn main() {
                         crate::window_frame::refresh_caption_layout();
                         view.sync_app_menus(cx);
                     });
-                    // Closing the window (e.g. the macOS traffic-light button)
-                    // doesn't necessarily quit the app, so flush the layout here
-                    // too — not just on app quit.
+                    // Closing the window (e.g. the macOS traffic-light button, or
+                    // the compositor's close on Linux) removes the view before the
+                    // quit hooks run, so its shutdown work happens here too.
                     let weak = view.downgrade();
                     window.on_window_should_close(cx, move |_window, cx| {
                         let may_quit = weak.upgrade().is_none_or(|view| {
-                            view.update(cx, |view, cx| {
-                                view.persist_now();
-                                view.may_quit(cx)
-                            })
+                            view.update(cx, |view, cx| view.close_main_window(cx))
                         });
                         if may_quit {
                             cx.quit();

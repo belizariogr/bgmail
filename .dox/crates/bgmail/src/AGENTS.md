@@ -1470,10 +1470,15 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Purpose: Closes focused compose or settings window.
   - Behavior: Closes the settings window; a compose window goes through `discard_draft`, so edits are asked about.
 
+- **`close_main_window`** (pub(crate))
+  - Signature: `pub(crate) fn close_main_window(&mut self, cx: &mut Context<Self>) -> bool`
+  - Purpose: The main window's `on_window_should_close` (`main.rs`): closing it quits the app.
+  - Behavior: `persist_now`, then `may_quit`; when it may close, `clear_render_guards` right away, since on Linux the window (and this view) is removed before the quit hooks run, so the `on_app_quit` hook can't reach the view and a normal close would read as a crash on the next start.
+
 - **`may_quit`** (pub(crate))
   - Signature: `pub(crate) fn may_quit(&mut self, cx: &mut Context<Self>) -> bool`
   - Purpose: Whether the app may quit now.
-  - Behavior: With edits in compose, activates it, asks through `discard_draft` and returns `false`; the user quits again after answering. Called from `on_window_should_close` of the main window and `schedule_quit` (`main.rs`: Quit action, caption close button; deferred because the dispatching window is busy).
+  - Behavior: With edits in compose, activates it, asks through `discard_draft` and returns `false`; the user quits again after answering. Called from `close_main_window` and `schedule_quit` (`main.rs`: Quit action, caption close button; deferred because the dispatching window is busy).
 
 - **`close_settings_window`** (pub(crate), L672)
   - Signature: `pub(crate) fn close_settings_window(&mut self, cx: &mut Context<Self>)`
@@ -1616,7 +1621,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Purpose: Keyboard handling while palette open.
   - Behavior: Handles Escape, Up/Down (move selection), Enter (execute); returns whether event was consumed.
 
-- **`clear_render_guards`** (pub(crate)): On app quit, removes the reader and quote markers: nothing rendering made the app crash.
+- **`clear_render_guards`** (pub(crate)): On app quit and in `close_main_window`, removes the reader and quote markers: nothing rendering made the app crash.
 - **`set_reader_guard`** (private): Writes the marker for a message, or removes it if one exists (`reader_guarded`, so an empty reader costs no disk access per frame).
 - **`persist_now`** (pub(crate), L953)
   - Signature: `pub(crate) fn persist_now(&self)`

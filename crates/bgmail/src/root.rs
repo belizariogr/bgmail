@@ -3198,6 +3198,20 @@ impl RootView {
         });
     }
 
+    /// The main window was asked to close, which quits the app: saves the layout and
+    /// reports whether it may close. When it may, the render markers go now, because
+    /// on Linux the window (and this view) is gone before the quit hooks run, so
+    /// [`Self::clear_render_guards`] on app quit would never reach the view and the next
+    /// start would take a normal close for a crash.
+    pub(crate) fn close_main_window(&mut self, cx: &mut Context<Self>) -> bool {
+        self.persist_now();
+        let may_quit = self.may_quit(cx);
+        if may_quit {
+            self.clear_render_guards();
+        }
+        may_quit
+    }
+
     /// Whether the app may quit now: a message being written is asked about first,
     /// in its window, and the user quits again after answering.
     pub(crate) fn may_quit(&mut self, cx: &mut Context<Self>) -> bool {
@@ -9150,6 +9164,31 @@ mod tests {
             assert!(!view.crashed_messages.contains(&id));
             assert_eq!(view.crash_guard.take_unfinished(), Some(id));
         });
+    }
+
+    #[gpui::test]
+    fn closing_the_main_window_clears_the_render_marker(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        let id = ids
+            .iter()
+            .copied()
+            .find(|id| {
+                view.update(cx, |view, cx| {
+                    view.set_selection(vec![*id], cx);
+                    view.selected_detail
+                        .as_ref()
+                        .is_some_and(|detail| detail.raw_format == "html")
+                })
+            })
+            .expect("a formatted message");
+        cx.run_until_parked();
+        let guard = view.read_with(cx, |view, _| view.crash_guard.clone());
+        guard.begin(id);
+        view.update(cx, |view, _| view.reader_guarded = true);
+
+        assert!(view.update(cx, |view, cx| view.close_main_window(cx)));
+        assert_eq!(guard.take_unfinished(), None);
     }
 
     #[test]

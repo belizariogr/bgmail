@@ -757,6 +757,9 @@
 - ✅ Buttons that open a menu show a small triangle (`IconButton::opens_menu`): Move in the
       toolbar and on a multiple selection, the list's filter, attachment chips, and compose's From and format menus
 - ✅ "View normally" on the notice of a message shown as text after a crash
+- ✅ Closing the main window on Linux no longer reads as a crash on the next start (the
+      render markers are cleared in `RootView::close_main_window`; the quit hook ran after
+      the view was already gone)
 - ✅ Delete buttons in the theme's danger red (`ThemeColors::danger`, `ui::Color::Danger`)
 - ✅ Mark as unread shows the list's blue dot on its icon; Mark as read doesn't
       (`IconButton::dot`, `ContextMenu::icon_dot`)
