@@ -1172,6 +1172,10 @@ pub struct RootView {
     remembered_selections: HashMap<Selection, RememberedSelection>,
     /// Message whose recipients show in full.
     expanded_recipients: Option<i64>,
+    /// The reader recipient under the pointer, by its place in the line. Kept here
+    /// because a hover style can't recolor text: it is laid out before the hover
+    /// is known.
+    hovered_recipient: Option<usize>,
     /// Row under the mouse, whose text makes room for its action buttons.
     hovered_row: Option<i64>,
     /// Focus of the message list (key context `MessageList`: arrows/j/k move
@@ -1784,6 +1788,7 @@ impl RootView {
             remembered_selections: HashMap::new(),
             selection_focus: None,
             expanded_recipients: None,
+            hovered_recipient: None,
             hovered_row: None,
             list_focus: None,
             attachments,
@@ -7855,6 +7860,17 @@ impl RootView {
     /// "To" / "Cc" lines under the sender (stored display-formatted).
     /// Who a message went to, as in Gmail: first names on one line, with everything
     /// on hover and all the details behind a chevron.
+    /// Notes the pointer entering or leaving recipient `ix`. Leaving one only
+    /// clears it if it is still the one marked, so moving straight to the next
+    /// name doesn't lose that one.
+    fn hover_recipient(&mut self, ix: usize, hovered: bool) {
+        if hovered {
+            self.hovered_recipient = Some(ix);
+        } else if self.hovered_recipient == Some(ix) {
+            self.hovered_recipient = None;
+        }
+    }
+
     fn render_recipients(
         &self,
         message: &MessageDetail,
@@ -7874,16 +7890,24 @@ impl RootView {
         let names = everyone.into_iter().enumerate().map(|(ix, address)| {
             let separator = if ix + 1 < count { "," } else { "" };
             let label = format!("{}{separator}", short_recipient(address, own_email, me));
+            // Lit up under the pointer: the address is in its tooltip.
+            let color = if self.hovered_recipient == Some(ix) {
+                Color::Default
+            } else {
+                Color::Muted
+            };
             div()
                 .id(("reader-recipient", ix))
                 .cursor_default()
                 .tooltip(Tooltip::text(address.display()))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    this.hover_recipient(ix, *hovered);
+                    cx.notify();
+                }))
                 .child(
                     Label::new(label)
                         .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        // Lit up under the pointer: the address is in its tooltip.
-                        .hover_color(Color::Default)
+                        .color(color)
                         .single_line(),
                 )
         });
@@ -11297,6 +11321,19 @@ mod tests {
             let detail = view.selected_detail.as_ref().expect("still open");
             assert_eq!(detail.subject, "not reloaded");
         });
+    }
+
+    #[test]
+    fn a_recipient_left_behind_does_not_unmark_the_next_one() {
+        let (_dir, mut view) = test_view();
+        view.hover_recipient(0, true);
+        assert_eq!(view.hovered_recipient, Some(0));
+        // Straight onto the next name: it may enter before the first one leaves.
+        view.hover_recipient(1, true);
+        view.hover_recipient(0, false);
+        assert_eq!(view.hovered_recipient, Some(1));
+        view.hover_recipient(1, false);
+        assert_eq!(view.hovered_recipient, None);
     }
 
     #[gpui::test]
