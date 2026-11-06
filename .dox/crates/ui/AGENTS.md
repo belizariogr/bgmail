@@ -9,7 +9,7 @@ an e-mail client, without Zed-scale bloat.
 
 ## Ownership
 
-- Owns: visual primitives (`Label`, `Icon`, `Button`, `IconButton`, `ListItem`,
+- Owns: visual primitives (`Avatar`, `Label`, `Icon`, `Button`, `IconButton`, `ListItem`,
   `ContextMenu`, `Scrollbar`, `Switch`, `TextInput`, `TextArea`, `Tooltip`),
   `Color`, layout helpers
   (`h_flex` / `v_flex`), embedded SVG `Assets` / `IconName`.

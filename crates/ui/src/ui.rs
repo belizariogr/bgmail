@@ -12,6 +12,7 @@
 pub mod prelude;
 
 mod assets;
+mod avatar;
 mod button;
 mod color;
 mod context_menu;
@@ -27,6 +28,7 @@ mod text_size;
 mod tooltip;
 
 pub use assets::*;
+pub use avatar::*;
 pub use button::*;
 pub use color::*;
 pub use context_menu::*;

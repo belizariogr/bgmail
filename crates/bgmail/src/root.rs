@@ -8389,8 +8389,6 @@ impl RootView {
         let colors = cx.theme().colors();
         let bg = colors.background;
         let border = colors.border;
-        let accent = colors.accent;
-        let on_accent = colors.text_on_accent;
         // The thumb must show on the page's color, not the app's.
         let thumb = if self.reader_white_background {
             let light = theme::Theme::light();
@@ -8418,13 +8416,7 @@ impl RootView {
                 .into_any_element();
         };
 
-        let initial = message
-            .sender
-            .chars()
-            .next()
-            .unwrap_or('?')
-            .to_uppercase()
-            .to_string();
+        let initial = message.sender.chars().next().unwrap_or('?');
 
         // Fixed header (does not scroll with the body, so it stays put while the
         // content scrolls vertically or horizontally).
@@ -8451,54 +8443,43 @@ impl RootView {
                     )
                     .child(self.render_privacy_shield(cx)),
             )
+            // The recipients line follows the sender's two lines with no gap, so the
+            // three read as one block with even spacing.
             .child(
-                h_flex()
-                    .gap_2p5()
-                    .items_center()
+                v_flex()
                     .child(
-                        div()
-                            .size(px(30.0))
-                            .flex_shrink_0()
-                            .rounded_full()
-                            .bg(accent)
-                            .flex()
+                        h_flex()
+                            .gap_2p5()
                             .items_center()
-                            .justify_center()
-                            .text_color(on_accent)
-                            .text_size(ui::ui_text_size(1.0))
-                            // Tight line height so the glyph (not the looser line
-                            // box) is what gets centered vertically.
-                            .line_height(ui::ui_text_size(1.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(initial),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
+                            .child(ui::Avatar::new(initial).size(px(30.0)))
                             .child(
-                                Label::new(message.sender.clone())
-                                    .weight(FontWeight::SEMIBOLD)
-                                    .single_line(),
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        Label::new(message.sender.clone())
+                                            .weight(FontWeight::SEMIBOLD)
+                                            .single_line(),
+                                    )
+                                    .child(
+                                        Label::new(message.sender_email.clone())
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted)
+                                            .single_line(),
+                                    ),
                             )
                             .child(
-                                Label::new(message.sender_email.clone())
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted)
-                                    .single_line(),
+                                Label::new(dates::full_date(
+                                    message.date_ts,
+                                    &message.received_at,
+                                    cx.language(),
+                                ))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
                             ),
                     )
-                    .child(
-                        Label::new(dates::full_date(
-                            message.date_ts,
-                            &message.received_at,
-                            cx.language(),
-                        ))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    ),
+                    .children(self.render_recipients(message, cx)),
             )
-            .children(self.render_recipients(message, cx))
             .children(self.render_attachments(cx));
 
         let loading_body = message.body_state == storage::BODY_STATE_HEADERS;

@@ -257,6 +257,14 @@ _300 functions/methods documented._
   - Behavior: Asserts strict ascending order of `px()` across all four
     `IconSize` variants.
 
+### `src/avatar.rs`
+
+- **struct `Avatar`** (`IntoElement`): round initial, accent fill, `OnAccent` letter at `ui_text_size(1.0)` semibold.
+- **`Avatar::new(initial)`** (pub): upper-cases the initial; 30 px by default. **`size(px)`** (pub): diameter.
+- **`ink_centered_origin(area, ink)`** (pub): pen position that puts `ink` (glyph bounds from the pen, y down) at the center of `area`.
+- **`render`**: asks GPUI for the glyph's ink (`TextSystem::glyph_ink_bounds`, a BGMail patch) and paints it with `Window::paint_glyph` in a `canvas`, so the letter is centered by its pixels, not its line box. A character the UI font lacks falls back to centered text.
+- Tests: the ink lands at the circle's center; initials are upper-cased.
+
 ### `src/label.rs`
 
 #### Types / constants

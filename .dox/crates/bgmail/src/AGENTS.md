@@ -2055,7 +2055,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_reader`** (private, L3100)
   - Signature: `fn render_reader(&mut self, cx) -> impl IntoElement`
   - Purpose: Renders reading pane.
-  - Behavior: Empty state, fixed header with subject/sender/date and privacy shield, and the body area hosting the reader `HtmlView` (white background when forced).
+  - Behavior: Empty state, fixed header with subject, privacy shield, then one block of avatar (`ui::Avatar`) + sender name/address/date and the recipients line right under it (no gap, so the three lines are evenly spaced), attachments, and the body area hosting the reader `HtmlView` (white background when forced).
 
 - **`render_status_bar`** (private, L3300)
   - Signature: `fn render_status_bar(&self, cx) -> impl IntoElement`
