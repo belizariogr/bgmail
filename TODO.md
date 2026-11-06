@@ -757,6 +757,12 @@
 - ✅ Buttons that open a menu show a small triangle (`IconButton::opens_menu`): Move in the
       toolbar and on a multiple selection, the list's filter, attachment chips, and compose's From and format menus
 - ✅ "View normally" on the notice of a message shown as text after a crash
+- ✅ Only a real crash costs a message its formatting: the marker is on disk only while
+      a message is built and first painted (`HtmlViewEvent::Rendered`), so closing the
+      window, logging out or killing the app later no longer opens it as text; a UI-thread
+      panic while it shows writes it back (`crash_guard::install_panic_hook`). Each render
+      has its own `RenderMark` (reply windows no longer clear each other's quote), and an
+      app-level quit hook clears the markers (on Linux the view is gone before quit hooks run)
 - ✅ Delete buttons in the theme's danger red (`ThemeColors::danger`, `ui::Color::Danger`)
 - ✅ Mark as unread shows the list's blue dot on its icon; Mark as read doesn't
       (`IconButton::dot`, `ContextMenu::icon_dot`)

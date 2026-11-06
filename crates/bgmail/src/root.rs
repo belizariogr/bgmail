@@ -39,7 +39,7 @@ use crate::command_palette::CommandPaletteState;
 use crate::commands::{self, BulkSelection, CommandContext, CommandId};
 use crate::compose::{self, ComposeAccount, ComposeInit, ComposeView, QuotedOriginal};
 use crate::config::{self, Config};
-use crate::crash_guard::CrashGuard;
+use crate::crash_guard::{CrashGuard, RenderMark};
 use crate::data::{self, GlobalMailbox, MailboxKind, MessageBody};
 use crate::dates;
 use crate::db_seed;
@@ -1157,9 +1157,8 @@ pub struct RootView {
     crash_guard: CrashGuard,
     /// Marks the formatted quote a reply window renders (see [`QuotedOriginal`]).
     quote_guard: CrashGuard,
-    /// Whether [`Self::crash_guard`]'s marker exists, so an empty reader isn't a disk
-    /// access on every frame.
-    reader_guarded: bool,
+    /// The formatted render of the message the reader shows (see [`CrashGuard`]).
+    reader_mark: Option<RenderMark>,
     /// The database was damaged and started over, which the first frame reports.
     pub(crate) database_replaced: bool,
     /// Inputs that last produced the reader document (selected message and the
@@ -1753,7 +1752,7 @@ impl RootView {
                 .collect(),
             crash_guard,
             quote_guard,
-            reader_guarded: false,
+            reader_mark: None,
             database_replaced,
             last_reader_sig: None,
             reader_preparing: false,
@@ -4360,18 +4359,15 @@ impl RootView {
 
     /// Marks message `id` as the one being rendered, or none.
     fn set_reader_guard(&mut self, id: Option<i64>) {
-        match id {
-            Some(id) => self.crash_guard.begin(id),
-            None if self.reader_guarded => self.crash_guard.finish(),
-            None => {}
-        }
-        self.reader_guarded = id.is_some();
+        // The mark it replaces goes first, so its marker isn't rewritten for nothing.
+        self.reader_mark = None;
+        self.reader_mark = id.map(|id| self.crash_guard.begin(id));
     }
 
-    /// The app is quitting on its own: nothing it was rendering made it crash.
-    pub(crate) fn clear_render_guards(&mut self) {
-        self.set_reader_guard(None);
-        self.quote_guard.finish();
+    /// The reader's and the reply quotes' crash guards, which the app clears when it
+    /// quits on its own.
+    pub(crate) fn render_guards(&self) -> [CrashGuard; 2] {
+        [self.crash_guard.clone(), self.quote_guard.clone()]
     }
 
     /// Hands a built document to the reader view.
@@ -4471,6 +4467,12 @@ impl RootView {
                     has_selection: view.read(cx).has_selection(),
                 });
                 cx.notify();
+            }
+            HtmlViewEvent::Rendered => {
+                // While another message builds, the view still shows the previous one.
+                if let Some(mark) = self.reader_mark.as_ref().filter(|_| !self.reader_preparing) {
+                    mark.rendered();
+                }
             }
         }
     }
@@ -9114,12 +9116,12 @@ mod tests {
         assert_eq!(built.notice, Some(ReaderNotice::Unrenderable));
     }
 
-    #[gpui::test]
-    fn a_message_that_crashed_can_be_viewed_normally_and_stays_guarded(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+    /// Selects the first formatted (HTML) message of the list and returns its id.
+    fn select_formatted_message(
+        view: &gpui::Entity<RootView>,
+        ids: &[i64],
+        cx: &mut gpui::VisualTestContext,
+    ) -> i64 {
         let id = ids
             .iter()
             .copied()
@@ -9132,6 +9134,17 @@ mod tests {
                 })
             })
             .expect("a formatted message");
+        cx.run_until_parked();
+        id
+    }
+
+    #[gpui::test]
+    fn a_message_that_crashed_can_be_viewed_normally_and_stays_guarded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        let id = select_formatted_message(&view, &ids, cx);
         view.update(cx, |view, cx| {
             view.crashed_messages.insert(id);
             view.last_reader_sig = None;
@@ -9140,7 +9153,8 @@ mod tests {
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
             assert_eq!(view.reader_notice, Some(ReaderNotice::Crashed));
-            assert_eq!(view.crash_guard.take_unfinished(), None);
+            assert!(view.reader_mark.is_none());
+            assert!(view.crash_guard.take_unfinished().is_empty());
         });
 
         view.update(cx, |view, cx| view.view_crashed_normally(cx));
@@ -9148,8 +9162,47 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert_eq!(view.reader_notice, None);
             assert!(!view.crashed_messages.contains(&id));
-            assert_eq!(view.crash_guard.take_unfinished(), Some(id));
+            assert_eq!(view.reader_mark.as_ref().map(RenderMark::id), Some(id));
         });
+    }
+
+    #[gpui::test]
+    fn a_formatted_message_that_rendered_leaves_no_marker_but_stays_guarded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        let id = select_formatted_message(&view, &ids, cx);
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.reader_mark.as_ref().map(RenderMark::id), Some(id));
+        });
+        // A kill now finds nothing: the render had finished.
+        assert!(!dir.path().join("reader-render.guard").exists());
+        // Quitting clears the guards whatever views are left.
+        let guards = view.read_with(cx, |view, _| view.render_guards());
+        assert_eq!(
+            guards,
+            [
+                CrashGuard::beside(&dir.path().join("mail.db")),
+                CrashGuard::beside_for_quotes(&dir.path().join("mail.db")),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn a_message_crashed_in_the_last_run_opens_as_text(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("mail.db");
+        let ids = {
+            let (view, ids, _) = row_menu_window(&dir, 0, cx);
+            drop(view);
+            ids
+        };
+        // The last run ended while it rendered message `ids[1]`.
+        std::mem::forget(CrashGuard::beside(&db).begin(ids[1]));
+        let view = RootView::new_with_database(Config::default(), &db, true);
+        assert!(view.crashed_messages.contains(&ids[1]));
+        CrashGuard::beside(&db).finish_all();
     }
 
     #[test]

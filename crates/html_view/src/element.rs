@@ -96,6 +96,9 @@ pub enum HtmlViewEvent {
         position: Point<Pixels>,
         hit: HitInfo,
     },
+    /// The document painted with nothing it loads still pending: its render finished.
+    /// Sent once per document.
+    Rendered,
 }
 
 /// Width used when the parent gives no definite width (should not happen in a
@@ -292,11 +295,19 @@ impl Element for HtmlElement {
             (None, true) => Some(REMOTE_POLL),
             (delay, false) => delay,
         };
+        let view = self.view.as_ref().and_then(|view| view.upgrade());
         if let Some(delay) = next_frame {
-            match self.view.as_ref().and_then(|view| view.upgrade()) {
+            match &view {
                 Some(view) => view.update(cx, |view, cx| view.schedule_frame(delay, cx)),
                 None => window.request_animation_frame(),
             }
+        }
+        // Once per document: animated images repaint every frame.
+        if let Some(view) = view
+            .as_ref()
+            .filter(|view| !loading && !view.read(cx).rendered)
+        {
+            view.update(cx, |view, cx| view.mark_rendered(cx));
         }
         if let Some(view) = self.view.clone() {
             paint_input_listeners(view, bounds.origin, hitbox.clone(), window, cx);
@@ -395,6 +406,8 @@ pub struct HtmlView {
     display_scale: f32,
     /// Pending repaint for animated images, and when it fires.
     frame_timer: Option<(Instant, Task<()>)>,
+    /// Whether [`HtmlViewEvent::Rendered`] went out for the current document.
+    rendered: bool,
 }
 
 impl EventEmitter<HtmlViewEvent> for HtmlView {}
@@ -418,6 +431,7 @@ impl HtmlView {
             zoom: 1.0,
             display_scale: 1.0,
             frame_timer: None,
+            rendered: false,
         }
     }
 
@@ -437,7 +451,16 @@ impl HtmlView {
         self.dragging = false;
         self.cursor = CursorStyle::Arrow;
         self.set_hovered_link(None, cx);
+        self.rendered = false;
         cx.notify();
+    }
+
+    /// The document painted with nothing left to load: tells the host, once.
+    fn mark_rendered(&mut self, cx: &mut Context<Self>) {
+        if !self.rendered {
+            self.rendered = true;
+            cx.emit(HtmlViewEvent::Rendered);
+        }
     }
 
     /// Repaints after `delay` (an animated image's next frame, or a look
@@ -731,6 +754,43 @@ impl Render for HtmlView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DocumentOptions;
+    use std::cell::Cell;
+
+    fn document(html: &str) -> HtmlDocument {
+        HtmlDocument::parse(html, DocumentOptions::default())
+    }
+
+    #[gpui::test]
+    fn rendered_goes_out_once_per_document_after_it_paints(cx: &mut gpui::TestAppContext) {
+        cx.update(init);
+        let (view, cx) = cx.add_window_view(|_, cx| HtmlView::new(document("<p>One</p>"), cx));
+        let count = Rc::new(Cell::new(0));
+        let counted = count.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &HtmlViewEvent, _| {
+                if matches!(event, HtmlViewEvent::Rendered) {
+                    counted.set(counted.get() + 1);
+                }
+            })
+            .detach()
+        });
+        cx.run_until_parked();
+        // The first paint may have gone before the subscription; force another.
+        view.update(cx, |view, cx| view.set_document(document("<p>Two</p>"), cx));
+        cx.run_until_parked();
+        assert_eq!(count.get(), 1);
+        // Repaints of the same document say nothing more.
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(count.get(), 1);
+        // A new document renders anew.
+        view.update(cx, |view, cx| {
+            view.set_document(document("<p>Three</p>"), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(count.get(), 2);
+    }
 
     #[test]
     fn dragging_past_the_view_scrolls_by_the_distance() {

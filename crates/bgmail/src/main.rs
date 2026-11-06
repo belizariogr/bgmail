@@ -52,6 +52,7 @@ use actions::{
     ToggleCommandPalette, ToggleSidebar,
 };
 use compose::ComposeView;
+use crash_guard::CrashGuard;
 use root::{RootView, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH};
 
 /// Handle to the main mail window, used to route global shortcuts.
@@ -248,6 +249,8 @@ fn register_command_palette_shortcuts(cx: &mut App) {
 fn main() {
     startup::mark_start();
     startup::log_milestone("main entered");
+    // On the thread that becomes the UI thread, where the reader renders.
+    crash_guard::install_panic_hook();
 
     // A later launch only hands over what it came for; this binding keeps the profile
     // for as long as the process runs.
@@ -342,7 +345,6 @@ fn main() {
                         // — within the `request_save` debounce window — isn't lost.
                         cx.on_app_quit(|view: &mut RootView, _cx| {
                             view.persist_now();
-                            view.clear_render_guards();
                             async {}
                         })
                         .detach();
@@ -377,6 +379,15 @@ fn main() {
                         crate::window_frame::refresh_caption_layout();
                         view.sync_app_menus(cx);
                     });
+                    // Quitting on its own, nothing rendering crashed the app. Held by
+                    // the app, not the view: on Linux closing the window drops the view
+                    // before the quit hooks run.
+                    let guards = view.read(cx).render_guards();
+                    cx.on_app_quit(move |_| {
+                        guards.iter().for_each(CrashGuard::finish_all);
+                        async {}
+                    })
+                    .detach();
                     // Closing the window (e.g. the macOS traffic-light button)
                     // doesn't necessarily quit the app, so flush the layout here
                     // too — not just on app quit.
