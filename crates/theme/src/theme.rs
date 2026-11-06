@@ -94,7 +94,7 @@ pub struct ThemeColors {
     pub element_active: Hsla,
     /// Background of a selected element (e.g. active list item).
     pub element_selected: Hsla,
-    /// Divider between selected rows: lighter than `element_selected`, the way a
+    /// Divider between selected rows: white over `element_selected`, the way a
     /// line stands out on a selection in macOS Mail.
     pub border_selected: Hsla,
 
@@ -183,7 +183,7 @@ impl Theme {
                 element_hover: hex(0x2a2d2e),
                 element_active: hex(0x37373d),
                 element_selected: hex(0x04395e),
-                border_selected: hex(0x2f6a94),
+                border_selected: hex(0xffffff),
 
                 text: hex(0xcccccc),
                 text_muted: hex(0x9d9d9d),
@@ -230,7 +230,7 @@ impl Theme {
                 element_hover: hex(0xf0f0f0),
                 element_active: hex(0xe4e6f1),
                 element_selected: hex(0xcfe3fa),
-                border_selected: hex(0xf2f8fe),
+                border_selected: hex(0xffffff),
 
                 text: hex(0x3b3b3b),
                 text_muted: hex(0x767676),
