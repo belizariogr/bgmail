@@ -336,7 +336,8 @@ struct RowEdges {
     separator: Option<RowSeparator>,
 }
 
-/// The line under a row: the list's own, or the lighter one inside a selection.
+/// The line under a row: the list's own, or the one inside a selection, in the
+/// preview's muted text color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RowSeparator {
     Plain,
@@ -6498,7 +6499,8 @@ impl RootView {
         let hover = colors.element_hover;
         let separator = edges.separator.map(|kind| match kind {
             RowSeparator::Plain => colors.border_variant,
-            RowSeparator::Selected => colors.border_selected,
+            // Same as the preview text, so the line reads on the selection fill.
+            RowSeparator::Selected => colors.text_muted,
         });
         let accent = colors.accent;
 
