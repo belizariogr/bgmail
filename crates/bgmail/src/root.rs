@@ -1157,9 +1157,9 @@ pub struct RootView {
     crash_guard: CrashGuard,
     /// Marks the formatted quote a reply window renders (see [`QuotedOriginal`]).
     quote_guard: CrashGuard,
-    /// Whether [`Self::crash_guard`]'s marker exists, so an empty reader isn't a disk
-    /// access on every frame.
-    reader_guarded: bool,
+    /// The message [`Self::crash_guard`] marks, so an empty reader isn't a disk access
+    /// on every frame.
+    reader_guarded: Option<i64>,
     /// The database was damaged and started over, which the first frame reports.
     pub(crate) database_replaced: bool,
     /// Inputs that last produced the reader document (selected message and the
@@ -1753,7 +1753,7 @@ impl RootView {
                 .collect(),
             crash_guard,
             quote_guard,
-            reader_guarded: false,
+            reader_guarded: None,
             database_replaced,
             last_reader_sig: None,
             reader_preparing: false,
@@ -4376,10 +4376,10 @@ impl RootView {
     fn set_reader_guard(&mut self, id: Option<i64>) {
         match id {
             Some(id) => self.crash_guard.begin(id),
-            None if self.reader_guarded => self.crash_guard.finish(),
+            None if self.reader_guarded.is_some() => self.crash_guard.finish(),
             None => {}
         }
-        self.reader_guarded = id.is_some();
+        self.reader_guarded = id;
     }
 
     /// The app is quitting on its own: nothing it was rendering made it crash.
@@ -4486,6 +4486,13 @@ impl RootView {
                 });
                 cx.notify();
             }
+            // While another message builds, the view still shows the previous one.
+            HtmlViewEvent::Rendered if !self.reader_preparing => {
+                if let Some(id) = self.reader_guarded {
+                    self.crash_guard.rendered(id);
+                }
+            }
+            HtmlViewEvent::Rendered => {}
         }
     }
 
@@ -9162,8 +9169,37 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert_eq!(view.reader_notice, None);
             assert!(!view.crashed_messages.contains(&id));
-            assert_eq!(view.crash_guard.take_unfinished(), Some(id));
+            // Its render finished: off the disk, still guarded in memory while it shows.
+            assert_eq!(view.crash_guard.showing(), Some(id));
+            assert_eq!(view.crash_guard.take_unfinished(), None);
         });
+    }
+
+    #[gpui::test]
+    fn a_formatted_message_that_rendered_leaves_no_marker_but_stays_guarded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        let id = ids
+            .iter()
+            .copied()
+            .find(|id| {
+                view.update(cx, |view, cx| {
+                    view.set_selection(vec![*id], cx);
+                    view.selected_detail
+                        .as_ref()
+                        .is_some_and(|detail| detail.raw_format == "html")
+                })
+            })
+            .expect("a formatted message");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.reader_guarded, Some(id));
+            assert_eq!(view.crash_guard.showing(), Some(id));
+        });
+        // A kill now finds nothing: the render had finished.
+        assert!(!dir.path().join("reader-render.guard").exists());
     }
 
     #[gpui::test]
@@ -9185,7 +9221,7 @@ mod tests {
         cx.run_until_parked();
         let guard = view.read_with(cx, |view, _| view.crash_guard.clone());
         guard.begin(id);
-        view.update(cx, |view, _| view.reader_guarded = true);
+        view.update(cx, |view, _| view.reader_guarded = Some(id));
 
         assert!(view.update(cx, |view, cx| view.close_main_window(cx)));
         assert_eq!(guard.take_unfinished(), None);

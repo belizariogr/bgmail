@@ -18,7 +18,7 @@ use gpui::{
 };
 use html_view::{
     has_too_many_tags, with_render_stack, Appearance as PageAppearance, DetachedDocument,
-    DocumentOptions, HtmlDocument, HtmlView, Resources,
+    DocumentOptions, HtmlDocument, HtmlView, HtmlViewEvent, Resources,
 };
 use mail_core::{Address, Draft, OutgoingAttachment};
 use storage::Contact;
@@ -168,7 +168,7 @@ pub struct QuotedOriginal {
     pub render_guard: Option<(CrashGuard, i64)>,
 }
 
-/// Keeps a quote's render marker for as long as the formatted quote exists.
+/// Keeps a quote's render guard for as long as the formatted quote exists.
 struct QuoteGuard(CrashGuard, i64);
 
 impl Drop for QuoteGuard {
@@ -311,7 +311,9 @@ pub struct ComposeView {
     /// The quoted original, parsed the first time it is shown.
     quote_view: Option<Entity<HtmlView>>,
     _quote_task: Option<Task<()>>,
-    _quote_guard: Option<QuoteGuard>,
+    quote_guard: Option<QuoteGuard>,
+    /// Takes the quote's marker off the disk once it has rendered.
+    _quote_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -399,7 +401,8 @@ impl ComposeView {
             format_menu: None,
             quote_view: None,
             _quote_task: None,
-            _quote_guard: None,
+            quote_guard: None,
+            _quote_subscription: None,
             _subscriptions: subscriptions,
         };
         view.apply_init(init, window, cx);
@@ -440,7 +443,7 @@ impl ComposeView {
         self.quote_expanded = false;
         self.quote_view = None;
         self._quote_task = None;
-        self._quote_guard = None;
+        self.quote_guard = None;
         self.errors = ComposeErrors::default();
         self.from_menu_open = false;
         self.format_menu = None;
@@ -497,8 +500,8 @@ impl ComposeView {
             }
         };
         // Dropped first: the guard it replaces clears the marker of the same message.
-        self._quote_guard = None;
-        self._quote_guard = quoted.render_guard.clone().map(|(guard, id)| {
+        self.quote_guard = None;
+        self.quote_guard = quoted.render_guard.clone().map(|(guard, id)| {
             guard.begin(id);
             QuoteGuard(guard, id)
         });
@@ -540,7 +543,15 @@ impl ComposeView {
         self._quote_task = Some(cx.spawn(async move |this, cx| {
             let document = build.await;
             this.update(cx, |this, cx| {
-                this.quote_view = Some(cx.new(|cx| HtmlView::new(document.into_inner(), cx)));
+                let view = cx.new(|cx| HtmlView::new(document.into_inner(), cx));
+                this._quote_subscription = Some(cx.subscribe(&view, |this, _, event, _| {
+                    if let (HtmlViewEvent::Rendered, Some(QuoteGuard(guard, id))) =
+                        (event, &this.quote_guard)
+                    {
+                        guard.rendered(*id);
+                    }
+                }));
+                this.quote_view = Some(view);
                 cx.notify();
             })
             .ok();

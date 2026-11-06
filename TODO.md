@@ -760,6 +760,12 @@
 - ✅ Closing the main window on Linux no longer reads as a crash on the next start (the
       render markers are cleared in `RootView::close_main_window`; the quit hook ran after
       the view was already gone)
+- ✅ A message whose render finished is safe: the crash marker leaves the disk once the
+      reader (or a reply's quote) paints it with nothing left to load
+      (`HtmlViewEvent::Rendered`), so a kill or logout no longer opens it as text; a panic
+      on the UI thread while it shows writes the marker back (`crash_guard::install_panic_hook`)
+- ⬜ A stack overflow or out-of-memory after the render finished (hover, selection, zoom)
+      isn't caught by the panic hook, so it doesn't fall back to text on the next start
 - ✅ Delete buttons in the theme's danger red (`ThemeColors::danger`, `ui::Color::Danger`)
 - ✅ Mark as unread shows the list's blue dot on its icon; Mark as read doesn't
       (`IconButton::dot`, `ContextMenu::icon_dot`)

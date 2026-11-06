@@ -519,7 +519,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   space/shift-space, home/end in the `HtmlView` context. Page zoom has no keys: they
   zoom the whole app (`bgmail`); it is Ctrl/Cmd + wheel.
 - `enum HtmlViewEvent { ZoomChanged(f32), LinkHovered(Option<String>),
-  LinkActivated(String), ContextMenu { position, hit } }`.
+  LinkActivated(String), ContextMenu { position, hit }, Rendered }`. `Rendered`
+  goes out once per document, after a paint with no remote load pending or
+  arrived: its render finished (the host's crash guard leaves the disk then).
 - `const FALLBACK_WIDTH` (private), `fn layout_width(known, available)`: known
   width, else definite available width, else 800.
 - `fn canvas_height(element_height, element_top, visible_bottom)`.
@@ -535,20 +537,22 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `paint` replays the display list (`canvas_height`, content width), asks
   for a repaint when an animated image's next frame is due or remote loads
   are in flight (`REMOTE_POLL`, 100ms) (the view's
-  `schedule_frame`, else `request_animation_frame`) and, when interactive,
-  `paint_input_listeners`.
+  `schedule_frame`, else `request_animation_frame`), with nothing loading tells
+  the view (`mark_rendered`) and, when interactive, `paint_input_listeners`.
 - `fn paint_input_listeners(view, origin, hitbox, window, cx)` (private): sets
   the view's cursor on the hitbox; window-level mouse down (over the hitbox),
   move and up listeners converting to document coordinates; a capture-phase
   wheel listener that, with Ctrl/Cmd held over the hitbox, zooms one step
   per event instead of scrolling.
 - `struct HtmlView { document, cache, scroll, focus, cursor, hovered_link,
-  dragging, zoom, frame_timer }` (`EventEmitter<HtmlViewEvent>`,
+  dragging, zoom, frame_timer, rendered }` (`EventEmitter<HtmlViewEvent>`,
   `Focusable`); private `schedule_frame(delay, cx)` (one pending repaint
   for animated images or remote loads, the earliest wins; on firing,
-  arrived remote resources invalidate the cached paint);
+  arrived remote resources invalidate the cached paint); private
+  `mark_rendered(cx)` (emits `Rendered` the first time per document);
   `new(document, cx)`; `set_document` (applies the view's zoom; forgets the
-  paint cache's document images; resets scroll, drag, cursor, hovered link); `zoom()`; `set_zoom(zoom, cx)`
+  paint cache's document images; resets scroll, drag, cursor, hovered link and
+  `rendered`); `zoom()`; `set_zoom(zoom, cx)`
   (clamped; scales the scroll offset to keep the same content at the top,
   emits `ZoomChanged`); `zoom_by(steps, cx)`;
   `document()`; `scroll_handle()`; `has_selection()`; `copy_selection(cx)`;

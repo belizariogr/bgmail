@@ -501,7 +501,7 @@ window.
 
 - **`merge_attachments`** (private, L1212) — appends files while the total stays within `cap`; returns whether any was rejected.
 
-- **struct `QuotedOriginal`** / **`reply_html`** / **`reply_text`** / **`toggle_quote`** / **`build_quote_view`** / **`render_quote`** (private, `compose`): what a reply quotes, the HTML and plain-text versions sent, and the quote below the editor. `render_guard` marks the original while its formatted quote exists (**struct `QuoteGuard`**, cleared on drop); `None` when it already crashed the app, so the quote shows as text, as does what `try_parse` refuses.
+- **struct `QuotedOriginal`** / **`reply_html`** / **`reply_text`** / **`toggle_quote`** / **`build_quote_view`** / **`render_quote`** (private, `compose`): what a reply quotes, the HTML and plain-text versions sent, and the quote below the editor. `render_guard` marks the original while its formatted quote exists (**struct `QuoteGuard`**, cleared on drop; the quote view's `Rendered` takes the marker off the disk through `_quote_subscription`, as in the reader); `None` when it already crashed the app, so the quote shows as text, as does what `try_parse` refuses.
 - **struct `QuoteToggleColors`** / **`quote_toggle_colors`** (private, `compose`): colors of the `⋯` button, from the light theme over a white page.
 - **`default_mail_app`**: `status()` / `set_default()` (pub, per OS), enums `Status`, `Outcome`, `Error`; on Linux `status_with` / `set_default_with` / `status_from_query` / `application_dirs`.
 - **`instance`**: `mailto_argument` / `lock_profile` / `hand_over` / `listen`, `ProfileLock`, `ACTIVATE` (pub); `lock_at` (file lock at `instance.lock`; I/O failure = `Unavailable`, which starts anyway), `hand_over_through` (retries while the running process starts), `forward_through`, `serve`, `read_message`, `new_token`, `write_private`, `instance_file` (private): one process per profile; a later launch hands over its `mailto:` link, or `ACTIVATE` to show the window, and exits.
@@ -712,16 +712,21 @@ window.
 #### Types / constants
 
 - **struct `CrashGuard`** (pub, Clone): Path of the reader's render marker (`reader-render.guard` beside the mail database).
+- **static `SHOWING`** (private): the message each guard has showing, by marker path, kept in memory so the panic hook can write the marker back after it left the disk.
 
 #### Functions / methods
 
+- **`install_panic_hook()`** (pub): called first in `main`, on the thread that becomes GPUI's UI thread; a panic on that thread writes the showing messages' markers back (`write_showing_markers`), then runs the previous hook. Other threads' panics (sync, network) blame no message.
+- **`write_showing_markers(which)`** (private): writes the markers of the showing messages whose path passes `which`; `try_lock`, never blocking inside a panic; a poisoned lock is still read.
 - **`CrashGuard::beside(db_path)`**: Guard for that database.
 - **`CrashGuard::take_unfinished()`**: Message id left by a run that crashed while rendering it (marker cleared); `None` otherwise.
-- **`CrashGuard::begin(id)`**: Writes the marker before rendering formatted HTML (best effort).
+- **`CrashGuard::begin(id)`**: Before rendering formatted HTML: records `id` as showing, then writes the marker (best effort; memory first so a concurrent hook can't write the previous id back).
+- **`CrashGuard::rendered(id)`**: The render of `id` finished (`HtmlViewEvent::Rendered`): removes the marker from disk, so a kill or closed window later leaves nothing; `id` stays showing in memory. Nothing when the guard moved on to another message.
+- **`CrashGuard::showing()`** (pub): the message the guard has showing (on disk or, once rendered, in memory).
 - **`CrashGuard::beside_for_quotes(db_path)`**: Guard of reply quotes (`quote-render.guard`), which show beside the reader.
-- **`CrashGuard::finish_if(id)`**: `finish`, unless the marker is by now another message's.
-- **`CrashGuard::finish()`**: Removes the marker: the message stopped showing, or the app quit on its own. It stays while the message shows, since hover, selection and zoom run the renderer again.
-- Tests: unfinished renders reported once; finished renders leave no marker.
+- **`CrashGuard::finish_if(id)`**: `finish`, unless the guard now shows another message.
+- **`CrashGuard::finish()`**: Nothing of the guard's kind shows any more: clears memory, then the marker.
+- Tests: unfinished renders reported once; a finished render leaves the disk and comes back only through the panic hook while it shows; a late `rendered` of a previous message keeps the current marker; finished renders leave no marker.
 
 ### `src/print.rs`
 
@@ -1327,7 +1332,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`main`** (private, L181)
   - Signature: `fn main()`
   - Purpose: Application entry point.
-  - Behavior: Startup milestones, theme/locale init, window open with persisted bounds (main window `app_id` `root::MAIN_WINDOW_APP_ID` = Wayland app_id / X11 WM_CLASS, matching the packaged `BGMail.desktop`), Windows cloaked maximize sequence, persistence hooks and globals.
+  - Behavior: Startup milestones, `crash_guard::install_panic_hook`, theme/locale init, window open with persisted bounds (main window `app_id` `root::MAIN_WINDOW_APP_ID` = Wayland app_id / X11 WM_CLASS, matching the packaged `BGMail.desktop`), Windows cloaked maximize sequence, persistence hooks and globals.
 
 - **`command_palette_shortcut_matches_ctrl_p_and_cmd_p`** (private, L391)
   - Signature: `fn command_palette_shortcut_matches_ctrl_p_and_cmd_p()`
@@ -1622,7 +1627,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Behavior: Handles Escape, Up/Down (move selection), Enter (execute); returns whether event was consumed.
 
 - **`clear_render_guards`** (pub(crate)): On app quit and in `close_main_window`, removes the reader and quote markers: nothing rendering made the app crash.
-- **`set_reader_guard`** (private): Writes the marker for a message, or removes it if one exists (`reader_guarded`, so an empty reader costs no disk access per frame).
+- **`set_reader_guard`** (private): `begin`s the guard for a message, or `finish`es it if one is guarded (`reader_guarded: Option<i64>`, so an empty reader costs no disk access per frame).
 - **`persist_now`** (pub(crate), L953)
   - Signature: `pub(crate) fn persist_now(&self)`
   - Purpose: Immediate synchronous settings save.
@@ -1769,7 +1774,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`on_reader_event`** (private)
   - Signature: `fn on_reader_event(&mut self, view: Entity<HtmlView>, event: &HtmlViewEvent, cx)`
   - Purpose: Handles reader events.
-  - Behavior: `LinkHovered` → status bar `hovered_link`; `LinkActivated` → `cx.open_url` when `is_openable_link`; `ZoomChanged` → `reader_zoom` (status bar); `ContextMenu` → opens `ReaderMenu` (records whether text is selected).
+  - Behavior: `LinkHovered` → status bar `hovered_link`; `LinkActivated` → `cx.open_url` when `is_openable_link`; `ZoomChanged` → `reader_zoom` (status bar); `ContextMenu` → opens `ReaderMenu` (records whether text is selected); `Rendered` → `crash_guard.rendered(reader_guarded)`, ignored while another message builds (`reader_preparing`: the view still shows the previous one).
 
 - **`open_find_bar`** (pub(crate))
   - Signature: `pub(crate) fn open_find_bar(&mut self, window, cx)`
@@ -1783,7 +1788,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`sync_reader`** (private)
   - Signature: `fn sync_reader(&mut self, window: &mut Window, cx: &mut Context<Self>)`
   - Purpose: Keeps the reader document in sync with the selected message and theme.
-  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, picks plain text only after a crash (`mail_html::plain_text`), builds the sanitized themed document (`mail_html::email_document`, remote content per `remote_allowed_for`, with `Resources::allow_remote` to match), parses it with `HtmlDocument::try_parse` (falling back to plain text, `Unrenderable`, when too deep; dark appearance for dark pages, `reader_selection_color`), records the blocked image count (0 for plain text) and the notice, marks formatted HTML renders in the `CrashGuard` from before parsing until the next frame (`window.on_next_frame`), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
+  - Behavior: Without a selection clears the signature. Otherwise computes page colors (forced white page when `reader_white_background`), skips work when the `ReaderSignature` is unchanged, picks plain text only after a crash (`mail_html::plain_text`), builds the sanitized themed document (`mail_html::email_document`, remote content per `remote_allowed_for`, with `Resources::allow_remote` to match), parses it with `HtmlDocument::try_parse` (falling back to plain text, `Unrenderable`, when too deep; dark appearance for dark pages, `reader_selection_color`), records the blocked image count (0 for plain text) and the notice, marks formatted HTML renders in the `CrashGuard` from before parsing until the reader view reports `Rendered` (then only in memory while it shows, for the panic hook), closes the context menu, sets it on the reader `HtmlView` (created and subscribed with `on_reader_event` on first use) and re-runs an open find.
 
 - **`set_reader_white_background`** (private, L1658)
   - Signature: `fn set_reader_white_background(&mut self, value: bool, cx: &mut Context<Self>)`

@@ -248,6 +248,8 @@ fn register_command_palette_shortcuts(cx: &mut App) {
 fn main() {
     startup::mark_start();
     startup::log_milestone("main entered");
+    // On the thread that becomes the UI thread, where the reader renders.
+    crash_guard::install_panic_hook();
 
     // A later launch only hands over what it came for; this binding keeps the profile
     // for as long as the process runs.
