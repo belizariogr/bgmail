@@ -1,9 +1,10 @@
-# script/ — Linux install scripts
+# script/ — Install, packaging and asset scripts
 
 ## Purpose
 
-Install BGMail on Linux without a package manager, following Zed's `script/`.
-Packages (deb, AppImage, pacman, dmg, Windows) stay with cargo-packager.
+Install BGMail on Linux without a package manager, following Zed's `script/`;
+build the macOS installer DMG; regenerate icon rasters. Other packages (deb,
+AppImage, pacman, .app, Windows) stay with cargo-packager.
 
 ## Ownership
 
@@ -22,6 +23,33 @@ Packages (deb, AppImage, pacman, dmg, Windows) stay with cargo-packager.
 - `uninstall.sh`: removes the `~/.local` install.
 - `test-install`: exercises all of the above with a dummy binary, a temp `HOME`
   and a temp prefix.
+- `bundle-macos-dmg APP OUT.dmg`: installer image with BGDesk's window
+  (`crates/bgmail/packaging/macos/`: background art, White Drive volume icon,
+  app at (200,190), Applications at (600,190), hidden files at (2000,2000);
+  no `hide_extensions`, whose FinderInfo xattr breaks `codesign --strict`).
+  Layout via `dmgbuild` (`DMGBUILD` or PATH; pinned 1.6.7), command line only:
+  never Finder/AppleScript (fails on CI). With `APPLE_SIGNING_IDENTITY` (+
+  optional `APPLE_KEYCHAIN`) signs the image. With notarization credentials
+  (`APPLE_KEYCHAIN_PROFILE`, or `APPLE_ID`+`APPLE_PASSWORD`+`APPLE_TEAM_ID`, or
+  `APPLE_API_KEY`+`APPLE_API_ISSUER`+`APPLE_API_KEY_PATH`, first complete set
+  wins) it first notarizes (zip via `ditto`) and staples the signed `.app` in
+  place, then the image; each must be `Accepted` (else prints the log), and
+  `spctl` must accept each. Stapling: `xcrun stapler` exits 68 when it loses
+  `api.apple-cloudkit.com` (always on GitHub's macOS runners, as BGDesk found):
+  3 tries (IPv6 off after the first on CI, `sudo -n networksetup`), then the
+  same ticket via `rcodesign staple` (apple-codesign 0.22.0, downloaded and
+  SHA-256 checked); a 68 from `stapler validate` is then tolerated. Other
+  stapler codes fail at once. Writes the output only after every step passed.
+- `test-macos-dmg`: builds an unsigned DMG from a dummy app and checks its
+  contents, volume icon, HiDPI background, no FinderInfo/ResourceFork xattr on
+  the app, and `.DS_Store` layout (window 800x480, icon view, positions). Runs
+  in the CI macOS job.
+- `generate-macos-dmg-assets`: rasterizes `background.svg` (800x400 + @2x) and
+  `volume-icon.svg` (ICNS via `iconutil`; the app icon `BGMail.svg` is copied
+  beside it first, librsvg refuses parent paths). Needs `rsvg-convert`; only
+  run after editing the art, CI uses the committed rasters.
+- `generate-app-icons`: `assets/appIcon/BGMail.svg` → `BGMail-{16..1024}.png`,
+  `BGMail.ico`, `BGMail.icns` (`rsvg-convert` + `python3`).
 
 ## Local Contracts
 
@@ -37,3 +65,4 @@ Packages (deb, AppImage, pacman, dmg, Windows) stay with cargo-packager.
 ## Verification
 
 - `script/test-install` (no build, no network; runs in the CI Linux job).
+- `script/test-macos-dmg` (macOS, needs dmgbuild; runs in the CI macOS job).

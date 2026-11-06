@@ -75,9 +75,9 @@ release instead.
 | Linux x86_64 | `.deb`, `.AppImage`, pacman `.tar.gz` + `PKGBUILD` |
 | Windows x86_64 | NSIS `-setup.exe` (per-user, no admin) and WiX `.msi` |
 
-Builds are signed (and on macOS notarized) only once the signing secrets are
-configured; unsigned, macOS needs right-click ▸ Open the first time (Gatekeeper)
-and Windows SmartScreen asks for confirmation. On Linux, account passwords are stored through the Secret
+macOS builds are signed with a Developer ID certificate and notarized (the
+`.app` and the `.dmg`). Windows builds are signed only once a certificate is
+configured; unsigned, SmartScreen asks for confirmation. On Linux, account passwords are stored through the Secret
 Service, so a keyring (GNOME Keyring, KWallet ≥ 5.97, KeePassXC…) must be
 running.
 
@@ -102,7 +102,10 @@ cargo packager --release --formats deb       # just one format
 ```
 
 Packages are written to `target/release/` (or `target/<triple>/release/` with
-`--target`). Linux defaults are deb + AppImage + pacman, macOS app + dmg,
+`--target`). Linux defaults are deb + AppImage + pacman, macOS app + dmg (the
+release `.dmg`, with the installer window art, comes from
+`script/bundle-macos-dmg target/release/BGMail.app out.dmg`, which needs
+`pip install dmgbuild` and signs/notarizes when the `APPLE_*` variables are set),
 Windows NSIS (`--formats nsis,wix` for the MSI too). On rolling distros whose
 libraries use `.relr.dyn` (e.g. Arch), the AppImage step needs `NO_STRIP=1`
 (linuxdeploy's bundled `strip` is too old); release AppImages are built on
