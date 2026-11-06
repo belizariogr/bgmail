@@ -326,9 +326,19 @@ fn row_after_removal(list: &[i64], removed: &[i64]) -> Option<i64> {
         .copied()
 }
 
+/// What fills a list row's background.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowFill {
+    None,
+    /// Under the pointer, or the target of the open row menu.
+    Hover,
+    Selected,
+}
+
 /// How a list row joins its neighbours. A run of selected rows reads as one
-/// rounded block (as in macOS Mail): only its outer corners are rounded, and no
-/// separator touches the block's edge, so no line cuts into the rounding.
+/// rounded block (as in macOS Mail): only its outer corners are rounded. No
+/// separator touches a filled row, hovered or selected, so no line cuts into
+/// the rounding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RowEdges {
     round_top: bool,
@@ -343,14 +353,15 @@ enum RowSeparator {
     Selected,
 }
 
-fn row_edges(previous_selected: bool, selected: bool, next_selected: bool) -> RowEdges {
+fn row_edges(previous: RowFill, fill: RowFill, next: RowFill) -> RowEdges {
+    let selected = fill == RowFill::Selected;
     RowEdges {
-        // An unselected row keeps all its corners for the hover fill.
-        round_top: !selected || !previous_selected,
-        round_bottom: !selected || !next_selected,
-        separator: match (selected, next_selected) {
-            (false, false) => Some(RowSeparator::Plain),
-            (true, true) => Some(RowSeparator::Selected),
+        // Only a run of selected rows joins up; any other row keeps its corners.
+        round_top: !selected || previous != RowFill::Selected,
+        round_bottom: !selected || next != RowFill::Selected,
+        separator: match (fill, next) {
+            (RowFill::None, RowFill::None) => Some(RowSeparator::Plain),
+            (RowFill::Selected, RowFill::Selected) => Some(RowSeparator::Selected),
             _ => None,
         },
     }
@@ -1904,6 +1915,19 @@ impl RootView {
 
     fn row_is_selected(&self, id: i64) -> bool {
         self.selected_message_id == Some(id) || self.multi_selection.contains(&id)
+    }
+
+    /// The fill of a list row. The row menu's target keeps the hover fill while
+    /// the pointer is off on the menu, so it says which row the menu is for.
+    fn row_fill(&self, id: i64) -> RowFill {
+        let menu_target = self.row_menu.as_ref().is_some_and(|menu| menu.id == id);
+        if self.row_is_selected(id) {
+            RowFill::Selected
+        } else if self.hovered_row == Some(id) || menu_target {
+            RowFill::Hover
+        } else {
+            RowFill::None
+        }
     }
 
     fn list_ids(&self) -> Vec<i64> {
@@ -6395,17 +6419,17 @@ impl RootView {
                     let start = range.start.min(end);
                     let this = &*this;
                     let selection = this.selection_drag();
-                    let is_selected = |index: Option<usize>| {
+                    let fill = |index: Option<usize>| {
                         index
                             .and_then(|index| this.list_messages.get(index))
-                            .is_some_and(|message| this.row_is_selected(message.id))
+                            .map_or(RowFill::None, |message| this.row_fill(message.id))
                     };
                     (start..end)
                         .map(|index| {
                             let edges = row_edges(
-                                is_selected(index.checked_sub(1)),
-                                is_selected(Some(index)),
-                                is_selected(Some(index + 1)),
+                                fill(index.checked_sub(1)),
+                                fill(Some(index)),
+                                fill(Some(index + 1)),
                             );
                             this.render_message_row(
                                 &this.list_messages[index],
@@ -6552,10 +6576,7 @@ impl RootView {
         // The subject, on the line the action buttons sit on, gives way to them.
         // The sender/date line above and the preview below never move.
         let room_for_actions = row_actions_room(self.hovered_row == Some(message_id));
-        let menu_target = self
-            .row_menu
-            .as_ref()
-            .is_some_and(|menu| menu.id == message_id);
+        let hovered = self.row_fill(message_id) == RowFill::Hover;
         let row = h_flex()
             .id(("message", message_id as u64))
             .group(MESSAGE_ROW_GROUP)
@@ -6568,9 +6589,9 @@ impl RootView {
             .when(edges.round_top, |el| el.rounded_t_lg())
             .when(edges.round_bottom, |el| el.rounded_b_lg())
             .when(selected, |el| el.bg(bg_selected))
-            .when(!selected, |el| el.hover(move |el| el.bg(hover)))
-            // The pointer goes off to the menu: this says which row it is for.
-            .when(!selected && menu_target, |el| el.bg(hover))
+            // From the view's hover state rather than `.hover()`, so the fill
+            // and the neighbours' separators always agree.
+            .when(hovered, |el| el.bg(hover))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Right,
@@ -11861,21 +11882,46 @@ mod tests {
 
     #[test]
     fn a_run_of_selected_rows_is_rounded_only_at_its_ends() {
+        use RowFill::{None as Empty, Selected as Sel};
         use RowSeparator::{Plain, Selected};
-        let edges = |p, s, n| {
-            let e = row_edges(p, s, n);
+        let edges = |p, f, n| {
+            let e = row_edges(p, f, n);
             (e.round_top, e.round_bottom, e.separator)
         };
         // A lone selected row: a pill, no line under it.
-        assert_eq!(edges(false, true, false), (true, true, None));
-        // First, middle and last of a run: the lighter line inside, none at the end.
-        assert_eq!(edges(false, true, true), (true, false, Some(Selected)));
-        assert_eq!(edges(true, true, true), (false, false, Some(Selected)));
-        assert_eq!(edges(true, true, false), (false, true, None));
-        // Unselected rows stay rounded for hover; the one above a run drops its
-        // line so it doesn't touch the rounding.
-        assert_eq!(edges(false, false, false), (true, true, Some(Plain)));
-        assert_eq!(edges(true, false, true), (true, true, None));
+        assert_eq!(edges(Empty, Sel, Empty), (true, true, None));
+        // First, middle and last of a run: the selection's line inside, none at the end.
+        assert_eq!(edges(Empty, Sel, Sel), (true, false, Some(Selected)));
+        assert_eq!(edges(Sel, Sel, Sel), (false, false, Some(Selected)));
+        assert_eq!(edges(Sel, Sel, Empty), (false, true, None));
+        // Unselected rows stay rounded; the one above a run drops its line.
+        assert_eq!(edges(Empty, Empty, Empty), (true, true, Some(Plain)));
+        assert_eq!(edges(Sel, Empty, Sel), (true, true, None));
+    }
+
+    #[test]
+    fn a_hovered_row_drops_the_lines_around_it_like_a_selected_one() {
+        use RowFill::{Hover, None as Empty, Selected as Sel};
+        // The row above a hovered one loses its line, as above a selection.
+        assert_eq!(row_edges(Empty, Empty, Hover).separator, None);
+        // The hovered row has none under it and keeps every corner.
+        let hovered = row_edges(Sel, Hover, Sel);
+        assert_eq!((hovered.round_top, hovered.round_bottom), (true, true));
+        assert_eq!(hovered.separator, None);
+        // A selected row next to a hovered one ends its run there.
+        assert!(row_edges(Empty, Sel, Hover).round_bottom);
+        assert_eq!(row_edges(Empty, Sel, Hover).separator, None);
+    }
+
+    #[test]
+    fn row_fill_prefers_selection_then_hover_then_the_menu_target() {
+        let (_dir, mut view) = test_view();
+        view.selected_message_id = Some(1);
+        view.hovered_row = Some(1);
+        assert_eq!(view.row_fill(1), RowFill::Selected);
+        view.hovered_row = Some(2);
+        assert_eq!(view.row_fill(2), RowFill::Hover);
+        assert_eq!(view.row_fill(3), RowFill::None);
     }
 
     /// A view with row `index` of its list as the only selected message.

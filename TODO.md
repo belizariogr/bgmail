@@ -788,7 +788,8 @@
       is read from the folder list: the `imap` crate can't parse a `NAMESPACE` answer)
 - ✅ List selection as in macOS Mail: rows inset and rounded; consecutive selected rows
       form one block rounded only at its ends (`row_edges`); separators span only the
-      text, inside a selection translucent white (as macOS Mail)
+      text, inside a selection translucent white (as macOS Mail); hover drops the
+      line of the row above, as a selection does
 - ⬜ Search recipients too (To/Cc aren't in `search_text`; needs a reindex), as Thunderbird
       and Gmail do
 - ⬜ Keyboard navigation in `ui::ContextMenu` (up/down/enter, as in Zed): every menu
