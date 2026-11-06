@@ -371,8 +371,10 @@ fn row_edges(previous: RowFill, fill: RowFill, next: RowFill) -> RowEdges {
 /// macOS Mail (`px_3` padding + dot + `gap_2`). It ends at the text's right edge.
 const ROW_SEPARATOR_INSET: f32 = 12.0 + 8.0 + 8.0;
 const ROW_SEPARATOR_END: f32 = 12.0;
-/// Space above the first and below the last row of the message list.
-const MESSAGE_LIST_PADDING_Y: f32 = 8.0;
+/// Gap above the first and below the last row of the message list: the rows'
+/// side inset (`px_2`). `uniform_list` applies its padding twice (it shrinks the
+/// viewport by it and shifts the rows by it again), so it gets half of this.
+const MESSAGE_LIST_INSET_Y: f32 = 8.0;
 
 /// Width the subject of a list row gives up for its action buttons, while hovered.
 fn row_actions_room(hovered: bool) -> Pixels {
@@ -6444,7 +6446,7 @@ impl RootView {
             .size_full()
             // Inside the scroll area, matching the rows' side inset, so the first
             // and last rows (and their rounded selection) clear the column edges.
-            .py(px(MESSAGE_LIST_PADDING_Y))
+            .py(px(MESSAGE_LIST_INSET_Y / 2.0))
             .track_scroll(self.list_scroll.clone())
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                 Self::note_scroll([this.list_scrollbar.clone()], cx);
@@ -7368,11 +7370,12 @@ impl RootView {
         if !bounds.contains(&position) || self.list_messages.is_empty() {
             return None;
         }
-        // The list's padding is part of its contents, above and below the rows.
-        let padding = px(MESSAGE_LIST_PADDING_Y);
+        // The contents hold half the inset above and below the rows; the rows
+        // start a whole inset down (see `MESSAGE_LIST_INSET_Y`).
+        let inset = px(MESSAGE_LIST_INSET_Y);
         let contents = scroll.last_item_size?.contents.height;
-        let row_height = (contents - padding * 2.0) / self.list_messages.len() as f32;
-        let y = position.y - bounds.top() - scroll.base_handle.offset().y - padding;
+        let row_height = (contents - inset) / self.list_messages.len() as f32;
+        let y = position.y - bounds.top() - scroll.base_handle.offset().y - inset;
         let row = (y / row_height).floor();
         if row < 0.0 {
             return None;
@@ -11160,11 +11163,11 @@ mod tests {
             let scroll = view.list_scroll.0.borrow();
             let bounds = scroll.base_handle.bounds();
             let x = bounds.left() + px(10.0);
-            let padding = px(MESSAGE_LIST_PADDING_Y);
+            let inset = px(MESSAGE_LIST_INSET_Y);
             let contents = scroll.last_item_size.expect("laid out").contents.height;
-            let row = (contents - padding * 2.0) / view.list_messages.len() as f32;
-            let first = point(x, bounds.top() + padding + px(1.0));
-            let second = point(x, bounds.top() + padding + row + px(1.0));
+            let row = (contents - inset) / view.list_messages.len() as f32;
+            let first = point(x, bounds.top() + inset + px(1.0));
+            let second = point(x, bounds.top() + inset + row + px(1.0));
             scroll.base_handle.set_offset(point(px(0.0), px(0.0)));
             drop(scroll);
             // The padding above the first row is no row.
@@ -11213,7 +11216,7 @@ mod tests {
         let row_height = view.read_with(cx, |view, _| {
             let sizes = view.list_scroll.0.borrow().last_item_size;
             let contents = sizes.expect("the list was laid out").contents.height;
-            (contents - px(2.0 * MESSAGE_LIST_PADDING_Y)) / view.list_messages.len() as f32
+            (contents - px(MESSAGE_LIST_INSET_Y)) / view.list_messages.len() as f32
         });
         let position = view.update(cx, |view, _| {
             // To the left of the menu, which opened under the first click.
