@@ -45,7 +45,7 @@ _19 functions/methods documented._
 #### Types / constants
 
 - **enum `Appearance`**: Light or dark theme mode; used to pick a built-in palette and to toggle appearance at runtime.
-- **struct `ThemeColors`**: Flat set of semantic `Hsla` color roles (background, borders, text, icons, accent, chrome, scrollbar, status). Field names mirror Zed conventions for component portability.
+- **struct `ThemeColors`**: Flat set of semantic `Hsla` color roles (background, borders, text, icons, accent, chrome, scrollbar, status). `border_selected` is the divider between selected list rows: `element_selected` a step lighter, in macOS Mail's proportion. Field names mirror Zed conventions for component portability.
 - **struct `Theme`**: Named built-in theme: static `name`, `appearance`, and embedded `ThemeColors`.
 - **struct `GlobalTheme`**: GPUI global wrapper around `Arc<Theme>`; registered on `App` via `init` / `set_theme`.
 - **trait `ActiveTheme`**: Read-only access to the active `Arc<Theme>` from any `App` context.
@@ -154,6 +154,7 @@ _19 functions/methods documented._
   - Purpose: Guards against accidental palette collapse between modes.
   - Behavior: Asserts dark and light `background` colors differ. Panics on failure.
 
+- **`selected_divider_is_a_step_lighter_than_the_selection`** (private): `border_selected` is 0.03–0.15 lighter than `element_selected` in both built-in themes.
 - **`hex_conversion_is_stable`** (private, L328)
   - Signature: `fn hex_conversion_is_stable()`
   - Purpose: Sanity-checks hex-to-HSLA lightness mapping.

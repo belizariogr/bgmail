@@ -371,8 +371,6 @@ fn row_edges(previous: RowFill, fill: RowFill, next: RowFill) -> RowEdges {
 /// macOS Mail (`px_3` padding + dot + `gap_2`). It ends at the text's right edge.
 const ROW_SEPARATOR_INSET: f32 = 12.0 + 8.0 + 8.0;
 const ROW_SEPARATOR_END: f32 = 12.0;
-/// Opacity of the white line between selected rows, sampled from macOS Mail.
-const SELECTED_SEPARATOR_OPACITY: f32 = 0.2;
 
 /// Width the subject of a list row gives up for its action buttons, while hovered.
 fn row_actions_room(hovered: bool) -> Pixels {
@@ -6524,9 +6522,7 @@ impl RootView {
         let hover = colors.element_hover;
         let separator = edges.separator.map(|kind| match kind {
             RowSeparator::Plain => colors.border_variant,
-            // Translucent white, as macOS Mail draws it: a shade lighter than the
-            // selection fill, never a line of its own color.
-            RowSeparator::Selected => colors.text_on_accent.opacity(SELECTED_SEPARATOR_OPACITY),
+            RowSeparator::Selected => colors.border_selected,
         });
         let accent = colors.accent;
 

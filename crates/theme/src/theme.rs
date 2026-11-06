@@ -94,6 +94,9 @@ pub struct ThemeColors {
     pub element_active: Hsla,
     /// Background of a selected element (e.g. active list item).
     pub element_selected: Hsla,
+    /// Divider between selected rows: `element_selected` a step lighter, in the
+    /// proportion macOS Mail draws its line on its selection.
+    pub border_selected: Hsla,
 
     /// Default text color.
     pub text: Hsla,
@@ -180,6 +183,7 @@ impl Theme {
                 element_hover: hex(0x2a2d2e),
                 element_active: hex(0x37373d),
                 element_selected: hex(0x04395e),
+                border_selected: hex(0x054d7f),
 
                 text: hex(0xcccccc),
                 text_muted: hex(0x9d9d9d),
@@ -226,6 +230,7 @@ impl Theme {
                 element_hover: hex(0xf0f0f0),
                 element_active: hex(0xe4e6f1),
                 element_selected: hex(0xcfe3fa),
+                border_selected: hex(0xe9f2fd),
 
                 text: hex(0x3b3b3b),
                 text_muted: hex(0x767676),
@@ -333,6 +338,15 @@ mod tests {
             Theme::dark().colors().background,
             Theme::light().colors().background
         );
+    }
+
+    #[test]
+    fn selected_divider_is_a_step_lighter_than_the_selection() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let colors = theme.colors();
+            let step = colors.border_selected.l - colors.element_selected.l;
+            assert!((0.03..0.15).contains(&step), "{}: {step}", theme.name);
+        }
     }
 
     #[test]
