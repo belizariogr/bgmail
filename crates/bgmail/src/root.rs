@@ -353,15 +353,17 @@ enum RowSeparator {
     Selected,
 }
 
-fn row_edges(previous: RowFill, fill: RowFill, next: RowFill) -> RowEdges {
+/// `next` is `None` under the last row, which never has a separator: nothing
+/// follows it for the line to divide from.
+fn row_edges(previous: RowFill, fill: RowFill, next: Option<RowFill>) -> RowEdges {
     let selected = fill == RowFill::Selected;
     RowEdges {
         // Only a run of selected rows joins up; any other row keeps its corners.
         round_top: !selected || previous != RowFill::Selected,
-        round_bottom: !selected || next != RowFill::Selected,
+        round_bottom: !selected || next != Some(RowFill::Selected),
         separator: match (fill, next) {
-            (RowFill::None, RowFill::None) => Some(RowSeparator::Plain),
-            (RowFill::Selected, RowFill::Selected) => Some(RowSeparator::Selected),
+            (RowFill::None, Some(RowFill::None)) => Some(RowSeparator::Plain),
+            (RowFill::Selected, Some(RowFill::Selected)) => Some(RowSeparator::Selected),
             _ => None,
         },
     }
@@ -6421,17 +6423,18 @@ impl RootView {
                     let start = range.start.min(end);
                     let this = &*this;
                     let selection = this.selection_drag();
-                    let fill = |index: Option<usize>| {
-                        index
-                            .and_then(|index| this.list_messages.get(index))
-                            .map_or(RowFill::None, |message| this.row_fill(message.id))
+                    let fill = |index: usize| {
+                        this.list_messages
+                            .get(index)
+                            .map(|message| this.row_fill(message.id))
                     };
                     (start..end)
                         .map(|index| {
+                            let previous = index.checked_sub(1).and_then(fill);
                             let edges = row_edges(
-                                fill(index.checked_sub(1)),
-                                fill(Some(index)),
-                                fill(Some(index + 1)),
+                                previous.unwrap_or(RowFill::None),
+                                fill(index).unwrap_or(RowFill::None),
+                                fill(index + 1),
                             );
                             this.render_message_row(
                                 &this.list_messages[index],
@@ -11894,7 +11897,7 @@ mod tests {
         use RowFill::{None as Empty, Selected as Sel};
         use RowSeparator::{Plain, Selected};
         let edges = |p, f, n| {
-            let e = row_edges(p, f, n);
+            let e = row_edges(p, f, Some(n));
             (e.round_top, e.round_bottom, e.separator)
         };
         // A lone selected row: a pill, no line under it.
@@ -11909,17 +11912,26 @@ mod tests {
     }
 
     #[test]
+    fn the_last_row_never_has_a_separator() {
+        use RowFill::{None as Empty, Selected as Sel};
+        assert_eq!(row_edges(Empty, Empty, None).separator, None);
+        let last_selected = row_edges(Sel, Sel, None);
+        assert_eq!(last_selected.separator, None);
+        assert!(last_selected.round_bottom);
+    }
+
+    #[test]
     fn a_hovered_row_drops_the_lines_around_it_like_a_selected_one() {
         use RowFill::{Hover, None as Empty, Selected as Sel};
         // The row above a hovered one loses its line, as above a selection.
-        assert_eq!(row_edges(Empty, Empty, Hover).separator, None);
+        assert_eq!(row_edges(Empty, Empty, Some(Hover)).separator, None);
         // The hovered row has none under it and keeps every corner.
-        let hovered = row_edges(Sel, Hover, Sel);
+        let hovered = row_edges(Sel, Hover, Some(Sel));
         assert_eq!((hovered.round_top, hovered.round_bottom), (true, true));
         assert_eq!(hovered.separator, None);
         // A selected row next to a hovered one ends its run there.
-        assert!(row_edges(Empty, Sel, Hover).round_bottom);
-        assert_eq!(row_edges(Empty, Sel, Hover).separator, None);
+        assert!(row_edges(Empty, Sel, Some(Hover)).round_bottom);
+        assert_eq!(row_edges(Empty, Sel, Some(Hover)).separator, None);
     }
 
     #[test]

@@ -789,7 +789,8 @@
 - ✅ List selection as in macOS Mail: rows inset and rounded; consecutive selected rows
       form one block rounded only at its ends (`row_edges`); separators span only the
       text, inside a selection a step lighter than it (`ThemeColors::border_selected`); hover drops the
-      line of the row above, as a selection does; 8 px padding above and below the rows
+      line of the row above, as a selection does; 8 px gap above and below the rows; no
+      separator under the last row
 - ⬜ Search recipients too (To/Cc aren't in `search_text`; needs a reindex), as Thunderbird
       and Gmail do
 - ⬜ Keyboard navigation in `ui::ContextMenu` (up/down/enter, as in Zed): every menu
