@@ -33,6 +33,10 @@ hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$mount" "$work/out/B
 fail() { echo "FAIL: $*" >&2; exit 1; }
 [ -x "$mount/BGMail.app/Contents/MacOS/BGMail" ] || fail "BGMail.app missing"
 [ "$(readlink "$mount/Applications")" = /Applications ] || fail "Applications link missing"
+# FinderInfo/resource fork on the bundle break `codesign --verify --strict`.
+if xattr "$mount/BGMail.app" | grep -qE '^com\.apple\.(FinderInfo|ResourceFork)$'; then
+  fail "BGMail.app carries a FinderInfo/ResourceFork xattr"
+fi
 cmp -s "$mount/.VolumeIcon.icns" "$root/crates/bgmail/packaging/macos/volume-icon.icns" \
   || fail "volume icon differs from the committed one"
 [ -f "$mount/.background.tiff" ] || fail "background missing"

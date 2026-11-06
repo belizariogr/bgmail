@@ -15,7 +15,8 @@ filesystem = "HFS+"
 
 files = [_app]
 symlinks = {"Applications": "/Applications"}
-hide_extensions = [_app_name]
+# No hide_extensions: SetFile would put a FinderInfo xattr on the signed
+# bundle, which `codesign --strict` rejects. Finder hides ".app" anyway.
 
 icon = os.path.join(_here, "volume-icon.icns")
 # background@2x.png next to it is merged into a HiDPI TIFF by dmgbuild.

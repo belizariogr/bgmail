@@ -268,10 +268,10 @@ jobs:
         env:
           BGMAIL_GOOGLE_CLIENT_ID: ${{ github.event_name != 'pull_request' && secrets.BGMAIL_GOOGLE_CLIENT_ID || '' }}
           BGMAIL_GOOGLE_CLIENT_SECRET: ${{ github.event_name != 'pull_request' && secrets.BGMAIL_GOOGLE_CLIENT_SECRET || '' }}
-          # macOS: cargo-packager signs the .app with the imported identity,
-          # then notarizes and staples it when the notarization vars exist
-          # (Apple ID + app-specific password + team, or an App Store Connect
-          # API key); script/bundle-macos-dmg does the same for the .dmg.
+          # macOS: cargo-packager only signs the .app with the imported
+          # identity; script/bundle-macos-dmg notarizes and staples the .app and
+          # then the .dmg when the notarization vars exist (Apple ID +
+          # app-specific password + team, or an App Store Connect API key).
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '' }}
           APPLE_ID: ${{ runner.os == 'macOS' && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
@@ -300,7 +300,12 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then attempts=3; fi
           packaged=false
           for attempt in $(seq 1 "$attempts"); do
-            if cargo packager "${args[@]}"; then packaged=true; break; fi
+            # Not the packager's notarization: its single stapler call fails on
+            # runners (CloudKit, error 68), which the DMG script works around.
+            if env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID -u APPLE_API_KEY \
+                   -u APPLE_API_ISSUER -u APPLE_API_KEY_PATH cargo packager "${args[@]}"; then
+              packaged=true; break
+            fi
             echo "Packaging failed (attempt $attempt of $attempts)"
             if [ "$attempt" -lt "$attempts" ]; then sleep 30; fi
           done

@@ -85,8 +85,11 @@ Continuous integration on the three desktop platforms and release packaging
       (app-specific password) + `APPLE_TEAM_ID` (wins when both are set), or an
       App Store Connect API key: `APPLE_API_KEY` (key id), `APPLE_API_ISSUER`,
       `APPLE_API_PRIVATE_KEY` (the .p8 text, written to `$RUNNER_TEMP` for the
-      step only). cargo-packager notarizes and staples the `.app`;
-      `script/bundle-macos-dmg` signs, notarizes and staples the `.dmg`.
+      step only). cargo-packager only signs the `.app` (the notarization vars
+      are unset for it: its single stapler call fails on runners, CloudKit
+      error 68); `script/bundle-macos-dmg` notarizes and staples the `.app`,
+      then signs, notarizes and staples the `.dmg`, with BGDesk's
+      IPv6-off/rcodesign fallback for stapling.
       Signed without credentials: warning, not failure.
     - Windows Authenticode: `WINDOWS_CERTIFICATE` (base64 .pfx),
       `WINDOWS_CERTIFICATE_PASSWORD`; imported into the runner's user store and
