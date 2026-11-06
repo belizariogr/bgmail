@@ -1266,22 +1266,25 @@ Bridge between the UI and `mail_sync::Engine` (plain Rust; the event loop lives 
 
 ### `src/notifications.rs`
 
-Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT behind one API), always shown off the UI thread.
-- **struct `Notice { summary, body }`**.
-- **`notices_for(account, messages, language)`** (pub): one notice per message (sender or account name; subject or "(no subject)"/"(sem assunto)") up to 3; a burst becomes one "N new messages" summary.
-- **`notify_new_mail(account, messages, language)`** (pub): spawns a short-lived thread showing the notices (errors logged).
+Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT behind one API), always shown off the UI thread; clicks come back through a channel.
+- **type `NoticeClicks`** (pub): `async_channel::Sender<Option<i64>>` — the message a clicked notification was about, `None` for a summary.
+- **struct `Notice { summary, body, message_id }`**: `message_id` is what a click opens (`None` for a summary).
+- **`notices_for(account, messages, language)`** (pub): one notice per message (sender or account name; subject or "(no subject)"/"(sem assunto)"; its id) up to 3; a burst becomes one "N new messages" summary with no message.
+- **`notify_new_mail(account, messages, language, clicks)`** (pub): one thread per notice, each running `show`.
+- **`opens(response)`** (private): only the default action (a click on the body) opens; buttons, replies and closes don't.
 - **const `WINDOW_APP_ID`** = `io.github.belizariogr.bgmail` (packager `identifier`; the NSIS shortcut's AppUserModelID).
 - **`shortcut_candidates(programs_dirs)`** (private): `BGMail.lnk` and `BGMail\BGMail.lnk` under each Start Menu `Programs` folder.
 - **`windows_app_id()`** (private, Windows only): `Some(WINDOW_APP_ID)` when an installer shortcut exists under `%APPDATA%` / `%PROGRAMDATA%` Start Menu, else `None` (unpackaged runs keep notify-rust's PowerShell id: Windows drops toasts from an unregistered id).
 - **`linux_icon(exe)`** (private): `file://` URI of `<exe prefix>/share/icons/hicolor/128x128/apps/bgmail.png` when it exists (bundles outside the icon theme path), else the theme name `bgmail`.
-- **`show(notice)`** (private): `notify_rust::Notification` with app name "BGMail"; on Windows also `.app_id(windows_app_id())` when registered; on Linux/BSD also `.icon(linux_icon(current_exe))` and the `desktop-entry` hint `BGMail`.
-- Tests: empty, per-message notices with fallbacks, burst summary, shortcut candidates + app id value, icon lookup.
+- **`show(notice, open_label, clicks)`** (private): `notify_rust::Notification` with app name "BGMail"; on Windows also `.app_id(windows_app_id())` when registered; on Linux/BSD also `.icon(linux_icon(current_exe))`, the `desktop-entry` hint `BGMail` and, with `clicks`, a `"default"` action labelled `Key::NotificationOpen` (freedesktop servers report a body click only then; on Windows/macOS actions would be buttons). With `clicks` it then blocks in `wait_for_response` until the notice is clicked or closed and sends a click's `message_id` (errors logged).
+- Tests: empty, per-message notices with fallbacks and ids, burst summary, only a body click opens, shortcut candidates + app id value, icon lookup.
 
 ### `src/main.rs`
 
 #### Types / constants
 
 - **struct `MainWindow`**: GPUI global holding the `WindowHandle<RootView>` for routing app-wide shortcuts and deferred menu actions.
+- **struct `NotificationClicks`**: GPUI global holding the `notifications::NoticeClicks` sender; `main` reads its receiver and, per click, activates the main window and calls `RootView::open_from_notification`.
 - **struct `CommandPaletteShortcut`**: GPUI global keeping the keystroke interceptor subscription alive for the app lifetime.
 
 #### Functions / methods
@@ -1583,6 +1586,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`remote_allowed_for`** (private): Whether a message loads remote content: `load_remote_images` or loaded from the shield this session (`remote_allowed`).
 - **`load_remote_for_selected`** (private): Shield click: adds the selected message to `remote_allowed` (re-renders through the `ReaderSignature`).
 - **`set_load_remote_images`** (private): "Always load remote images" (Settings ▸ Privacy): persists and refreshes windows.
+- **`open_from_notification(message_id, cx)`** (pub(crate)): what a clicked notification opens (nothing during onboarding): the unified Inbox (search ended, via `select_mailbox` unless already there), then the message if given and listed — not listed, the list reloads once with `ListFilter::All`; still missing, only the Inbox shows. Already the open message: not reloaded (no reader flash). Revealed in the list.
 - **`set_notifications_enabled`** (pub(crate)): Settings ▸ Notifications switch: sets `notifications_enabled`, persists via `request_save`, notifies.
 
 - **`print_message`** (pub(crate))
@@ -2269,7 +2273,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`start_mail(cx)`** (pub(crate)): creates `MailService` once (engine on `db_path`), spawns the task awaiting `SyncEvent`s into `on_sync_event`, and starts every remote account. Called from `main` after the window exists (never blocks the first frame).
 - **`start_account(account, cx)`** (private): skips `local` accounts; reads the secret with `cx.read_credentials(config.secret_key())` asynchronously, then `start_account_with_secret`.
 - **`start_account_with_secret(id, config_json, secret, cx)`** (private): returns when the id is no longer in `accounts` (removed while its keychain read was pending; a new worker would outlive it); builds the connector (`mail_service::connector_for`) and runs `MailService::start_account`'s job on `cx.background_spawn` (replacing a worker waits for the old one), or records a `StartError` (status bar / settings show it).
-- **`on_sync_event(event, cx)`** (private): `Status` → service status (ignored for accounts being removed); `Sent`/`SendFailed` also `refresh_unsent`; `SentCopyFailed` → `StatusSentCopyFailed` note; `MailboxChanged`/`FoldersChanged`/`BodyReady`/`Sent` → `schedule_reload` (BodyReady also re-renders the open message); `NewMail` → desktop notifications when `notifications_enabled`; `BodyFailed`/`Sent`/`SendFailed` → status notes.
+- **`on_sync_event(event, cx)`** (private): `Status` → service status (ignored for accounts being removed); `Sent`/`SendFailed` also `refresh_unsent`; `SentCopyFailed` → `StatusSentCopyFailed` note; `MailboxChanged`/`FoldersChanged`/`BodyReady`/`Sent` → `schedule_reload` (BodyReady also re-renders the open message); `NewMail` → desktop notifications when `notifications_enabled`, their clicks to the `NotificationClicks` global; `BodyFailed`/`Sent`/`SendFailed` → status notes.
 - **`set_status_note(note, cx)`** (private): shows a note in the status bar for 6 s (token-guarded timer).
 - **`schedule_reload(cx)`** (private): coalesces event bursts into one `reload_from_database` 250 ms later.
 - **`reload_from_database()`** (pub(crate)): re-reads accounts (minus `removing_accounts`), folders, the current list (also minus removing accounts, in `reload_message_list`) and the unsent rows (`refresh_unsent`).

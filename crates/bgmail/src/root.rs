@@ -2642,7 +2642,15 @@ impl RootView {
                         .find(|account| account.id == account_id)
                         .map(|account| account.name.clone())
                         .unwrap_or_default();
-                    crate::notifications::notify_new_mail(&account, &messages, cx.language());
+                    let clicks = cx
+                        .try_global::<crate::NotificationClicks>()
+                        .map(|clicks| clicks.0.clone());
+                    crate::notifications::notify_new_mail(
+                        &account,
+                        &messages,
+                        cx.language(),
+                        clicks,
+                    );
                 }
                 self.schedule_reload(cx);
             }
@@ -2849,6 +2857,44 @@ impl RootView {
             }
         })
         .detach();
+    }
+
+    /// Opens what a clicked new-mail notification was about: the unified Inbox (new
+    /// mail always lands in an Inbox), at that message. A summary of several, or a
+    /// message no longer there, just shows the Inbox.
+    pub(crate) fn open_from_notification(
+        &mut self,
+        message_id: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.onboarding_active() {
+            return;
+        }
+        let inbox = Selection::Global(GlobalMailbox::Inbox);
+        if self.search_is_active(cx) || self.selected_mailbox != inbox {
+            self.select_mailbox(inbox, cx);
+        }
+        let Some(id) = message_id else {
+            return;
+        };
+        let listed = |view: &Self| view.list_messages.iter().any(|m| m.id == id);
+        if !listed(self) {
+            // It may have come after the last reload, or be hidden by a filter.
+            self.list_filter = ListFilter::All;
+            self.reload_message_list();
+            cx.notify();
+        }
+        if !listed(self) {
+            return;
+        }
+        self.selection_anchor = Some(id);
+        self.selection_focus = Some(id);
+        // Already open: reloading would only make the reader flash.
+        if self.selected_message_id != Some(id) {
+            self.select_only(id);
+            self.on_message_selection_changed(cx);
+        }
+        self.reveal_selected_message();
     }
 
     /// Asks every account to sync now ("Get mail").
@@ -11208,6 +11254,43 @@ mod tests {
         cx.simulate_mouse_up(reader, MouseButton::Right, Default::default());
         cx.run_until_parked();
         view.read_with(cx, |view, _| assert!(view.row_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_notification_click_opens_its_message_in_the_unified_inbox(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _) = bulk_view(&dir, cx);
+        view.update(cx, |view, cx| {
+            let inbox = Selection::Global(GlobalMailbox::Inbox);
+            assert_eq!(view.selected_mailbox, inbox);
+            let target = view.list_messages.last().expect("inbox mail").id;
+            // Somewhere else, under a filter that may hide it.
+            let (folder, _) = a_folder_with_mail(view);
+            switch_mailbox(view, folder);
+            view.list_filter = ListFilter::Starred;
+            view.open_from_notification(Some(target), cx);
+            assert_eq!(view.selected_mailbox, inbox);
+            assert_eq!(view.selected_message_id, Some(target));
+            assert!(view.multi_selection.is_empty());
+            assert!(view.list_messages.iter().any(|m| m.id == target));
+            // A summary, or a message no longer there, shows the Inbox as it is.
+            view.open_from_notification(None, cx);
+            assert_eq!(view.selected_message_id, Some(target));
+            view.open_from_notification(Some(-1), cx);
+            assert_eq!(view.selected_message_id, Some(target));
+        });
+    }
+
+    #[gpui::test]
+    fn a_notification_click_on_the_open_message_does_not_reload_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = view_with_row_selected(&dir, Some(0), cx);
+        view.update(cx, |view, cx| {
+            view.selected_detail.as_mut().expect("open").subject = "not reloaded".into();
+            view.open_from_notification(Some(ids[0]), cx);
+            let detail = view.selected_detail.as_ref().expect("still open");
+            assert_eq!(detail.subject, "not reloaded");
+        });
     }
 
     #[gpui::test]

@@ -60,6 +60,11 @@ pub(crate) struct MainWindow(WindowHandle<RootView>);
 
 impl Global for MainWindow {}
 
+/// Where notifications send their clicks (see [`notifications::NoticeClicks`]).
+pub(crate) struct NotificationClicks(pub notifications::NoticeClicks);
+
+impl Global for NotificationClicks {}
+
 /// Keeps the command-palette key interceptor subscribed for the app lifetime.
 struct CommandPaletteShortcut {
     _subscription: Subscription,
@@ -266,6 +271,7 @@ fn main() {
         lock => lock,
     };
     let (links, incoming_links) = async_channel::unbounded::<String>();
+    let (notice_clicks, incoming_notice_clicks) = async_channel::unbounded::<Option<i64>>();
     if let Some(link) = launch_link {
         links.send_blocking(link).ok();
     }
@@ -480,6 +486,7 @@ fn main() {
             )
             .expect("failed to open the main window");
         cx.set_global(MainWindow(main_window));
+        cx.set_global(NotificationClicks(notice_clicks));
         register_command_palette_shortcuts(cx);
         register_global_menu_actions(cx);
 
@@ -498,6 +505,19 @@ fn main() {
                         } else {
                             view.open_mailto(&link, window, cx);
                         }
+                    })
+                    .ok();
+            }
+        })
+        .detach();
+        // A click on a new-mail notification brings the window up at that message.
+        cx.spawn(async move |cx| {
+            while let Ok(message_id) = incoming_notice_clicks.recv().await {
+                main_window
+                    .update(cx, |view, window, cx| {
+                        window.activate_window();
+                        cx.activate(true);
+                        view.open_from_notification(message_id, cx);
                     })
                     .ok();
             }

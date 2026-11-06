@@ -200,8 +200,11 @@ wiring to `storage`.
   - `instance` — one process per profile: lock file, and hand-off of links or
     "show the window" from later launches.
   - `dates` — local-time list/reader dates (chrono `clock`).
-  - `notifications` — desktop notifications (`notify-rust`) on a short-lived
-    thread; bursts summarized.
+  - `notifications` — desktop notifications (`notify-rust`), one thread each
+    waiting for its click; bursts summarized. A click (user decision) brings
+    the main window up in the unified Inbox at that message
+    (`RootView::open_from_notification`). It needs the app running: a
+    notification outlives the process only as a dead one, as in Thunderbird.
 - Mail data flow: real profiles start empty (welcome screen → Settings ▸
   Accounts); sample mail is seeded only with `BGMAIL_DEMO`/`BGMAIL_SAMPLE_DIR`.
   Message actions call `mail_sync::actions` (local change + queued server
