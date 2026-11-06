@@ -9,7 +9,7 @@ an e-mail client, without Zed-scale bloat.
 
 ## Ownership
 
-- Owns: visual primitives (`Label`, `Icon`, `Button`, `IconButton`, `ListItem`,
+- Owns: visual primitives (`Avatar`, `Label`, `Icon`, `Button`, `IconButton`, `ListItem`,
   `ContextMenu`, `Scrollbar`, `Switch`, `TextInput`, `TextArea`, `Tooltip`),
   `Color`, layout helpers
   (`h_flex` / `v_flex`), embedded SVG `Assets` / `IconName`.
@@ -27,6 +27,9 @@ an e-mail client, without Zed-scale bloat.
 - New icons: add SVG to `assets/icons/`, wire `IconName` + embed in `Assets`,
   keep square viewBox footprint.
 - Prefer reusing existing components over one-off markup in `bgmail`.
+- Colored SVG pictures (avatar logos) are drawn by `rasterize_svg` at their exact
+  device size with the `resvg` GPUI already depends on (same version), never through
+  `gpui::Image`'s SVG path, which swaps red and blue and lets the GPU scale them.
 - Windows-only deps for text input stay behind `cfg`; do not leak OS details
   into public component APIs.
 - Text components: `ui::bind_keys(cx)` (once at startup) registers both

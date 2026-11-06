@@ -54,6 +54,10 @@ repository instead of living in someone's checkout.
   menu position, client inset) is multiplied again. `Window::content_scale`,
   `Window::platform_viewport_size` expose it. `window_bounds`/`bounds` stay in
   platform coordinates.
+  `text_system.rs`: `TextSystem::glyph_ink_bounds(font_id, char, font_size, scale_factor)` (public)
+  returns a glyph and the bounds of its pixels from the pen position, through the crate-private
+  `raster_bounds`, so `ui::Avatar` can center a letter by its ink (Linux's `typographic_bounds` is
+  a stub returning the advance).
   `platform/test/window.rs`: `TestWindow`'s window handle is an error instead of a
   panic, which took down any test reaching native code on Windows
   (`set_native_text_focus`).

@@ -719,6 +719,11 @@
       the selection and is omitted in Trash
 - ✅ New-mail notifications carry the app icon on Linux (bundle icon or theme
       name + `desktop-entry` hint)
+- ✅ Backspace deletes a message from the list only on macOS (Delete everywhere)
+- ✅ Clicking a new-mail notification brings the window up in the unified Inbox at
+      that message (a summary of several opens just the Inbox)
+- ⬜ Clicking a notification after the app quit: start it at that message (Windows
+      toast launch arguments / macOS relaunch; freedesktop has no launch path)
 - ✅ Gmail: new mail met in All Mail before the Inbox is still announced
       (`plan::is_new_arrival`)
 - 🔄 Confirm why a Gmail message arrived with no notification on 2026-11-02:
@@ -790,6 +795,22 @@
       renaming asks only for the folder's own name; names go to the server in its encoding,
       with its delimiter and prefix (`folders.delimiter`, `accounts.folder_prefix`; the prefix
       is read from the folder list: the `imap` crate can't parse a `NAMESPACE` answer)
+- ✅ List selection as in macOS Mail: rows inset and rounded; consecutive selected rows
+      form one block rounded only at its ends (`row_edges`); separators span only the
+      text, inside a selection a step lighter than it (`ThemeColors::border_selected`); hover drops the
+      line of the row above, as a selection does; 8 px gap above and below the rows; no
+      separator under the last row
+- ✅ Clicking the open message again doesn't reload it (the reader no longer flashes)
+- ✅ Message list minimum width 210 px (was 350)
+- ✅ Search field bordered in the light theme (`ThemeColors::border_input`)
+- ✅ Reader recipients light up under the pointer (`RootView::hovered_recipient`)
+- ✅ Reader header: recipients line spaced like the name and address above it; the
+      avatar's letter centered by its ink (`ui::Avatar`, `TextSystem::glyph_ink_bounds`)
+- ✅ Brand logo in the reader's avatar (BIMI), as Gmail and Apple Mail: our own DKIM +
+      DMARC check (enforcing policy), mark certificate verified against the authorities'
+      roots, logo from the certificate, cached per domain; the initial shows meanwhile
+      (drawn at the exact device size, colors in GPUI's BGRA order)
+- ⬜ BIMI: check mark certificate revocation (CRL), as Gmail does
 - ⬜ Search recipients too (To/Cc aren't in `search_text`; needs a reindex), as Thunderbird
       and Gmail do
 - ⬜ Keyboard navigation in `ui::ContextMenu` (up/down/enter, as in Zed): every menu

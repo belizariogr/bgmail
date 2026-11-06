@@ -22,8 +22,9 @@ presets, Thunderbird autoconfig, guess).
 - **Certificates:** always validated, except on a literal loopback address
   (`ConnectOptions::for_host`, user decision), for Proton Bridge's self-signed one.
   Applied per host in `connect_tls` and `SmtpSender::new`.
-- **Blocking, no async runtime.** Callers run every call on a background
-  thread. No GPUI. `#![forbid(unsafe_code)]`.
+- **Blocking.** Callers run every call on a background thread. The only async
+  runtime is the single-threaded Tokio one `bimi::BrandChecker` owns for its
+  resolver, never exposed. No GPUI. `#![forbid(unsafe_code)]`.
 - **Dependencies (decided stack):** `imap = "3.0.0-alpha.15"` with
   `default-features = false` over our own rustls stream; `imap-proto 0.16`
   (parses raw command responses); `rustls 0.23` with the **ring** provider
@@ -32,7 +33,10 @@ presets, Thunderbird autoconfig, guess).
   `rustls`, `ring`, `rustls-platform-verifier` (no `hostname`, so `EHLO` is `[127.0.0.1]`: the machine's
   name would reach `Received:`) — transport only
   (`send_raw`); `ureq 3` (`rustls`, `platform-verifier`, `json`) for OAuth and
-  autoconfig; `sha2`, `base64 0.22`, `getrandom 0.3`, `roxmltree 0.21`.
+  autoconfig; `sha2`, `base64 0.22`, `getrandom 0.3`, `roxmltree 0.21`. For BIMI:
+  `mail-auth 0.7.5` (`default-features = false`, `ring`: DKIM/DMARC and its hickory
+  resolver, on the same patched `mail-parser 0.11`), `tokio` (`rt`), `psl 2`,
+  `rustls-webpki 0.103` (`ring`) + `rustls-pki-types`, `flate2`.
   **Never** add native-tls/OpenSSL, aws-lc, an `oauth2` crate or a second
   rustls; check with `cargo tree -p protocols -d` and
   `cargo tree --workspace -i rustls`.

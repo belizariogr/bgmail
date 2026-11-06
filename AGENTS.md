@@ -96,7 +96,9 @@ BGMail/
   **Stage 3 (connectivity)** is in progress — see `TODO.md`.
 - Networking is allowed (user decision): IMAP/SMTP and Gmail (OAuth2 +
   XOAUTH2) live in `crates/protocols`, driven by `crates/mail_sync`; remote
-  images are fetched by `html_view` only when the user allows them. All
+  images are fetched by `html_view` only when the user allows them; brand
+  logos (BIMI: DNS lookups and the mark certificate from its authority, per
+  sender domain, cached) by `protocols::bimi`, as Gmail and Apple Mail do. All
   network IO runs off the UI thread. POP3 is postponed.
 - Sample / seed data stays isolated (`crates/bgmail/src/data.rs`,
   `crates/bgmail/src/db_seed.rs`, `storage::seed`) so it can be replaced by the

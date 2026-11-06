@@ -306,6 +306,34 @@ impl TextSystem {
     }
 
     /// Get the rasterized size and location of a specific, rendered glyph.
+    /// BGMail: the ink of `character` as [`Window::paint_glyph`] draws it at
+    /// `font_size` and `scale_factor`: its glyph, and the bounds of its pixels in
+    /// logical pixels, from the pen position on the baseline (y down). Lets a
+    /// caller center a glyph by what shows rather than by its line box. `None`
+    /// when the font has no glyph for it, or draws nothing (a space).
+    pub fn glyph_ink_bounds(
+        &self,
+        font_id: FontId,
+        character: char,
+        font_size: Pixels,
+        scale_factor: f32,
+    ) -> Option<(GlyphId, Bounds<Pixels>)> {
+        let glyph_id = self.platform_text_system.glyph_for_char(font_id, character)?;
+        let params = RenderGlyphParams {
+            font_id,
+            glyph_id,
+            font_size,
+            subpixel_variant: Point::default(),
+            scale_factor,
+            is_emoji: false,
+        };
+        let bounds = self.raster_bounds(&params).ok()?;
+        if bounds.size.width.0 == 0 || bounds.size.height.0 == 0 {
+            return None;
+        }
+        Some((glyph_id, bounds.map(|value| px(value.0 as f32 / scale_factor))))
+    }
+
     pub(crate) fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         let raster_bounds = self.raster_bounds.upgradable_read();
         if let Some(bounds) = raster_bounds.get(params) {

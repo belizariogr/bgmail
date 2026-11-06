@@ -3,11 +3,16 @@
 //! One portable entry point ([`notify_new_mail`]); `notify-rust` hides the
 //! platform backends (D-Bus on Linux/BSD, `NSUserNotification` on macOS, WinRT
 //! toasts on Windows). Showing a notification can block on IPC, so it always
-//! runs on a short-lived background thread, never on the UI thread.
+//! runs on a background thread, never on the UI thread. That thread then waits
+//! for the click and hands it to the UI through a channel ([`NoticeClicks`]).
 
 use mail_sync::NewMailNotice;
 
-use crate::locale::Language;
+use crate::locale::{Key, Language};
+
+/// Where clicks on notifications go: the message a notification was about, or
+/// `None` for a summary of several. The main window opens it in the Inbox.
+pub type NoticeClicks = async_channel::Sender<Option<i64>>;
 
 /// More messages than this are summarized in one notification.
 const MAX_INDIVIDUAL: usize = 3;
@@ -17,6 +22,8 @@ const MAX_INDIVIDUAL: usize = 3;
 pub struct Notice {
     pub summary: String,
     pub body: String,
+    /// The message a click opens; `None` for a summary of several.
+    pub message_id: Option<i64>,
 }
 
 /// Turns newly arrived messages into notifications: one per message for a
@@ -34,6 +41,7 @@ pub fn notices_for(account: &str, messages: &[NewMailNotice], language: Language
         return vec![Notice {
             summary,
             body: account.to_string(),
+            message_id: None,
         }];
     }
     messages
@@ -52,26 +60,37 @@ pub fn notices_for(account: &str, messages: &[NewMailNotice], language: Language
             } else {
                 message.subject.clone()
             },
+            message_id: Some(message.message_id),
         })
         .collect()
 }
 
-/// Shows desktop notifications for `messages` (best effort, off-thread).
-pub fn notify_new_mail(account: &str, messages: &[NewMailNotice], language: Language) {
-    let notices = notices_for(account, messages, language);
-    if notices.is_empty() {
-        return;
+/// Shows desktop notifications for `messages` (best effort, off-thread). A click
+/// on one is sent to `clicks`.
+pub fn notify_new_mail(
+    account: &str,
+    messages: &[NewMailNotice],
+    language: Language,
+    clicks: Option<NoticeClicks>,
+) {
+    let open_label = Key::NotificationOpen.tr(language).to_string();
+    // One thread per notification: each waits for its own click or close.
+    for notice in notices_for(account, messages, language) {
+        let clicks = clicks.clone();
+        let open_label = open_label.clone();
+        let spawned = std::thread::Builder::new()
+            .name("bgmail-notify".into())
+            .spawn(move || show(&notice, &open_label, clicks));
+        if let Err(error) = spawned {
+            eprintln!("BGMail: could not show a notification: {error}");
+        }
     }
-    let spawned = std::thread::Builder::new()
-        .name("bgmail-notify".into())
-        .spawn(move || {
-            for notice in notices {
-                show(&notice);
-            }
-        });
-    if let Err(error) = spawned {
-        eprintln!("BGMail: could not show a notification: {error}");
-    }
+}
+
+/// Whether a response opens what the notification was about: a click on its body
+/// (the default action). Buttons, replies and closing it don't.
+fn opens(response: &notify_rust::NotificationResponse) -> bool {
+    response.is_default_action()
 }
 
 /// Windows AppUserModelID of the installed app: the NSIS installer stamps it
@@ -159,12 +178,22 @@ fn escape_for_server(body: &str, markup: bool) -> String {
         .replace('>', "&gt;")
 }
 
-fn show(notice: &Notice) {
+/// Shows `notice`, then blocks until it is clicked or closed, and sends a click
+/// to `clicks`. The wait ends with the notification, or with the process.
+fn show(notice: &Notice, open_label: &str, clicks: Option<NoticeClicks>) {
     let mut notification = notify_rust::Notification::new();
     notification
         .appname("BGMail")
         .summary(&notice.summary)
         .body(&displayed_body(&notice.body));
+    // A freedesktop server only reports a click on the body when the
+    // notification offers a "default" action. Elsewhere actions become buttons.
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    if clicks.is_some() {
+        notification.action("default", open_label);
+    }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let _ = open_label;
     #[cfg(target_os = "windows")]
     if let Some(app_id) = windows_app_id() {
         notification.app_id(app_id);
@@ -177,8 +206,26 @@ fn show(notice: &Notice) {
             .icon(&linux_icon(exe.as_deref()))
             .hint(notify_rust::Hint::DesktopEntry("BGMail".into()));
     }
-    if let Err(error) = notification.show() {
-        eprintln!("BGMail: notification failed: {error}");
+    let handle = match notification.show() {
+        Ok(handle) => handle,
+        Err(error) => {
+            eprintln!("BGMail: notification failed: {error}");
+            return;
+        }
+    };
+    let Some(clicks) = clicks else {
+        // Dropping the handle shows it (macOS sends it then) and waits for nothing.
+        return;
+    };
+    let message_id = notice.message_id;
+    let waited = handle.wait_for_response(move |response: &notify_rust::NotificationResponse| {
+        if opens(response) {
+            // The app may be quitting: then there is nothing to open.
+            clicks.send_blocking(message_id).ok();
+        }
+    });
+    if let Err(error) = waited {
+        eprintln!("BGMail: notification click lost: {error}");
     }
 }
 
@@ -199,7 +246,7 @@ mod tests {
 
     fn notice(sender: &str, subject: &str) -> NewMailNotice {
         NewMailNotice {
-            message_id: 1,
+            message_id: sender.len() as i64,
             sender: sender.into(),
             subject: subject.into(),
         }
@@ -222,11 +269,13 @@ mod tests {
             vec![
                 Notice {
                     summary: "Ana".into(),
-                    body: "Lunch?".into()
+                    body: "Lunch?".into(),
+                    message_id: Some(3),
                 },
                 Notice {
                     summary: "Work".into(),
-                    body: "(sem assunto)".into()
+                    body: "(sem assunto)".into(),
+                    message_id: Some(0),
                 },
             ]
         );
@@ -267,8 +316,21 @@ mod tests {
             notices_for("Work", &messages, Language::English),
             vec![Notice {
                 summary: "5 new messages".into(),
-                body: "Work".into()
+                body: "Work".into(),
+                // A summary opens the Inbox, at no message in particular.
+                message_id: None,
             }]
         );
+    }
+
+    #[test]
+    fn only_a_click_on_the_body_opens() {
+        use notify_rust::{CloseReason, NotificationResponse};
+        assert!(opens(&NotificationResponse::Default));
+        assert!(!opens(&NotificationResponse::Action("other".into())));
+        assert!(!opens(&NotificationResponse::Closed(
+            CloseReason::Dismissed
+        )));
+        assert!(!opens(&NotificationResponse::Closed(CloseReason::Expired)));
     }
 }

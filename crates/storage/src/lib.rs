@@ -1,6 +1,7 @@
 //! Local SQLite persistence for accounts, folders and messages.
 
 mod accounts;
+mod brand_logos;
 mod contacts;
 mod database;
 mod folder;
@@ -16,6 +17,7 @@ mod sync;
 mod test_support;
 mod types;
 
+pub use brand_logos::BrandLogo;
 pub use contacts::Contact;
 pub use database::{database_path, global_folder_path, is_corrupt, Database};
 pub use folder::{

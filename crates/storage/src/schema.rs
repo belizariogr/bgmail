@@ -3,7 +3,7 @@
 //! The v1 DDL below is the base every database starts from; later versions are
 //! applied as in-place steps by `migration.rs` so existing user data survives.
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 pub const CREATE_ACCOUNTS: &str = "
 CREATE TABLE IF NOT EXISTS accounts (
@@ -192,6 +192,16 @@ pub const V8_COLUMNS: &[(&str, &str, &str)] = &[
     ("folders", "delimiter", "TEXT"),
     ("accounts", "folder_prefix", "TEXT NOT NULL DEFAULT ''"),
 ];
+
+/// v9: verified brand logos (BIMI) per sender domain, and domains found to have
+/// none (`svg` NULL), with when that was found out.
+pub const V9_OBJECTS: &str = "
+CREATE TABLE IF NOT EXISTS brand_logos (
+    domain TEXT PRIMARY KEY COLLATE NOCASE,
+    svg BLOB,
+    checked_at INTEGER NOT NULL
+);
+";
 
 /// v7: when the user last asked for a retry, from which an unsent message's age counts.
 pub const V7_COLUMNS: &[(&str, &str, &str)] =

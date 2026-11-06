@@ -747,6 +747,21 @@ Guards against crash loops (a message that kills the renderer every time the rea
 - **`create_private_dir(dir)`** / **`create_private_file(path)`** (pub(crate); also used by `attachments`): Unix modes 0700 / 0600 (create-new); elsewhere plain creation (Windows' temp dir is per user).
 - Tests: nonces differ; pages are private, never overwritten; only stale pages are removed.
 
+### `src/brand_logos.rs`
+
+The reader's brand logos, found off the UI thread (`protocols::bimi`).
+- **enum `Finding`** (`NotReady`, `None`, `Logo { domain, svg }`); **struct `Request { message_id, domain }`** (private).
+- **struct `BrandLogos`** (pub(crate)): per message the domain shown (`shown`), `pending`, `awaiting_body`, `images` per domain (`ui::SvgLogo`), and the worker's request sender.
+  - **`new(db_path)`**; **`logo(message_id)`**: the `SvgLogo` to show, once found.
+  - **`needs_request(message_id)`**: not settled, pending, nor waiting for its body (cheap: asked on every reader render).
+  - **`body_ready(message_id)`**: a message waiting for its body may be asked about again (`SyncEvent::BodyReady`).
+  - **`request(message_id, sender_email, start)`**: no domain → settled with none; else starts the worker on first use (`start` gets the result receiver) and sends the request.
+  - **`receive(message_id, finding)`**: records it; `true` when a logo now shows. `NotReady` waits for the body.
+- **`sender_domain`** / **`is_fresh`** (logo kept `LOGO_KEPT` 7 days, none `NONE_KEPT` 1 day) / **`unix_now`** (private).
+- **`spawn_worker(db_path, results)`** (private): one thread `bgmail-brand-logos` with its own `Database` and a `BrandChecker` built on first need; answers in order; ends when the sender drops.
+- **`check(db, checker, request)`** (private): a fresh cached none → `None` with no network; no raw body → `NotReady`; the message's authenticated domain must equal the sender's; a fresh cached logo is reused, else `BrandChecker::logo` refreshes the cache (a failed fetch keeps the stale finding).
+- Tests: sender domains, freshness, ask once / show what was found, body-less retry only after `body_ready`, domainless sender, cached absence needs no resolver.
+
 ### `src/attachments.rs`
 
 Reader attachment chips' presentation and the file side of Open / Save As… /
@@ -1266,22 +1281,25 @@ Bridge between the UI and `mail_sync::Engine` (plain Rust; the event loop lives 
 
 ### `src/notifications.rs`
 
-Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT behind one API), always shown off the UI thread.
-- **struct `Notice { summary, body }`**.
-- **`notices_for(account, messages, language)`** (pub): one notice per message (sender or account name; subject or "(no subject)"/"(sem assunto)") up to 3; a burst becomes one "N new messages" summary.
-- **`notify_new_mail(account, messages, language)`** (pub): spawns a short-lived thread showing the notices (errors logged).
+Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT behind one API), always shown off the UI thread; clicks come back through a channel.
+- **type `NoticeClicks`** (pub): `async_channel::Sender<Option<i64>>` — the message a clicked notification was about, `None` for a summary.
+- **struct `Notice { summary, body, message_id }`**: `message_id` is what a click opens (`None` for a summary).
+- **`notices_for(account, messages, language)`** (pub): one notice per message (sender or account name; subject or "(no subject)"/"(sem assunto)"; its id) up to 3; a burst becomes one "N new messages" summary with no message.
+- **`notify_new_mail(account, messages, language, clicks)`** (pub): one thread per notice, each running `show`.
+- **`opens(response)`** (private): only the default action (a click on the body) opens; buttons, replies and closes don't.
 - **const `WINDOW_APP_ID`** = `io.github.belizariogr.bgmail` (packager `identifier`; the NSIS shortcut's AppUserModelID).
 - **`shortcut_candidates(programs_dirs)`** (private): `BGMail.lnk` and `BGMail\BGMail.lnk` under each Start Menu `Programs` folder.
 - **`windows_app_id()`** (private, Windows only): `Some(WINDOW_APP_ID)` when an installer shortcut exists under `%APPDATA%` / `%PROGRAMDATA%` Start Menu, else `None` (unpackaged runs keep notify-rust's PowerShell id: Windows drops toasts from an unregistered id).
 - **`linux_icon(exe)`** (private): `file://` URI of `<exe prefix>/share/icons/hicolor/128x128/apps/bgmail.png` when it exists (bundles outside the icon theme path), else the theme name `bgmail`.
-- **`show(notice)`** (private): `notify_rust::Notification` with app name "BGMail"; on Windows also `.app_id(windows_app_id())` when registered; on Linux/BSD also `.icon(linux_icon(current_exe))` and the `desktop-entry` hint `BGMail`.
-- Tests: empty, per-message notices with fallbacks, burst summary, shortcut candidates + app id value, icon lookup.
+- **`show(notice, open_label, clicks)`** (private): `notify_rust::Notification` with app name "BGMail"; on Windows also `.app_id(windows_app_id())` when registered; on Linux/BSD also `.icon(linux_icon(current_exe))`, the `desktop-entry` hint `BGMail` and, with `clicks`, a `"default"` action labelled `Key::NotificationOpen` (freedesktop servers report a body click only then; on Windows/macOS actions would be buttons). With `clicks` it then blocks in `wait_for_response` until the notice is clicked or closed and sends a click's `message_id` (errors logged).
+- Tests: empty, per-message notices with fallbacks and ids, burst summary, only a body click opens, shortcut candidates + app id value, icon lookup.
 
 ### `src/main.rs`
 
 #### Types / constants
 
 - **struct `MainWindow`**: GPUI global holding the `WindowHandle<RootView>` for routing app-wide shortcuts and deferred menu actions.
+- **struct `NotificationClicks`**: GPUI global holding the `notifications::NoticeClicks` sender; `main` reads its receiver and, per click, activates the main window and calls `RootView::open_from_notification`.
 - **struct `CommandPaletteShortcut`**: GPUI global keeping the keystroke interceptor subscription alive for the app lifetime.
 
 #### Functions / methods
@@ -1348,7 +1366,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 #### Types / constants
 
 - **const `SIDEBAR_MIN_WIDTH`**: Minimum sidebar column width (150px).
-- **const `LIST_MIN_WIDTH`**: Minimum message-list column width (350px).
+- **const `LIST_MIN_WIDTH`**: Minimum message-list column width (210px, user decision: 60% of the former 350px).
 - **const `READER_MIN_WIDTH`**: Minimum reading-pane width (550px).
 - **const `WINDOW_MIN_WIDTH` / `WINDOW_MIN_HEIGHT`**: Minimum main window size (950×480px); exported for startup clamping.
 - **const `MAIN_WINDOW_APP_ID` / `SETTINGS_WINDOW_APP_ID` / `COMPOSE_WINDOW_APP_ID`** = `com.bgmail.main` / `.settings` / `.newmail`: Wayland app_id / X11 WM_CLASS of each window; the main one matches the packaged desktop entry's `StartupWMClass`.
@@ -1375,6 +1393,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **enum `ReaderNotice`**: Why a message is shown as plain text: `Unrenderable` (`RenderError`), `Crashed` (crash guard).
 - **enum `ListFilter`** (`matches`, `label`, `OPTIONS`): rows shown by the filter button.
 - **`clicked_selection`** / **`selection_range`** (private): rows selected after a click (Shift range from the anchor, Ctrl/Cmd toggle, plain single) and the inclusive range between two rows, in list order.
+- **`row_edges`** / **`RowEdges`** / **`RowFill`** (private, pure): how a list row joins its neighbours, from their fills (`None`, `Hover`, `Selected`): a run of selected rows is one block rounded only at its outer corners (as in macOS Mail), other rows keep every corner; a hovered row drops the lines around it exactly like a selected one; the separator (`RowSeparator::Plain` in `border_variant`, `Selected` in `border_selected` between selected rows) is dropped wherever a filled row meets another fill or an empty row, and never drawn under the last row (`next` is `None`). It is drawn under the text only: from `ROW_SEPARATOR_INSET` (past the unread dot) to `ROW_SEPARATOR_END`.
 - **`row_actions_room`** (private): width the subject of a hovered row gives up for its action buttons.
 - **`star_icon`** / **`star_color`** (private): toolbar star look: filled and `Color::Warning` (as in the list) when the message is starred.
 - **`folder_shows_unread`** (private): whether a folder's row counts unread (not the Trash).
@@ -1582,6 +1601,8 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`remote_allowed_for`** (private): Whether a message loads remote content: `load_remote_images` or loaded from the shield this session (`remote_allowed`).
 - **`load_remote_for_selected`** (private): Shield click: adds the selected message to `remote_allowed` (re-renders through the `ReaderSignature`).
 - **`set_load_remote_images`** (private): "Always load remote images" (Settings ▸ Privacy): persists and refreshes windows.
+- **`request_brand_logo(cx)`** (private): asks `brand_logos` about the message the reader shows unless settled; on first use starts the task that takes the worker's findings (`receive`, notifies when a logo shows).
+- **`open_from_notification(message_id, cx)`** (pub(crate)): what a clicked notification opens (nothing during onboarding): the unified Inbox (search ended, via `select_mailbox` unless already there), then the message if given and listed — not listed, the list reloads once with `ListFilter::All`; still missing, only the Inbox shows. Already the open message: not reloaded (no reader flash). Revealed in the list.
 - **`set_notifications_enabled`** (pub(crate)): Settings ▸ Notifications switch: sets `notifications_enabled`, persists via `request_save`, notifies.
 
 - **`print_message`** (pub(crate))
@@ -1899,7 +1920,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_search_control`** (private, L2321)
   - Signature: `fn render_search_control(&self, compact_search, search_bg, language, cx) -> AnyElement`
   - Purpose: Renders compact or expanded search UI.
-  - Behavior: Icon button or TextInput with clear affordance based on layout state.
+  - Behavior: Icon button or TextInput with clear affordance based on layout state. In a light theme the expanded field has a 1 px `border_input` border (its fill barely differs from the toolbar).
 
 - **`render_search_clear_button`** (private, L2377)
   - Signature: `fn render_search_clear_button(language, cx) -> impl IntoElement`
@@ -1954,13 +1975,14 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_message_list`** (private, L2766)
   - Signature: `fn render_message_list(&mut self, cx) -> impl IntoElement`
   - Purpose: Renders the virtualized message list column.
-  - Behavior: Optional list header when sidebar undocked; GPUI `uniform_list` over `list_messages` (only visible rows are built; uniform row height measured from the first row) tracked by `list_scroll: UniformListScrollHandle`; the existing `ui::Scrollbar` reads its `base_handle`. A click below the rows keeps the selection (single or multiple), and the column still takes focus; search with no results shows "No results". The column tracks `list_focus`, sets key context `MessageList` and handles `SelectNextMessage` / `SelectPreviousMessage`.
+  - Behavior: Optional list header when sidebar undocked; GPUI `uniform_list` over `list_messages` (only visible rows are built; uniform row height measured from the first row) tracked by `list_scroll: UniformListScrollHandle`, with an 8 px gap above and below the rows (`MESSAGE_LIST_INSET_Y`, the rows' `px_2` side inset), scrolling with them; `uniform_list` applies padding twice, so it is given half; the existing `ui::Scrollbar` reads its `base_handle`. A click below the rows keeps the selection (single or multiple), and the column still takes focus; search with no results shows "No results". The column tracks `list_focus`, sets key context `MessageList` and handles `SelectNextMessage` / `SelectPreviousMessage`.
 
 - **`render_message_row`** (private, L2847)
-  - Signature: `fn render_message_row(&self, message, cx) -> impl IntoElement`
+  - Signature: `fn render_message_row(&self, message, edges: RowEdges, selection, cx) -> impl IntoElement`
   - Purpose: Single message list row.
-  - Behavior: Sender, subject preview, date, unread/flag/attachment indicators; click calls `select_message_row`. Hover group `MESSAGE_ROW_GROUP` reveals `render_message_row_actions`.
-- **`click_message_row`** / **`set_selection`** / **`apply_selection`** / **`prune_multi_selection`** / **`selected_ids`** / **`row_is_selected`** / **`list_ids`** / **`extended_selection`** / **`extend_selection`** / **`set_list_filter`** (private): multiple selection and filter state. `apply_selection` returns whether a single message resulted, which `set_selection` then opens.
+  - Behavior: Inset by `px_2` from the column; corners (`rounded_t_lg`/`rounded_b_lg`) and the inset separator line from `edges`, which `render_message_list` computes from the neighbours' selection. Sender, subject preview, date, unread/flag/attachment indicators; click calls `select_message_row`. Hover group `MESSAGE_ROW_GROUP` reveals `render_message_row_actions`.
+- **`row_fill`** (private): a row's `RowFill`: selected first, then hovered (`hovered_row`) or the open row menu's target. The hover fill comes from this state, not `.hover()`, so it always matches the neighbours' separators.
+- **`click_message_row`** / **`set_selection`** / **`apply_selection`** / **`prune_multi_selection`** / **`selected_ids`** / **`row_is_selected`** / **`list_ids`** / **`extended_selection`** / **`extend_selection`** / **`set_list_filter`** (private): multiple selection and filter state. `apply_selection` returns whether a single message resulted, which `set_selection` then opens. `click_message_row` stops when the click leaves the selection as it was (reloading would rebuild and flash the reader).
 - **`apply_action_to_selection`** / **`run_bulk_action`** / **`act_on_message`** (private): runs an action on every selected row (rows leave the list at once, nothing left selected) / off the UI thread on its own connection, then wakes workers, reloads and reports the first error / on one message plus its worker notification.
 - **`delete_selection`** / **`delete_message`** / **`open_row_after_delete`** (private) and **`row_after_removal`** (private, pure): every delete (toolbar, key, menu, palette, row button, confirmed permanent deletion) goes through these. Deleting the open message or a multiple selection opens, and so marks read, the first kept row after the first removed one, or the row before it; deleting another row leaves the selection alone; a message still selected afterwards (action failed, still in search results) stays open.
 - **`render_selection_stack`** / **`reader_detail`** / **`reload_multi_preview`** / **`fetch_multi_preview_body`** / **`sheet_corners`** (private): reader for a multiple selection: the previewed message (never marked read) on a sheet, tilted sheets behind it, floating actions.
@@ -1969,12 +1991,12 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`ReaderJob`** (`runs_in_background`: large bodies of either format; `build`: `has_too_many_tags` first, then sanitize and parse) / **`BuiltReader`** / **`install_reader`** (private): a reader document's inputs, buildable on any thread, its result, and handing it to the view.
 - **`open_mailto`** (`pub(crate)`): prefilled compose from a `mailto:` link, through `open_compose_with`.
 - **`request_delete`** (`pub(crate)`) / **`confirm_delete_forever`** / **`delete_row_message`** (private): Delete from anywhere: to the Trash, or for good, confirmed, for what is already there.
-- **`short_recipient`** / **`unique_recipients`** (private, `root`): the reader's recipients line, as in Gmail.
+- **`short_recipient`** / **`unique_recipients`** (private, `root`): the reader's recipients line, as in Gmail. Each name is muted and turns to the default text color under the pointer (`hovered_recipient`, set by **`hover_recipient`**, which a name left behind doesn't clear for the next; a GPUI hover style can't recolor text, laid out before the hover is known); its tooltip has the address.
 - **`set_account_names`** (`pub(crate)`) / **`begin_names_edit`** / **`save_names`** (`settings`, private): editing an account's names.
 - **`recipients`**: `RecipientInput` (`new`, `set_contacts`, `set_addresses`, `content`), event `RecipientsChanged`; private `matching_contacts`, `with_known_name`, `placeholder_for`, `sync_placeholder`, `split_typed`, `add_unique`, `card_label`, `on_typed`, `commit_typed`, `accept`, `remove`, `on_key_down`, `render_card`, `render_suggestions`.
 - **`drag_counts`** / **`DragProgress`** / **`DraggedMessages`** (`can_drop_on`) / **`DragPreview`** / **`dragged_messages`** / **`move_messages_to_folder`** (private): dragging list rows onto folders. The card of several messages has only the count, so it centers vertically, clear of the pointer at the corner. A drag counts past `MESSAGE_DRAG_THRESHOLD` (50 px) or once the pointer leaves the list, and then for good.
 - **`render_dropdown`** (`on_outside` receives the mouse-down) / **`render_filter_menu`** / **`render_move_menu`** (private): reader card stack for a multiple selection and the toolbar dropdowns.
-- **`RowMenu`** / **`open_row_menu`** / **`render_row_menu`** (private): right-click menu of a list row. Opening changes neither the selection nor the read state; it holds a focus handle of its own, so the list's keys stay off while open, and Escape closes it; its backdrop occludes like the other menus (`render_dropdown`), and a right-click on another row moves the menu there (**`list_row_at`** finds the row from the list's geometry), while any other click only closes it; closing without an action returns the focus to what had it (`row_menu_focus_return`).
+- **`RowMenu`** / **`open_row_menu`** / **`render_row_menu`** (private): right-click menu of a list row. Opening changes neither the selection nor the read state; it holds a focus handle of its own, so the list's keys stay off while open, and Escape closes it; its backdrop occludes like the other menus (`render_dropdown`), and a right-click on another row moves the menu there (**`list_row_at`** finds the row from the list's geometry, skipping the `MESSAGE_LIST_INSET_Y` gap above and below the rows), while any other click only closes it; closing without an action returns the focus to what had it (`row_menu_focus_return`).
 - **`shortcut_context`** (pub(crate)): what shortcuts act on: the row menu's target while it is open, otherwise the selection. With the menu open, `request_delete` and `execute_command` run on that target; commands not on messages close it and still run; `MoveToFolder` (menu bar) moves that target. `sync_app_menus` builds the menu bar from it too.
 - **`sync_row_menu`** (private): run on each render; closes the menu when the window went inactive after having been active (it can open on a background window), it lost the focus, or its row left the list, and restores the earlier focus; with no folder left, only the folders close.
 - **`command_context_of`** (private): `command_context` for an explicit target, so the row menu doesn't clone the selected body.
@@ -2049,7 +2071,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_reader`** (private, L3100)
   - Signature: `fn render_reader(&mut self, cx) -> impl IntoElement`
   - Purpose: Renders reading pane.
-  - Behavior: Empty state, fixed header with subject/sender/date and privacy shield, and the body area hosting the reader `HtmlView` (white background when forced).
+  - Behavior: First `request_brand_logo`. Empty state, fixed header with subject, privacy shield, then one block of avatar (`ui::Avatar`, with `brand_logos.logo(id)` when verified) + sender name/address/date and the recipients line right under it (no gap, so the three lines are evenly spaced), attachments, and the body area hosting the reader `HtmlView` (white background when forced).
 
 - **`render_status_bar`** (private, L3300)
   - Signature: `fn render_status_bar(&self, cx) -> impl IntoElement`
@@ -2267,7 +2289,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`start_mail(cx)`** (pub(crate)): creates `MailService` once (engine on `db_path`), spawns the task awaiting `SyncEvent`s into `on_sync_event`, and starts every remote account. Called from `main` after the window exists (never blocks the first frame).
 - **`start_account(account, cx)`** (private): skips `local` accounts; reads the secret with `cx.read_credentials(config.secret_key())` asynchronously, then `start_account_with_secret`.
 - **`start_account_with_secret(id, config_json, secret, cx)`** (private): returns when the id is no longer in `accounts` (removed while its keychain read was pending; a new worker would outlive it); builds the connector (`mail_service::connector_for`) and runs `MailService::start_account`'s job on `cx.background_spawn` (replacing a worker waits for the old one), or records a `StartError` (status bar / settings show it).
-- **`on_sync_event(event, cx)`** (private): `Status` → service status (ignored for accounts being removed); `Sent`/`SendFailed` also `refresh_unsent`; `SentCopyFailed` → `StatusSentCopyFailed` note; `MailboxChanged`/`FoldersChanged`/`BodyReady`/`Sent` → `schedule_reload` (BodyReady also re-renders the open message); `NewMail` → desktop notifications when `notifications_enabled`; `BodyFailed`/`Sent`/`SendFailed` → status notes.
+- **`on_sync_event(event, cx)`** (private): `Status` → service status (ignored for accounts being removed); `Sent`/`SendFailed` also `refresh_unsent`; `SentCopyFailed` → `StatusSentCopyFailed` note; `MailboxChanged`/`FoldersChanged`/`BodyReady`/`Sent` → `schedule_reload` (BodyReady also re-renders the open message); `NewMail` → desktop notifications when `notifications_enabled`, their clicks to the `NotificationClicks` global; `BodyFailed`/`Sent`/`SendFailed` → status notes.
 - **`set_status_note(note, cx)`** (private): shows a note in the status bar for 6 s (token-guarded timer).
 - **`schedule_reload(cx)`** (private): coalesces event bursts into one `reload_from_database` 250 ms later.
 - **`reload_from_database()`** (pub(crate)): re-reads accounts (minus `removing_accounts`), folders, the current list (also minus removing accounts, in `reload_message_list`) and the unsent rows (`refresh_unsent`).
@@ -2397,7 +2419,7 @@ in `account_setup`.
 - **const `REPLY_*` / `REPLY_ALL_*` / `FORWARD_*`**: `cmd-r`/`ctrl-r`, `cmd-shift-r`/`ctrl-shift-r`, `cmd-shift-f`/`ctrl-shift-f` (macOS Mail).
 - **const `TOGGLE_READ_MAC` / `TOGGLE_READ_OTHER`**: `cmd-shift-u` / `ctrl-shift-m` (Ctrl+Shift+U is the IBus/GTK Unicode-entry key on Linux).
 - **const `GET_MAIL_MAC` / `GET_MAIL_OTHER`**: `cmd-shift-n` / `ctrl-shift-n`.
-- **const `LIST_NEXT_KEYS` / `LIST_PREVIOUS_KEYS` / `LIST_DELETE_KEYS`**: `down`/`j`, `up`/`k`, `delete`/`backspace` — bound only in `MessageList`.
+- **const `LIST_NEXT_KEYS` / `LIST_PREVIOUS_KEYS` / `LIST_DELETE_KEYS_MAC` / `LIST_DELETE_KEYS_OTHER`** + **`list_delete_keys()`**: `down`/`j`, `up`/`k`, and `delete` plus `backspace` on macOS only (user decision: elsewhere Backspace never deletes a message) — bound only in `MessageList`.
 - **const `GLOBAL_CHORDS`** (test-only): every global chord pair, for the collision test.
 
 #### Functions / methods

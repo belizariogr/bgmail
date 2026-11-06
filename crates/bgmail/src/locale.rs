@@ -331,6 +331,8 @@ pub enum Key {
     AccountErrSaveFailed,
     NotificationsHint,
     AttachmentOpen,
+    /// Default action of a new-mail notification (servers that show it as a button).
+    NotificationOpen,
     AttachmentSaveAs,
     AttachmentSaveToDownloads,
     StatusAttachmentSaved,
@@ -911,6 +913,8 @@ impl Key {
             (NotificationsHint, P) => "Mostrar uma notificação quando chegarem novas mensagens.",
             (AttachmentOpen, E) => "Open",
             (AttachmentOpen, P) => "Abrir",
+            (NotificationOpen, E) => "Open",
+            (NotificationOpen, P) => "Abrir",
             (AttachmentSaveAs, E) => "Save As…",
             (AttachmentSaveAs, P) => "Salvar como…",
             (AttachmentSaveToDownloads, E) => "Save to Downloads",
@@ -1129,7 +1133,7 @@ mod tests {
         assert_eq!(Language::from_code(""), Language::default());
     }
 
-    const ALL_KEYS: [Key; 278] = [
+    const ALL_KEYS: [Key; 279] = [
         Key::StatusDatabaseReplaced,
         Key::ViewZoomIn,
         Key::ViewZoomOut,
@@ -1389,6 +1393,7 @@ mod tests {
         Key::AccountErrSaveFailed,
         Key::NotificationsHint,
         Key::AttachmentOpen,
+        Key::NotificationOpen,
         Key::AttachmentSaveAs,
         Key::AttachmentSaveToDownloads,
         Key::StatusAttachmentSaved,

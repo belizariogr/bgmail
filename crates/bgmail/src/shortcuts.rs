@@ -71,7 +71,20 @@ pub const GET_MAIL_OTHER: &str = "ctrl-shift-n";
 /// message and move to Trash.
 pub const LIST_NEXT_KEYS: [&str; 2] = ["down", "j"];
 pub const LIST_PREVIOUS_KEYS: [&str; 2] = ["up", "k"];
-pub const LIST_DELETE_KEYS: [&str; 2] = ["delete", "backspace"];
+/// Delete on every platform; Backspace too only on macOS, as in Mail (user
+/// decision): elsewhere a stray Backspace must never throw a message away, as in
+/// Thunderbird on Linux and Windows.
+pub const LIST_DELETE_KEYS_MAC: &[&str] = &["delete", "backspace"];
+pub const LIST_DELETE_KEYS_OTHER: &[&str] = &["delete"];
+
+/// The list's delete keys on the platform the app runs on.
+pub fn list_delete_keys() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        LIST_DELETE_KEYS_MAC
+    } else {
+        LIST_DELETE_KEYS_OTHER
+    }
+}
 /// Message-list keys growing the selection, and selecting every row.
 pub const LIST_EXTEND_DOWN: &str = "shift-down";
 pub const LIST_EXTEND_UP: &str = "shift-up";
@@ -158,8 +171,8 @@ pub fn bind_app_shortcuts(cx: &mut App) {
                     .map(|key| KeyBinding::new(key, SelectPreviousMessage, list)),
             )
             .chain(
-                LIST_DELETE_KEYS
-                    .into_iter()
+                list_delete_keys()
+                    .iter()
                     .map(|key| KeyBinding::new(key, MessageDelete, list)),
             )
             .chain([
@@ -305,11 +318,21 @@ mod tests {
         for key in LIST_NEXT_KEYS
             .iter()
             .chain(&LIST_PREVIOUS_KEYS)
-            .chain(&LIST_DELETE_KEYS)
+            .chain(LIST_DELETE_KEYS_MAC)
+            .chain(LIST_DELETE_KEYS_OTHER)
         {
             let keystroke = Keystroke::parse(key).expect(key);
             assert!(!keystroke.modifiers.modified(), "{key} must be a plain key");
         }
+    }
+
+    #[test]
+    fn backspace_deletes_a_message_only_on_macos() {
+        assert!(LIST_DELETE_KEYS_MAC.contains(&"backspace"));
+        assert!(!LIST_DELETE_KEYS_OTHER.contains(&"backspace"));
+        assert!(LIST_DELETE_KEYS_OTHER.contains(&"delete"));
+        let backspace = list_delete_keys().contains(&"backspace");
+        assert_eq!(backspace, cfg!(target_os = "macos"));
     }
 
     #[test]

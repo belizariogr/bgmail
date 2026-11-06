@@ -67,7 +67,7 @@ use storage::{
 /// Minimum width of the accounts/folders sidebar, in pixels.
 const SIDEBAR_MIN_WIDTH: f32 = 150.0;
 /// Minimum width of the message list, in pixels.
-const LIST_MIN_WIDTH: f32 = 350.0;
+const LIST_MIN_WIDTH: f32 = 210.0;
 /// Minimum width reserved for the reading pane (e-mail content), in pixels.
 const READER_MIN_WIDTH: f32 = 550.0;
 /// Minimum window width, in pixels. Kept above `LIST_MIN_WIDTH +
@@ -325,6 +325,58 @@ fn row_after_removal(list: &[i64], removed: &[i64]) -> Option<i64> {
         .or_else(|| list[..first].last())
         .copied()
 }
+
+/// What fills a list row's background.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowFill {
+    None,
+    /// Under the pointer, or the target of the open row menu.
+    Hover,
+    Selected,
+}
+
+/// How a list row joins its neighbours. A run of selected rows reads as one
+/// rounded block (as in macOS Mail): only its outer corners are rounded. No
+/// separator touches a filled row, hovered or selected, so no line cuts into
+/// the rounding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowEdges {
+    round_top: bool,
+    round_bottom: bool,
+    separator: Option<RowSeparator>,
+}
+
+/// The line under a row: the list's own, or the one inside a selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowSeparator {
+    Plain,
+    Selected,
+}
+
+/// `next` is `None` under the last row, which never has a separator: nothing
+/// follows it for the line to divide from.
+fn row_edges(previous: RowFill, fill: RowFill, next: Option<RowFill>) -> RowEdges {
+    let selected = fill == RowFill::Selected;
+    RowEdges {
+        // Only a run of selected rows joins up; any other row keeps its corners.
+        round_top: !selected || previous != RowFill::Selected,
+        round_bottom: !selected || next != Some(RowFill::Selected),
+        separator: match (fill, next) {
+            (RowFill::None, Some(RowFill::None)) => Some(RowSeparator::Plain),
+            (RowFill::Selected, Some(RowFill::Selected)) => Some(RowSeparator::Selected),
+            _ => None,
+        },
+    }
+}
+
+/// Where a row's separator starts: under the text, past the unread dot, as in
+/// macOS Mail (`px_3` padding + dot + `gap_2`). It ends at the text's right edge.
+const ROW_SEPARATOR_INSET: f32 = 12.0 + 8.0 + 8.0;
+const ROW_SEPARATOR_END: f32 = 12.0;
+/// Gap above the first and below the last row of the message list: the rows'
+/// side inset (`px_2`). `uniform_list` applies its padding twice (it shrinks the
+/// viewport by it and shifts the rows by it again), so it gets half of this.
+const MESSAGE_LIST_INSET_Y: f32 = 8.0;
 
 /// Width the subject of a list row gives up for its action buttons, while hovered.
 fn row_actions_room(hovered: bool) -> Pixels {
@@ -972,6 +1024,8 @@ pub struct RootView {
     db: storage::Database,
     /// Path of [`Self::db`]; the sync engine opens its own connections on it.
     db_path: std::path::PathBuf,
+    /// Verified brand logos for the reader's avatar, found off the UI thread.
+    brand_logos: crate::brand_logos::BrandLogos,
     /// Background sync engine. `None` until [`Self::start_mail`] (and in
     /// unit tests, which never touch the network).
     mail: Option<MailService>,
@@ -1120,10 +1174,14 @@ pub struct RootView {
     remembered_selections: HashMap<Selection, RememberedSelection>,
     /// Message whose recipients show in full.
     expanded_recipients: Option<i64>,
+    /// The reader recipient under the pointer, by its place in the line. Kept here
+    /// because a hover style can't recolor text: it is laid out before the hover
+    /// is known.
+    hovered_recipient: Option<usize>,
     /// Row under the mouse, whose text makes room for its action buttons.
     hovered_row: Option<i64>,
     /// Focus of the message list (key context `MessageList`: arrows/j/k move
-    /// the selection, Delete/Backspace trash). Created on first render.
+    /// the selection, Delete trashes, and Backspace on macOS). Created on first render.
     list_focus: Option<FocusHandle>,
     /// User-facing (non-inline) attachments of the selected message; empty
     /// until its body is downloaded.
@@ -1668,6 +1726,7 @@ impl RootView {
 
         Self {
             db,
+            brand_logos: crate::brand_logos::BrandLogos::new(db_path.clone()),
             db_path,
             mail: None,
             account_start_errors: HashMap::new(),
@@ -1732,6 +1791,7 @@ impl RootView {
             remembered_selections: HashMap::new(),
             selection_focus: None,
             expanded_recipients: None,
+            hovered_recipient: None,
             hovered_row: None,
             list_focus: None,
             attachments,
@@ -1869,6 +1929,19 @@ impl RootView {
         self.selected_message_id == Some(id) || self.multi_selection.contains(&id)
     }
 
+    /// The fill of a list row. The row menu's target keeps the hover fill while
+    /// the pointer is off on the menu, so it says which row the menu is for.
+    fn row_fill(&self, id: i64) -> RowFill {
+        let menu_target = self.row_menu.as_ref().is_some_and(|menu| menu.id == id);
+        if self.row_is_selected(id) {
+            RowFill::Selected
+        } else if self.hovered_row == Some(id) || menu_target {
+            RowFill::Hover
+        } else {
+            RowFill::None
+        }
+    }
+
     fn list_ids(&self) -> Vec<i64> {
         self.list_messages.iter().map(|m| m.id).collect()
     }
@@ -1934,6 +2007,11 @@ impl RootView {
             self.selection_anchor = Some(id);
         }
         self.selection_focus = Some(id);
+        // Clicking what is already selected changes nothing: reloading would
+        // rebuild the reader and make it flash.
+        if ids == self.selected_ids() {
+            return;
+        }
         self.set_selection(ids, cx);
     }
 
@@ -2572,11 +2650,20 @@ impl RootView {
                         .find(|account| account.id == account_id)
                         .map(|account| account.name.clone())
                         .unwrap_or_default();
-                    crate::notifications::notify_new_mail(&account, &messages, cx.language());
+                    let clicks = cx
+                        .try_global::<crate::NotificationClicks>()
+                        .map(|clicks| clicks.0.clone());
+                    crate::notifications::notify_new_mail(
+                        &account,
+                        &messages,
+                        cx.language(),
+                        clicks,
+                    );
                 }
                 self.schedule_reload(cx);
             }
             SyncEvent::BodyReady { message_id } => {
+                self.brand_logos.body_ready(message_id);
                 if self.selected_message_id == Some(message_id) {
                     self.reload_selected_detail();
                     self.last_reader_sig = None;
@@ -2779,6 +2866,44 @@ impl RootView {
             }
         })
         .detach();
+    }
+
+    /// Opens what a clicked new-mail notification was about: the unified Inbox (new
+    /// mail always lands in an Inbox), at that message. A summary of several, or a
+    /// message no longer there, just shows the Inbox.
+    pub(crate) fn open_from_notification(
+        &mut self,
+        message_id: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.onboarding_active() {
+            return;
+        }
+        let inbox = Selection::Global(GlobalMailbox::Inbox);
+        if self.search_is_active(cx) || self.selected_mailbox != inbox {
+            self.select_mailbox(inbox, cx);
+        }
+        let Some(id) = message_id else {
+            return;
+        };
+        let listed = |view: &Self| view.list_messages.iter().any(|m| m.id == id);
+        if !listed(self) {
+            // It may have come after the last reload, or be hidden by a filter.
+            self.list_filter = ListFilter::All;
+            self.reload_message_list();
+            cx.notify();
+        }
+        if !listed(self) {
+            return;
+        }
+        self.selection_anchor = Some(id);
+        self.selection_focus = Some(id);
+        // Already open: reloading would only make the reader flash.
+        if self.selected_message_id != Some(id) {
+            self.select_only(id);
+            self.on_message_selection_changed(cx);
+        }
+        self.reveal_selected_message();
     }
 
     /// Asks every account to sync now ("Get mail").
@@ -5807,6 +5932,10 @@ impl RootView {
             .items_center()
             .rounded_md()
             .bg(search_bg)
+            // On the light toolbar the field's fill barely differs from it.
+            .when(cx.theme().appearance().is_light(), |el| {
+                el.border_1().border_color(cx.theme().colors().border_input)
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -6358,13 +6487,33 @@ impl RootView {
                     let start = range.start.min(end);
                     let this = &*this;
                     let selection = this.selection_drag();
-                    this.list_messages[start..end]
-                        .iter()
-                        .map(|message| this.render_message_row(message, selection.as_ref(), cx))
+                    let fill = |index: usize| {
+                        this.list_messages
+                            .get(index)
+                            .map(|message| this.row_fill(message.id))
+                    };
+                    (start..end)
+                        .map(|index| {
+                            let previous = index.checked_sub(1).and_then(fill);
+                            let edges = row_edges(
+                                previous.unwrap_or(RowFill::None),
+                                fill(index).unwrap_or(RowFill::None),
+                                fill(index + 1),
+                            );
+                            this.render_message_row(
+                                &this.list_messages[index],
+                                edges,
+                                selection.as_ref(),
+                                cx,
+                            )
+                        })
                         .collect::<Vec<_>>()
                 }),
             )
             .size_full()
+            // Inside the scroll area, matching the rows' side inset, so the first
+            // and last rows (and their rounded selection) clear the column edges.
+            .py(px(MESSAGE_LIST_INSET_Y / 2.0))
             .track_scroll(self.list_scroll.clone())
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                 Self::note_scroll([this.list_scrollbar.clone()], cx);
@@ -6437,6 +6586,7 @@ impl RootView {
     fn render_message_row(
         &self,
         message: &MessageListItem,
+        edges: RowEdges,
         selection: Option<&SelectionDrag>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -6444,7 +6594,10 @@ impl RootView {
         let selected = self.row_is_selected(message.id);
         let bg_selected = colors.element_selected;
         let hover = colors.element_hover;
-        let border = colors.border_variant;
+        let separator = edges.separator.map(|kind| match kind {
+            RowSeparator::Plain => colors.border_variant,
+            RowSeparator::Selected => colors.border_selected,
+        });
         let accent = colors.accent;
 
         let sender_weight = if message.unread {
@@ -6493,11 +6646,8 @@ impl RootView {
         // The subject, on the line the action buttons sit on, gives way to them.
         // The sender/date line above and the preview below never move.
         let room_for_actions = row_actions_room(self.hovered_row == Some(message_id));
-        let menu_target = self
-            .row_menu
-            .as_ref()
-            .is_some_and(|menu| menu.id == message_id);
-        h_flex()
+        let hovered = self.row_fill(message_id) == RowFill::Hover;
+        let row = h_flex()
             .id(("message", message_id as u64))
             .group(MESSAGE_ROW_GROUP)
             .relative()
@@ -6506,12 +6656,12 @@ impl RootView {
             .gap_2()
             .px_3()
             .py_2()
-            .border_b_1()
-            .border_color(border)
+            .when(edges.round_top, |el| el.rounded_t_lg())
+            .when(edges.round_bottom, |el| el.rounded_b_lg())
             .when(selected, |el| el.bg(bg_selected))
-            .when(!selected, |el| el.hover(move |el| el.bg(hover)))
-            // The pointer goes off to the menu: this says which row it is for.
-            .when(!selected && menu_target, |el| el.bg(hover))
+            // From the view's hover state rather than `.hover()`, so the fill
+            // and the neighbours' separators always agree.
+            .when(hovered, |el| el.bg(hover))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Right,
@@ -6567,6 +6717,15 @@ impl RootView {
                     cx.notify();
                 }
             }))
+            .children(separator.map(|color| {
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left(px(ROW_SEPARATOR_INSET))
+                    .right(px(ROW_SEPARATOR_END))
+                    .h(px(1.0))
+                    .bg(color)
+            }))
             .child(div().pt_1().child(unread_dot))
             .child(
                 v_flex()
@@ -6605,7 +6764,9 @@ impl RootView {
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     this.click_message_row(message_id, event.modifiers(), window, cx);
                 }),
-            )
+            );
+        // Inset from the column edges so the rounded selection floats in the list.
+        div().w_full().px_2().child(row)
     }
 
     /// Selects and opens a row of the list.
@@ -7276,9 +7437,12 @@ impl RootView {
         if !bounds.contains(&position) || self.list_messages.is_empty() {
             return None;
         }
+        // The contents hold half the inset above and below the rows; the rows
+        // start a whole inset down (see `MESSAGE_LIST_INSET_Y`).
+        let inset = px(MESSAGE_LIST_INSET_Y);
         let contents = scroll.last_item_size?.contents.height;
-        let row_height = contents / self.list_messages.len() as f32;
-        let y = position.y - bounds.top() - scroll.base_handle.offset().y;
+        let row_height = (contents - inset) / self.list_messages.len() as f32;
+        let y = position.y - bounds.top() - scroll.base_handle.offset().y - inset;
         let row = (y / row_height).floor();
         if row < 0.0 {
             return None;
@@ -7700,6 +7864,17 @@ impl RootView {
     /// "To" / "Cc" lines under the sender (stored display-formatted).
     /// Who a message went to, as in Gmail: first names on one line, with everything
     /// on hover and all the details behind a chevron.
+    /// Notes the pointer entering or leaving recipient `ix`. Leaving one only
+    /// clears it if it is still the one marked, so moving straight to the next
+    /// name doesn't lose that one.
+    fn hover_recipient(&mut self, ix: usize, hovered: bool) {
+        if hovered {
+            self.hovered_recipient = Some(ix);
+        } else if self.hovered_recipient == Some(ix) {
+            self.hovered_recipient = None;
+        }
+    }
+
     fn render_recipients(
         &self,
         message: &MessageDetail,
@@ -7719,14 +7894,24 @@ impl RootView {
         let names = everyone.into_iter().enumerate().map(|(ix, address)| {
             let separator = if ix + 1 < count { "," } else { "" };
             let label = format!("{}{separator}", short_recipient(address, own_email, me));
+            // Lit up under the pointer: the address is in its tooltip.
+            let color = if self.hovered_recipient == Some(ix) {
+                Color::Default
+            } else {
+                Color::Muted
+            };
             div()
                 .id(("reader-recipient", ix))
                 .cursor_default()
                 .tooltip(Tooltip::text(address.display()))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    this.hover_recipient(ix, *hovered);
+                    cx.notify();
+                }))
                 .child(
                     Label::new(label)
                         .size(LabelSize::Small)
-                        .color(Color::Muted)
+                        .color(color)
                         .single_line(),
                 )
         });
@@ -8204,12 +8389,40 @@ impl RootView {
             )
     }
 
+    /// Asks, off the UI thread, whether the message shown has a verified brand
+    /// logo (see `brand_logos`); the initial shows meanwhile, and stays if not.
+    fn request_brand_logo(&mut self, cx: &mut Context<Self>) {
+        let Some((id, email)) = self
+            .reader_detail()
+            .map(|message| (message.id, message.sender_email.clone()))
+        else {
+            return;
+        };
+        if !self.brand_logos.needs_request(id) {
+            return;
+        }
+        self.brand_logos.request(id, &email, |incoming| {
+            cx.spawn(async move |this, cx| {
+                while let Ok((id, finding)) = incoming.recv().await {
+                    let alive = this.update(cx, |this, cx| {
+                        if this.brand_logos.receive(id, finding) {
+                            cx.notify();
+                        }
+                    });
+                    if alive.is_err() {
+                        return;
+                    }
+                }
+            })
+            .detach();
+        });
+    }
+
     fn render_reader(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.request_brand_logo(cx);
         let colors = cx.theme().colors();
         let bg = colors.background;
         let border = colors.border;
-        let accent = colors.accent;
-        let on_accent = colors.text_on_accent;
         // The thumb must show on the page's color, not the app's.
         let thumb = if self.reader_white_background {
             let light = theme::Theme::light();
@@ -8237,13 +8450,7 @@ impl RootView {
                 .into_any_element();
         };
 
-        let initial = message
-            .sender
-            .chars()
-            .next()
-            .unwrap_or('?')
-            .to_uppercase()
-            .to_string();
+        let initial = message.sender.chars().next().unwrap_or('?');
 
         // Fixed header (does not scroll with the body, so it stays put while the
         // content scrolls vertically or horizontally).
@@ -8270,54 +8477,47 @@ impl RootView {
                     )
                     .child(self.render_privacy_shield(cx)),
             )
+            // The recipients line follows the sender's two lines with no gap, so the
+            // three read as one block with even spacing.
             .child(
-                h_flex()
-                    .gap_2p5()
-                    .items_center()
+                v_flex()
                     .child(
-                        div()
-                            .size(px(30.0))
-                            .flex_shrink_0()
-                            .rounded_full()
-                            .bg(accent)
-                            .flex()
+                        h_flex()
+                            .gap_2p5()
                             .items_center()
-                            .justify_center()
-                            .text_color(on_accent)
-                            .text_size(ui::ui_text_size(1.0))
-                            // Tight line height so the glyph (not the looser line
-                            // box) is what gets centered vertically.
-                            .line_height(ui::ui_text_size(1.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(initial),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
                             .child(
-                                Label::new(message.sender.clone())
-                                    .weight(FontWeight::SEMIBOLD)
-                                    .single_line(),
+                                ui::Avatar::new(initial)
+                                    .size(px(30.0))
+                                    .logo(self.brand_logos.logo(message.id)),
                             )
                             .child(
-                                Label::new(message.sender_email.clone())
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted)
-                                    .single_line(),
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        Label::new(message.sender.clone())
+                                            .weight(FontWeight::SEMIBOLD)
+                                            .single_line(),
+                                    )
+                                    .child(
+                                        Label::new(message.sender_email.clone())
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted)
+                                            .single_line(),
+                                    ),
+                            )
+                            .child(
+                                Label::new(dates::full_date(
+                                    message.date_ts,
+                                    &message.received_at,
+                                    cx.language(),
+                                ))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
                             ),
                     )
-                    .child(
-                        Label::new(dates::full_date(
-                            message.date_ts,
-                            &message.received_at,
-                            cx.language(),
-                        ))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    ),
+                    .children(self.render_recipients(message, cx)),
             )
-            .children(self.render_recipients(message, cx))
             .children(self.render_attachments(cx));
 
         let loading_body = message.body_state == storage::BODY_STATE_HEADERS;
@@ -11066,12 +11266,15 @@ mod tests {
             let scroll = view.list_scroll.0.borrow();
             let bounds = scroll.base_handle.bounds();
             let x = bounds.left() + px(10.0);
+            let inset = px(MESSAGE_LIST_INSET_Y);
             let contents = scroll.last_item_size.expect("laid out").contents.height;
-            let row = contents / view.list_messages.len() as f32;
-            let first = point(x, bounds.top() + px(1.0));
-            let second = point(x, bounds.top() + row + px(1.0));
+            let row = (contents - inset) / view.list_messages.len() as f32;
+            let first = point(x, bounds.top() + inset + px(1.0));
+            let second = point(x, bounds.top() + inset + row + px(1.0));
             scroll.base_handle.set_offset(point(px(0.0), px(0.0)));
             drop(scroll);
+            // The padding above the first row is no row.
+            assert_eq!(view.list_row_at(point(x, bounds.top() + px(1.0))), None);
             assert_eq!(view.list_row_at(first), Some(ids[0]));
             assert_eq!(view.list_row_at(second), Some(ids[1]));
             // Outside the list, or past its last row, there is no row.
@@ -11103,6 +11306,73 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_notification_click_opens_its_message_in_the_unified_inbox(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _) = bulk_view(&dir, cx);
+        view.update(cx, |view, cx| {
+            let inbox = Selection::Global(GlobalMailbox::Inbox);
+            assert_eq!(view.selected_mailbox, inbox);
+            let target = view.list_messages.last().expect("inbox mail").id;
+            // Somewhere else, under a filter that may hide it.
+            let (folder, _) = a_folder_with_mail(view);
+            switch_mailbox(view, folder);
+            view.list_filter = ListFilter::Starred;
+            view.open_from_notification(Some(target), cx);
+            assert_eq!(view.selected_mailbox, inbox);
+            assert_eq!(view.selected_message_id, Some(target));
+            assert!(view.multi_selection.is_empty());
+            assert!(view.list_messages.iter().any(|m| m.id == target));
+            // A summary, or a message no longer there, shows the Inbox as it is.
+            view.open_from_notification(None, cx);
+            assert_eq!(view.selected_message_id, Some(target));
+            view.open_from_notification(Some(-1), cx);
+            assert_eq!(view.selected_message_id, Some(target));
+        });
+    }
+
+    #[gpui::test]
+    fn a_notification_click_on_the_open_message_does_not_reload_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids) = view_with_row_selected(&dir, Some(0), cx);
+        view.update(cx, |view, cx| {
+            view.selected_detail.as_mut().expect("open").subject = "not reloaded".into();
+            view.open_from_notification(Some(ids[0]), cx);
+            let detail = view.selected_detail.as_ref().expect("still open");
+            assert_eq!(detail.subject, "not reloaded");
+        });
+    }
+
+    #[test]
+    fn a_recipient_left_behind_does_not_unmark_the_next_one() {
+        let (_dir, mut view) = test_view();
+        view.hover_recipient(0, true);
+        assert_eq!(view.hovered_recipient, Some(0));
+        // Straight onto the next name: it may enter before the first one leaves.
+        view.hover_recipient(1, true);
+        view.hover_recipient(0, false);
+        assert_eq!(view.hovered_recipient, Some(1));
+        view.hover_recipient(1, false);
+        assert_eq!(view.hovered_recipient, None);
+    }
+
+    #[gpui::test]
+    fn clicking_the_open_row_again_does_not_reload_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.click_message_row(ids[0], Default::default(), window, cx);
+            // A reload would read the subject back from the database.
+            view.selected_detail.as_mut().expect("open").subject = "not reloaded".into();
+            view.click_message_row(ids[0], Default::default(), window, cx);
+            let detail = view.selected_detail.as_ref().expect("still open");
+            assert_eq!(detail.subject, "not reloaded");
+            // Another row still opens.
+            view.click_message_row(ids[1], Default::default(), window, cx);
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+        });
+    }
+
+    #[gpui::test]
     fn right_clicking_another_row_moves_the_menu_there(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().expect("tempdir");
         let (view, ids, cx) = row_menu_window(&dir, 1, cx);
@@ -11116,7 +11386,7 @@ mod tests {
         let row_height = view.read_with(cx, |view, _| {
             let sizes = view.list_scroll.0.borrow().last_item_size;
             let contents = sizes.expect("the list was laid out").contents.height;
-            contents / view.list_messages.len() as f32
+            (contents - px(MESSAGE_LIST_INSET_Y)) / view.list_messages.len() as f32
         });
         let position = view.update(cx, |view, _| {
             // To the left of the menu, which opened under the first click.
@@ -11787,6 +12057,59 @@ mod tests {
         assert_eq!(row_after_removal(&list, &[1, 2, 3, 4, 5]), None);
         assert_eq!(row_after_removal(&list, &[9]), None);
         assert_eq!(row_after_removal(&[], &[1]), None);
+    }
+
+    #[test]
+    fn a_run_of_selected_rows_is_rounded_only_at_its_ends() {
+        use RowFill::{None as Empty, Selected as Sel};
+        use RowSeparator::{Plain, Selected};
+        let edges = |p, f, n| {
+            let e = row_edges(p, f, Some(n));
+            (e.round_top, e.round_bottom, e.separator)
+        };
+        // A lone selected row: a pill, no line under it.
+        assert_eq!(edges(Empty, Sel, Empty), (true, true, None));
+        // First, middle and last of a run: the selection's line inside, none at the end.
+        assert_eq!(edges(Empty, Sel, Sel), (true, false, Some(Selected)));
+        assert_eq!(edges(Sel, Sel, Sel), (false, false, Some(Selected)));
+        assert_eq!(edges(Sel, Sel, Empty), (false, true, None));
+        // Unselected rows stay rounded; the one above a run drops its line.
+        assert_eq!(edges(Empty, Empty, Empty), (true, true, Some(Plain)));
+        assert_eq!(edges(Sel, Empty, Sel), (true, true, None));
+    }
+
+    #[test]
+    fn the_last_row_never_has_a_separator() {
+        use RowFill::{None as Empty, Selected as Sel};
+        assert_eq!(row_edges(Empty, Empty, None).separator, None);
+        let last_selected = row_edges(Sel, Sel, None);
+        assert_eq!(last_selected.separator, None);
+        assert!(last_selected.round_bottom);
+    }
+
+    #[test]
+    fn a_hovered_row_drops_the_lines_around_it_like_a_selected_one() {
+        use RowFill::{Hover, None as Empty, Selected as Sel};
+        // The row above a hovered one loses its line, as above a selection.
+        assert_eq!(row_edges(Empty, Empty, Some(Hover)).separator, None);
+        // The hovered row has none under it and keeps every corner.
+        let hovered = row_edges(Sel, Hover, Some(Sel));
+        assert_eq!((hovered.round_top, hovered.round_bottom), (true, true));
+        assert_eq!(hovered.separator, None);
+        // A selected row next to a hovered one ends its run there.
+        assert!(row_edges(Empty, Sel, Some(Hover)).round_bottom);
+        assert_eq!(row_edges(Empty, Sel, Some(Hover)).separator, None);
+    }
+
+    #[test]
+    fn row_fill_prefers_selection_then_hover_then_the_menu_target() {
+        let (_dir, mut view) = test_view();
+        view.selected_message_id = Some(1);
+        view.hovered_row = Some(1);
+        assert_eq!(view.row_fill(1), RowFill::Selected);
+        view.hovered_row = Some(2);
+        assert_eq!(view.row_fill(2), RowFill::Hover);
+        assert_eq!(view.row_fill(3), RowFill::None);
     }
 
     /// A view with row `index` of its list as the only selected message.
