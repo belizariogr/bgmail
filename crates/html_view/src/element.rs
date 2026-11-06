@@ -302,7 +302,11 @@ impl Element for HtmlElement {
                 None => window.request_animation_frame(),
             }
         }
-        if let Some(view) = view.as_ref().filter(|_| !loading) {
+        // Once per document: animated images repaint every frame.
+        if let Some(view) = view
+            .as_ref()
+            .filter(|view| !loading && !view.read(cx).rendered)
+        {
             view.update(cx, |view, cx| view.mark_rendered(cx));
         }
         if let Some(view) = self.view.clone() {
@@ -750,6 +754,43 @@ impl Render for HtmlView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DocumentOptions;
+    use std::cell::Cell;
+
+    fn document(html: &str) -> HtmlDocument {
+        HtmlDocument::parse(html, DocumentOptions::default())
+    }
+
+    #[gpui::test]
+    fn rendered_goes_out_once_per_document_after_it_paints(cx: &mut gpui::TestAppContext) {
+        cx.update(init);
+        let (view, cx) = cx.add_window_view(|_, cx| HtmlView::new(document("<p>One</p>"), cx));
+        let count = Rc::new(Cell::new(0));
+        let counted = count.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &HtmlViewEvent, _| {
+                if matches!(event, HtmlViewEvent::Rendered) {
+                    counted.set(counted.get() + 1);
+                }
+            })
+            .detach()
+        });
+        cx.run_until_parked();
+        // The first paint may have gone before the subscription; force another.
+        view.update(cx, |view, cx| view.set_document(document("<p>Two</p>"), cx));
+        cx.run_until_parked();
+        assert_eq!(count.get(), 1);
+        // Repaints of the same document say nothing more.
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(count.get(), 1);
+        // A new document renders anew.
+        view.update(cx, |view, cx| {
+            view.set_document(document("<p>Three</p>"), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(count.get(), 2);
+    }
 
     #[test]
     fn dragging_past_the_view_scrolls_by_the_distance() {

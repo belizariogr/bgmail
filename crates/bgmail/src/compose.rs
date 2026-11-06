@@ -37,7 +37,7 @@ use ui::{
 use crate::actions::{ComposeAttach, ComposeClose, ComposeDiscard, ComposeSend};
 use crate::app_menus;
 use crate::attachments::{file_family, human_size};
-use crate::crash_guard::CrashGuard;
+use crate::crash_guard::{CrashGuard, RenderMark};
 use crate::locale::{ActiveLanguage, Key, Language};
 use crate::root::{clipped_text, RootView};
 
@@ -166,15 +166,6 @@ pub struct QuotedOriginal {
     /// What marks the original while its formatted HTML renders, as in the reader; `None`
     /// when rendering it already closed the app, and it shows as text.
     pub render_guard: Option<(CrashGuard, i64)>,
-}
-
-/// Keeps a quote's render guard for as long as the formatted quote exists.
-struct QuoteGuard(CrashGuard, i64);
-
-impl Drop for QuoteGuard {
-    fn drop(&mut self) {
-        self.0.finish_if(self.1);
-    }
 }
 
 /// The recipient fields that are validated as address lists.
@@ -311,8 +302,9 @@ pub struct ComposeView {
     /// The quoted original, parsed the first time it is shown.
     quote_view: Option<Entity<HtmlView>>,
     _quote_task: Option<Task<()>>,
-    quote_guard: Option<QuoteGuard>,
-    /// Takes the quote's marker off the disk once it has rendered.
+    /// Marks the formatted quote while it exists (see [`QuotedOriginal::render_guard`]).
+    quote_mark: Option<RenderMark>,
+    /// Tells [`Self::quote_mark`] when the quote has rendered.
     _quote_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
@@ -401,7 +393,7 @@ impl ComposeView {
             format_menu: None,
             quote_view: None,
             _quote_task: None,
-            quote_guard: None,
+            quote_mark: None,
             _quote_subscription: None,
             _subscriptions: subscriptions,
         };
@@ -441,9 +433,7 @@ impl ComposeView {
             quoted: init.quoted_original,
         };
         self.quote_expanded = false;
-        self.quote_view = None;
-        self._quote_task = None;
-        self.quote_guard = None;
+        self.drop_quote_view();
         self.errors = ComposeErrors::default();
         self.from_menu_open = false;
         self.format_menu = None;
@@ -463,13 +453,20 @@ impl ComposeView {
             let selection = body_selection_color(value, cx);
             self.body
                 .update(cx, |area, cx| area.set_selection_color(selection, cx));
-            self.quote_view = None;
-            self._quote_task = None;
+            self.drop_quote_view();
             if self.quote_expanded {
                 self.build_quote_view(cx);
             }
             cx.notify();
         }
+    }
+
+    /// Forgets the formatted quote: its view, its build, and its render mark.
+    fn drop_quote_view(&mut self) {
+        self.quote_view = None;
+        self._quote_task = None;
+        self.quote_mark = None;
+        self._quote_subscription = None;
     }
 
     fn toggle_quote(&mut self, cx: &mut Context<Self>) {
@@ -499,12 +496,10 @@ impl ComposeView {
                 accent: theme.accent,
             }
         };
-        // Dropped first: the guard it replaces clears the marker of the same message.
-        self.quote_guard = None;
-        self.quote_guard = quoted.render_guard.clone().map(|(guard, id)| {
-            guard.begin(id);
-            QuoteGuard(guard, id)
-        });
+        self.quote_mark = quoted
+            .render_guard
+            .as_ref()
+            .map(|(guard, id)| guard.begin(*id));
         let build = cx.background_spawn(async move {
             with_render_stack(move || {
                 // Text costs the same as in the reader, so it is clipped the same way.
@@ -545,10 +540,8 @@ impl ComposeView {
             this.update(cx, |this, cx| {
                 let view = cx.new(|cx| HtmlView::new(document.into_inner(), cx));
                 this._quote_subscription = Some(cx.subscribe(&view, |this, _, event, _| {
-                    if let (HtmlViewEvent::Rendered, Some(QuoteGuard(guard, id))) =
-                        (event, &this.quote_guard)
-                    {
-                        guard.rendered(*id);
+                    if let (HtmlViewEvent::Rendered, Some(mark)) = (event, &this.quote_mark) {
+                        mark.rendered();
                     }
                 }));
                 this.quote_view = Some(view);
@@ -2440,18 +2433,6 @@ mod tests {
         );
         assert_eq!(draft.references, reply.references);
         assert_eq!(draft.attachments, files);
-    }
-
-    #[test]
-    fn a_quote_guard_clears_only_its_own_marker_when_it_goes() {
-        let dir = tempfile::tempdir().unwrap();
-        let guard = CrashGuard::beside_for_quotes(&dir.path().join("mail.db"));
-        guard.begin(1);
-        drop(QuoteGuard(guard.clone(), 1));
-        assert_eq!(guard.take_unfinished(), None);
-        guard.begin(2);
-        drop(QuoteGuard(guard.clone(), 1));
-        assert_eq!(guard.take_unfinished(), Some(2));
     }
 
     #[test]

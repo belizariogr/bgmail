@@ -537,8 +537,9 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `paint` replays the display list (`canvas_height`, content width), asks
   for a repaint when an animated image's next frame is due or remote loads
   are in flight (`REMOTE_POLL`, 100ms) (the view's
-  `schedule_frame`, else `request_animation_frame`), with nothing loading tells
-  the view (`mark_rendered`) and, when interactive, `paint_input_listeners`.
+  `schedule_frame`, else `request_animation_frame`), with nothing loading and
+  `rendered` not yet set tells the view (`mark_rendered`; animated images repaint
+  every frame, so it's skipped after) and, when interactive, `paint_input_listeners`.
 - `fn paint_input_listeners(view, origin, hitbox, window, cx)` (private): sets
   the view's cursor on the hitbox; window-level mouse down (over the hitbox),
   move and up listeners converting to document coordinates; a capture-phase
@@ -566,7 +567,8 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   `impl Render`: focusable `div` in the `HtmlView` key context scrolling on
   both axes, action handlers, the interactive element and the overflow spacer.
 - Tests: width selection, canvas height, content width change threshold,
-  cursor choice, reveal scroll.
+  cursor choice, reveal scroll; `Rendered` once per document (not on repaints, again
+  after `set_document`). Dev-dependency `gpui` with `test-support` for the window test.
 
 ### `examples/`
 - `viewer.rs`: calls `html_view::init`; window (app id `html_view_viewer`) showing HTML files in an

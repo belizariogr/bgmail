@@ -757,15 +757,12 @@
 - ✅ Buttons that open a menu show a small triangle (`IconButton::opens_menu`): Move in the
       toolbar and on a multiple selection, the list's filter, attachment chips, and compose's From and format menus
 - ✅ "View normally" on the notice of a message shown as text after a crash
-- ✅ Closing the main window on Linux no longer reads as a crash on the next start (the
-      render markers are cleared in `RootView::close_main_window`; the quit hook ran after
-      the view was already gone)
-- ✅ A message whose render finished is safe: the crash marker leaves the disk once the
-      reader (or a reply's quote) paints it with nothing left to load
-      (`HtmlViewEvent::Rendered`), so a kill or logout no longer opens it as text; a panic
-      on the UI thread while it shows writes the marker back (`crash_guard::install_panic_hook`)
-- ⬜ A stack overflow or out-of-memory after the render finished (hover, selection, zoom)
-      isn't caught by the panic hook, so it doesn't fall back to text on the next start
+- ✅ Only a real crash costs a message its formatting: the marker is on disk only while
+      a message is built and first painted (`HtmlViewEvent::Rendered`), so closing the
+      window, logging out or killing the app later no longer opens it as text; a UI-thread
+      panic while it shows writes it back (`crash_guard::install_panic_hook`). Each render
+      has its own `RenderMark` (reply windows no longer clear each other's quote), and an
+      app-level quit hook clears the markers (on Linux the view is gone before quit hooks run)
 - ✅ Delete buttons in the theme's danger red (`ThemeColors::danger`, `ui::Color::Danger`)
 - ✅ Mark as unread shows the list's blue dot on its icon; Mark as read doesn't
       (`IconButton::dot`, `ContextMenu::icon_dot`)
