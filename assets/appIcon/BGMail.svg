@@ -1,56 +1,40 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-  <!-- Envelope body (bottom + sides) -->
-  <rect x="16" y="40" width="224" height="176" rx="36" fill="#006CBE"/>
-
-  <!-- Bottom fold subtle darker tone -->
-  <path d="M26 204 C20 198 16 188 16 178 V92 L128 152 L240 92 V178 C240 199 223 216 202 216 H54 C42 216 32 211 26 204 Z" fill="#005BA1"/>
-
-  <!-- Top envelope flap -->
-  <path d="M16 76 C16 56.1 32.1 40 52 40 H204 C223.9 40 240 56.1 240 76 V84 L136.5 138.5 C131.2 141.3 124.8 141.3 119.5 138.5 L16 84 Z" fill="#29B6F6"/>
-
-  <!-- Italic BG, 25% smaller than the previous mark, centered on the envelope -->
-  <g transform="translate(128 140) scale(0.4875) translate(-183.44 -140)">
-    <g transform="translate(38 0) skewX(-15)">
-      <g fill="#003E75" opacity="0.35" transform="translate(2 4)">
-        <rect x="58" y="102" width="38" height="14" rx="7"/>
-        <rect x="70" y="133" width="26" height="14" rx="7"/>
-        <rect x="80" y="164" width="16" height="14" rx="7"/>
-        <path fill-rule="evenodd" d="
-          M108 92 H156 C175 92 188 101.5 188 116.5 C188 126.5 181.5 134 171 137.5
-          C183.5 140.5 191 149 191 161.5 C191 178 177 188 157 188 H108 V92 Z
-          M130 110 V131 H151 C160 131 165.5 126.5 165.5 120.5 C165.5 114.5 160 110 151 110 H130 Z
-          M130 146 V170 H153.5 C162.5 170 168 165.5 168 158 C168 150.5 162.5 146 153.5 146 H130 Z
-        "/>
-        <g transform="translate(194 92) scale(1.230769) translate(-144.5 -104)">
-          <path d="
-            M186 104 C202.5 104 215.5 111.5 221 124 L204.5 131.5
-            C200.5 123.5 194 119.5 185.5 119.5 C171.5 119.5 163 129.5 163 143
-            C163 156.5 171.5 166.5 186 166.5 C197 166.5 204.5 161 206 152
-            H185 V138.5 H223 V147.5 C223 169 208 182 185.5 182
-            C160.5 182 144.5 165.5 144.5 143 C144.5 120.5 160.5 104 186 104 Z
-          "/>
-        </g>
-      </g>
-      <g fill="#FFFFFF">
-        <rect x="58" y="102" width="38" height="14" rx="7"/>
-        <rect x="70" y="133" width="26" height="14" rx="7"/>
-        <rect x="80" y="164" width="16" height="14" rx="7"/>
-        <path fill-rule="evenodd" d="
-          M108 92 H156 C175 92 188 101.5 188 116.5 C188 126.5 181.5 134 171 137.5
-          C183.5 140.5 191 149 191 161.5 C191 178 177 188 157 188 H108 V92 Z
-          M130 110 V131 H151 C160 131 165.5 126.5 165.5 120.5 C165.5 114.5 160 110 151 110 H130 Z
-          M130 146 V170 H153.5 C162.5 170 168 165.5 168 158 C168 150.5 162.5 146 153.5 146 H130 Z
-        "/>
-        <g transform="translate(194 92) scale(1.230769) translate(-144.5 -104)">
-          <path d="
-            M186 104 C202.5 104 215.5 111.5 221 124 L204.5 131.5
-            C200.5 123.5 194 119.5 185.5 119.5 C171.5 119.5 163 129.5 163 143
-            C163 156.5 171.5 166.5 186 166.5 C197 166.5 204.5 161 206 152
-            H185 V138.5 H223 V147.5 C223 169 208 182 185.5 182
-            C160.5 182 144.5 165.5 144.5 143 C144.5 120.5 160.5 104 186 104 Z
-          "/>
-        </g>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4FA8FF"/>
+      <stop offset="1" stop-color="#0A47BA"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0.1" r="0.9">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="0.6" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <!-- The flap edge is a V-shaped slit cut through the envelope, so the tile shows through -->
+    <mask id="slit">
+      <rect width="256" height="256" fill="#FFFFFF"/>
+      <path d="M58 84 L119 124 C124.5 127.8 131.5 127.8 137 124 L198 84" stroke="#000000" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </mask>
+  </defs>
+  <!-- Rounded-square tile with a diagonal blue gradient and a soft top-left highlight -->
+  <rect width="256" height="256" rx="58" fill="url(#bg)"/>
+  <rect width="256" height="256" rx="58" fill="url(#glow)"/>
+  <!-- Envelope, slightly enlarged around its own centre -->
+  <g transform="translate(128 124) scale(1.08) translate(-128 -124)">
+  <g mask="url(#slit)">
+    <!-- Soft shadow that lifts the envelope off the tile -->
+    <rect x="46" y="66" width="164" height="128" rx="20" fill="#06309A" opacity="0.30"/>
+    <!-- Envelope body -->
+    <rect x="46" y="60" width="164" height="128" rx="20" fill="#FFFFFF"/>
+    <!-- Flap, tinted so it reads as a separate surface -->
+    <path d="M46 80 C46 69 55 60 66 60 H190 C201 60 210 69 210 80 V88 L137 136 C131.5 139.8 124.5 139.8 119 136 L46 88 Z" fill="#EAF2FF"/>
+  </g>
+  <!-- Small BG monogram on the envelope corner -->
+  <g transform="translate(182 166)">
+    <g fill="#1B6AE0" transform="translate(0 0) scale(0.18) translate(-199.5 -140)">
+      <path fill-rule="evenodd" d="M108 92 H156 C175 92 188 101.5 188 116.5 C188 126.5 181.5 134 171 137.5 C183.5 140.5 191 149 191 161.5 C191 178 177 188 157 188 H108 V92 Z M130 110 V131 H151 C160 131 165.5 126.5 165.5 120.5 C165.5 114.5 160 110 151 110 H130 Z M130 146 V170 H153.5 C162.5 170 168 165.5 168 158 C168 150.5 162.5 146 153.5 146 H130 Z"/>
+      <g transform="translate(194 92) scale(1.230769) translate(-144.5 -104)">
+        <path d="M186 104 C202.5 104 215.5 111.5 221 124 L204.5 131.5 C200.5 123.5 194 119.5 185.5 119.5 C171.5 119.5 163 129.5 163 143 C163 156.5 171.5 166.5 186 166.5 C197 166.5 204.5 161 206 152 H185 V138.5 H223 V147.5 C223 169 208 182 185.5 182 C160.5 182 144.5 165.5 144.5 143 C144.5 120.5 160.5 104 186 104 Z"/>
       </g>
     </g>
+  </g>
   </g>
 </svg>

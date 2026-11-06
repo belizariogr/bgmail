@@ -1,4 +1,8 @@
-# BGMail
+<p align="center">
+  <img src="assets/appIcon/BGMail.svg" alt="BGMail icon" width="128" height="128">
+</p>
+
+<h1 align="center">BGMail</h1>
 
 A **fast**, **simple** and **elegant** desktop e-mail client, written in Rust on
 top of **GPUI** (the GPU-accelerated UI framework from
