@@ -85,6 +85,8 @@ pub struct ThemeColors {
     pub border_variant: Hsla,
     /// Border of a focused element (keyboard focus).
     pub border_focused: Hsla,
+    /// Border of a text field (VSCode's `input.border`).
+    pub border_input: Hsla,
 
     /// Background of an interactive element (button, input).
     pub element_background: Hsla,
@@ -178,6 +180,7 @@ impl Theme {
                 border: hex(0x2b2b2b),
                 border_variant: hex(0x313131),
                 border_focused: hex(0x0078d4),
+                border_input: hex(0x3c3c3c),
 
                 element_background: hex(0x313131),
                 element_hover: hex(0x2a2d2e),
@@ -225,6 +228,7 @@ impl Theme {
                 border: hex(0xe5e5e5),
                 border_variant: hex(0xeaeaea),
                 border_focused: hex(0x005fb8),
+                border_input: hex(0xcecece),
 
                 element_background: hex(0xf3f3f3),
                 element_hover: hex(0xf0f0f0),

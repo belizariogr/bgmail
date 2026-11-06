@@ -797,6 +797,7 @@
       separator under the last row
 - ✅ Clicking the open message again doesn't reload it (the reader no longer flashes)
 - ✅ Message list minimum width 210 px (was 350)
+- ✅ Search field bordered in the light theme (`ThemeColors::border_input`)
 - ⬜ Search recipients too (To/Cc aren't in `search_text`; needs a reindex), as Thunderbird
       and Gmail do
 - ⬜ Keyboard navigation in `ui::ContextMenu` (up/down/enter, as in Zed): every menu

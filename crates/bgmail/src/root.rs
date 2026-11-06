@@ -5923,6 +5923,10 @@ impl RootView {
             .items_center()
             .rounded_md()
             .bg(search_bg)
+            // On the light toolbar the field's fill barely differs from it.
+            .when(cx.theme().appearance().is_light(), |el| {
+                el.border_1().border_color(cx.theme().colors().border_input)
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {

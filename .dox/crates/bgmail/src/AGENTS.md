@@ -1904,7 +1904,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_search_control`** (private, L2321)
   - Signature: `fn render_search_control(&self, compact_search, search_bg, language, cx) -> AnyElement`
   - Purpose: Renders compact or expanded search UI.
-  - Behavior: Icon button or TextInput with clear affordance based on layout state.
+  - Behavior: Icon button or TextInput with clear affordance based on layout state. In a light theme the expanded field has a 1 px `border_input` border (its fill barely differs from the toolbar).
 
 - **`render_search_clear_button`** (private, L2377)
   - Signature: `fn render_search_clear_button(language, cx) -> impl IntoElement`
