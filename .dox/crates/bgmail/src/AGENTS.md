@@ -1351,7 +1351,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 #### Types / constants
 
 - **const `SIDEBAR_MIN_WIDTH`**: Minimum sidebar column width (150px).
-- **const `LIST_MIN_WIDTH`**: Minimum message-list column width (350px).
+- **const `LIST_MIN_WIDTH`**: Minimum message-list column width (210px, user decision: 60% of the former 350px).
 - **const `READER_MIN_WIDTH`**: Minimum reading-pane width (550px).
 - **const `WINDOW_MIN_WIDTH` / `WINDOW_MIN_HEIGHT`**: Minimum main window size (950×480px); exported for startup clamping.
 - **const `MAIN_WINDOW_APP_ID` / `SETTINGS_WINDOW_APP_ID` / `COMPOSE_WINDOW_APP_ID`** = `com.bgmail.main` / `.settings` / `.newmail`: Wayland app_id / X11 WM_CLASS of each window; the main one matches the packaged desktop entry's `StartupWMClass`.

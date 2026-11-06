@@ -67,7 +67,7 @@ use storage::{
 /// Minimum width of the accounts/folders sidebar, in pixels.
 const SIDEBAR_MIN_WIDTH: f32 = 150.0;
 /// Minimum width of the message list, in pixels.
-const LIST_MIN_WIDTH: f32 = 350.0;
+const LIST_MIN_WIDTH: f32 = 210.0;
 /// Minimum width reserved for the reading pane (e-mail content), in pixels.
 const READER_MIN_WIDTH: f32 = 550.0;
 /// Minimum window width, in pixels. Kept above `LIST_MIN_WIDTH +
