@@ -7882,6 +7882,8 @@ impl RootView {
                     Label::new(label)
                         .size(LabelSize::Small)
                         .color(Color::Muted)
+                        // Lit up under the pointer: the address is in its tooltip.
+                        .hover_color(Color::Default)
                         .single_line(),
                 )
         });

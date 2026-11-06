@@ -300,6 +300,11 @@ _300 functions/methods documented._
   - Purpose: Sets the GPUI font weight.
   - Behavior: Builder; assigns `weight` and returns `self`.
 
+- **`hover_color`** (pub)
+  - Signature: `pub fn hover_color(mut self, color: Color) -> Self`
+  - Purpose: Text color while the pointer is over the label.
+  - Behavior: Builder; stores `Some(color)`, applied at render as a `hover` text color. Test `hover_color_is_kept_apart_from_the_color`.
+
 - **`bold`** (pub, L75)
   - Signature: `pub fn bold(mut self) -> Self`
   - Purpose: Shortcut for bold weight.
@@ -321,8 +326,8 @@ _300 functions/methods documented._
 - **`render`** (private, L94)
   - Signature: `fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement`
   - Purpose: Renders themed label text inside a `div`.
-  - Behavior: Resolves color via `hsla(cx)`, applies `text_size`, `text_color`,
-    and `font_weight`. When `single_line`, adds overflow/ellipsis modifiers.
+  - Behavior: Resolves color via `hsla(cx)`, applies `text_size`, `text_color`
+    (and the `hover_color` on hover, when set), and `font_weight`. When `single_line`, adds overflow/ellipsis modifiers.
     Child is the label string.
 
 ### `src/context_menu.rs`
