@@ -204,7 +204,7 @@ wiring to `storage`.
     waiting for its click; bursts summarized. A click (user decision) brings
     the main window up in the unified Inbox at that message
     (`RootView::open_from_notification`). It needs the app running: a
-    notification outlives the process only as a dead one, as in Thunderbird.
+    notification left after the app quits opens nothing (TODO).
 - Mail data flow: real profiles start empty (welcome screen → Settings ▸
   Accounts); sample mail is seeded only with `BGMAIL_DEMO`/`BGMAIL_SAMPLE_DIR`.
   Message actions call `mail_sync::actions` (local change + queued server
