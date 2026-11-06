@@ -27,3 +27,14 @@ base64 = "0.22"
 getrandom = "0.3"
 # Autoconfig (Thunderbird clientConfig) XML.
 roxmltree = "0.21"
+# Brand logos (BIMI): DKIM + DMARC verification and DNS (hickory, on Tokio), on the same
+# ring as rustls and the same (patched) mail-parser.
+mail-auth = { version = "0.7.5", default-features = false, features = ["ring"] }
+tokio = { version = "1", default-features = false, features = ["rt"] }
+# Organizational domains (public suffix list) for DMARC alignment and BIMI lookup.
+psl = "2"
+# Mark certificate (VMC/CMC) chain checks, as rustls checks server certificates.
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+# Logotypes are gzipped SVG.
+flate2 = "1"

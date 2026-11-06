@@ -1,8 +1,10 @@
-use gpui::{canvas, point, Bounds, FontWeight, Point};
+use std::sync::Arc;
+
+use gpui::{canvas, img, point, Bounds, FontWeight, Image, Point};
 
 use crate::prelude::*;
 
-/// A round avatar showing a person's initial.
+/// A round avatar showing a person's initial, or a logo when one is given.
 ///
 /// The letter is centered by its ink, not its line box: a line box puts the
 /// glyph where the font's ascent and descent say, which leaves a capital a
@@ -17,6 +19,7 @@ pub struct Avatar {
     size: Pixels,
     background: Color,
     color: Color,
+    logo: Option<Arc<Image>>,
 }
 
 impl Avatar {
@@ -27,7 +30,14 @@ impl Avatar {
             size: px(30.0),
             background: Color::Accent,
             color: Color::OnAccent,
+            logo: None,
         }
+    }
+
+    /// Shows `logo` (cropped to the circle) in place of the initial.
+    pub fn logo(mut self, logo: Option<Arc<Image>>) -> Self {
+        self.logo = logo;
+        self
     }
 
     /// Diameter of the circle.
@@ -47,6 +57,13 @@ pub fn ink_centered_origin(area: Bounds<Pixels>, ink: Bounds<Pixels>) -> Point<P
 
 impl RenderOnce for Avatar {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        if let Some(logo) = self.logo {
+            return img(logo)
+                .size(self.size)
+                .flex_shrink_0()
+                .rounded_full()
+                .into_any_element();
+        }
         let font_size = crate::ui_text_size(1.0);
         let font = gpui::Font {
             weight: FontWeight::SEMIBOLD,
@@ -90,6 +107,7 @@ impl RenderOnce for Avatar {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(self.initial.to_string()),
         }
+        .into_any_element()
     }
 }
 

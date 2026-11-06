@@ -801,10 +801,10 @@
 - ✅ Reader recipients light up under the pointer (`RootView::hovered_recipient`)
 - ✅ Reader header: recipients line spaced like the name and address above it; the
       avatar's letter centered by its ink (`ui::Avatar`, `TextSystem::glyph_ink_bounds`)
-- ⬜ Brand logo in the avatar (BIMI), as Gmail and Apple Mail: `default._bimi.<domain>` TXT
-      → SVG Tiny PS, shown only with DMARC passing (the receiving server's
-      `Authentication-Results`) and a verified mark certificate (VMC/CMC, `a=`), cached
-      per domain. Needs a DNS TXT resolver and X.509 checks; Thunderbird has none
+- ✅ Brand logo in the reader's avatar (BIMI), as Gmail and Apple Mail: our own DKIM +
+      DMARC check (enforcing policy), mark certificate verified against the authorities'
+      roots, logo from the certificate, cached per domain; the initial shows meanwhile
+- ⬜ BIMI: check mark certificate revocation (CRL), as Gmail does
 - ⬜ Search recipients too (To/Cc aren't in `search_text`; needs a reindex), as Thunderbird
       and Gmail do
 - ⬜ Keyboard navigation in `ui::ContextMenu` (up/down/enter, as in Zed): every menu

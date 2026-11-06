@@ -71,7 +71,8 @@ _(No functions.)_
 
 ### `src/schema.rs`
 
-- **const `SCHEMA_VERSION`**: `8`.
+- **const `SCHEMA_VERSION`**: `9`.
+- **const `V9_OBJECTS`**: `brand_logos (domain TEXT PRIMARY KEY COLLATE NOCASE, svg BLOB, checked_at INTEGER NOT NULL)`.
 - **const `CREATE_ACCOUNTS` / `CREATE_FOLDERS` / `CREATE_MESSAGES` / `CREATE_META`**: v1 base DDL (`IF NOT EXISTS`), the starting point of every database.
 - **const `INDEX_MESSAGES_SEARCH` / `INDEX_MESSAGES_ACCOUNT` / `INDEX_MESSAGES_FOLDERS`**: v1 indexes.
 - **const `V2_COLUMNS`**: `(table, column, definition)` list added in place by the v1→v2 step (accounts: provider/config_json/sort_order; folders: remote_name/role/uid_validity/uid_next/highest_modseq/synced_at; messages: message_id_hdr/in_reply_to/references_hdr/thread_id/to_addrs/cc_addrs/reply_to/date_ts/answered/body_state/gm_msgid/size).
@@ -81,11 +82,18 @@ _(No functions.)_
 
 _(No functions.)_
 
+### `src/brand_logos.rs`
+
+- **struct `BrandLogo { svg: Option<Vec<u8>>, checked_at }`** (pub): what was found for a domain (`svg` `None` = none to show) and when.
+- **`Database::brand_logo(domain)`** (pub): the last finding for a domain, any case.
+- **`Database::set_brand_logo(domain, svg, checked_at)`** (pub): upserts the finding.
+- Test: kept per domain, case-insensitive, replaced by a later check.
+
 ### `src/migration.rs`
 
 - **`migrate`** (pub(crate)) — `fn migrate(conn: &Connection) -> rusqlite::Result<()>`
   - Purpose: bring any database to `SCHEMA_VERSION`.
-  - Behavior: one `IMMEDIATE` transaction: runs v1 base DDL, reads `schema_version` (missing → 1), runs `migrate_v1_to_v2` when < 2 and `migrate_v2_to_v3` when < 3, upserts `meta.schema_version` when it changed or was missing, commits. Newer versions are left untouched.
+  - Behavior: one `IMMEDIATE` transaction: runs v1 base DDL, reads `schema_version` (missing → 1), runs `migrate_v1_to_v2` when < 2, `migrate_v2_to_v3` when < 3, then the v4–v9 steps (v9: `V9_OBJECTS`), upserts `meta.schema_version` when it changed or was missing, commits. Newer versions are left untouched.
 - **`schema_version`** (pub(crate)) — `fn schema_version(conn: &Connection) -> rusqlite::Result<Option<i64>>`
   - Reads and parses `meta.schema_version`; `None` when absent or not an integer.
 - **`migrate_v1_to_v2`** (private) — `fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()>`

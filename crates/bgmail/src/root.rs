@@ -1024,6 +1024,8 @@ pub struct RootView {
     db: storage::Database,
     /// Path of [`Self::db`]; the sync engine opens its own connections on it.
     db_path: std::path::PathBuf,
+    /// Verified brand logos for the reader's avatar, found off the UI thread.
+    brand_logos: crate::brand_logos::BrandLogos,
     /// Background sync engine. `None` until [`Self::start_mail`] (and in
     /// unit tests, which never touch the network).
     mail: Option<MailService>,
@@ -1724,6 +1726,7 @@ impl RootView {
 
         Self {
             db,
+            brand_logos: crate::brand_logos::BrandLogos::new(db_path.clone()),
             db_path,
             mail: None,
             account_start_errors: HashMap::new(),
@@ -2660,6 +2663,7 @@ impl RootView {
                 self.schedule_reload(cx);
             }
             SyncEvent::BodyReady { message_id } => {
+                self.brand_logos.body_ready(message_id);
                 if self.selected_message_id == Some(message_id) {
                     self.reload_selected_detail();
                     self.last_reader_sig = None;
@@ -8385,7 +8389,37 @@ impl RootView {
             )
     }
 
+    /// Asks, off the UI thread, whether the message shown has a verified brand
+    /// logo (see `brand_logos`); the initial shows meanwhile, and stays if not.
+    fn request_brand_logo(&mut self, cx: &mut Context<Self>) {
+        let Some((id, email)) = self
+            .reader_detail()
+            .map(|message| (message.id, message.sender_email.clone()))
+        else {
+            return;
+        };
+        if !self.brand_logos.needs_request(id) {
+            return;
+        }
+        self.brand_logos.request(id, &email, |incoming| {
+            cx.spawn(async move |this, cx| {
+                while let Ok((id, finding)) = incoming.recv().await {
+                    let alive = this.update(cx, |this, cx| {
+                        if this.brand_logos.receive(id, finding) {
+                            cx.notify();
+                        }
+                    });
+                    if alive.is_err() {
+                        return;
+                    }
+                }
+            })
+            .detach();
+        });
+    }
+
     fn render_reader(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.request_brand_logo(cx);
         let colors = cx.theme().colors();
         let bg = colors.background;
         let border = colors.border;
@@ -8451,7 +8485,11 @@ impl RootView {
                         h_flex()
                             .gap_2p5()
                             .items_center()
-                            .child(ui::Avatar::new(initial).size(px(30.0)))
+                            .child(
+                                ui::Avatar::new(initial)
+                                    .size(px(30.0))
+                                    .logo(self.brand_logos.logo(message.id)),
+                            )
                             .child(
                                 v_flex()
                                     .flex_1()

@@ -3,14 +3,15 @@
 //! ([`oauth`]), account wiring ([`ImapSmtpConnector`]) and server discovery
 //! ([`presets`], [`autoconfig`]).
 //!
-//! Everything is blocking and runs on the caller's (background) thread; there
-//! is no async runtime. One rustls 0.23 (ring provider, OS trust store via
+//! Everything is blocking and runs on the caller's (background) thread; the only
+//! async runtime is the one [`bimi::BrandChecker`] owns for its DNS resolver. One rustls 0.23 (ring provider, OS trust store via
 //! `rustls-platform-verifier`) serves IMAP, SMTP (lettre) and HTTP (ureq).
 //! No GPUI, no UI strings beyond the OAuth loopback page.
 
 #![forbid(unsafe_code)]
 
 pub mod autoconfig;
+pub mod bimi;
 pub mod connector;
 #[cfg(test)]
 mod dotenv;

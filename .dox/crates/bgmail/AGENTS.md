@@ -200,6 +200,11 @@ wiring to `storage`.
   - `instance` — one process per profile: lock file, and hand-off of links or
     "show the window" from later launches.
   - `dates` — local-time list/reader dates (chrono `clock`).
+  - `brand_logos` — the reader avatar's brand logo (BIMI, as Gmail and Apple
+    Mail): the initial shows at once; one worker thread, started by the first
+    message opened, checks it through `protocols::bimi` and caches per domain
+    in `storage` (logo 7 days, none 1 day); only a verified logo replaces the
+    initial.
   - `notifications` — desktop notifications (`notify-rust`), one thread each
     waiting for its click; bursts summarized. A click (user decision) brings
     the main window up in the unified Inbox at that message

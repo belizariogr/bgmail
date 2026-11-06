@@ -25,7 +25,7 @@ isolated tests, and shorter incremental compiles.
   `mail_sync` (sync engine) → `mail_core` + `storage`; no GPUI and no protocol
   crate: it only sees `mail_core::MailConnector`, so the UI injects the real
   connector (`protocols`) and tests inject `mail_core::fake::FakeConnector`.
-  `protocols` (IMAP/SMTP/OAuth/discovery) → `mail_core` only (no GPUI, no
+  `protocols` (IMAP/SMTP/OAuth/discovery/BIMI) → `mail_core` only (no GPUI, no
   `storage`/`ui`/`theme`); blocking clients on std threads, one rustls 0.23
   (ring) shared by `imap`, `lettre` and `ureq`.
 - No `accounts` crate (decided): config in `storage`, secrets via GPUI's

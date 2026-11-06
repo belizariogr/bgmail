@@ -35,6 +35,25 @@ pub(crate) fn get(url: &str, timeout: Duration) -> Result<HttpResponse, RemoteEr
     read(response)
 }
 
+/// GET `url` as bytes, refusing a body over `limit` bytes. `None` for a non-2xx status.
+pub(crate) fn get_bytes(
+    url: &str,
+    timeout: Duration,
+    limit: u64,
+) -> Result<Option<Vec<u8>>, RemoteError> {
+    let mut response = agent(timeout).get(url).call().map_err(map_error)?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(limit)
+        .read_to_vec()
+        .map_err(map_error)?;
+    Ok(Some(body))
+}
+
 /// POST an `application/x-www-form-urlencoded` body.
 pub(crate) fn post_form(
     url: &str,
@@ -257,6 +276,20 @@ mod tests {
         assert_eq!(posted.status, 400);
         assert_eq!(posted.body, "echo:a=1+2&b=%26");
         assert_eq!(log.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn get_bytes_refuses_failures_and_oversized_bodies() {
+        let (base, _) = test_server::serve(|req| match req.target.as_str() {
+            "/ok" => (200, "abc".into()),
+            "/big" => (200, "x".repeat(100)),
+            _ => (404, String::new()),
+        });
+        let timeout = Duration::from_secs(5);
+        let get = |path: &str, limit| get_bytes(&format!("{base}{path}"), timeout, limit);
+        assert_eq!(get("/ok", 10).unwrap(), Some(b"abc".to_vec()));
+        assert_eq!(get("/missing", 10).unwrap(), None);
+        assert!(get("/big", 10).is_err());
     }
 
     #[test]

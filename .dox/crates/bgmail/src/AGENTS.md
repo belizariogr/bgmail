@@ -747,6 +747,21 @@ Guards against crash loops (a message that kills the renderer every time the rea
 - **`create_private_dir(dir)`** / **`create_private_file(path)`** (pub(crate); also used by `attachments`): Unix modes 0700 / 0600 (create-new); elsewhere plain creation (Windows' temp dir is per user).
 - Tests: nonces differ; pages are private, never overwritten; only stale pages are removed.
 
+### `src/brand_logos.rs`
+
+The reader's brand logos, found off the UI thread (`protocols::bimi`).
+- **enum `Finding`** (`NotReady`, `None`, `Logo { domain, svg }`); **struct `Request { message_id, domain }`** (private).
+- **struct `BrandLogos`** (pub(crate)): per message the domain shown (`shown`), `pending`, `awaiting_body`, decoded `images` per domain, and the worker's request sender.
+  - **`new(db_path)`**; **`logo(message_id)`**: the `Arc<gpui::Image>` to show, once found.
+  - **`needs_request(message_id)`**: not settled, pending, nor waiting for its body (cheap: asked on every reader render).
+  - **`body_ready(message_id)`**: a message waiting for its body may be asked about again (`SyncEvent::BodyReady`).
+  - **`request(message_id, sender_email, start)`**: no domain → settled with none; else starts the worker on first use (`start` gets the result receiver) and sends the request.
+  - **`receive(message_id, finding)`**: records it; `true` when a logo now shows. `NotReady` waits for the body.
+- **`sender_domain`** / **`is_fresh`** (logo kept `LOGO_KEPT` 7 days, none `NONE_KEPT` 1 day) / **`unix_now`** (private).
+- **`spawn_worker(db_path, results)`** (private): one thread `bgmail-brand-logos` with its own `Database` and a `BrandChecker` built on first need; answers in order; ends when the sender drops.
+- **`check(db, checker, request)`** (private): a fresh cached none → `None` with no network; no raw body → `NotReady`; the message's authenticated domain must equal the sender's; a fresh cached logo is reused, else `BrandChecker::logo` refreshes the cache (a failed fetch keeps the stale finding).
+- Tests: sender domains, freshness, ask once / show what was found, body-less retry only after `body_ready`, domainless sender, cached absence needs no resolver.
+
 ### `src/attachments.rs`
 
 Reader attachment chips' presentation and the file side of Open / Save As… /
@@ -1586,6 +1601,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`remote_allowed_for`** (private): Whether a message loads remote content: `load_remote_images` or loaded from the shield this session (`remote_allowed`).
 - **`load_remote_for_selected`** (private): Shield click: adds the selected message to `remote_allowed` (re-renders through the `ReaderSignature`).
 - **`set_load_remote_images`** (private): "Always load remote images" (Settings ▸ Privacy): persists and refreshes windows.
+- **`request_brand_logo(cx)`** (private): asks `brand_logos` about the message the reader shows unless settled; on first use starts the task that takes the worker's findings (`receive`, notifies when a logo shows).
 - **`open_from_notification(message_id, cx)`** (pub(crate)): what a clicked notification opens (nothing during onboarding): the unified Inbox (search ended, via `select_mailbox` unless already there), then the message if given and listed — not listed, the list reloads once with `ListFilter::All`; still missing, only the Inbox shows. Already the open message: not reloaded (no reader flash). Revealed in the list.
 - **`set_notifications_enabled`** (pub(crate)): Settings ▸ Notifications switch: sets `notifications_enabled`, persists via `request_save`, notifies.
 
@@ -2055,7 +2071,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_reader`** (private, L3100)
   - Signature: `fn render_reader(&mut self, cx) -> impl IntoElement`
   - Purpose: Renders reading pane.
-  - Behavior: Empty state, fixed header with subject, privacy shield, then one block of avatar (`ui::Avatar`) + sender name/address/date and the recipients line right under it (no gap, so the three lines are evenly spaced), attachments, and the body area hosting the reader `HtmlView` (white background when forced).
+  - Behavior: First `request_brand_logo`. Empty state, fixed header with subject, privacy shield, then one block of avatar (`ui::Avatar`, with `brand_logos.logo(id)` when verified) + sender name/address/date and the recipients line right under it (no gap, so the three lines are evenly spaced), attachments, and the body area hosting the reader `HtmlView` (white background when forced).
 
 - **`render_status_bar`** (private, L3300)
   - Signature: `fn render_status_bar(&self, cx) -> impl IntoElement`

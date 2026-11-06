@@ -10,6 +10,7 @@ mod actions;
 mod app_menus;
 mod app_zoom;
 mod attachments;
+mod brand_logos;
 mod command_palette;
 mod command_palette_overlay;
 mod commands;

@@ -3,7 +3,8 @@
 ## Purpose
 
 Source of the `protocols` crate: TLS plumbing, IMAP client, SMTP sender,
-OAuth, account connector, presets and autoconfig, plus a private HTTP helper.
+OAuth, account connector, presets and autoconfig, brand logos (BIMI), plus a
+private HTTP helper.
 
 ## Ownership
 
@@ -39,9 +40,23 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 ## API Catalog
 
+### `src/bimi.rs`
+
+Brand logos, shown only when the message passes DMARC through an aligned DKIM signature we verify ourselves (never a provider's `Authentication-Results`, which a sender can forge where the provider adds none), the DMARC policy enforces, and the domain's mark certificate verifies. The logo is the one inside the certificate; `l=` is never fetched; revocation isn't checked.
+- **mod `roots`**: DER roots `DIGICERT`, `GLOBALSIGN`, `SSL_COM_RSA`, `SSL_COM_ECC`, `ENTRUST` (files in `src/bimi_roots/`, sources in their rustdoc, SHA-256 checked against CCADB) and `ALL`. BIMI Group list: DigiCert, GlobalSign, SSL.com (Sectigo issues under SSL.com RSA); Entrust's kept for certificates still valid.
+- **struct `BimiRecord { logo, authority }`**; **`parse_bimi_record(text)`** (pub): `v=BIMI1` first, then `l=` (empty = declined) and `a=`; anything else → `None`.
+- **`policy_enforces(policy, percent)`** (pub): `quarantine`/`reject` at `pct=100`.
+- **`organizational_domain(domain)`** (pub): registrable domain by the public suffix list (`psl`), else the domain.
+- **`der_element` / `der_elements` / `extension_value` / `ia5_string_starting`** (private): minimal DER walk (short/long lengths up to 4 bytes, depth ≤ `MAX_DER_DEPTH`) to find the logotype extension (`1.3.6.1.5.5.7.1.12`) and its `data:` URI.
+- **`svg_from_data_uri(uri)`** (pub): `data:image/svg+xml;base64,…`, gunzipped when compressed, ≤ `MAX_LOGO_BYTES` (1 MiB); anything else `None`.
+- **`certificate_logo(der)`** (pub): the logotype SVG of a certificate.
+- **enum `MarkError`** (`Empty`, `Untrusted`, `WrongDomain`, `NoLogo`); **`verify_mark_certificate(pem, domains, roots, now)`** (pub): leaf + intermediates from PEM, `webpki` chain check to `roots` at `now` with the BIMI key usage (`1.3.6.1.5.5.7.3.31`), a SAN naming one of `domains`, then its logo.
+- **struct `BrandChecker`** (pub): owns a current-thread Tokio runtime and `mail_auth::MessageAuthenticator` (system DNS config). **`new()`**; **`authenticated_domain(raw)`**: `From` domain when DKIM verifies, DMARC passes by DKIM alignment (relaxed via `organizational_domain`) and `policy_enforces` (SPF not checked: no connecting address in a client); **`logo(domain, now)`**: BIMI record at `default._bimi.<domain>` then the organizational domain; needs `l=` and an `https` `a=`; certificate fetched with `http::get_bytes` (≤ 512 KiB, 10 s) and checked for the domain or its organizational domain. `Ok(None)` when there is nothing to show, `Err` when the fetch failed.
+- Tests: record parsing, policy, organizational domains, data URIs (plain, gzip, wrong type, decompression bomb), malformed DER, the roots' fingerprints, Nubank's real VMC chain (`bimi_roots/test_nubank_vmc.pem`) verified at a fixed date, refused for another domain, before/after validity and without roots, an authority certificate as leaf refused; `live_nubank_logo` (ignored, network; `BIMI_RAW=<.eml>` checks a message end to end).
+
 ### `src/lib.rs`
 
-- `#![forbid(unsafe_code)]`; declares `autoconfig`, `connector`, `http`
+- `#![forbid(unsafe_code)]`; declares `autoconfig`, `bimi`, `connector`, `http`
   (private), `imap_remote`, `oauth`, `presets`, `smtp`, `tls`, and re-exports
   the public entry points (`ImapRemote`, `SmtpSender`, `ImapSmtpConnector`,
   `Credential`, `Secret`, `test_account`, `ConnectOptions`, OAuth functions and
@@ -112,6 +127,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 - **`agent`** (pub(crate)) — `fn agent(timeout: Duration) -> ureq::Agent`
   - Behavior: global timeout, non-2xx returned as data (`http_status_as_error(false)`), `BGMail/<version>` user agent, `RootCerts::PlatformVerifier`.
 - **`get`** (pub(crate)) — `fn get(url: &str, timeout: Duration) -> Result<HttpResponse, RemoteError>`: GET and read the body as text.
+- **`get_bytes`** (pub(crate)) — `fn get_bytes(url, timeout, limit: u64) -> Result<Option<Vec<u8>>, RemoteError>`: GET as bytes; `None` for a non-2xx status, an error past `limit` bytes.
 - **`post_form`** (pub(crate)) — `fn post_form(url: &str, form: &[(&str, &str)], timeout: Duration) -> Result<HttpResponse, RemoteError>`: urlencoded POST, body as text.
 - **`read`** (private) — status + `read_to_string` of a ureq response.
 - **`map_error`** (pub(crate)) — `fn map_error(err: ureq::Error) -> RemoteError`
