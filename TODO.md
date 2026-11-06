@@ -804,6 +804,7 @@
 - ✅ Brand logo in the reader's avatar (BIMI), as Gmail and Apple Mail: our own DKIM +
       DMARC check (enforcing policy), mark certificate verified against the authorities'
       roots, logo from the certificate, cached per domain; the initial shows meanwhile
+      (drawn at the exact device size, colors in GPUI's BGRA order)
 - ⬜ BIMI: check mark certificate revocation (CRL), as Gmail does
 - ⬜ Search recipients too (To/Cc aren't in `search_text`; needs a reindex), as Thunderbird
       and Gmail do

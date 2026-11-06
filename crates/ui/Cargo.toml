@@ -11,6 +11,10 @@ path = "src/ui.rs"
 gpui.workspace = true
 theme.workspace = true
 unicode-segmentation = "1"
+# Avatar logos drawn at their exact on-screen size (the resvg GPUI already uses).
+resvg = { version = "0.45", default-features = false }
+image = { version = "0.25", default-features = false }
+smallvec = "1"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

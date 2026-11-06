@@ -751,8 +751,8 @@ Guards against crash loops (a message that kills the renderer every time the rea
 
 The reader's brand logos, found off the UI thread (`protocols::bimi`).
 - **enum `Finding`** (`NotReady`, `None`, `Logo { domain, svg }`); **struct `Request { message_id, domain }`** (private).
-- **struct `BrandLogos`** (pub(crate)): per message the domain shown (`shown`), `pending`, `awaiting_body`, decoded `images` per domain, and the worker's request sender.
-  - **`new(db_path)`**; **`logo(message_id)`**: the `Arc<gpui::Image>` to show, once found.
+- **struct `BrandLogos`** (pub(crate)): per message the domain shown (`shown`), `pending`, `awaiting_body`, `images` per domain (`ui::SvgLogo`), and the worker's request sender.
+  - **`new(db_path)`**; **`logo(message_id)`**: the `SvgLogo` to show, once found.
   - **`needs_request(message_id)`**: not settled, pending, nor waiting for its body (cheap: asked on every reader render).
   - **`body_ready(message_id)`**: a message waiting for its body may be asked about again (`SyncEvent::BodyReady`).
   - **`request(message_id, sender_email, start)`**: no domain → settled with none; else starts the worker on first use (`start` gets the result receiver) and sends the request.

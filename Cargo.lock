@@ -7541,7 +7541,10 @@ name = "ui"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "image",
  "raw-window-handle",
+ "resvg",
+ "smallvec",
  "theme",
  "unicode-segmentation",
  "windows 0.61.3",

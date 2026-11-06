@@ -10,12 +10,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use gpui::{Image, ImageFormat};
 use protocols::bimi::BrandChecker;
 use storage::{BrandLogo, Database};
+use ui::SvgLogo;
 
 /// How long a logo found stays good before it is checked again.
 const LOGO_KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -47,7 +46,7 @@ pub(crate) struct BrandLogos {
     pending: HashSet<i64>,
     /// Asked about before their body was downloaded: asked again on `body_ready`.
     awaiting_body: HashSet<i64>,
-    images: HashMap<String, Arc<Image>>,
+    images: HashMap<String, SvgLogo>,
 }
 
 impl BrandLogos {
@@ -63,7 +62,7 @@ impl BrandLogos {
     }
 
     /// The logo to show for `message_id`, once found.
-    pub(crate) fn logo(&self, message_id: i64) -> Option<Arc<Image>> {
+    pub(crate) fn logo(&self, message_id: i64) -> Option<SvgLogo> {
         let domain = self.shown.get(&message_id)?.as_ref()?;
         self.images.get(domain).cloned()
     }
@@ -124,7 +123,7 @@ impl BrandLogos {
             Finding::Logo { domain, svg } => {
                 self.images
                     .entry(domain.clone())
-                    .or_insert_with(|| Arc::new(Image::from_bytes(ImageFormat::Svg, svg)));
+                    .or_insert_with(|| SvgLogo::new(svg));
                 self.shown.insert(message_id, Some(domain));
                 true
             }

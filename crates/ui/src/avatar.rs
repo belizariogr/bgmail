@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use gpui::{canvas, img, point, Bounds, FontWeight, Image, Point};
+use gpui::{canvas, img, point, Bounds, FontWeight, ImageSource, Point, RenderImage};
 
 use crate::prelude::*;
 
@@ -19,7 +19,75 @@ pub struct Avatar {
     size: Pixels,
     background: Color,
     color: Color,
-    logo: Option<Arc<Image>>,
+    logo: Option<SvgLogo>,
+}
+
+/// An SVG logo, drawn at exactly the size it shows at in device pixels and kept
+/// until that size changes. Scaling a bigger picture down on the GPU blurs a
+/// small logo; this keeps it as sharp as the screen allows.
+#[derive(Clone)]
+pub struct SvgLogo {
+    svg: Arc<[u8]>,
+    drawn: Arc<Mutex<Option<Drawn>>>,
+}
+
+/// A drawing of a logo and the side, in device pixels, it was drawn for.
+type Drawn = (u32, Arc<RenderImage>);
+
+impl SvgLogo {
+    pub fn new(svg: Vec<u8>) -> Self {
+        Self {
+            svg: svg.into(),
+            drawn: Arc::default(),
+        }
+    }
+
+    /// The logo as a `side`×`side` device-pixel image, drawn on first need.
+    /// `None` when the SVG doesn't parse.
+    pub fn image(&self, side: u32) -> Option<Arc<RenderImage>> {
+        let mut drawn = self
+            .drawn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((drawn_side, image)) = drawn.as_ref() {
+            if *drawn_side == side {
+                return Some(image.clone());
+            }
+        }
+        let image = Arc::new(rasterize_svg(&self.svg, side)?);
+        *drawn = Some((side, image.clone()));
+        Some(image)
+    }
+}
+
+/// Draws `svg` fitted and centered in a `side`×`side` square, as the BGRA with
+/// straight alpha GPUI's render images hold (resvg gives premultiplied RGBA).
+pub fn rasterize_svg(svg: &[u8], side: u32) -> Option<RenderImage> {
+    use resvg::{tiny_skia, usvg};
+    let side = side.max(1);
+    let tree = usvg::Tree::from_data(svg, &usvg::Options::default()).ok()?;
+    let size = tree.size();
+    let scale = side as f32 / size.width().max(size.height());
+    let offset_x = (side as f32 - size.width() * scale) / 2.0;
+    let offset_y = (side as f32 - size.height() * scale) / 2.0;
+    let mut pixmap = tiny_skia::Pixmap::new(side, side)?;
+    let transform =
+        tiny_skia::Transform::from_translate(offset_x, offset_y).pre_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let mut pixels = pixmap.take();
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+        let alpha = pixel[3] as u32;
+        if alpha > 0 && alpha < 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((*channel as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+    let buffer = image::RgbaImage::from_raw(side, side, pixels)?;
+    Some(RenderImage::new(smallvec::smallvec![image::Frame::new(
+        buffer
+    )]))
 }
 
 impl Avatar {
@@ -35,7 +103,7 @@ impl Avatar {
     }
 
     /// Shows `logo` (cropped to the circle) in place of the initial.
-    pub fn logo(mut self, logo: Option<Arc<Image>>) -> Self {
+    pub fn logo(mut self, logo: Option<SvgLogo>) -> Self {
         self.logo = logo;
         self
     }
@@ -57,8 +125,9 @@ pub fn ink_centered_origin(area: Bounds<Pixels>, ink: Bounds<Pixels>) -> Point<P
 
 impl RenderOnce for Avatar {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        if let Some(logo) = self.logo {
-            return img(logo)
+        let side = (f32::from(self.size) * window.scale_factor()).round() as u32;
+        if let Some(image) = self.logo.and_then(|logo| logo.image(side)) {
+            return img(ImageSource::Render(image))
                 .size(self.size)
                 .flex_shrink_0()
                 .rounded_full()
@@ -128,6 +197,43 @@ mod tests {
             ink.size,
         );
         assert_eq!(painted.center(), area.center());
+    }
+
+    const PURPLE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="#820ad1"/></svg>"##;
+
+    /// Colors come out in the order GPUI reads (BGRA): red and blue once traded
+    /// places, and Nubank's purple showed magenta.
+    #[test]
+    fn a_logo_keeps_its_colors() {
+        let image = rasterize_svg(PURPLE, 8).unwrap();
+        assert_eq!(&image.as_bytes(0).unwrap()[..4], [0xd1, 0x0a, 0x82, 0xff]);
+    }
+
+    /// Drawn at the exact device size, whatever the SVG's own, so the GPU never
+    /// scales it.
+    #[test]
+    fn a_logo_is_drawn_at_the_size_it_shows_at() {
+        let image = rasterize_svg(PURPLE, 60).unwrap();
+        assert_eq!(image.size(0).width.0, 60);
+        assert_eq!(image.size(0).height.0, 60);
+        let logo = SvgLogo::new(PURPLE.to_vec());
+        let first = logo.image(60).unwrap();
+        assert!(Arc::ptr_eq(&first, &logo.image(60).unwrap()), "kept");
+        assert_eq!(logo.image(90).unwrap().size(0).width.0, 90, "redrawn");
+        assert!(SvgLogo::new(b"not svg".to_vec()).image(30).is_none());
+    }
+
+    /// Semi-transparent edges keep their color once alpha is no longer premultiplied.
+    #[test]
+    fn soft_edges_keep_their_color() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#820ad1" fill-opacity="0.5"/></svg>"##;
+        let image = rasterize_svg(svg, 4).unwrap();
+        let pixel = &image.as_bytes(0).unwrap()[..4];
+        assert!(
+            pixel[0].abs_diff(0xd1) <= 2 && pixel[2].abs_diff(0x82) <= 2,
+            "{pixel:?}"
+        );
+        assert!(pixel[3].abs_diff(128) <= 1);
     }
 
     #[test]

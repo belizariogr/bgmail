@@ -260,10 +260,12 @@ _300 functions/methods documented._
 ### `src/avatar.rs`
 
 - **struct `Avatar`** (`IntoElement`): round initial, accent fill, `OnAccent` letter at `ui_text_size(1.0)` semibold.
-- **`Avatar::new(initial)`** (pub): upper-cases the initial; 30 px by default. **`size(px)`** (pub): diameter. **`logo(Option<Arc<Image>>)`** (pub): shows the image, cropped round, instead of the initial.
+- **`Avatar::new(initial)`** (pub): upper-cases the initial; 30 px by default. **`size(px)`** (pub): diameter. **`logo(Option<SvgLogo>)`** (pub): shows the logo, cropped round, instead of the initial, drawn at `size × window.scale_factor()` device pixels.
 - **`ink_centered_origin(area, ink)`** (pub): pen position that puts `ink` (glyph bounds from the pen, y down) at the center of `area`.
 - **`render`**: asks GPUI for the glyph's ink (`TextSystem::glyph_ink_bounds`, a BGMail patch) and paints it with `Window::paint_glyph` in a `canvas`, so the letter is centered by its pixels, not its line box. A character the UI font lacks falls back to centered text.
-- Tests: the ink lands at the circle's center; initials are upper-cased.
+- **struct `SvgLogo`** (pub, `Clone`): SVG bytes plus the last drawing and its side. **`new(svg)`**; **`image(side)`**: the `RenderImage` for a `side`×`side` device-pixel square, redrawn only when `side` changes (`None` if the SVG doesn't parse). The GPU never scales it, which blurred small logos.
+- **`rasterize_svg(svg, side)`** (pub): resvg (GPUI's 0.45) draws the SVG fitted and centered in the square; premultiplied RGBA becomes the straight-alpha BGRA of GPUI render images (red and blue once swapped: Nubank's purple showed magenta).
+- Tests: the ink lands at the circle's center; initials are upper-cased; a logo keeps its colors (BGRA order), is drawn at the asked size and kept/redrawn, an unparsable SVG gives nothing, soft edges keep their color.
 
 ### `src/label.rs`
 
