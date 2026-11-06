@@ -25,8 +25,13 @@ on:
         description: Create the tag and the GitHub Release (off = only build the packages)
         type: boolean
         default: true
+      bump:
+        description: Part of the Cargo.toml version to bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
       version:
-        description: Version to release, e.g. 0.2.0 (blank = the one in Cargo.toml; another one is committed to Cargo.toml first)
+        description: Exact version instead of a bump, e.g. 1.0.0-beta.1 (blank = bump)
         type: string
         default: ""
       draft:
@@ -69,6 +74,7 @@ jobs:
         id: plan
         env:
           PUBLISH_INPUT: ${{ inputs.publish }}
+          BUMP_INPUT: ${{ inputs.bump }}
           VERSION_INPUT: ${{ inputs.version }}
           DRAFT_INPUT: ${{ inputs.draft }}
         run: |
@@ -83,7 +89,16 @@ jobs:
             fi
             current=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)
             version="${VERSION_INPUT#v}"
-            version="${version:-$current}"
+            if [ -z "$version" ]; then
+              # A prerelease's patch bump is its final version (1.0.0-beta.1 -> 1.0.0).
+              IFS=. read -r major minor patch <<<"${current%%-*}"
+              case "$BUMP_INPUT" in
+                major) version="$((major + 1)).0.0" ;;
+                minor) version="$major.$((minor + 1)).0" ;;
+                *) if [ "$current" != "${current%%-*}" ]; then version="${current%%-*}"
+                   else version="$major.$minor.$((patch + 1))"; fi ;;
+              esac
+            fi
             if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
               echo "::error::\"$version\" is not a version like 1.2.3 or 1.2.3-beta.1."
               exit 1

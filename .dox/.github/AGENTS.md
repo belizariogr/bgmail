@@ -36,11 +36,13 @@ Continuous integration on the three desktop platforms and release packaging
   file is on the default branch.
   - `prepare` (ubuntu, `contents: write`) decides the commit, tag and release
     kind (outputs `sha`, `tag`, `publish`, `draft`, `prerelease`):
-    - Manual run with `publish` (default on): tag `v<version>`, where `version`
-      is the input (leading `v` dropped) or the `[workspace.package]` version in
-      `Cargo.toml`. Fails on anything but `X.Y.Z[-pre]`, on an existing tag, or
-      when run from a tag instead of a branch. A version other than
-      `Cargo.toml`'s is committed first (`Cargo.toml` + `Cargo.lock` via
+    - Manual run with `publish` (default on): tag `v<version>`. `version` is
+      the `version` input (leading `v` dropped) or, when blank, the
+      `[workspace.package]` version in `Cargo.toml` bumped by the `bump` input
+      (`patch` default, `minor`, `major`; a prerelease's patch bump is its final
+      version, `1.0.0-beta.1` → `1.0.0`). Fails on anything but `X.Y.Z[-pre]`,
+      on an existing tag, or when run from a tag instead of a branch. A version
+      other than `Cargo.toml`'s is committed first (`Cargo.toml` + `Cargo.lock` via
       `cargo metadata`, as `github-actions[bot]`, "Release vX.Y.Z") and pushed to
       the dispatched branch, so the packages carry it; that push triggers no
       other workflow (GITHUB_TOKEN). `draft` input (default off).

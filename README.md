@@ -63,9 +63,10 @@ so GPUI's `xcrun -sdk macosx metal` build step finds the installed toolchain.
 ## Install / Build packages
 
 Releases are built by GitHub Actions (`.github/workflows/release.yml`): run the
-**Release** workflow by hand (Actions ▸ Release ▸ Run workflow), optionally with a
-new version, and it bumps `Cargo.toml`, builds every package, creates the `v*` tag
-and publishes the GitHub Release. Pushing a `v*` tag yourself makes a draft
+**Release** workflow by hand (Actions ▸ Release ▸ Run workflow) and it bumps the
+version in `Cargo.toml` (patch by default; minor/major, or an exact version, on
+request), builds every package, creates the `v*` tag and publishes the GitHub
+Release. Pushing a `v*` tag yourself makes a draft
 release instead.
 
 | OS | Packages |

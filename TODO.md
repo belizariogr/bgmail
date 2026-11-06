@@ -738,7 +738,7 @@
       workflows (GitHub Actions matrix). deb/AppImage/pacman built locally;
       **macOS and Windows jobs never ran yet** (check the first CI run);
       signing/notarization secrets are optional and unset
-- ✅ One-click release: manual `Release` run bumps the version (input), builds,
+- ✅ One-click release: manual `Release` run bumps the version (patch/minor/major or exact), builds,
       creates the `v*` tag and publishes the GitHub Release (draft optional)
 - 🔄 macOS signing + notarization: workflow notarizes/staples the .app and the .dmg
       (Apple ID or App Store Connect key). Next: set the `APPLE_*` secrets and check
