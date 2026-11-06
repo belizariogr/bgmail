@@ -1375,6 +1375,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **enum `ReaderNotice`**: Why a message is shown as plain text: `Unrenderable` (`RenderError`), `Crashed` (crash guard).
 - **enum `ListFilter`** (`matches`, `label`, `OPTIONS`): rows shown by the filter button.
 - **`clicked_selection`** / **`selection_range`** (private): rows selected after a click (Shift range from the anchor, Ctrl/Cmd toggle, plain single) and the inclusive range between two rows, in list order.
+- **`row_edges`** / **`RowEdges`** (private, pure): how a list row joins its neighbours: a run of selected rows is one block rounded only at its outer corners (as in macOS Mail), unselected rows stay rounded for hover, and the separator is dropped wherever selected meets unselected.
 - **`row_actions_room`** (private): width the subject of a hovered row gives up for its action buttons.
 - **`star_icon`** / **`star_color`** (private): toolbar star look: filled and `Color::Warning` (as in the list) when the message is starred.
 - **`folder_shows_unread`** (private): whether a folder's row counts unread (not the Trash).
@@ -1957,9 +1958,9 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Behavior: Optional list header when sidebar undocked; GPUI `uniform_list` over `list_messages` (only visible rows are built; uniform row height measured from the first row) tracked by `list_scroll: UniformListScrollHandle`; the existing `ui::Scrollbar` reads its `base_handle`. A click below the rows keeps the selection (single or multiple), and the column still takes focus; search with no results shows "No results". The column tracks `list_focus`, sets key context `MessageList` and handles `SelectNextMessage` / `SelectPreviousMessage`.
 
 - **`render_message_row`** (private, L2847)
-  - Signature: `fn render_message_row(&self, message, cx) -> impl IntoElement`
+  - Signature: `fn render_message_row(&self, message, edges: RowEdges, selection, cx) -> impl IntoElement`
   - Purpose: Single message list row.
-  - Behavior: Sender, subject preview, date, unread/flag/attachment indicators; click calls `select_message_row`. Hover group `MESSAGE_ROW_GROUP` reveals `render_message_row_actions`.
+  - Behavior: Inset by `px_2` from the column; corners (`rounded_t_lg`/`rounded_b_lg`) and separator from `edges`, which `render_message_list` computes from the neighbours' selection. Sender, subject preview, date, unread/flag/attachment indicators; click calls `select_message_row`. Hover group `MESSAGE_ROW_GROUP` reveals `render_message_row_actions`.
 - **`click_message_row`** / **`set_selection`** / **`apply_selection`** / **`prune_multi_selection`** / **`selected_ids`** / **`row_is_selected`** / **`list_ids`** / **`extended_selection`** / **`extend_selection`** / **`set_list_filter`** (private): multiple selection and filter state. `apply_selection` returns whether a single message resulted, which `set_selection` then opens.
 - **`apply_action_to_selection`** / **`run_bulk_action`** / **`act_on_message`** (private): runs an action on every selected row (rows leave the list at once, nothing left selected) / off the UI thread on its own connection, then wakes workers, reloads and reports the first error / on one message plus its worker notification.
 - **`delete_selection`** / **`delete_message`** / **`open_row_after_delete`** (private) and **`row_after_removal`** (private, pure): every delete (toolbar, key, menu, palette, row button, confirmed permanent deletion) goes through these. Deleting the open message or a multiple selection opens, and so marks read, the first kept row after the first removed one, or the row before it; deleting another row leaves the selection alone; a message still selected afterwards (action failed, still in search results) stays open.

@@ -326,6 +326,26 @@ fn row_after_removal(list: &[i64], removed: &[i64]) -> Option<i64> {
         .copied()
 }
 
+/// How a list row joins its neighbours. A run of selected rows reads as one
+/// rounded block (as in macOS Mail): only its outer corners are rounded, and the
+/// separator goes where the block meets an unselected row, so no line cuts into
+/// the rounding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowEdges {
+    round_top: bool,
+    round_bottom: bool,
+    separator: bool,
+}
+
+fn row_edges(previous_selected: bool, selected: bool, next_selected: bool) -> RowEdges {
+    RowEdges {
+        // An unselected row keeps all its corners for the hover fill.
+        round_top: !selected || !previous_selected,
+        round_bottom: !selected || !next_selected,
+        separator: selected == next_selected,
+    }
+}
+
 /// Width the subject of a list row gives up for its action buttons, while hovered.
 fn row_actions_room(hovered: bool) -> Pixels {
     if hovered {
@@ -6358,9 +6378,25 @@ impl RootView {
                     let start = range.start.min(end);
                     let this = &*this;
                     let selection = this.selection_drag();
-                    this.list_messages[start..end]
-                        .iter()
-                        .map(|message| this.render_message_row(message, selection.as_ref(), cx))
+                    let is_selected = |index: Option<usize>| {
+                        index
+                            .and_then(|index| this.list_messages.get(index))
+                            .is_some_and(|message| this.row_is_selected(message.id))
+                    };
+                    (start..end)
+                        .map(|index| {
+                            let edges = row_edges(
+                                is_selected(index.checked_sub(1)),
+                                is_selected(Some(index)),
+                                is_selected(Some(index + 1)),
+                            );
+                            this.render_message_row(
+                                &this.list_messages[index],
+                                edges,
+                                selection.as_ref(),
+                                cx,
+                            )
+                        })
                         .collect::<Vec<_>>()
                 }),
             )
@@ -6437,6 +6473,7 @@ impl RootView {
     fn render_message_row(
         &self,
         message: &MessageListItem,
+        edges: RowEdges,
         selection: Option<&SelectionDrag>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -6497,7 +6534,7 @@ impl RootView {
             .row_menu
             .as_ref()
             .is_some_and(|menu| menu.id == message_id);
-        h_flex()
+        let row = h_flex()
             .id(("message", message_id as u64))
             .group(MESSAGE_ROW_GROUP)
             .relative()
@@ -6507,7 +6544,13 @@ impl RootView {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(border)
+            .border_color(if edges.separator {
+                border
+            } else {
+                gpui::transparent_black()
+            })
+            .when(edges.round_top, |el| el.rounded_t_lg())
+            .when(edges.round_bottom, |el| el.rounded_b_lg())
             .when(selected, |el| el.bg(bg_selected))
             .when(!selected, |el| el.hover(move |el| el.bg(hover)))
             // The pointer goes off to the menu: this says which row it is for.
@@ -6605,7 +6648,9 @@ impl RootView {
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     this.click_message_row(message_id, event.modifiers(), window, cx);
                 }),
-            )
+            );
+        // Inset from the column edges so the rounded selection floats in the list.
+        div().w_full().px_2().child(row)
     }
 
     /// Selects and opens a row of the list.
@@ -11787,6 +11832,24 @@ mod tests {
         assert_eq!(row_after_removal(&list, &[1, 2, 3, 4, 5]), None);
         assert_eq!(row_after_removal(&list, &[9]), None);
         assert_eq!(row_after_removal(&[], &[1]), None);
+    }
+
+    #[test]
+    fn a_run_of_selected_rows_is_rounded_only_at_its_ends() {
+        let edges = |p, s, n| {
+            let e = row_edges(p, s, n);
+            (e.round_top, e.round_bottom, e.separator)
+        };
+        // A lone selected row: a pill, no line under it.
+        assert_eq!(edges(false, true, false), (true, true, false));
+        // First, middle and last of a run.
+        assert_eq!(edges(false, true, true), (true, false, true));
+        assert_eq!(edges(true, true, true), (false, false, true));
+        assert_eq!(edges(true, true, false), (false, true, false));
+        // Unselected rows stay rounded for hover; the one above a run drops its
+        // line so it doesn't touch the rounding.
+        assert_eq!(edges(false, false, false), (true, true, true));
+        assert_eq!(edges(true, false, true), (true, true, false));
     }
 
     /// A view with row `index` of its list as the only selected message.
