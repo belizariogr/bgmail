@@ -76,7 +76,7 @@ BGMail/
 │ └── PLANEJAMENTO.md ← vision, architecture and scope
 ├── .github/ ← CI and release workflows (GitHub Actions)
 ├── assets/ ← shared icons, fonts, app icon (+ generated PNG/ICO/ICNS)
-├── script/ ← Linux bundle, install and uninstall scripts (Zed's layout)
+├── script/ ← Linux bundle/install scripts (Zed's layout), macOS DMG and icon scripts
 ├── spikes/ ← throwaway evaluations (own workspaces, not shipped)
 ├── vendor/ ← patched third-party crates (serde_fmt, Blitz, Taffy, GPUI, mail-parser)
 └── crates/
@@ -236,6 +236,6 @@ When the user requests a durable behavior change, record it here or in the relev
 | `assets/` | [`.dox/assets/AGENTS.md`](.dox/assets/AGENTS.md) | Shared binary assets (icons, fonts, app icon) |
 | `.cargo/` | [`.dox/.cargo/AGENTS.md`](.dox/.cargo/AGENTS.md) | Workspace Cargo/build environment overrides |
 | `.github/` | [`.dox/.github/AGENTS.md`](.dox/.github/AGENTS.md) | CI checks and release packaging workflows (cargo-packager), their secrets |
-| `script/` | [`.dox/script/AGENTS.md`](.dox/script/AGENTS.md) | Linux bundle, install and uninstall scripts |
+| `script/` | [`.dox/script/AGENTS.md`](.dox/script/AGENTS.md) | Linux bundle/install scripts, macOS installer DMG, icon generation |
 | `spikes/` | [`.dox/spikes/AGENTS.md`](.dox/spikes/AGENTS.md) | Throwaway technical evaluations (self-contained, never built with the workspace) |
 | `vendor/` | [`.dox/vendor/AGENTS.md`](.dox/vendor/AGENTS.md) | Patched third-party crates (serde_fmt, Blitz subset, Taffy, GPUI, mail-parser) and their BGMail fixes |

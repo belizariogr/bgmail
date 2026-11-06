@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Builds the BGMail installer .dmg from a (signed) BGMail.app: the same window
+# as BGDesk's (background art, White Drive volume icon, app and Applications
+# side by side). Layout comes from dmgbuild (crates/bgmail/packaging/macos/
+# dmg-settings.py), command line only: no Finder, no AppleScript, so it works
+# on CI runners.
+#
+#   script/bundle-macos-dmg path/to/BGMail.app path/to/output.dmg
+#
+# Environment:
+#   DMGBUILD                 dmgbuild executable (default: `dmgbuild` on PATH;
+#                            pip install "dmgbuild==1.6.7")
+#   APPLE_SIGNING_IDENTITY   signs the .dmg (Developer ID Application); unset = unsigned
+#   APPLE_KEYCHAIN           keychain holding that identity (default: search list)
+#   Notarization (needs signing), first complete set wins:
+#     APPLE_KEYCHAIN_PROFILE                     notarytool profile
+#     APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID  app-specific password
+#     APPLE_API_KEY + APPLE_API_ISSUER + APPLE_API_KEY_PATH  App Store Connect key (.p8)
+set -euo pipefail
+
+fail() { echo "bundle-macos-dmg: $*" >&2; exit 1; }
+
+[ "$#" -eq 2 ] || fail "usage: $0 BGMail.app output.dmg"
+app="${1%/}"
+output="$2"
+[ -d "$app/Contents/MacOS" ] || fail "not an app bundle: $app"
+[[ "$output" == *.dmg ]] || fail "output must end in .dmg: $output"
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+assets="$root/crates/bgmail/packaging/macos"
+dmgbuild="${DMGBUILD:-dmgbuild}"
+command -v "$dmgbuild" >/dev/null || fail "dmgbuild not found (pip install \"dmgbuild==1.6.7\")"
+
+app="$(cd "$(dirname "$app")" && pwd)/$(basename "$app")"
+mkdir -p "$(dirname "$output")"
+output="$(cd "$(dirname "$output")" && pwd)/$(basename "$output")"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+image="$work/$(basename "$output")"
+
+"$dmgbuild" -s "$assets/dmg-settings.py" -D app="$app" -D assets="$assets" BGMail "$image"
+hdiutil verify -quiet "$image"
+
+if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+  sign=(--force --timestamp --sign "$APPLE_SIGNING_IDENTITY"
+        --identifier io.github.belizariogr.bgmail.diskimage)
+  [ -z "${APPLE_KEYCHAIN:-}" ] || sign+=(--keychain "$APPLE_KEYCHAIN")
+  codesign "${sign[@]}" "$image"
+  codesign --verify --strict --verbose=2 "$image"
+
+  notary=()
+  if [ -n "${APPLE_KEYCHAIN_PROFILE:-}" ]; then
+    notary=(--keychain-profile "$APPLE_KEYCHAIN_PROFILE")
+  elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+    notary=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+  elif [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ] && [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+    notary=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
+  fi
+  if [ "${#notary[@]}" -gt 0 ]; then
+    # Gatekeeper checks the downloaded .dmg itself, so it carries its own ticket.
+    echo "Notarizing $(basename "$output")"
+    result=$(xcrun notarytool submit "$image" --wait --timeout 30m --output-format json "${notary[@]}")
+    id=$(plutil -extract id raw -o - - <<<"$result" 2>/dev/null || true)
+    status=$(plutil -extract status raw -o - - <<<"$result" 2>/dev/null || true)
+    if [ "$status" != Accepted ]; then
+      echo "$result" >&2
+      [ -z "$id" ] || xcrun notarytool log "$id" "${notary[@]}" >&2 || true
+      fail "notarization not accepted (${status:-no status})"
+    fi
+    # The stapler's CloudKit lookup drops now and then right after Accepted.
+    for attempt in 1 2 3 4 5; do
+      if xcrun stapler staple "$image"; then break; fi
+      [ "$attempt" -lt 5 ] || fail "could not staple the notarization ticket"
+      sleep $((attempt * 10))
+    done
+    xcrun stapler validate "$image"
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$image"
+  else
+    echo "bundle-macos-dmg: signed but not notarized (no notarization credentials)" >&2
+  fi
+fi
+
+mv -f "$image" "$output"
+echo "Wrote $output"

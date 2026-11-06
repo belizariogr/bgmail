@@ -24,7 +24,8 @@ Continuous integration on the three desktop platforms and release packaging
     `cargo test --workspace --no-fail-fast` (one failing crate must not hide the others on platforms nobody runs locally).
   - The Linux job also runs `script/test-install`.
   - `macos` (macos-15) and `windows` (windows-latest): `cargo build -p bgmail`
-    + `cargo test --workspace --no-fail-fast`.
+    + `cargo test --workspace --no-fail-fast`; macOS also installs dmgbuild
+    1.6.7 in a venv and runs `script/test-macos-dmg`.
   - `greenmail` (ubuntu-22.04): GreenMail `greenmail/standalone:2.1.15`
     service container with the users/ports of
     `crates/protocols/tests/greenmail.sh`; waits for the IMAP greeting, then
@@ -51,12 +52,15 @@ Continuous integration on the three desktop platforms and release packaging
     - A `-` in the tag makes it a prerelease.
   - `package` matrix (checks out `prepare.sha`): linux-x86_64 (ubuntu-22.04:
     deb, AppImage, pacman), macos-aarch64 and macos-x86_64 (both macos-15;
-    x86_64 cross-compiled via `CARGO_BUILD_TARGET` + `--target`: app, dmg),
+    x86_64 cross-compiled via `CARGO_BUILD_TARGET` + `--target`: packager
+    `app`, then `script/bundle-macos-dmg` → `BGMail_<version>_<arch>.dmg` in
+    `target/<triple>/release/`, dmgbuild pinned `DMGBUILD_VERSION`),
     windows-x86_64 (NSIS, WiX msi). Installs `cargo-packager` (pinned
     `CARGO_PACKAGER_VERSION`), builds the release binary before any secret is
     in the environment, runs `cargo packager --release --formats …`, uploads the
-    packages as `BGMail-<name>` artifacts. macOS packaging retries up to 3 times
-    (`hdiutil` fails now and then on runners: "Resource busy").
+    packages as `BGMail-<name>` artifacts. macOS packaging and the DMG step
+    each retry up to 3 times (`hdiutil` fails now and then on runners:
+    "Resource busy").
   - `release` (when `prepare.publish`): downloads all artifacts, creates the tag
     at `prepare.sha` through the API if missing (only after every package
     built; a draft would otherwise leave it uncreated), then the GitHub Release
@@ -69,14 +73,20 @@ Continuous integration on the three desktop platforms and release packaging
     - macOS signing: `APPLE_CERTIFICATE` (base64 .p12 of a **Developer ID
       Application** certificate + key), `APPLE_CERTIFICATE_PASSWORD`,
       `APPLE_SIGNING_IDENTITY` (e.g. `Developer ID Application: … (TEAMID)`;
-      injected into the packager config at build time, never committed).
+      injected into the packager config at build time, never committed). The
+      workflow imports the .p12 into its own keychain (`$RUNNER_TEMP`, random
+      password, `APPLE_KEYCHAIN` in the job env; checks the identity is in it;
+      deleted in an `always()` step): the packager deletes its own keychain
+      right after signing the .app, before the .dmg is signed. The certificate
+      never reaches the packager. Set to BGDesk's certificate (team
+      `3Z7C3Q7NMT`, Apple ID notarization), from BGDesk's local `.env`
+      (`MACOS_P12_*`, `MACOS_NOTARY_*`).
     - macOS notarization (needs signing), either `APPLE_ID` + `APPLE_PASSWORD`
       (app-specific password) + `APPLE_TEAM_ID` (wins when both are set), or an
       App Store Connect API key: `APPLE_API_KEY` (key id), `APPLE_API_ISSUER`,
       `APPLE_API_PRIVATE_KEY` (the .p8 text, written to `$RUNNER_TEMP` for the
-      step only). cargo-packager notarizes and staples the `.app`; the workflow
-      then notarizes (`notarytool submit --wait`, fails unless `Accepted`,
-      prints the log) and staples each `.dmg`, which the packager only signs.
+      step only). cargo-packager notarizes and staples the `.app`;
+      `script/bundle-macos-dmg` signs, notarizes and staples the `.dmg`.
       Signed without credentials: warning, not failure.
     - Windows Authenticode: `WINDOWS_CERTIFICATE` (base64 .pfx),
       `WINDOWS_CERTIFICATE_PASSWORD`; imported into the runner's user store and

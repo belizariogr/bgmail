@@ -740,9 +740,13 @@
       signing/notarization secrets are optional and unset
 - ✅ One-click release: manual `Release` run bumps the version (patch/minor/major or exact), builds,
       creates the `v*` tag and publishes the GitHub Release (draft optional)
-- 🔄 macOS signing + notarization: workflow notarizes/staples the .app and the .dmg
-      (Apple ID or App Store Connect key). Next: set the `APPLE_*` secrets and check
-      `spctl -a -vv` / `stapler validate` on a downloaded .dmg
+- ✅ macOS signing + notarization with BGDesk's Developer ID (team 3Z7C3Q7NMT): `.app`
+      and `.dmg` notarized and stapled, locally and in the release workflow (`APPLE_*`
+      secrets set). Next: check `spctl -a -vv` on a .dmg downloaded from a CI release
+- ✅ macOS installer DMG with BGDesk's window (background art, White Drive volume icon,
+      app → Applications), built from the command line by dmgbuild
+      (`script/bundle-macos-dmg`, tested by `script/test-macos-dmg`)
+- ✅ App icon: envelope centered on the tile (`script/generate-app-icons`)
 - ⬜ Windows signing: apply to SignPath Foundation (free for OSS) and swap the
       PFX import step for its action
 

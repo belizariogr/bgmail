@@ -37,7 +37,12 @@ wiring to `storage`.
     secrets go over D-Bus Secret Service (pure Rust), so a keyring daemon
     (gnome-keyring, KeePassXC…) is needed at runtime but not a package dep.
   - macOS: `minimum-system-version` 10.15.7 (Zed's floor); signing identity
-    is injected by CI only (never committed).
+    is injected by CI only (never committed). Releases package only the `.app`
+    here; the `.dmg` comes from `script/bundle-macos-dmg` with the art and
+    dmgbuild settings in `packaging/macos/` (BGDesk's window: `background.svg`
+    → `background.png`/`@2x`, `volume-icon.svg` → `volume-icon.icns`, generated
+    by `script/generate-macos-dmg-assets`; `dmg-settings.py` gets `app` and
+    `assets` through dmgbuild `-D`).
   - Windows: `build.rs` embeds `assets/appIcon/BGMail.ico` in the exe
     (`main` calls `embed_windows_icon` only on a Windows host building for
     Windows: writes `OUT_DIR/bgmail-icon.rc` with the absolute icon path and

@@ -17,8 +17,9 @@
   <!-- Rounded-square tile with a diagonal blue gradient and a soft top-left highlight -->
   <rect width="256" height="256" rx="58" fill="url(#bg)"/>
   <rect width="256" height="256" rx="58" fill="url(#glow)"/>
-  <!-- Envelope, slightly enlarged around its own centre -->
-  <g transform="translate(128 124) scale(1.08) translate(-128 -124)">
+  <!-- Envelope, slightly enlarged around its own centre (y=124) and moved onto
+       the tile's centre (y=128) so the top and bottom margins match -->
+  <g transform="translate(128 128) scale(1.08) translate(-128 -124)">
   <g mask="url(#slit)">
     <!-- Soft shadow that lifts the envelope off the tile -->
     <rect x="46" y="66" width="164" height="128" rx="20" fill="#06309A" opacity="0.30"/>

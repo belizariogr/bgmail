@@ -56,6 +56,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p bgmail
       - run: cargo test --workspace --no-fail-fast
+      - name: Installer image layout (script/test-macos-dmg)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/dmgbuild"
+          "$RUNNER_TEMP/dmgbuild/bin/pip" install --quiet "dmgbuild==1.6.7"
+          DMGBUILD="$RUNNER_TEMP/dmgbuild/bin/dmgbuild" script/test-macos-dmg
 
   windows:
     name: Windows (build, test)
