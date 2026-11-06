@@ -110,7 +110,7 @@ _19 functions/methods documented._
 
 - **`light`** (pub, L202)
   - Signature: `pub fn light() -> Self`
-  - Purpose: Built-in light palette based on VSCode Light Modern, with grayer chrome (user decision): title/status bar and panel `#ededed` instead of `#f8f8f8`, `element_hover` `#e5e5e5` so hover still shows on it.
+  - Purpose: Built-in light palette based on VSCode Light Modern.
   - Behavior: Constructs a static `Theme` named `"BGMail Light"` with `Appearance::Light` and a full `ThemeColors` block (white/light-gray surfaces, blue accent `0x005fb8`, lighter scrollbar alphas, semantic status colors). No I/O; deterministic each call.
 
 - **`for_appearance`** (pub, L247)

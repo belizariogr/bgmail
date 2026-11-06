@@ -212,7 +212,7 @@ impl Theme {
         }
     }
 
-    /// Built-in light theme, based on *VSCode Light Modern* with grayer chrome.
+    /// Built-in light theme, based on *VSCode Light Modern*.
     pub fn light() -> Self {
         Theme {
             name: "BGMail Light",
@@ -227,8 +227,7 @@ impl Theme {
                 border_focused: hex(0x005fb8),
 
                 element_background: hex(0xf3f3f3),
-                // Darker than VSCode's #f0f0f0 so it still shows on the grayer chrome.
-                element_hover: hex(0xe5e5e5),
+                element_hover: hex(0xf0f0f0),
                 element_active: hex(0xe4e6f1),
                 element_selected: hex(0xcfe3fa),
                 border_selected: hex(0xe9f2fd),
@@ -245,11 +244,9 @@ impl Theme {
 
                 accent: hex(0x005fb8),
 
-                // Grayer than VSCode's #f8f8f8 (user decision: the app read as all white),
-                // as macOS's light window chrome (#ececec).
-                title_bar_background: hex(0xededed),
-                status_bar_background: hex(0xededed),
-                panel_background: hex(0xededed),
+                title_bar_background: hex(0xf8f8f8),
+                status_bar_background: hex(0xf8f8f8),
+                panel_background: hex(0xf8f8f8),
 
                 scrollbar_thumb: hexa(0x6b6b6b, 0.35),
                 scrollbar_thumb_hover: hexa(0x4b4b4b, 0.55),
