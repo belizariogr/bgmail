@@ -791,6 +791,7 @@
       text, inside a selection a step lighter than it (`ThemeColors::border_selected`); hover drops the
       line of the row above, as a selection does; 8 px gap above and below the rows; no
       separator under the last row
+- ✅ Clicking the open message again doesn't reload it (the reader no longer flashes)
 - ⬜ Search recipients too (To/Cc aren't in `search_text`; needs a reindex), as Thunderbird
       and Gmail do
 - ⬜ Keyboard navigation in `ui::ContextMenu` (up/down/enter, as in Zed): every menu

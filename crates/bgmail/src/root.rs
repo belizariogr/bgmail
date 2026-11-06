@@ -1999,6 +1999,11 @@ impl RootView {
             self.selection_anchor = Some(id);
         }
         self.selection_focus = Some(id);
+        // Clicking what is already selected changes nothing: reloading would
+        // rebuild the reader and make it flash.
+        if ids == self.selected_ids() {
+            return;
+        }
         self.set_selection(ids, cx);
     }
 
@@ -11203,6 +11208,23 @@ mod tests {
         cx.simulate_mouse_up(reader, MouseButton::Right, Default::default());
         cx.run_until_parked();
         view.read_with(cx, |view, _| assert!(view.row_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn clicking_the_open_row_again_does_not_reload_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.click_message_row(ids[0], Default::default(), window, cx);
+            // A reload would read the subject back from the database.
+            view.selected_detail.as_mut().expect("open").subject = "not reloaded".into();
+            view.click_message_row(ids[0], Default::default(), window, cx);
+            let detail = view.selected_detail.as_ref().expect("still open");
+            assert_eq!(detail.subject, "not reloaded");
+            // Another row still opens.
+            view.click_message_row(ids[1], Default::default(), window, cx);
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+        });
     }
 
     #[gpui::test]
