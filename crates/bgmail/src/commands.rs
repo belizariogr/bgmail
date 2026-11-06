@@ -10,6 +10,7 @@ use storage::{
 use crate::data::MailboxKind;
 use crate::locale::{Key, Language};
 use crate::shortcuts;
+use ui::IconName;
 
 /// Identifies a command shown in the palette or menus.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -24,6 +25,7 @@ pub enum CommandId {
     MessageMarkJunk,
     MessageToggleFlag,
     MessagePrint,
+    MessageFindFromSender,
     MessageToggleRead,
     MessageReply,
     MessageReplyAll,
@@ -55,6 +57,9 @@ pub struct CommandContext {
     pub list_in_trash: bool,
     /// The list shows Sent, whose items can't leave it.
     pub list_in_sent: bool,
+    /// The folder the list shows, in one account or in all of them, which is no place
+    /// to move its rows to. `None` for a search, whose results span folders.
+    pub list_folder: Option<String>,
 }
 
 impl CommandContext {
@@ -153,6 +158,12 @@ impl CommandContext {
     /// can't move at all, and not the ones it is already in, except Archive, where
     /// Gmail keeps all its mail.
     pub fn move_targets(&self, language: Language) -> Vec<(SharedString, SharedString)> {
+        let mut targets = self.targets_of_selection(language);
+        targets.retain(|(_, path)| self.list_folder.as_deref() != Some(path.as_ref()));
+        targets
+    }
+
+    fn targets_of_selection(&self, language: Language) -> Vec<(SharedString, SharedString)> {
         if !command_enabled(&CommandId::MoveToFolder(SharedString::default()), self) {
             return Vec::new();
         }
@@ -216,8 +227,34 @@ fn system_folder_label(path: &str, language: Language) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+/// Longest sender name shown in a menu entry: the menu is as wide as its longest entry.
+const MENU_SENDER_CHARS: usize = 32;
+
+/// The name a menu calls the sender of `detail` by: the name, or else the address.
+fn menu_sender(detail: &MessageDetail) -> String {
+    let name = detail.sender.trim();
+    let name = if name.is_empty() {
+        detail.sender_email.trim()
+    } else {
+        name
+    };
+    if name.chars().count() > MENU_SENDER_CHARS {
+        let cut: String = name.chars().take(MENU_SENDER_CHARS - 1).collect();
+        format!("{}…", cut.trim_end())
+    } else {
+        name.to_string()
+    }
+}
+
 fn label_for(id: &CommandId, language: Language, ctx: &CommandContext) -> SharedString {
     let text = match id {
+        CommandId::MessageFindFromSender => {
+            let sender = ctx.message_detail.as_ref().map(menu_sender);
+            return Key::CommandFindFromSender
+                .tr(language)
+                .replace("{}", sender.as_deref().unwrap_or_default())
+                .into();
+        }
         CommandId::ComposeNew => Key::ComposeWindowTitle.tr(language),
         CommandId::OpenSettings => Key::SettingsTitle.tr(language),
         CommandId::ToggleSidebar => Key::ToolbarToggleSidebar.tr(language),
@@ -280,6 +317,13 @@ pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool {
                         && !ctx.message_in_junk()))
         }
         CommandId::MessageToggleRead => ctx.selected_message_id.is_some() || ctx.bulk.is_some(),
+        CommandId::MessageFindFromSender => {
+            ctx.selected_message_id.is_some()
+                && ctx
+                    .message_detail
+                    .as_ref()
+                    .is_some_and(|detail| !detail.sender_email.trim().is_empty())
+        }
         CommandId::MessagePrint
         | CommandId::MessageReply
         | CommandId::MessageReplyAll
@@ -296,30 +340,28 @@ pub fn command_enabled(id: &CommandId, ctx: &CommandContext) -> bool {
     }
 }
 
-/// The actions of a message's right-click menu, one list per block: the toolbar's
-/// groups in the toolbar's order, then Restore (in the Trash) and Print, which it
-/// doesn't have. Only what can run is listed, as in the palette; a block left with
-/// nothing is dropped.
+/// The actions of a message's right-click menu, one list per block, in the order of
+/// Gmail's: answering; what changes the message itself; where it goes; finding more
+/// from the sender; Print in the last block, where Gmail opens it in a new window. Only what can run is listed, as
+/// in the palette; a block left with nothing is dropped.
 pub fn row_menu_groups(language: Language, ctx: &CommandContext) -> Vec<Vec<CommandEntry>> {
     let move_to = CommandId::MoveToFolder(SharedString::default());
     let groups = [
         vec![
-            CommandId::MessageReply,
             CommandId::MessageReplyAll,
+            CommandId::MessageReply,
             CommandId::MessageForward,
         ],
         vec![
+            CommandId::MessageArchive,
             CommandId::MessageRestore,
             CommandId::MessageDelete,
             CommandId::MessageDeletePermanent,
-            CommandId::MessageArchive,
-            CommandId::MessageMarkJunk,
-        ],
-        vec![
-            CommandId::MessageToggleFlag,
             CommandId::MessageToggleRead,
-            move_to.clone(),
+            CommandId::MessageToggleFlag,
         ],
+        vec![move_to.clone(), CommandId::MessageMarkJunk],
+        vec![CommandId::MessageFindFromSender],
         vec![CommandId::MessagePrint],
     ];
     let has_targets = !ctx.move_targets(language).is_empty();
@@ -367,6 +409,46 @@ pub fn row_menu_shortcut(id: &CommandId) -> Option<(&'static str, &'static str)>
         CommandId::MessagePrint => Some((shortcuts::PRINT_MAC, shortcuts::PRINT_OTHER)),
         _ => None,
     }
+}
+
+/// A folder a message can move to: its label and its path.
+pub type MoveTarget = (SharedString, SharedString);
+
+/// Move targets as a Move menu lists them: the folders, then Junk, Trash and Archive,
+/// which every account has and which stay in view below the rest.
+pub fn split_move_targets(targets: Vec<MoveTarget>) -> (Vec<MoveTarget>, Vec<MoveTarget>) {
+    const FIXED: [&str; 3] = [system::JUNK, system::TRASH, system::ARCHIVE];
+    let (mut fixed, folders): (Vec<_>, Vec<_>) = targets
+        .into_iter()
+        .partition(|(_, path)| FIXED.contains(&path.as_ref()));
+    fixed.sort_by_key(|(_, path)| FIXED.iter().position(|kept| *kept == path.as_ref()));
+    (folders, fixed)
+}
+
+/// The icon of a right-click menu action: its toolbar button's, for those that have one.
+pub fn row_menu_icon(id: &CommandId, ctx: &CommandContext) -> Option<IconName> {
+    match id {
+        CommandId::MessageReplyAll => Some(IconName::ReplyAll),
+        CommandId::MessageReply => Some(IconName::Reply),
+        CommandId::MessageForward => Some(IconName::Forward),
+        CommandId::MessageArchive => Some(IconName::Archive),
+        CommandId::MessageRestore => Some(IconName::Restore),
+        CommandId::MessageDelete | CommandId::MessageDeletePermanent => Some(IconName::Trash),
+        CommandId::MessageToggleRead => Some(IconName::Mail),
+        CommandId::MessageToggleFlag if ctx.message_starred() => Some(IconName::StarFilled),
+        CommandId::MessageToggleFlag => Some(IconName::Star),
+        CommandId::MoveToFolder(_) => Some(IconName::Folder),
+        CommandId::MessageMarkJunk => Some(IconName::Junk),
+        CommandId::MessageFindFromSender => Some(IconName::Search),
+        CommandId::MessagePrint => Some(IconName::Print),
+        _ => None,
+    }
+}
+
+/// Whether a right-click menu action's icon carries the dot of unread mail: Mark as
+/// unread does, as its toolbar button.
+pub fn row_menu_icon_dot(id: &CommandId, ctx: &CommandContext) -> bool {
+    *id == CommandId::MessageToggleRead && !ctx.message_unread()
 }
 
 /// All commands for the palette, filtered by selection and availability.
@@ -433,26 +515,24 @@ mod tests {
     }
 
     #[test]
-    fn the_row_menu_follows_the_toolbar_in_blocks() {
+    fn the_row_menu_follows_the_order_of_gmail_in_blocks() {
         let ctx = ctx_with_message(false, false);
         assert_eq!(
             menu_ids(&ctx),
             [
                 vec![
-                    CommandId::MessageReply,
                     CommandId::MessageReplyAll,
+                    CommandId::MessageReply,
                     CommandId::MessageForward
                 ],
                 vec![
-                    CommandId::MessageDelete,
                     CommandId::MessageArchive,
-                    CommandId::MessageMarkJunk
-                ],
-                vec![
-                    CommandId::MessageToggleFlag,
+                    CommandId::MessageDelete,
                     CommandId::MessageToggleRead,
-                    move_entry()
+                    CommandId::MessageToggleFlag
                 ],
+                vec![move_entry(), CommandId::MessageMarkJunk],
+                vec![CommandId::MessageFindFromSender],
                 vec![CommandId::MessagePrint],
             ]
         );
@@ -509,7 +589,7 @@ mod tests {
             ..ctx_with_message(false, false)
         };
         let groups = menu_ids(&ctx);
-        assert_eq!(groups[0][0], CommandId::MessageDelete);
+        assert_eq!(groups[0][0], CommandId::MessageArchive);
         let flat: Vec<CommandId> = groups.into_iter().flatten().collect();
         assert!(flat.contains(&move_entry()));
         for id in [
@@ -517,6 +597,7 @@ mod tests {
             CommandId::MessageReplyAll,
             CommandId::MessageForward,
             CommandId::MessagePrint,
+            CommandId::MessageFindFromSender,
         ] {
             assert!(!flat.contains(&id), "{id:?} takes a single message");
         }
@@ -553,6 +634,88 @@ mod tests {
         );
         assert_eq!(row_menu_shortcut(&CommandId::MessageRestore), None);
         assert_eq!(row_menu_shortcut(&move_entry()), None);
+    }
+
+    #[test]
+    fn finding_from_the_sender_names_them_and_needs_an_address() {
+        let id = CommandId::MessageFindFromSender;
+        let label = |ctx: &CommandContext| label_for(&id, Language::English, ctx).to_string();
+        let mut ctx = ctx_with_message(false, false);
+        let detail = ctx.message_detail.as_mut().unwrap();
+        detail.sender = "Stripe".into();
+        detail.sender_email = "notify@stripe.com".into();
+        assert_eq!(label(&ctx), "Find emails from Stripe");
+        assert!(command_enabled(&id, &ctx));
+
+        // No name: the address stands for it.
+        ctx.message_detail.as_mut().unwrap().sender = "  ".into();
+        assert_eq!(label(&ctx), "Find emails from notify@stripe.com");
+
+        // A long name doesn't stretch the menu.
+        ctx.message_detail.as_mut().unwrap().sender = "x".repeat(100);
+        assert_eq!(
+            label(&ctx),
+            format!("Find emails from {}…", "x".repeat(MENU_SENDER_CHARS - 1))
+        );
+
+        // There is nothing to search for without an address.
+        ctx.message_detail.as_mut().unwrap().sender_email = " ".into();
+        assert!(!command_enabled(&id, &ctx));
+        assert!(!menu_ids(&ctx).into_iter().flatten().any(|e| e == id));
+    }
+
+    #[test]
+    fn the_system_folders_of_a_move_menu_go_apart_in_a_fixed_order() {
+        let target = |path: &'static str| -> MoveTarget { (path.into(), path.into()) };
+        let (folders, fixed) = split_move_targets(vec![
+            target(system::ARCHIVE),
+            target(system::INBOX),
+            target("Clients"),
+            target(system::TRASH),
+            target(system::JUNK),
+        ]);
+        let paths = |targets: Vec<MoveTarget>| -> Vec<String> {
+            targets
+                .into_iter()
+                .map(|(_, path)| path.to_string())
+                .collect()
+        };
+        assert_eq!(paths(folders), [system::INBOX, "Clients"]);
+        assert_eq!(paths(fixed), [system::JUNK, system::TRASH, system::ARCHIVE]);
+    }
+
+    #[test]
+    fn only_mark_as_unread_carries_the_dot() {
+        let mut ctx = ctx_with_message(false, false);
+        let id = CommandId::MessageToggleRead;
+        assert!(row_menu_icon_dot(&id, &ctx));
+        assert!(!row_menu_icon_dot(&CommandId::MessageReply, &ctx));
+        ctx.message_detail.as_mut().unwrap().unread = true;
+        assert!(!row_menu_icon_dot(&id, &ctx));
+    }
+
+    #[test]
+    fn every_row_menu_action_has_an_icon() {
+        let mut trash = ctx_with_message(false, false);
+        trash.message_detail.as_mut().unwrap().folders_csv = format!(",{},", system::TRASH);
+        for ctx in [ctx_with_message(false, false), trash] {
+            for entry in menu_ids(&ctx).into_iter().flatten() {
+                assert!(row_menu_icon(&entry, &ctx).is_some(), "{entry:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_row_menu_star_shows_whether_the_message_has_one() {
+        let id = CommandId::MessageToggleFlag;
+        assert_eq!(
+            row_menu_icon(&id, &ctx_with_message(false, false)),
+            Some(IconName::Star)
+        );
+        assert_eq!(
+            row_menu_icon(&id, &ctx_with_message(false, true)),
+            Some(IconName::StarFilled)
+        );
     }
 
     fn only_moves_are_blocked(ctx: &CommandContext) {
@@ -866,6 +1029,48 @@ mod tests {
         let targets = ctx.move_targets(Language::English);
         let paths: Vec<&str> = targets.iter().map(|(_, path)| path.as_ref()).collect();
         assert_eq!(paths, vec![system::TRASH]);
+    }
+
+    #[test]
+    fn the_folder_the_list_shows_is_no_move_target() {
+        let paths = |ctx: &CommandContext| -> Vec<String> {
+            ctx.move_targets(Language::English)
+                .into_iter()
+                .map(|(_, path)| path.to_string())
+                .collect()
+        };
+        let clients = user_folder_path("Clients");
+
+        // Archive is offered even to the mail in it, until it is what the list shows.
+        let mut one = ctx_with_message(false, false);
+        one.folders_by_account.get_mut(&1).unwrap().push(Folder {
+            id: 3,
+            account_id: 1,
+            path: system::ARCHIVE.into(),
+            display_name: String::new(),
+            remote_name: None,
+            role: None,
+        });
+        one.message_detail.as_mut().unwrap().folders_csv = format!(",{},", system::ARCHIVE);
+        assert!(paths(&one).contains(&system::ARCHIVE.to_string()));
+        one.list_folder = Some(system::ARCHIVE.to_string());
+        assert!(!paths(&one).contains(&system::ARCHIVE.to_string()));
+
+        // Several messages: nothing else left the folder out for them.
+        let mut several = CommandContext {
+            bulk: Some(BulkSelection {
+                account_ids: vec![1],
+                ..Default::default()
+            }),
+            selected_message_id: None,
+            message_detail: None,
+            ..ctx_with_message(false, false)
+        };
+        assert!(paths(&several).contains(&clients));
+        assert!(paths(&several).contains(&system::INBOX.to_string()));
+        several.list_folder = Some(system::INBOX.to_string());
+        assert!(paths(&several).contains(&clients));
+        assert!(!paths(&several).contains(&system::INBOX.to_string()));
     }
 
     #[test]

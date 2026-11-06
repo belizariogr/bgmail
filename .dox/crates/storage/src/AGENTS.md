@@ -71,7 +71,7 @@ _(No functions.)_
 
 ### `src/schema.rs`
 
-- **const `SCHEMA_VERSION`**: `3`.
+- **const `SCHEMA_VERSION`**: `8`.
 - **const `CREATE_ACCOUNTS` / `CREATE_FOLDERS` / `CREATE_MESSAGES` / `CREATE_META`**: v1 base DDL (`IF NOT EXISTS`), the starting point of every database.
 - **const `INDEX_MESSAGES_SEARCH` / `INDEX_MESSAGES_ACCOUNT` / `INDEX_MESSAGES_FOLDERS`**: v1 indexes.
 - **const `V2_COLUMNS`**: `(table, column, definition)` list added in place by the v1→v2 step (accounts: provider/config_json/sort_order; folders: remote_name/role/uid_validity/uid_next/highest_modseq/synced_at; messages: message_id_hdr/in_reply_to/references_hdr/thread_id/to_addrs/cc_addrs/reply_to/date_ts/answered/body_state/gm_msgid/size).
@@ -181,6 +181,7 @@ _(No functions.)_
 - **`Database::apply_remote_flags`** (pub) — `pub fn apply_remote_flags(&self, folder_id: i64, uid: u32, unread: bool, starred: bool, answered: bool) -> rusqlite::Result<bool>`: updates flags only if different, refreshes membership when changed; `false` for unknown location or no change.
 - **`Database::store_body`** (pub) — `pub fn store_body(&self, message_id: i64, raw: &[u8], content: &str, format: &str, plain_text: &str, preview: &str, attachments: &[NewAttachment]) -> rusqlite::Result<()>`: write tx; upserts `message_bodies.raw`, sets raw_content/raw_format (`html`|`text`, CHECK-enforced)/plain_text/preview/search_text (recomputed)/`has_attachment` (any non-inline)/`body_state 1`, replaces attachments. No-op for a deleted message.
 - Starred (`system::FLAGGED`) leaves out mail in the Trash, in lists and unread counts (`hidden_from_folder`); it keeps its star for when it is restored.
+- **`Database::rename_folders`** (pub): new display and server names, in one transaction; paths and messages' `folders_csv` follow, locations stay. **`trash_folder_messages`** (pub): a folder's mail to the Trash, in one transaction. **`FOLDER_LEVEL_SEPARATOR`** / **`child_display_name`** (pub): the levels of a folder's display name. **`folder_delimiter`** / **`account_delimiters`** / **`set_folder_delimiters`** / **`folder_prefix`** / **`set_folder_prefix`** (pub): how the server writes folder names.
 - **`Account::from_name`** (pub) / **`Database::set_account_names`** (pub): the name in the "From" (`sender_name`, schema v5, or the account's name when blank), and setting both.
 - **`contacts`**: `Contact`; `Database::record_contacts`, `list_contacts`, `contact_sources`, `meta_flag`, `set_meta_flag` (pub).
 - **`Database::messages_with_markup_preview`** (pub) — downloaded messages of an account whose preview starts with `<` or holds `&…;`.

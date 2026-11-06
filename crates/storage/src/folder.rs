@@ -50,6 +50,17 @@ pub fn folder_csv_needle(folder_path: &str) -> String {
     format!(",{},", encode_csv_path(folder_path))
 }
 
+/// Between the levels of a folder's display name, whatever the server's delimiter.
+pub const FOLDER_LEVEL_SEPARATOR: char = '/';
+
+/// The display name of the level `leaf` inside the folder `parent`, or at the top.
+pub fn child_display_name(parent: Option<&str>, leaf: &str) -> String {
+    match parent {
+        Some(parent) => format!("{parent}{FOLDER_LEVEL_SEPARATOR}{leaf}"),
+        None => leaf.to_string(),
+    }
+}
+
 /// Path for a user-created folder from its display name.
 pub fn user_folder_path(display_name: &str) -> String {
     format!("{USER_PREFIX}{display_name}")

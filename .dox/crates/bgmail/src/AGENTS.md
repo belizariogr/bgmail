@@ -309,11 +309,28 @@ _(No functions — only action types.)_
   - Behavior: Always enables compose/settings/sidebar. Message commands require a selection and apply folder-state rules (e.g. delete disabled in trash, restore only in trash, archive disabled when already archived or in trash).
 - **`row_menu_groups`** (pub)
   - Signature: `pub fn row_menu_groups(language: Language, ctx: &CommandContext) -> Vec<Vec<CommandEntry>>`
-  - Purpose: Actions of a list row's right-click menu, by block, in toolbar order (reply; restore/delete/archive/junk; flag/read/move; print).
+  - Purpose: Actions of a list row's right-click menu, by block, in Gmail's order (reply all/reply/forward; archive/restore/delete/read/star; move/junk; find from sender; print).
   - Behavior: Lists only what `command_enabled` allows; Move (`MoveToFolder` with an empty path, labeled `ToolbarMove`) needs a non-empty `move_targets`; empty blocks are dropped.
+- **`CommandContext::move_targets`** leaves out `list_folder`, the folder the list shows, in one account or in all (`RootView::list_folder`; `None` in a search).
+- **`split_move_targets`** (pub)
+  - Purpose: Splits move targets into the folders and the fixed block, in the order Junk, Trash, Archive.
+- **`row_menu_icon_dot`** (pub)
+  - Purpose: Mark as unread carries the dot of unread mail on its icon, as its toolbar button; Mark as read doesn't.
+- **`list_title`** (private, `root`): the list's title: "Search" during a search, else the mailbox it shows.
+- **`search_scope`** (module): `folder_slug` (a folder's name in lowercase, without accents or special characters, dashes for spaces: "Minha Pasta!" → `minha-pasta`; levels stay apart: `thinksoft/pendencias`), `typed_slugs` (`.` works as the delimiter too), `split_scope` (`slug: text`, the colon followed by a space or nothing), `scope_prefix` (what the folder menu types).
+- **`folders_of_slug`** / **`search_scope`** / **`search_results`** (private, `root`): a search limited to a folder: the slug stands for that folder in every account, in both languages of the app; a word naming no folder is plain text (`re: hello`), and a scope without text lists the whole folder. `list_folder` gives the scope's folder when it is one.
+- **`FolderMenu`** / **`open_folder_menu`** / **`render_folder_menu`** (private, `root`): right-click on a sidebar mailbox: Search in this folder (`search_for`, also behind `find_from_sender`), New folder, and for non-system folders New subfolder, Rename and Delete; a unified mailbox only offers Search.
+- **`FolderDialog`** / **`open_folder_dialog`** / **`submit_folder_dialog`** / **`render_folder_dialog`** / **`folder_name_problem`** (private, `root`): the name of a new or renamed folder: only its own level, never its parent's; an empty name, one with `/` or one the account has is refused in place. What is open follows a rename of it or of its parent (`follow_folder_rename`, on `SyncEvent::FolderRenamed` for server accounts). Enter confirms, Escape cancels.
+- **`confirm_delete_folder`** / **`delete_folder`** (private, `root`): asks, saying where the mail goes (Trash; on Gmail, All Mail), then deletes; if it was open, the unified Inbox takes over.
+- **`sidebar_ordered`** / **`folder_tree_position`** (private, `root`): a folder's subfolders (levels of its display name, joined with `/`) come right after it, indented by `SUBFOLDER_INDENT` per level and showing only their own name; a level with no folder of its own stays in the name.
+- **`sidebar_shows_selected`** (private, `root`): whether the sidebar marks a mailbox as selected; none is during a search, whose results come from every folder.
+- **`search_result_key`** (private, `root`): orders search results (`reload_message_list`): starred ones outside the Trash first, then by the first of their folders in sidebar order, all accounts together, newest first within each; Flagged doesn't count as a folder.
 - **`row_menu_shortcut`** (pub)
   - Signature: `pub fn row_menu_shortcut(id: &CommandId) -> Option<(&'static str, &'static str)>`
   - Purpose: (macOS, other) chords shown beside a menu action, the same as its toolbar button; `None` for Restore and Move.
+- **`row_menu_icon`** (pub)
+  - Signature: `pub fn row_menu_icon(id: &CommandId, ctx: &CommandContext) -> Option<IconName>`
+  - Purpose: Icon of a menu action, the same as its toolbar button; Restore and Print use their own, and the star is filled when the target has one.
 - **`palette_commands`** (pub, L163)
   - Signature: `pub fn palette_commands(language: Language, ctx: &CommandContext) -> Vec<CommandEntry>`
   - Purpose: Builds the filtered command palette list.
@@ -1334,6 +1351,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **const `ITEM_INDENT` / `ITEM_PADDING`**: Sidebar tree indentation and inner row padding.
 - **const `DRAG_THRESHOLD`**: Pixels before toolbar mouse-down becomes window drag (2px).
 - **const `SEARCH_FIELD_WIDTH` / `SEARCH_ICON_WIDTH`**: Expanded and collapsed search control widths.
+- **`SearchGrowth`** / **`search_growth_room`** / **`sync_search_growth`** (private): with the focus or text in it the search field grows by up to `SEARCH_FIELD_GROWTH` (100 px) into the half of the toolbar's spare room on its side of the centered buttons, without changing which action groups show or moving them (the toolbar lays out a slot of the resting width, and the field grows from it to the left), animating over `SEARCH_GROW_DURATION`; having neither shrinks it back, and a change of target starts from the current width.
 - **const `SEARCH_DEBOUNCE_MS`**: Delay before search query reloads the message list (150ms).
 - **const `READER_LIGHT_TEXT`**: Near-black body text when reader uses forced white background.
 - **enum `ResizeHandle`**: Which column divider is being dragged (`Sidebar` or `List`).
@@ -1475,7 +1493,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`move_selection`** (private)
   - Signature: `fn move_selection(&mut self, step: isize, cx) -> bool`
   - Purpose: Keyboard navigation (`SelectNextMessage` / `SelectPreviousMessage`).
-  - Behavior: `select_adjacent_message`, then `reveal_selected_message` and `on_message_selection_changed` (opens it: marks read, fetches a missing body); false when nothing moved.
+  - Behavior: `select_adjacent_message`, then `reveal_selected_message` and `on_message_selection_changed` (opens it: fetches a missing body, marks read after `MARK_READ_DELAY`); false when nothing moved.
 
 - **`select_adjacent_message`** (private)
   - Signature: `fn select_adjacent_message(&mut self, step: isize) -> bool`
@@ -1945,14 +1963,20 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`short_recipient`** / **`unique_recipients`** (private, `root`): the reader's recipients line, as in Gmail.
 - **`set_account_names`** (`pub(crate)`) / **`begin_names_edit`** / **`save_names`** (`settings`, private): editing an account's names.
 - **`recipients`**: `RecipientInput` (`new`, `set_contacts`, `set_addresses`, `content`), event `RecipientsChanged`; private `matching_contacts`, `with_known_name`, `placeholder_for`, `sync_placeholder`, `split_typed`, `add_unique`, `card_label`, `on_typed`, `commit_typed`, `accept`, `remove`, `on_key_down`, `render_card`, `render_suggestions`.
-- **`drag_counts`** / **`DragProgress`** / **`DraggedMessages`** (`can_drop_on`) / **`DragPreview`** / **`dragged_messages`** / **`move_messages_to_folder`** (private): dragging list rows onto folders.
+- **`drag_counts`** / **`DragProgress`** / **`DraggedMessages`** (`can_drop_on`) / **`DragPreview`** / **`dragged_messages`** / **`move_messages_to_folder`** (private): dragging list rows onto folders. The card of several messages has only the count, so it centers vertically, clear of the pointer at the corner. A drag counts past `MESSAGE_DRAG_THRESHOLD` (50 px) or once the pointer leaves the list, and then for good.
 - **`render_dropdown`** (`on_outside` receives the mouse-down) / **`render_filter_menu`** / **`render_move_menu`** (private): reader card stack for a multiple selection and the toolbar dropdowns.
 - **`RowMenu`** / **`open_row_menu`** / **`render_row_menu`** (private): right-click menu of a list row. Opening changes neither the selection nor the read state; it holds a focus handle of its own, so the list's keys stay off while open, and Escape closes it; its backdrop occludes like the other menus (`render_dropdown`), and a right-click on another row moves the menu there (**`list_row_at`** finds the row from the list's geometry), while any other click only closes it; closing without an action returns the focus to what had it (`row_menu_focus_return`).
 - **`shortcut_context`** (pub(crate)): what shortcuts act on: the row menu's target while it is open, otherwise the selection. With the menu open, `request_delete` and `execute_command` run on that target; commands not on messages close it and still run; `MoveToFolder` (menu bar) moves that target. `sync_app_menus` builds the menu bar from it too.
-- **`sync_row_menu`** (private): run on each render; closes the menu when the window went inactive after having been active (it can open on a background window), it lost the focus, its row left the list, or the folder list ran out of folders, and restores the earlier focus.
+- **`sync_row_menu`** (private): run on each render; closes the menu when the window went inactive after having been active (it can open on a background window), it lost the focus, or its row left the list, and restores the earlier focus; with no folder left, only the folders close.
 - **`command_context_of`** (private): `command_context` for an explicit target, so the row menu doesn't clone the selected body.
 - **`row_menu_context`** (private): `CommandContext` of the menu: the multiple selection when the row is part of it, otherwise that row alone (from **`detail_of_row`**, a body-less `MessageDetail`, so no body is read or cloned per frame); `None` once the row left the list.
-- **`run_row_menu_command`** (private): runs a menu action. Inside the selection: `execute_command`. Outside: acts on the row and keeps the selection, except Reply/Reply all/Forward/Print, which open the row first. Move switches the menu to the folder list (`choosing_folder`).
+- **`run_row_menu_command`** (private): runs a menu action. Inside the selection: `execute_command`. Outside: acts on the row and keeps the selection, except Reply/Reply all/Forward/Print, which open the row first. Move shows the folders beside the menu (`choosing_folder`); Find from sender only searches, so it keeps the selection too.
+- **`hover_row_menu_folders`** (private): the mouse entered or left the Move entry or the folders. Reaching Move opens them; on neither, they close after `ROW_MENU_FOLDERS_LINGER`, so crossing other entries on the way doesn't close them.
+- **`render_row_menu_folders`** (private): the folders beside the menu, at `ui::submenu_anchor` of the Move entry.
+- **`move_menu_items`** (private): what both Move menus (toolbar and row) list: the folders scrolling past `move_menu_visible_folders` (12, or what fits in the window), then Junk, Trash and Archive below a separator, always in view (`commands::split_move_targets`); each with the icon of its mailbox.
+- **`reset_move_menu_scroll`** (private): run on each render; a Move menu opens at its top.
+- **`render_menu_backdrop`** (private): a menu at a position over a backdrop that takes the clicks outside it; `render_dropdown` adds the height cap the other menus use.
+- **`find_from_sender`** (private): puts the sender's address in the search field, applies the search right away, without the typing debounce, and focuses the field with the caret at the end.
 - **`keep_row_menu_focus`** (private): after a menu action, the focus returns to the list rather than to what had it, which the action may have removed.
 - **`move_from_row_menu`** (private): closes the menu and moves the selection or the row into the chosen folder, if `move_targets` still offers it.
 - Row menu tests (`root::tests`): opening keeps the selection and read state; Escape, an outside click, losing the focus or foreground, and the row leaving the list close it; entries act on the row clicked or on the whole selection containing it; a shortcut behind it acts on its target; closing returns the focus.
@@ -2000,7 +2024,8 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 
 - **`render_reader_notice`** (private)
   - Signature: `fn render_reader_notice(&self, cx) -> impl IntoElement`
-  - Purpose: Notice above a message shown as plain text (reason text).
+  - Purpose: Notice above a message shown as plain text (reason text); after a crash it ends with a "View normally" button.
+- **`view_crashed_normally`** (private): forgets the crash of the message showing and rebuilds it formatted; the crash guard arms again, so a real cause falls back to plain text after the next crash.
 
 - **`render_find_bar`** (private)
   - Signature: `fn render_find_bar(&self, cx) -> impl IntoElement`
@@ -2250,7 +2275,8 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`edit_unsent(id, window, cx)`** (pub(crate)): reads the row with `outgoing` (ignored unless stopped), parses its raw (`parse_message`, default when unparseable), closes the panel and opens compose with `compose_init_from_outgoing`. The row is kept until the edited copy is queued (`send_draft` replaces it), so closing compose loses nothing.
 - **`edit_unsent`** (pub(crate)): refused without touching the row while compose has edits, then stops a row still being retried (`stop_outgoing`). **`retry_unsent`** (pub(crate)): refused with `Key::UnsentBeingEdited` while compose holds that row (`ComposeView::replaces_outgoing`). **`showing_sent`** / **`showing_trash`** (private): during a search, results come from every folder: `false` / whether the whole selection is in the Trash (`selection_all_in_trash`). **`discard_unsent(id, window, cx)`** (pub(crate)): refused with `Key::UnsentBusy` while being sent; `window.prompt` (Warning; `ComposeDiscardConfirm` / `UnsentDiscardDetail`, Discard / Cancel); Discard → `delete_outgoing(id)` (error → note), refreshes.
 - **`render_unsent_panel(cx)`** (private): full-window occluder (mouse-down outside closes) with a scrollable elevated panel above the status bar's right edge: title, then per row the subject (or "(no subject)"), "To: recipients", `last_error` (`Color::Error`), the "May already have been sent" hint (`Color::Warning`) for `maybe_sent`, and Retry / Edit / Discard buttons.
-- **`open_selected_message()`** (private): marks the opened message read (`mail_sync::actions::set_read` + queue) and asks for its body (`Command::FetchBody`) when only headers are stored.
+- **`open_selected_message()`** (private): asks for the opened message's body (`Command::FetchBody`) when only headers are stored and, if it is unread, starts `MARK_READ_DELAY` (2.5 s, `pending_read`); opening another replaces the wait, reopening the same one keeps it, and the manual toggle cancels it.
+- **`finish_pending_read`** (private): when the wait ends, marks the message read (`mail_sync::actions::set_read` + queue) if it is still the one open.
 - **`after_action(account_id, outcome)`** (private): wakes the account's worker when an action queued server work.
 - **`run_message_action(cx, action)`** (private): runs a `mail_sync::actions` function on the selected message (an error, e.g. "database is locked", becomes a `StatusActionFailed: {error}` status note), reloads the list; see `apply_message_action` for the selection.
 - **`toggle_message_read(cx)`** (pub(crate)): read ↔ unread for the selected message (stays selected).
@@ -2903,7 +2929,7 @@ First-run setup view; see the crate doc for its contract.
 - **`RootView::finish_onboarding(cx)`**: ends the setup, drops its view and saves at once.
 - **`RootView::render_onboarding(window, cx)`**: the setup under a draggable title bar with the window controls.
 - **`RootView::window_drag_bar(bar, cx)`**: makes an element act as the title bar (shared with the toolbar).
-- **`RootView::toggle_command_palette`**: does nothing during the setup.
+- **`RootView::toggle_command_palette`**: does nothing during the setup or while the folder dialog is open.
 - **`RootView::remember_selection()`**: notes the current mailbox's selected rows, or forgets them if none.
 - **`RootView::restore_selection()`**: selects them again if still listed, without marking read; fetches a missing body and reveals the row.
 - **`RootView::request_selected_body()`**: fetches the selected message's body when only headers are stored.

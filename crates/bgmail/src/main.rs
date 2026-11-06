@@ -29,6 +29,7 @@ mod onboarding;
 mod print;
 mod recipients;
 mod root;
+mod search_scope;
 mod settings;
 mod shortcuts;
 mod startup;

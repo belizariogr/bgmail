@@ -236,6 +236,23 @@ impl ImapRemote {
         }
     }
 
+    /// Selects the Inbox if `folder` is what is selected: some servers refuse to rename or
+    /// delete that. Not `CLOSE`, which would expunge what is flagged `\\Deleted` in it.
+    fn leave_folder(&mut self, folder: &str) -> RemoteResult<()> {
+        // Or one under it, whose name goes too: the name's start is enough to go by.
+        if self
+            .selected
+            .as_deref()
+            .is_some_and(|selected| selected.starts_with(folder))
+        {
+            self.selected = None;
+            if !folder.eq_ignore_ascii_case("INBOX") {
+                self.select("INBOX")?;
+            }
+        }
+        Ok(())
+    }
+
     fn ensure_selected(&mut self, folder: &str) -> RemoteResult<()> {
         if self.selected.as_deref() == Some(folder) {
             return Ok(());
@@ -560,6 +577,17 @@ impl MailRemote for ImapRemote {
 
     fn create_folder(&mut self, name: &str) -> RemoteResult<()> {
         self.run(&format!("CREATE {}", quote(name)?)).map(|_| ())
+    }
+
+    fn rename_folder(&mut self, from: &str, to: &str) -> RemoteResult<()> {
+        self.leave_folder(from)?;
+        self.run(&format!("RENAME {} {}", quote(from)?, quote(to)?))
+            .map(|_| ())
+    }
+
+    fn delete_folder(&mut self, name: &str) -> RemoteResult<()> {
+        self.leave_folder(name)?;
+        self.run(&format!("DELETE {}", quote(name)?)).map(|_| ())
     }
 
     fn noop(&mut self) -> RemoteResult<()> {
@@ -1656,6 +1684,33 @@ mod tests {
     }
 
     #[test]
+    fn a_selected_folder_is_left_before_renaming_or_deleting_it() {
+        let selected = "* 1 EXISTS\r\n* OK [UIDVALIDITY 1] ok\r\n{tag} OK [READ-WRITE] done\r\n";
+        let (mut remote, handle) = session(
+            BASIC_CAPS,
+            vec![
+                ("SELECT \"Old\"", selected),
+                ("SELECT \"INBOX\"", selected),
+                ("RENAME \"Old\" \"New\"", "{tag} OK done\r\n"),
+                ("SELECT \"New\"", selected),
+                ("SELECT \"INBOX\"", selected),
+                ("DELETE \"New\"", "{tag} OK done\r\n"),
+                ("SELECT \"Parent.Child\"", selected),
+                ("SELECT \"INBOX\"", selected),
+                ("RENAME \"Parent\" \"Other\"", "{tag} OK done\r\n"),
+                ("LOGOUT", "{tag} OK bye\r\n"),
+            ],
+        );
+        remote.select("Old").unwrap();
+        remote.rename_folder("Old", "New").unwrap();
+        remote.select("New").unwrap();
+        remote.delete_folder("New").unwrap();
+        remote.select("Parent.Child").unwrap();
+        remote.rename_folder("Parent", "Other").unwrap();
+        finish(remote, handle);
+    }
+
+    #[test]
     fn append_create_and_noop() {
         let (mut remote, handle) = session(
             BASIC_CAPS,
@@ -1665,6 +1720,8 @@ mod tests {
                 ("CREATE \"Projects/New\"", "{tag} OK done\r\n"),
                 ("NOOP", "* 4 EXISTS\r\n{tag} OK done\r\n"),
                 ("CREATE \"Dup\"", "{tag} NO already exists\r\n"),
+                ("RENAME \"Old\" \"New name\"", "{tag} OK done\r\n"),
+                ("DELETE \"New name\"", "{tag} OK done\r\n"),
                 ("LOGOUT", "{tag} OK bye\r\n"),
             ],
         );
@@ -1683,6 +1740,8 @@ mod tests {
             remote.create_folder("bad\r\nname").unwrap_err().kind,
             RemoteErrorKind::Other
         );
+        remote.rename_folder("Old", "New name").unwrap();
+        remote.delete_folder("New name").unwrap();
         finish(remote, handle);
     }
 

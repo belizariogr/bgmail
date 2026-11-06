@@ -195,6 +195,9 @@ pub trait MailRemote: Send {
     fn delete_messages(&mut self, folder: &str, uids: &[u32]) -> RemoteResult<()>;
     fn append(&mut self, folder: &str, flags: MessageFlags, raw: &[u8]) -> RemoteResult<()>;
     fn create_folder(&mut self, name: &str) -> RemoteResult<()>;
+    fn rename_folder(&mut self, from: &str, to: &str) -> RemoteResult<()>;
+    /// Deletes the folder, with whatever is still in it.
+    fn delete_folder(&mut self, name: &str) -> RemoteResult<()>;
     /// Keep-alive and a cheap way to receive pending untagged updates.
     fn noop(&mut self) -> RemoteResult<()>;
     /// Best effort; never fails.
@@ -370,6 +373,12 @@ mod tests {
                 Ok(())
             }
             fn create_folder(&mut self, _: &str) -> RemoteResult<()> {
+                Ok(())
+            }
+            fn rename_folder(&mut self, _: &str, _: &str) -> RemoteResult<()> {
+                Ok(())
+            }
+            fn delete_folder(&mut self, _: &str) -> RemoteResult<()> {
                 Ok(())
             }
             fn noop(&mut self) -> RemoteResult<()> {

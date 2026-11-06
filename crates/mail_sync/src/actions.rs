@@ -9,13 +9,14 @@
 //! Ops are queued *before* the local write so a sync running concurrently
 //! already treats the UIDs as in flight and never reverts the edit.
 
-use mail_core::MessageFlags;
+use mail_core::{encode_imap_utf7, MessageFlags};
 use storage::{
-    is_manual_move_destination_forbidden, parse_folders_csv, system, Account, Database,
-    MessageDetail, PROVIDER_LOCAL,
+    child_display_name, is_manual_move_destination_forbidden, is_system_path, parse_folders_csv,
+    system, user_folder_path, Account, Database, Folder, MessageDetail, FOLDER_LEVEL_SEPARATOR,
+    PROVIDER_GMAIL, PROVIDER_LOCAL,
 };
 
-use crate::plan::PendingAction;
+use crate::plan::{name_after_rename, FolderAction, PendingAction, FOLDER_OP_KIND};
 
 /// What an action did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -32,6 +33,11 @@ impl ActionOutcome {
     const LOCAL: Self = Self {
         changed: true,
         needs_sync: false,
+        no_destination: false,
+    };
+    const QUEUED: Self = Self {
+        changed: true,
+        needs_sync: true,
         no_destination: false,
     };
 }
@@ -609,6 +615,311 @@ fn delete_permanently_round(
     }))
 }
 
+/// The folder at `path` of the account, if it is one of the user's: system folders are
+/// neither renamed, nor deleted, nor given subfolders.
+fn user_folder(db: &Database, account_id: i64, path: &str) -> rusqlite::Result<Option<Folder>> {
+    Ok(db
+        .list_folders(account_id)?
+        .into_iter()
+        .find(|folder| folder.path == path && !is_system_path(&folder.path)))
+}
+
+/// The delimiter of `folder`, or the one the rest of the account's folders use: one still
+/// queued has none on record, or `/` when nothing is known yet.
+pub(crate) fn account_folder_delimiter(
+    db: &Database,
+    account_id: i64,
+    folder: Option<&Folder>,
+) -> rusqlite::Result<String> {
+    if let Some(folder) = folder {
+        if let Some(delimiter) = db.folder_delimiter(folder.id)? {
+            return Ok(delimiter);
+        }
+    }
+    Ok(db
+        .account_delimiters(account_id)?
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| FOLDER_LEVEL_SEPARATOR.to_string()))
+}
+
+/// Whether the account's folders are Gmail labels, whichever way it signs in: one with an
+/// app password is a plain `imap` account to the rest of the app.
+pub fn folders_are_labels(account: &Account) -> bool {
+    account.provider == PROVIDER_GMAIL
+        || mail_core::AccountConfig::from_json(&account.config_json)
+            .is_some_and(|config| mail_core::is_gmail_host(&config.imap.host))
+}
+
+/// The last level of a folder's display name.
+pub fn folder_leaf(display_name: &str) -> &str {
+    display_name
+        .rsplit(FOLDER_LEVEL_SEPARATOR)
+        .next()
+        .unwrap_or(display_name)
+}
+
+/// The display name of the level `leaf` beside `display_name`.
+pub(crate) fn sibling_display_name(display_name: &str, leaf: &str) -> String {
+    let parent = display_name
+        .rsplit_once(FOLDER_LEVEL_SEPARATOR)
+        .map(|(parent, _)| parent);
+    child_display_name(parent, leaf)
+}
+
+/// The server's name for the folder `display_name` once its last level is `leaf`. All
+/// before that level stays as the server has it: its delimiter, and a prefix like the
+/// `INBOX.` that some servers put on everything. `delimiter` is for a name written in
+/// some other way than expected, like raw UTF-8.
+fn sibling_remote_name(
+    remote_name: &str,
+    display_name: &str,
+    leaf: &str,
+    delimiter: Option<&str>,
+) -> String {
+    let old_leaf = folder_leaf(display_name);
+    let prefix = remote_name
+        .strip_suffix(&encode_imap_utf7(old_leaf))
+        .or_else(|| remote_name.strip_suffix(old_leaf))
+        .unwrap_or_else(|| {
+            let delimiter = delimiter.unwrap_or("/");
+            remote_name
+                .rfind(delimiter)
+                .map_or("", |ix| &remote_name[..ix + delimiter.len()])
+        });
+    format!("{prefix}{}", encode_imap_utf7(leaf))
+}
+
+/// Whether renaming the folder `old_display` to `new_display` would land it, or one under
+/// it, on a folder outside it. The caller's check of the name itself doesn't see those.
+pub fn rename_collides(display_names: &[&str], old_display: &str, new_display: &str) -> bool {
+    let under = format!("{old_display}{FOLDER_LEVEL_SEPARATOR}");
+    let moved = |name: &str| name == old_display || name.starts_with(&under);
+    display_names.iter().filter(|name| moved(name)).any(|name| {
+        let target = format!("{new_display}{}", &name[old_display.len()..]);
+        display_names
+            .iter()
+            .any(|other| !moved(other) && other.to_lowercase() == target.to_lowercase())
+    })
+}
+
+/// Creates a folder, inside `parent_path` if given: on a server account it shows now and
+/// the server gets it with the queue; if the server refuses, the next folder list takes
+/// it away again.
+pub fn create_folder(
+    db: &Database,
+    account_id: i64,
+    parent_path: Option<&str>,
+    leaf: &str,
+) -> rusqlite::Result<ActionOutcome> {
+    let Some(account) = db.get_account(account_id)? else {
+        return Ok(ActionOutcome::default());
+    };
+    let parent = match parent_path {
+        Some(path) => match user_folder(db, account_id, path)? {
+            Some(folder) => Some(folder),
+            None => return Ok(ActionOutcome::default()),
+        },
+        None => None,
+    };
+    let name = encode_imap_utf7(leaf);
+    let parent_remote = parent.as_ref().and_then(|p| p.remote_name.clone());
+    let display_name = child_display_name(parent.as_ref().map(|p| p.display_name.as_str()), leaf);
+    // As the server last said it writes names, so that what is queued after this, like a
+    // message moved here, reaches the folder that the server will have.
+    let remote_name = match (&parent, &parent_remote) {
+        (Some(parent), Some(parent_remote)) => {
+            let delimiter = account_folder_delimiter(db, account_id, Some(parent))?;
+            format!("{parent_remote}{delimiter}{name}")
+        }
+        _ => format!("{}{name}", db.folder_prefix(account_id)?),
+    };
+    let queued = !is_local(&account);
+    db.atomically(|| {
+        if queued {
+            let action = FolderAction::Create {
+                name,
+                parent: parent_remote,
+                guess: remote_name.clone(),
+            };
+            db.enqueue_op(account_id, FOLDER_OP_KIND, None, &action.encode())?;
+        }
+        db.upsert_remote_folder(
+            account_id,
+            &user_folder_path(&display_name),
+            &display_name,
+            &remote_name,
+            None,
+        )
+    })?;
+    Ok(if queued {
+        ActionOutcome::QUEUED
+    } else {
+        ActionOutcome::LOCAL
+    })
+}
+
+/// Renames in storage the folder `old_display` and those under it, which a server renames
+/// along with it, so none has to be downloaded again.
+pub(crate) fn apply_folder_rename(
+    db: &Database,
+    account_id: i64,
+    old_display: &str,
+    new_display: &str,
+    old_remote: Option<&str>,
+    new_remote: Option<&str>,
+) -> rusqlite::Result<()> {
+    let under = format!("{old_display}{FOLDER_LEVEL_SEPARATOR}");
+    let folders = db.list_folders(account_id)?;
+    let renamed = folders.iter().find(|f| f.display_name == old_display);
+    let delimiter = account_folder_delimiter(db, account_id, renamed)?;
+    let mut renames = Vec::new();
+    for folder in &folders {
+        let display = if folder.display_name == old_display {
+            new_display.to_string()
+        } else if let Some(rest) = folder.display_name.strip_prefix(&under) {
+            // Under it on the server too: a `/` can be part of a name where `.` separates.
+            let moves = match (&folder.remote_name, old_remote) {
+                (Some(remote), Some(old)) => remote
+                    .strip_prefix(old)
+                    .is_some_and(|rest| rest.starts_with(delimiter.as_str())),
+                _ => true,
+            };
+            if !moves {
+                continue;
+            }
+            format!("{new_display}{FOLDER_LEVEL_SEPARATOR}{rest}")
+        } else {
+            continue;
+        };
+        let remote = match (&folder.remote_name, old_remote, new_remote) {
+            (Some(remote), Some(old), Some(new)) => Some(
+                name_after_rename(remote, old, new, &delimiter).unwrap_or_else(|| remote.clone()),
+            ),
+            (remote, _, _) => remote.clone(),
+        };
+        renames.push((folder.id, display, remote));
+    }
+    db.rename_folders(account_id, &renames)
+}
+
+/// Whether a system folder lives under the folder at `path`, as a server may have it:
+/// neither renaming nor deleting can take that along.
+pub fn holds_system_folder(db: &Database, account_id: i64, path: &str) -> rusqlite::Result<bool> {
+    let Some(folder) = user_folder(db, account_id, path)? else {
+        return Ok(false);
+    };
+    let Some(remote) = &folder.remote_name else {
+        return Ok(false);
+    };
+    let delimiter = account_folder_delimiter(db, account_id, Some(&folder))?;
+    let under = format!("{remote}{delimiter}");
+    Ok(db.list_folders(account_id)?.iter().any(|other| {
+        is_system_path(&other.path)
+            && other
+                .remote_name
+                .as_deref()
+                .is_some_and(|name| name.starts_with(&under))
+    }))
+}
+
+/// Gives a folder of the user's a new last level, `leaf`, leaving it where it is; system
+/// folders are never renamed. On a server account it takes the new name once the server
+/// has it: until then, everything queued and every folder sync means the same folder by
+/// the same name, here and there.
+pub fn rename_folder(
+    db: &Database,
+    account_id: i64,
+    path: &str,
+    leaf: &str,
+) -> rusqlite::Result<ActionOutcome> {
+    let Some(account) = db.get_account(account_id)? else {
+        return Ok(ActionOutcome::default());
+    };
+    let Some(folder) = user_folder(db, account_id, path)? else {
+        return Ok(ActionOutcome::default());
+    };
+    if folder_leaf(&folder.display_name) == leaf {
+        return Ok(ActionOutcome::default());
+    }
+    let to_display = sibling_display_name(&folder.display_name, leaf);
+    let folders = db.list_folders(account_id)?;
+    let names: Vec<&str> = folders.iter().map(|f| f.display_name.as_str()).collect();
+    if rename_collides(&names, &folder.display_name, &to_display) {
+        return Ok(ActionOutcome::default());
+    }
+    let delimiter = db.folder_delimiter(folder.id)?;
+    let to = folder.remote_name.as_deref().map(|remote| {
+        sibling_remote_name(remote, &folder.display_name, leaf, delimiter.as_deref())
+    });
+    if holds_system_folder(db, account_id, path)? {
+        return Ok(ActionOutcome::default());
+    }
+    if let (Some(from), Some(to), false) = (&folder.remote_name, &to, is_local(&account)) {
+        let action = FolderAction::Rename {
+            from: from.clone(),
+            to: to.clone(),
+            leaf: leaf.to_string(),
+        };
+        db.enqueue_op(account_id, FOLDER_OP_KIND, None, &action.encode())?;
+        return Ok(ActionOutcome::QUEUED);
+    }
+    apply_folder_rename(
+        db,
+        account_id,
+        &folder.display_name,
+        &to_display,
+        folder.remote_name.as_deref(),
+        to.as_deref(),
+    )?;
+    Ok(ActionOutcome::LOCAL)
+}
+
+/// Deletes a folder of the user's; system folders never are. Its mail goes to the Trash,
+/// so nothing is lost: except on Gmail, where a folder is a label and its mail stays in
+/// All Mail. On a server account all of it happens there, in one go, when the queue gets
+/// to it: however big the folder, this only queues one op.
+pub fn delete_folder(
+    db: &Database,
+    account_id: i64,
+    path: &str,
+) -> rusqlite::Result<ActionOutcome> {
+    let Some(account) = db.get_account(account_id)? else {
+        return Ok(ActionOutcome::default());
+    };
+    let Some(folder) = user_folder(db, account_id, path)? else {
+        return Ok(ActionOutcome::default());
+    };
+    if !folders_are_labels(&account) {
+        let has_trash = db
+            .list_folders(account_id)?
+            .iter()
+            .any(|folder| folder.path == system::TRASH);
+        if !has_trash {
+            return Ok(ActionOutcome {
+                no_destination: true,
+                ..Default::default()
+            });
+        }
+    }
+    let name = folder.remote_name.clone().filter(|_| !is_local(&account));
+    let Some(name) = name else {
+        // Nothing on a server: here it all happens now, the folder and those under it.
+        let under = format!("{}{FOLDER_LEVEL_SEPARATOR}", folder.display_name);
+        for target in db.list_folders(account_id)? {
+            if target.id != folder.id && !target.display_name.starts_with(&under) {
+                continue;
+            }
+            db.trash_folder_messages(account_id, &target.path)?;
+            db.delete_folder(target.id)?;
+        }
+        return Ok(ActionOutcome::LOCAL);
+    };
+    let action = FolderAction::Delete { name };
+    db.enqueue_op(account_id, FOLDER_OP_KIND, None, &action.encode())?;
+    Ok(ActionOutcome::QUEUED)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,6 +1023,47 @@ mod tests {
         needs_sync: true,
         no_destination: false,
     };
+
+    #[test]
+    fn a_renamed_folder_keeps_all_before_its_last_level() {
+        assert_eq!(folder_leaf("Work/Acme"), "Acme");
+        assert_eq!(folder_leaf("Work"), "Work");
+        assert_eq!(sibling_display_name("Work/Acme", "New"), "Work/New");
+        assert_eq!(sibling_display_name("Work", "New"), "New");
+        for (remote, display, delimiter, renamed) in [
+            ("Work", "Work", None, "Novo"),
+            ("Work/Acme", "Work/Acme", None, "Work/Novo"),
+            ("Work.Acme", "Work/Acme", Some("."), "Work.Novo"),
+            ("INBOX.Work.Acme", "Work/Acme", Some("."), "INBOX.Work.Novo"),
+            ("Work/S&AOM-o", "Work/São", Some("/"), "Work/Novo"),
+            // Raw UTF-8, as some servers list it.
+            ("INBOX.Work.São", "Work/São", Some("."), "INBOX.Work.Novo"),
+            // A name that doesn't end like its display name.
+            ("INBOX.Work.Other", "Work/São", Some("."), "INBOX.Work.Novo"),
+        ] {
+            assert_eq!(
+                sibling_remote_name(remote, display, "Novo", delimiter),
+                renamed,
+                "{remote}"
+            );
+        }
+        assert_eq!(sibling_remote_name("Work", "Work", "São", None), "S&AOM-o");
+    }
+
+    #[test]
+    fn a_rename_must_not_land_a_subfolder_on_another_folder() {
+        let names = ["A", "A/C", "B/C", "D"];
+        assert!(rename_collides(&names, "A", "B"), "A/C on B/C");
+        assert!(
+            rename_collides(&names, "A", "d"),
+            "A on D, whatever the case"
+        );
+        assert!(!rename_collides(&names, "A", "E"));
+        assert!(
+            !rename_collides(&names, "A", "a"),
+            "only its own case changes"
+        );
+    }
 
     #[test]
     fn set_read_queues_one_flags_op() {

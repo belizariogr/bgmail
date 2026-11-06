@@ -1,5 +1,6 @@
 //! SQLite mail store: connection setup and list/detail queries.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -377,22 +378,47 @@ fn hidden_from_folder(folder_path: &str) -> &'static str {
 
 /// SQL `WHERE` clause + parameters for a list query; `None` means "no rows"
 /// (blank search).
-fn query_filter(query: &MailListQuery) -> Option<(&'static str, Vec<Value>)> {
+fn query_filter(query: &MailListQuery) -> Option<(Cow<'static, str>, Vec<Value>)> {
     match query {
-        MailListQuery::Search(text) => search_filter(text),
+        MailListQuery::Search(text) => {
+            search_filter(text).map(|(filter, values)| (filter.into(), values))
+        }
+        MailListQuery::SearchInFolders { text, folders } => {
+            if folders.is_empty() {
+                return None;
+            }
+            // No text yet: all that is in them.
+            let (filter, mut values) = search_filter(text).unwrap_or(("1", Vec::new()));
+            let any: Vec<String> = folders
+                .iter()
+                .map(|path| {
+                    values.push(Value::Text(folder_csv_needle(path)));
+                    let in_folder = format!("instr(folders_csv, ?{}) > 0", values.len());
+                    if path == system::FLAGGED {
+                        format!("({in_folder} AND folders_csv NOT LIKE '%,sys:trash,%')")
+                    } else {
+                        in_folder
+                    }
+                })
+                .collect();
+            Some((
+                format!("{filter} AND ({})", any.join(" OR ")).into(),
+                values,
+            ))
+        }
         MailListQuery::GlobalSystemFolder(path) if path == system::FLAGGED => Some((
-            "instr(folders_csv, ?1) > 0 AND folders_csv NOT LIKE '%,sys:trash,%'",
+            "instr(folders_csv, ?1) > 0 AND folders_csv NOT LIKE '%,sys:trash,%'".into(),
             vec![Value::Text(folder_csv_needle(path))],
         )),
         MailListQuery::GlobalSystemFolder(path) => Some((
-            "instr(folders_csv, ?1) > 0",
+            "instr(folders_csv, ?1) > 0".into(),
             vec![Value::Text(folder_csv_needle(path))],
         )),
         MailListQuery::AccountFolder {
             account_id,
             folder_path,
         } => Some((
-            "account_id = ?1 AND instr(folders_csv, ?2) > 0",
+            "account_id = ?1 AND instr(folders_csv, ?2) > 0".into(),
             vec![
                 Value::Integer(*account_id),
                 Value::Text(folder_csv_needle(folder_path)),
@@ -776,6 +802,52 @@ mod tests {
                 .unwrap();
             assert_eq!(found.len(), 1, "{query}");
         }
+    }
+
+    #[test]
+    fn search_finds_the_name_and_the_address_of_the_sender() {
+        let (_file, db, fx) = crate::test_support::remote_db();
+        let mut message = crate::test_support::remote_message("A subject", None);
+        message.sender = "João da Silva".into();
+        message.sender_email = "joao.silva@example.com".into();
+        db.insert_remote_message(fx.account, fx.inbox, 1, &message)
+            .unwrap();
+        for query in [
+            "João",
+            "joao da silva",
+            "SILVA",
+            "joao.silva@example.com",
+            "@example",
+        ] {
+            assert_eq!(search_ids(&db, query).len(), 1, "{query}");
+        }
+        assert!(search_ids(&db, "someone else").is_empty());
+    }
+
+    #[test]
+    fn a_search_can_be_limited_to_folders() {
+        let (_file, db, fx) = crate::test_support::remote_db();
+        let message = crate::test_support::remote_message("Needle", None);
+        let id = db
+            .insert_remote_message(fx.account, fx.inbox, 1, &message)
+            .unwrap();
+        let in_folders = |text: &str, folders: &[&str]| -> Vec<i64> {
+            let query = MailListQuery::SearchInFolders {
+                text: text.into(),
+                folders: folders.iter().map(|f| f.to_string()).collect(),
+            };
+            let found = db.list_messages(&query).unwrap();
+            assert_eq!(db.message_count_for_query(&query).unwrap(), found.len());
+            found.into_iter().map(|m| m.id).collect()
+        };
+        for text in ["needle", "ne"] {
+            assert_eq!(in_folders(text, &[system::INBOX]), [id], "{text}");
+            assert_eq!(in_folders(text, &[system::TRASH, system::INBOX]), [id]);
+            assert!(in_folders(text, &[system::TRASH]).is_empty(), "{text}");
+            assert!(in_folders(text, &[]).is_empty(), "{text}");
+        }
+        assert_eq!(in_folders("  ", &[system::TRASH, system::INBOX]), [id]);
+        assert!(in_folders("", &[system::TRASH]).is_empty());
     }
 
     #[test]

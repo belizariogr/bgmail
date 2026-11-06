@@ -2,6 +2,7 @@
 
 use rusqlite::{params, OptionalExtension};
 
+use crate::folder::{folder_csv_needle, user_folder_path};
 use crate::membership::{message_ids_in_folder, settle_after_location_loss};
 use crate::types::{Account, Folder, FolderSyncState};
 use crate::Database;
@@ -189,6 +190,147 @@ impl Database {
         tx.commit()
     }
 
+    /// The delimiter the server last said the folder's name uses.
+    pub fn folder_delimiter(&self, folder_id: i64) -> rusqlite::Result<Option<String>> {
+        self.conn()
+            .query_row(
+                "SELECT delimiter FROM folders WHERE id = ?1",
+                params![folder_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
+    /// The delimiters the server uses in the account's folder names.
+    pub fn account_delimiters(&self, account_id: i64) -> rusqlite::Result<Vec<String>> {
+        self.conn()
+            .prepare(
+                "SELECT DISTINCT delimiter FROM folders
+                 WHERE account_id = ?1 AND delimiter IS NOT NULL",
+            )?
+            .query_map(params![account_id], |row| row.get(0))?
+            .collect()
+    }
+
+    /// Records the delimiter of each `(server name, delimiter)` of the account.
+    pub fn set_folder_delimiters(
+        &self,
+        account_id: i64,
+        delimiters: &[(&str, Option<&str>)],
+    ) -> rusqlite::Result<()> {
+        let tx = self.write_transaction()?;
+        for (name, delimiter) in delimiters {
+            tx.execute(
+                "UPDATE folders SET delimiter = ?1
+                 WHERE account_id = ?2 AND remote_name = ?3 AND delimiter IS NOT ?1",
+                params![delimiter, account_id, name],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// What the server puts before the name of a new top-level folder (`INBOX.`).
+    pub fn folder_prefix(&self, account_id: i64) -> rusqlite::Result<String> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT folder_prefix FROM accounts WHERE id = ?1",
+                params![account_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    pub fn set_folder_prefix(&self, account_id: i64, prefix: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE accounts SET folder_prefix = ?1 WHERE id = ?2 AND folder_prefix <> ?1",
+            params![prefix, account_id],
+        )?;
+        Ok(())
+    }
+
+    /// Gives folders of the user's new display and server names, keeping their messages:
+    /// their locations go by folder id, and their membership by path. All at once, so the
+    /// sync never sees it half done.
+    pub fn rename_folders(
+        &self,
+        account_id: i64,
+        renames: &[(i64, String, Option<String>)],
+    ) -> rusqlite::Result<()> {
+        let tx = self.write_transaction()?;
+        // Membership in one pass over the account's messages, however many folders move.
+        let mut needles = Vec::new();
+        for (folder_id, display_name, remote_name) in renames {
+            let old: Option<String> = tx
+                .query_row(
+                    "SELECT path FROM folders WHERE id = ?1",
+                    params![folder_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(old) = old else {
+                continue;
+            };
+            let new = user_folder_path(display_name);
+            tx.execute(
+                "UPDATE folders SET path = ?1, display_name = ?2, remote_name = ?3 WHERE id = ?4",
+                params![new, display_name, remote_name, folder_id],
+            )?;
+            needles.push((folder_csv_needle(&old), folder_csv_needle(&new)));
+        }
+        if !needles.is_empty() {
+            let any = vec!["instr(folders_csv, ?) > 0"; needles.len()].join(" OR ");
+            let select =
+                format!("SELECT id, folders_csv FROM messages WHERE account_id = ? AND ({any})");
+            let mut values = vec![rusqlite::types::Value::Integer(account_id)];
+            values.extend(
+                needles
+                    .iter()
+                    .map(|(old, _)| rusqlite::types::Value::Text(old.clone())),
+            );
+            let rows: Vec<(i64, String)> = tx
+                .prepare(&select)?
+                .query_map(rusqlite::params_from_iter(values), |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut update = tx.prepare("UPDATE messages SET folders_csv = ?1 WHERE id = ?2")?;
+            for (id, csv) in rows {
+                // `,a,b,`: a needle's closing comma is the next one's opening, so each is
+                // replaced on what the one before left, and overlaps are handled.
+                let mut new_csv = csv;
+                for (old, new) in &needles {
+                    new_csv = new_csv.replace(old.as_str(), new.as_str());
+                }
+                update.execute(params![new_csv, id])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Sends what is in a folder to the Trash, in one go.
+    pub fn trash_folder_messages(
+        &self,
+        account_id: i64,
+        folder_path: &str,
+    ) -> rusqlite::Result<()> {
+        let tx = self.write_transaction()?;
+        let ids: Vec<i64> = tx
+            .prepare(
+                "SELECT id FROM messages WHERE account_id = ?1 AND instr(folders_csv, ?2) > 0",
+            )?
+            .query_map(params![account_id, folder_csv_needle(folder_path)], |row| {
+                row.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        for id in ids {
+            self.move_message_to_trash(id)?;
+        }
+        tx.commit()
+    }
+
     /// Stored sync checkpoint (all `None` for unknown folders or never synced).
     pub fn folder_sync_state(&self, folder_id: i64) -> rusqlite::Result<FolderSyncState> {
         let state = self
@@ -236,7 +378,7 @@ impl Database {
 mod tests {
     use crate::test_support::{remote_db, remote_message};
     use crate::types::{FolderSyncState, NewAttachment};
-    use crate::{system, Database, MailListQuery};
+    use crate::{system, user_folder_path, Database, MailListQuery};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -363,6 +505,66 @@ mod tests {
         assert_eq!(folder.display_name, "Job");
         assert_eq!(folder.remote_name.as_deref(), Some("Job"));
         assert_eq!(folder.role, None);
+    }
+
+    #[test]
+    fn how_the_server_names_folders_is_remembered() {
+        let (_file, db, fx) = remote_db();
+        let folder = db
+            .upsert_remote_folder(fx.account, "user:Work", "Work", "INBOX.Work", None)
+            .unwrap();
+        assert_eq!(db.folder_delimiter(folder).unwrap(), None);
+        db.set_folder_delimiters(
+            fx.account,
+            &[("INBOX.Work", Some(".")), ("Gone", Some("/"))],
+        )
+        .unwrap();
+        assert_eq!(db.folder_delimiter(folder).unwrap().as_deref(), Some("."));
+        assert_eq!(db.account_delimiters(fx.account).unwrap(), ["."]);
+
+        assert_eq!(db.folder_prefix(fx.account).unwrap(), "");
+        db.set_folder_prefix(fx.account, "INBOX.").unwrap();
+        assert_eq!(db.folder_prefix(fx.account).unwrap(), "INBOX.");
+        assert_eq!(db.folder_prefix(fx.account + 1000).unwrap(), "");
+    }
+
+    #[test]
+    fn renaming_a_folder_keeps_its_messages_where_they_are() {
+        let (_file, db, fx) = crate::test_support::remote_db();
+        let old = user_folder_path("Old, name");
+        let folder = db
+            .upsert_remote_folder(fx.account, &old, "Old, name", "Old, name", None)
+            .unwrap();
+        let id = db
+            .insert_remote_message(
+                fx.account,
+                folder,
+                1,
+                &crate::test_support::remote_message("Kept", None),
+            )
+            .unwrap();
+        let renames = [(folder, "New name".to_string(), Some("New name".to_string()))];
+        db.rename_folders(fx.account, &renames).unwrap();
+
+        let renamed = db.folder_by_id(folder).unwrap().unwrap();
+        assert_eq!(renamed.path, user_folder_path("New name"));
+        assert_eq!(renamed.display_name, "New name");
+        assert_eq!(renamed.remote_name.as_deref(), Some("New name"));
+        let listed = db
+            .list_messages(&MailListQuery::AccountFolder {
+                account_id: fx.account,
+                folder_path: renamed.path.clone(),
+            })
+            .unwrap();
+        assert_eq!(listed.iter().map(|m| m.id).collect::<Vec<_>>(), [id]);
+        assert!(db
+            .list_messages(&MailListQuery::AccountFolder {
+                account_id: fx.account,
+                folder_path: old,
+            })
+            .unwrap()
+            .is_empty());
+        assert_eq!(db.folder_uids(folder).unwrap().len(), 1);
     }
 
     #[test]

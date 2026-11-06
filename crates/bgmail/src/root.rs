@@ -7,7 +7,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::f32::consts::FRAC_PI_2;
 
@@ -16,8 +16,8 @@ use gpui::{
     AnimationExt as _, App, AppContext as _, Bounds, ClipboardItem, Context, Corner, CursorStyle,
     DragMoveEvent, Empty, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder, Point, ScrollHandle, ScrollStrategy,
-    Size, Subscription, Svg, TitlebarOptions, Transformation, UniformListScrollHandle, Window,
-    WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
+    Size, Subscription, Svg, Task, TitlebarOptions, Transformation, UniformListScrollHandle,
+    Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
 };
 
 use crate::command_palette_overlay;
@@ -49,14 +49,17 @@ use crate::mail_html::{
     DocumentColors, PrintHeader,
 };
 use crate::mail_service::{self, MailService, OverallStatus, StartError};
+use crate::search_scope;
 use crate::settings::SettingsView;
 use crate::shortcuts;
 use html_view::{
     has_too_many_tags, Appearance as PageAppearance, DetachedDocument, DocumentOptions, HitInfo,
     HtmlDocument, HtmlView, HtmlViewEvent, RenderError,
 };
+use mail_core::FolderRole;
 use mail_core::{AccountConfig, Address, Draft, ParsedMessage, QuoteLabels, ReplyKind};
-use mail_sync::{actions as mail_actions, ActionOutcome, Command, SyncEvent};
+use mail_sync::{actions as mail_actions, ActionOutcome, Command, FolderRefusal, SyncEvent};
+use storage::{child_display_name, FOLDER_LEVEL_SEPARATOR};
 use storage::{
     AttachmentRow, MailListQuery, MessageDetail, MessageListItem, OutgoingRow, OutgoingState,
 };
@@ -148,6 +151,30 @@ const SEARCH_ICON_WIDTH: f32 = 28.0;
 /// groups and search) is narrower than this, the search field collapses into a
 /// single magnifying-glass button. Tweak this to fine-tune the breakpoint.
 const SEARCH_COLLAPSE_WIDTH: f32 = 700.0;
+/// How much the search field grows while it has the focus, room permitting, in pixels.
+const SEARCH_FIELD_GROWTH: f32 = 100.0;
+/// How long the search field takes to grow or shrink back.
+const SEARCH_GROW_DURATION: Duration = Duration::from_millis(220);
+
+/// The search field on its way to a width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SearchGrowth {
+    from: f32,
+    to: f32,
+    started: Instant,
+    /// Names the animation, so that a new target starts a new one.
+    token: u64,
+}
+
+impl SearchGrowth {
+    /// Its width at `now`, for a change of target halfway to start from where it is.
+    fn width_at(&self, now: Instant) -> f32 {
+        let elapsed = now.saturating_duration_since(self.started);
+        let delta = (elapsed.as_secs_f32() / SEARCH_GROW_DURATION.as_secs_f32()).min(1.0);
+        self.from + (self.to - self.from) * ease_in_out(delta)
+    }
+}
+
 /// Fixed reader-segment overhead that always precedes the action groups:
 /// horizontal padding, inter-child gaps and the compose + get-mail buttons.
 const TOOLBAR_FIXED_OVERHEAD: f32 = 140.0;
@@ -156,7 +183,7 @@ const TOOLBAR_FIXED_OVERHEAD: f32 = 140.0;
 /// dropped from the right (flag/move first) so search is never overlapped.
 const ACTIONS_1_WIDTH: f32 = 92.0; // reply / reply-all / forward
 const ACTIONS_2_WIDTH: f32 = 193.0; // + trash / archive / junk
-const ACTIONS_3_WIDTH: f32 = 322.0; // + flag / read / move
+const ACTIONS_3_WIDTH: f32 = 340.0; // + flag / read / move (with its menu arrow)
 
 /// Which inter-column divider is currently being dragged.
 #[derive(Debug, Clone, Copy)]
@@ -354,7 +381,7 @@ fn unique_recipients<'a>(list: impl Iterator<Item = &'a Address>) -> Vec<&'a Add
 }
 
 /// How far a message must be dragged before it counts, in pixels.
-const MESSAGE_DRAG_THRESHOLD: f32 = 100.0;
+const MESSAGE_DRAG_THRESHOLD: f32 = 50.0;
 /// Opacity of the row following the pointer while dragged.
 const MESSAGE_DRAG_OPACITY: f32 = 0.6;
 
@@ -365,28 +392,28 @@ fn drag_counts(origin: Point<Pixels>, position: Point<Pixels>) -> bool {
     dx * dx + dy * dy > MESSAGE_DRAG_THRESHOLD * MESSAGE_DRAG_THRESHOLD
 }
 
-/// How far a drag went. Once past the threshold it counts for good: the way back to
-/// a folder close to where it started mustn't undo it.
+/// How far a drag went. Once past the threshold or out of the list it counts for good:
+/// the way back to a folder close to where it started mustn't undo it.
 #[derive(Default)]
 struct DragProgress {
-    origin: Cell<Option<Point<Pixels>>>,
+    /// Where it started, and the area of the list then.
+    start: Cell<Option<(Point<Pixels>, Bounds<Pixels>)>>,
     counted: Cell<bool>,
 }
 
 impl DragProgress {
-    fn start(&self, origin: Point<Pixels>) {
-        self.origin.set(Some(origin));
+    fn start(&self, origin: Point<Pixels>, list: Bounds<Pixels>) {
+        self.start.set(Some((origin, list)));
         self.counted.set(false);
     }
 
     /// Whether the drag counts with the pointer at `position`.
     fn counts_at(&self, position: Point<Pixels>) -> bool {
         if !self.counted.get() {
-            let far = self
-                .origin
-                .get()
-                .is_some_and(|origin| drag_counts(origin, position));
-            self.counted.set(far);
+            let counts = self.start.get().is_some_and(|(origin, list)| {
+                drag_counts(origin, position) || !list.contains(&position)
+            });
+            self.counted.set(counts);
         }
         self.counted.get()
     }
@@ -458,15 +485,17 @@ fn drag_cursor(draws_hand: bool) -> CursorStyle {
 /// Height of the card following the pointer, in pixels.
 const DRAG_CARD_HEIGHT: f32 = 56.0;
 
-/// How far inside the card's top left corner the pointer sits, in pixels.
-const DRAG_CARD_POINTER_INSET: f32 = 12.0;
+/// How far inside the card's left edge and top edge the pointer sits, in pixels. Nearer
+/// the top than the left, so the cursor's body hangs above the text rather than on it.
+const DRAG_CARD_POINTER_INSET_X: f32 = 12.0;
+const DRAG_CARD_POINTER_INSET_Y: f32 = 4.0;
 
 /// Where the card goes for its top left corner to be just past the pointer, relative
 /// to where GPUI places a drag: the pointer minus where the row was grabbed.
 fn drag_card_origin(grab: Point<Pixels>) -> Point<Pixels> {
     point(
-        grab.x - px(DRAG_CARD_POINTER_INSET),
-        grab.y - px(DRAG_CARD_POINTER_INSET),
+        grab.x - px(DRAG_CARD_POINTER_INSET_X),
+        grab.y - px(DRAG_CARD_POINTER_INSET_Y),
     )
 }
 
@@ -516,15 +545,23 @@ impl Render for DragPreview {
                     .bg(colors.elevated_surface_background)
                     .opacity(MESSAGE_DRAG_OPACITY)
                     .child(
-                        Label::new(self.title.clone())
-                            .weight(FontWeight::SEMIBOLD)
-                            .single_line(),
+                        div()
+                            .debug_selector(|| "drag-card-title".to_string())
+                            .child(
+                                Label::new(self.title.clone())
+                                    .weight(FontWeight::SEMIBOLD)
+                                    .single_line(),
+                            ),
                     )
-                    .child(
-                        Label::new(self.subtitle.clone())
-                            .size(LabelSize::Small)
-                            .single_line(),
-                    ),
+                    // Without a line below (several messages), the title centers, clear
+                    // of the pointer at the card's corner.
+                    .when(!self.subtitle.is_empty(), |el| {
+                        el.child(
+                            Label::new(self.subtitle.clone())
+                                .size(LabelSize::Small)
+                                .single_line(),
+                        )
+                    }),
             )
             // As a system cursor: light with a dark outline, visible on anything.
             .when(self.draws_hand, |el| {
@@ -773,6 +810,102 @@ struct AttachmentMenu {
     attachment: AttachmentRow,
 }
 
+/// How long a message stays open before it counts as read: a quick look through the list
+/// leaves it unread.
+const MARK_READ_DELAY: Duration = Duration::from_millis(2500);
+
+/// Folders a Move menu shows before it scrolls.
+const MOVE_MENU_VISIBLE_FOLDERS: usize = 12;
+/// Height of everything in a Move menu but its rows: padding, border, separator, and the
+/// margins it keeps from the window.
+const MOVE_MENU_CHROME_HEIGHT: f32 = 35.0;
+
+/// How many folders a Move menu shows with `fixed` rows below them, in a window of
+/// `height`: [`MOVE_MENU_VISIBLE_FOLDERS`], or what fits, but never too few to use.
+fn move_menu_visible_folders(height: Pixels, fixed: usize) -> usize {
+    let row = f32::from(ui::MENU_ENTRY_HEIGHT);
+    let room = f32::from(height) - MOVE_MENU_CHROME_HEIGHT - row * fixed as f32;
+    ((room / row).floor().max(3.0) as usize).min(MOVE_MENU_VISIBLE_FOLDERS)
+}
+
+/// How long the folders of the row menu outlast the mouse leaving Move: on its way to
+/// them, the mouse can cross the entries below.
+const ROW_MENU_FOLDERS_LINGER: Duration = Duration::from_millis(250);
+
+/// The right-click menu of a mailbox in the sidebar.
+struct FolderMenu {
+    position: Point<Pixels>,
+    /// `None` for a unified mailbox, which belongs to no account.
+    account_id: Option<i64>,
+    path: String,
+    name: SharedString,
+}
+
+/// What the folder dialog is for.
+#[derive(Clone, Debug, PartialEq)]
+enum FolderDialogKind {
+    /// A new folder, inside the one at `parent_path` if given.
+    Create {
+        parent_path: Option<String>,
+    },
+    Rename {
+        path: String,
+    },
+}
+
+/// The dialog asking for the name of a folder.
+struct FolderDialog {
+    account_id: i64,
+    kind: FolderDialogKind,
+    /// The display name of the folder it is in: the dialog asks only for its own name.
+    parent: Option<String>,
+    input: Entity<TextInput>,
+    error: Option<Key>,
+}
+
+/// What is wrong with `name` for a folder inside `parent`, among `folders`, leaving out
+/// the one being renamed; `None` when it will do.
+fn folder_name_problem(
+    name: &str,
+    parent: Option<&str>,
+    folders: &[storage::Folder],
+    renaming: Option<&str>,
+    delimiters: &[String],
+) -> Option<Key> {
+    if name.is_empty() {
+        return Some(Key::FolderNameEmpty);
+    }
+    // On the server it would make a level of its own, and another folder than the one asked.
+    let splits = |delimiter: &String| !delimiter.is_empty() && name.contains(delimiter.as_str());
+    if name.contains(FOLDER_LEVEL_SEPARATOR) || delimiters.iter().any(splits) {
+        return Some(Key::FolderNameSlash);
+    }
+    let full = child_display_name(parent, name);
+    // On the next folder list it would pass for that system folder and take its place. With
+    // none of that kind it may well be how the account gets one, as with a Trash; the kinds
+    // that are never folders of their own would just never show.
+    let separator = FOLDER_LEVEL_SEPARATOR.to_string();
+    let taken = |path: &str| folders.iter().any(|folder| folder.path == path);
+    let reserved = match mail_core::role_from_name(&full, Some(separator.as_str())) {
+        None | Some(FolderRole::Custom) => false,
+        Some(FolderRole::Inbox | FolderRole::Flagged | FolderRole::Important) => true,
+        Some(FolderRole::Sent) => taken(storage::system::SENT),
+        Some(FolderRole::Drafts) => taken(storage::system::DRAFTS),
+        Some(FolderRole::Trash) => taken(storage::system::TRASH),
+        Some(FolderRole::Junk) => taken(storage::system::JUNK),
+        Some(FolderRole::Archive | FolderRole::All) => taken(storage::system::ARCHIVE),
+    };
+    if reserved {
+        return Some(Key::FolderNameReserved);
+    }
+    let full = full.to_lowercase();
+    folders
+        .iter()
+        .filter(|folder| Some(folder.path.as_str()) != renaming)
+        .any(|folder| folder.display_name.to_lowercase() == full)
+        .then_some(Key::FolderNameTaken)
+}
+
 /// The right-click menu of a list row. It holds the focus while open, so the list's
 /// keys can't act on another message behind it. The app's other shortcuts act on what
 /// the menu is about: see [`RootView::shortcut_context`].
@@ -782,8 +915,15 @@ struct RowMenu {
     /// otherwise on the row alone. See [`RootView::row_menu_context`].
     id: i64,
     focus: FocusHandle,
-    /// Move was chosen: the menu lists the folders instead of the actions.
+    /// The folders of Move are showing beside the menu.
     choosing_folder: bool,
+    /// Where the Move entry is, to put the folders beside it.
+    move_entry_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The mouse is on the Move entry, or on the folders.
+    over_move_entry: bool,
+    over_folders: bool,
+    /// Closes the folders after the mouse left them: see [`ROW_MENU_FOLDERS_LINGER`].
+    folders_close: Option<Task<()>>,
     /// The window has been in the foreground since the menu opened. A right-click can
     /// open it on a window that is still in the background.
     window_was_active: bool,
@@ -955,6 +1095,12 @@ pub struct RootView {
     filter_menu: Option<Point<Pixels>>,
     /// Where the Move button's menu is open.
     move_menu: Option<Point<Pixels>>,
+    folder_menu: Option<FolderMenu>,
+    folder_dialog: Option<FolderDialog>,
+    /// The scrolling folders of a Move menu, of the toolbar or of a row: one is open at a
+    /// time.
+    move_menu_scroll: ScrollHandle,
+    move_menu_scrollbar: Option<Entity<ScrollbarState>>,
     /// The open right-click menu of a list row.
     row_menu: Option<RowMenu>,
     /// The focus handle of the last row menu and what had the focus when it opened,
@@ -996,6 +1142,12 @@ pub struct RootView {
     reader_menu: Option<ReaderMenu>,
     /// Find bar of the reader, while open.
     find_bar: Option<FindBar>,
+    /// The message waiting to count as read, and what marks it after
+    /// [`MARK_READ_DELAY`]: opening another replaces it.
+    pending_read: Option<(i64, Task<()>)>,
+    /// What the user marked unread with the button: it comes back on screen without
+    /// counting as read, until it is opened again.
+    kept_unread: HashSet<i64>,
     /// Why the current message is shown as plain text, if it is.
     reader_notice: Option<ReaderNotice>,
     /// Large messages the user chose to show formatted anyway.
@@ -1055,6 +1207,11 @@ pub struct RootView {
     /// Token for the delayed search application. New keystrokes invalidate older
     /// timers so only the latest query reloads the list.
     search_debounce_seq: u64,
+    /// The folders the search is limited to, as of the last reload of the list: asking
+    /// on every frame would go through all the folders each time.
+    active_scope_folders: Vec<String>,
+    /// The search field's change of width, once it has grown for the first time.
+    search_growth: Option<SearchGrowth>,
     /// Sidebar selection restored when the search box is cleared.
     pre_search_mailbox: Option<Selection>,
     /// Command palette state (rendered as an in-window overlay — see
@@ -1327,7 +1484,8 @@ fn system_folder_rank(path: &str) -> Option<usize> {
 }
 
 /// Folders in sidebar order: system folders by [`system_folder_rank`], then
-/// user folders alphabetically (case-insensitive) by display name.
+/// user folders alphabetically (case-insensitive) by display name, each level on its
+/// own: a folder's subfolders come right after it, before a sibling like "Work 2".
 fn sidebar_ordered(mut folders: Vec<storage::Folder>) -> Vec<storage::Folder> {
     folders.sort_by_cached_key(|folder| {
         let rank = system_folder_rank(&folder.path);
@@ -1336,10 +1494,60 @@ fn sidebar_ordered(mut folders: Vec<storage::Folder>) -> Vec<storage::Folder> {
         } else {
             folder.display_name.to_lowercase()
         };
-        (rank.is_none(), rank, name)
+        let levels: Vec<String> = name
+            .split(FOLDER_LEVEL_SEPARATOR)
+            .map(str::to_string)
+            .collect();
+        (rank.is_none(), rank, levels)
     });
     folders
 }
+
+/// How much further in a subfolder goes than its parent in the sidebar, in pixels.
+const SUBFOLDER_INDENT: f32 = 12.0;
+
+/// How deep `name` sits under the folders in `names`, and what is left of it to show: a
+/// level with no folder of its own (a server's `[Gmail]`) stays in the name, since no row
+/// above says it.
+fn folder_tree_position<'a>(name: &'a str, names: &HashSet<&str>) -> (usize, &'a str) {
+    let mut depth = 0;
+    let mut label = name;
+    for (ix, _) in name.match_indices(FOLDER_LEVEL_SEPARATOR) {
+        if names.contains(&name[..ix]) {
+            depth += 1;
+            label = &name[ix + FOLDER_LEVEL_SEPARATOR.len_utf8()..];
+        }
+    }
+    (depth, label)
+}
+
+/// Where a search result goes: what has a star first, since it matters most, as the
+/// Starred folder lists it (what is in the Trash is out of it); then under the first of
+/// its folders in sidebar order, all accounts together. Mail in no folder goes last.
+fn search_result_key(starred: bool, folders_csv: &str) -> SearchResultKey {
+    if starred && !storage::message_has_folder(folders_csv, storage::system::TRASH) {
+        return (false, false, false, None, Vec::new());
+    }
+    let (no_folder, user, rank, levels) = storage::parse_folders_csv(folders_csv)
+        .into_iter()
+        .filter(|path| path != storage::system::FLAGGED)
+        .map(|path| {
+            let rank = system_folder_rank(&path);
+            // By levels, as in the sidebar: a subfolder right after its parent.
+            let levels = path
+                .to_lowercase()
+                .split(FOLDER_LEVEL_SEPARATOR)
+                .map(str::to_string)
+                .collect();
+            (false, rank.is_none(), rank, levels)
+        })
+        .min()
+        .unwrap_or((true, true, None, Vec::new()));
+    (true, no_folder, user, rank, levels)
+}
+
+/// See [`search_result_key`].
+type SearchResultKey = (bool, bool, bool, Option<usize>, Vec<String>);
 
 /// Row index after moving `step` rows from `current` in a list of `len`
 /// rows, clamped to the ends. Without a current row, moving down starts at
@@ -1513,6 +1721,10 @@ impl RootView {
             list_filter: ListFilter::All,
             filter_menu: None,
             move_menu: None,
+            folder_menu: None,
+            folder_dialog: None,
+            move_menu_scroll: ScrollHandle::new(),
+            move_menu_scrollbar: None,
             row_menu: None,
             row_menu_focus_return: None,
             multi_selection: Vec::new(),
@@ -1531,6 +1743,8 @@ impl RootView {
             _reader_subscription: None,
             reader_menu: None,
             find_bar: None,
+            pending_read: None,
+            kept_unread: HashSet::new(),
             reader_notice: None,
             crashed_messages: crash_guard
                 .take_unfinished()
@@ -1557,6 +1771,8 @@ impl RootView {
             content_blocked_count: 0,
             search_input: None,
             search_force_expanded: false,
+            active_scope_folders: Vec::new(),
+            search_growth: None,
             last_search_query: String::new(),
             search_debounce_seq: 0,
             pre_search_mailbox: None,
@@ -1568,10 +1784,10 @@ impl RootView {
     fn reload_message_list(&mut self) {
         let query = mail_list_query(&self.selected_mailbox, &self.last_search_query);
         if !self.last_search_query.trim().is_empty() {
-            self.list_messages = self
-                .db
-                .list_messages(&MailListQuery::Search(self.last_search_query.clone()))
-                .unwrap_or_default();
+            self.list_messages = self.search_results();
+            // Stable: each folder keeps its newest first.
+            self.list_messages
+                .sort_by_cached_key(|m| search_result_key(m.starred, &m.folders_csv));
         } else {
             self.list_messages = self.db.list_messages(&query).unwrap_or_default();
         }
@@ -1582,7 +1798,7 @@ impl RootView {
         }
         if self.list_filter != ListFilter::All {
             // A message being read stays until the selection moves, even if it
-            // no longer matches: opening an unread one marks it read.
+            // no longer matches: an unread one becomes read while it is open.
             let (filter, selected) = (self.list_filter, self.selected_message_id);
             let multi: HashSet<i64> = self.multi_selection.iter().copied().collect();
             self.list_messages.retain(|message| {
@@ -1756,6 +1972,8 @@ impl RootView {
     }
 
     fn clear_message_selection(&mut self) {
+        // What leaves the screen stops counting as being read.
+        self.pending_read = None;
         self.multi_selection.clear();
         self.multi_preview = None;
         self.selected_message_id = None;
@@ -1782,7 +2000,7 @@ impl RootView {
 
     fn on_message_selection_changed(&mut self, cx: &mut Context<Self>) {
         self.reload_selected_detail();
-        self.open_selected_message();
+        self.open_selected_message(cx);
         self.sync_app_menus(cx);
         cx.notify();
     }
@@ -1844,23 +2062,64 @@ impl RootView {
         }
     }
 
-    /// Side effects of opening the selected message: it becomes read (on the
-    /// server too) and a body that was not downloaded yet is fetched now.
-    fn open_selected_message(&mut self) {
-        let Some(detail) = self.selected_detail.as_ref() else {
+    /// Side effects of opening the selected message: a body that was not downloaded yet
+    /// is fetched now, and after [`MARK_READ_DELAY`] it becomes read (on the server too),
+    /// unless the user has moved on.
+    fn open_selected_message(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected_message_id {
+            self.kept_unread.remove(&id);
+        }
+        self.start_read_wait(cx);
+        self.request_selected_body();
+    }
+
+    /// Starts the wait for what is open to count as read, unless it is already waiting or
+    /// the user said to keep it unread.
+    fn start_read_wait(&mut self, cx: &mut Context<Self>) {
+        let Some(detail) = self
+            .selected_detail
+            .as_ref()
+            .filter(|detail| !self.kept_unread.contains(&detail.id))
+        else {
+            self.pending_read = None;
             return;
         };
-        let (id, account_id) = (detail.id, detail.account_id);
-        if detail.unread {
-            if let Ok(outcome) = mail_actions::set_read(&self.db, id, true) {
-                self.after_action(account_id, outcome);
-            }
-            if let Some(item) = self.list_messages.iter_mut().find(|m| m.id == id) {
-                item.unread = false;
-            }
-            self.reload_selected_detail();
+        let (id, unread) = (detail.id, detail.unread);
+        if !unread {
+            self.pending_read = None;
+            return;
         }
-        self.request_selected_body();
+        // Reopening what is already waiting doesn't start the wait over.
+        if self.pending_read.as_ref().map(|(id, _)| *id) != Some(id) {
+            let timer = cx.background_executor().timer(MARK_READ_DELAY);
+            let task = cx.spawn(async move |this, cx| {
+                timer.await;
+                let _ = this.update(cx, |this, cx| this.finish_pending_read(id, cx));
+            });
+            self.pending_read = Some((id, task));
+        }
+    }
+
+    /// The wait for message `id` is over: it becomes read if it is still the one open.
+    fn finish_pending_read(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.pending_read = None;
+        let Some(detail) = self
+            .selected_detail
+            .as_ref()
+            .filter(|detail| detail.id == id && detail.unread)
+        else {
+            return;
+        };
+        let account_id = detail.account_id;
+        if let Ok(outcome) = mail_actions::set_read(&self.db, id, true) {
+            self.after_action(account_id, outcome);
+        }
+        if let Some(item) = self.list_messages.iter_mut().find(|m| m.id == id) {
+            item.unread = false;
+        }
+        self.reload_selected_detail();
+        self.sync_app_menus(cx);
+        cx.notify();
     }
 
     /// Fetches the selected message's body, if it was not downloaded yet.
@@ -2162,6 +2421,8 @@ impl RootView {
 
     /// Toggles read/unread of the selected message (it stays selected).
     pub(crate) fn toggle_message_read(&mut self, cx: &mut Context<Self>) {
+        // The user has decided: the wait must not undo a choice of unread.
+        self.pending_read = None;
         if let Some(bulk) = self.bulk_selection() {
             let read = bulk.has_unread;
             self.apply_action_keeping_selection(
@@ -2174,6 +2435,12 @@ impl RootView {
             return;
         };
         let read = detail.unread;
+        let id = detail.id;
+        if read {
+            self.kept_unread.remove(&id);
+        } else {
+            self.kept_unread.insert(id);
+        }
         self.run_message_action(cx, move |db, id| mail_actions::set_read(db, id, read));
     }
 
@@ -2270,6 +2537,27 @@ impl RootView {
                     mail.set_status(account_id, status);
                 }
                 cx.notify();
+            }
+            SyncEvent::FolderRenamed {
+                account_id,
+                old_path,
+                new_path,
+            } => self.follow_folder_rename(account_id, &old_path, &new_path),
+            SyncEvent::FolderActionFailed { error, refusal, .. } => {
+                let language = cx.language();
+                let note = match refusal {
+                    Some(FolderRefusal::HoldsSystemFolder) => {
+                        Key::FolderHoldsSystem.tr(language).to_string()
+                    }
+                    Some(FolderRefusal::NoTrash) => {
+                        Key::FolderDeleteNoTrash.tr(language).to_string()
+                    }
+                    Some(FolderRefusal::MailKeepsArriving) => {
+                        Key::FolderMailKeepsArriving.tr(language).to_string()
+                    }
+                    None => format!("{}: {error}", Key::StatusActionFailed.tr(language)),
+                };
+                self.set_status_note(note, cx);
             }
             SyncEvent::MailboxChanged { .. } | SyncEvent::FoldersChanged { .. } => {
                 self.schedule_reload(cx);
@@ -2403,8 +2691,43 @@ impl RootView {
                 )
             })
             .collect();
+        self.leave_missing_mailboxes();
         self.reload_message_list();
         self.refresh_unsent();
+    }
+
+    /// What was open may be gone, or may be back under its old name after the server
+    /// refused a rename: an empty list would be left titled with a raw path.
+    fn leave_missing_mailboxes(&mut self) {
+        let folders = &self.folders_by_account;
+        let db = &self.db;
+        // With a folder change in the queue it may be on its way: the engine says so when
+        // it is done, and a renamed folder stays open.
+        let settled = |account_id: i64| {
+            db.pending_ops(account_id).is_ok_and(|ops| {
+                !ops.iter()
+                    .any(|op| op.kind == mail_sync::plan::FOLDER_OP_KIND)
+            })
+        };
+        let missing = |mailbox: &Selection| match mailbox {
+            Selection::Global(_) => false,
+            Selection::Mailbox {
+                account_id,
+                folder_path,
+            } => {
+                folders.get(account_id).is_some_and(|folders| {
+                    !folders.iter().any(|folder| folder.path == *folder_path)
+                }) && settled(*account_id)
+            }
+        };
+        let inbox = Selection::Global(GlobalMailbox::Inbox);
+        if self.pre_search_mailbox.as_ref().is_some_and(missing) {
+            self.pre_search_mailbox = Some(inbox.clone());
+        }
+        if missing(&self.selected_mailbox) {
+            self.clear_message_selection();
+            self.selected_mailbox = inbox;
+        }
     }
 
     /// Re-reads the outbox rows that stopped retrying (subjects already
@@ -2811,7 +3134,24 @@ impl RootView {
             bulk,
             list_in_trash: self.showing_trash(),
             list_in_sent: self.showing_sent(),
+            list_folder: self.list_folder(),
         }
+    }
+
+    /// The folder the list shows, in one account or in all of them. A search has none:
+    /// its results come from every folder.
+    fn list_folder(&self) -> Option<String> {
+        if self.searching() {
+            // Limited to one folder, it is that folder's rows that it lists.
+            return match &self.active_scope_folders[..] {
+                [path] => Some(path.clone()),
+                _ => None,
+            };
+        }
+        Some(match &self.selected_mailbox {
+            Selection::Mailbox { folder_path, .. } => folder_path.clone(),
+            Selection::Global(global) => db_seed::global_folder_path(*global).to_string(),
+        })
     }
 
     /// Refreshes the global menu bar (disabled states follow the current selection).
@@ -2940,8 +3280,8 @@ impl RootView {
     }
 
     pub(crate) fn toggle_command_palette(&mut self, window: &Window, cx: &mut Context<Self>) {
-        // The setup replaces the screen that shows the palette.
-        if self.onboarding_active() {
+        // The setup replaces the screen that shows the palette; the folder dialog is modal.
+        if self.onboarding_active() || self.folder_dialog.is_some() {
             return;
         }
         self.toggle_command_palette_internal(window, cx);
@@ -3005,6 +3345,10 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The dialog is all there is until it is answered, as with any other modal.
+        if self.folder_dialog.is_some() {
+            return;
+        }
         // A shortcut behind the row menu: the ones it shows run on what it is about.
         if let Some(menu) = self.row_menu.take() {
             cx.notify();
@@ -3036,6 +3380,10 @@ impl RootView {
             CommandId::MessageMarkJunk => self.mark_message_junk(cx),
             CommandId::MessageToggleFlag => self.toggle_message_flag(cx),
             CommandId::MessagePrint => self.print_message(cx),
+            CommandId::MessageFindFromSender => {
+                let ctx = self.command_context();
+                self.find_from_sender(&ctx, window, cx);
+            }
             CommandId::MoveToFolder(path) => self.move_message_to_folder(path.as_ref(), cx),
             CommandId::MessageToggleRead => self.toggle_message_read(cx),
             CommandId::SyncNow => self.sync_now(cx),
@@ -3451,7 +3799,7 @@ impl RootView {
 
     /// The palette is modal: Tab must not move focus to the fields behind it.
     fn palette_traps_tab(&self) -> bool {
-        self.command_palette.as_ref().is_some_and(|p| p.open)
+        self.command_palette.as_ref().is_some_and(|p| p.open) || self.folder_dialog.is_some()
     }
 
     pub(crate) fn handle_command_palette_key(
@@ -3631,6 +3979,7 @@ impl RootView {
             &mut self.sidebar_scrollbar,
             &mut self.reader_v_scrollbar,
             &mut self.reader_h_scrollbar,
+            &mut self.move_menu_scrollbar,
         ] {
             slot.get_or_insert_with(|| cx.new(|_| ScrollbarState::new()));
         }
@@ -3668,6 +4017,9 @@ impl RootView {
             let focus_handle = input.read(cx).focus_handle(cx);
             cx.on_blur(&focus_handle, window, |this, _, cx| this.on_search_blur(cx))
                 .detach();
+            // The field's width follows its focus.
+            cx.on_focus(&focus_handle, window, |_, _, cx| cx.notify())
+                .detach();
             self.search_input = Some(input);
         } else if let Some(input) = &self.search_input {
             input.update(cx, |field, _| {
@@ -3702,6 +4054,7 @@ impl RootView {
         self.sync_search_selection();
         if !now_active && was_active {
             self.restore_selection_after_search();
+            self.start_read_wait(cx);
         }
     }
 
@@ -3797,6 +4150,7 @@ impl RootView {
             self.reload_message_list();
             self.sync_search_selection();
             self.restore_selection_after_search();
+            self.start_read_wait(cx);
         }
 
         if collapse {
@@ -3864,7 +4218,50 @@ impl RootView {
     fn on_search_blur(&mut self, cx: &mut Context<Self>) {
         if self.should_collapse_search_after_blur(&self.search_query(cx)) {
             self.search_force_expanded = false;
-            cx.notify();
+        }
+        cx.notify();
+    }
+
+    /// Room for the search field to grow without reaching the action groups shown, which
+    /// stay decided by its resting width. They are centered, so only half of the spare
+    /// width is on the field's side.
+    fn search_growth_room(&self) -> f32 {
+        let actions = match self.visible_action_groups() {
+            3 => ACTIONS_3_WIDTH,
+            2 => ACTIONS_2_WIDTH,
+            1 => ACTIONS_1_WIDTH,
+            _ => 0.0,
+        };
+        let spare = f32::from(self.reader_segment_width())
+            - TOOLBAR_FIXED_OVERHEAD
+            - SEARCH_FIELD_WIDTH
+            - actions;
+        (spare / 2.0).clamp(0.0, SEARCH_FIELD_GROWTH)
+    }
+
+    /// Starts moving the search field to the width it should have now, from wherever it
+    /// is: wider with the focus or with text in it, where there is room.
+    fn sync_search_growth(&mut self, window: &Window, cx: &App) {
+        let wide =
+            self.search_input_focused(window, cx) || !self.search_query(cx).trim().is_empty();
+        let target = if wide {
+            SEARCH_FIELD_WIDTH + self.search_growth_room()
+        } else {
+            SEARCH_FIELD_WIDTH
+        };
+        let current = self.search_growth.map_or(SEARCH_FIELD_WIDTH, |g| g.to);
+        if target != current {
+            let now = Instant::now();
+            let from = self
+                .search_growth
+                .map_or(SEARCH_FIELD_WIDTH, |g| g.width_at(now));
+            let token = self.search_growth.map_or(0, |g| g.token + 1);
+            self.search_growth = Some(SearchGrowth {
+                from,
+                to: target,
+                started: now,
+                token,
+            });
         }
     }
 
@@ -4024,7 +4421,25 @@ impl RootView {
                     .min_w_0()
                     .child(Label::new(text).size(LabelSize::Small).color(Color::Muted)),
             )
+            .when(notice == ReaderNotice::Crashed, |el| {
+                el.child(
+                    Button::new("view-normally", Key::NoticeViewNormally.tr(language))
+                        .on_click(cx.listener(|this, _, _, cx| this.view_crashed_normally(cx))),
+                )
+            })
             .into_any_element()
+    }
+
+    /// Shows the message formatted again, after a crash that may have had nothing to do
+    /// with it. The crash guard arms again, so if it was the cause, the app comes back to
+    /// plain text after the next crash instead of crashing on every start.
+    fn view_crashed_normally(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.reader_detail().map(|detail| detail.id) else {
+            return;
+        };
+        self.crashed_messages.remove(&id);
+        self.last_reader_sig = None;
+        cx.notify();
     }
 
     /// Reacts to the reader: link under the pointer (status bar), link clicks
@@ -4062,7 +4477,7 @@ impl RootView {
 
     /// Opens (or focuses) the reader's find bar.
     pub(crate) fn open_find_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.reader_detail().is_none() {
+        if self.reader_detail().is_none() || self.folder_dialog.is_some() {
             return;
         }
         if self.find_bar.is_none() {
@@ -4604,8 +5019,15 @@ impl RootView {
         self.apply_mailbox_selection(selection);
         self.reload_message_list();
         self.restore_selection();
+        self.start_read_wait(cx);
         self.sync_app_menus(cx);
         cx.notify();
+    }
+
+    /// Whether the sidebar marks `selection` as what the list shows. Nothing is during a
+    /// search: its results come from every folder.
+    fn sidebar_shows_selected(&self, selection: &Selection) -> bool {
+        !self.searching() && self.selected_mailbox == *selection
     }
 
     /// Notes what the current mailbox has selected, before leaving it.
@@ -4799,29 +5221,80 @@ impl RootView {
         }
     }
 
+    /// The folders `slug` stands for, in any account and in any language of the app: mail
+    /// clients show them in the user's, but "inbox" stays easy to remember.
+    fn folders_of_slug(&self, slug: &str) -> Vec<String> {
+        let slugs = search_scope::typed_slugs(slug);
+        let matches = |name: &str| slugs.contains(&search_scope::folder_slug(name));
+        let mut paths = Vec::new();
+        for language in [Language::English, Language::Portuguese] {
+            for global in GlobalMailbox::ALL {
+                if matches(global.display_name(language)) {
+                    paths.push(db_seed::global_folder_path(global).to_string());
+                }
+            }
+            for folder in self.folders_by_account.values().flatten() {
+                let name =
+                    db_seed::folder_display_name(&folder.path, &folder.display_name, language);
+                if matches(&name) {
+                    paths.push(folder.path.clone());
+                }
+            }
+        }
+        paths.sort_unstable();
+        paths.dedup();
+        paths
+    }
+
+    /// The folders the search is limited to, and what to look for in them: `inbox: text`.
+    /// A word that names no folder is part of the text, as in `re: hello`.
+    fn search_scope(&self) -> Option<(Vec<String>, String)> {
+        let (slug, text) = search_scope::split_scope(&self.last_search_query)?;
+        let paths = self.folders_of_slug(slug);
+        (!paths.is_empty()).then(|| (paths, text.to_string()))
+    }
+
+    /// What the search finds. A scope without text yet lists the whole folder.
+    fn search_results(&mut self) -> Vec<MessageListItem> {
+        let scope = self.search_scope();
+        self.active_scope_folders = scope
+            .as_ref()
+            .map(|(paths, _)| paths.clone())
+            .unwrap_or_default();
+        let query = match scope {
+            Some((folders, text)) => MailListQuery::SearchInFolders { text, folders },
+            None => MailListQuery::Search(self.last_search_query.clone()),
+        };
+        self.db.list_messages(&query).unwrap_or_default()
+    }
+
+    /// What the list is called: the search, or else the mailbox it shows.
+    fn list_title(&self, language: Language) -> SharedString {
+        if self.searching() {
+            return Key::SearchActiveTitle.tr(language).into();
+        }
+        match &self.selected_mailbox {
+            Selection::Global(global) => global.display_name(language).into(),
+            Selection::Mailbox {
+                account_id,
+                folder_path,
+            } => self
+                .folders_by_account
+                .get(account_id)
+                .and_then(|folders| folders.iter().find(|f| f.path == *folder_path))
+                .map(|folder| {
+                    db_seed::folder_display_name(&folder.path, &folder.display_name, language)
+                })
+                .unwrap_or_else(|| folder_path.clone().into()),
+        }
+    }
+
     /// The message-list controls (mailbox title + count on the left, filter/more
     /// on the right). Rendered in the top toolbar while the sidebar is docked,
     /// and inside the list's own header otherwise.
     fn render_list_controls(&self, show_count: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let language = cx.language();
-        let list_title: SharedString = if self.search_is_active(cx) {
-            Key::SearchActiveTitle.tr(language).into()
-        } else {
-            match &self.selected_mailbox {
-                Selection::Global(global) => global.display_name(language).into(),
-                Selection::Mailbox {
-                    account_id,
-                    folder_path,
-                } => self
-                    .folders_by_account
-                    .get(account_id)
-                    .and_then(|folders| folders.iter().find(|f| f.path == *folder_path))
-                    .map(|folder| {
-                        db_seed::folder_display_name(&folder.path, &folder.display_name, language)
-                    })
-                    .unwrap_or_else(|| folder_path.clone().into()),
-            }
-        };
+        let list_title = self.list_title(language);
         let list_count = locale::message_count(language, self.list_messages.len());
 
         h_flex()
@@ -4857,6 +5330,7 @@ impl RootView {
                         Key::ToolbarFilter.tr(language),
                         None,
                         IconButton::new("filter", IconName::Filter)
+                            .opens_menu()
                             .selected(self.list_filter != ListFilter::All)
                             .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
                                 this.filter_menu = Some(event.position());
@@ -5191,6 +5665,7 @@ impl RootView {
                                                     shortcuts::DELETE_MESSAGE_OTHER,
                                                 )),
                                                 IconButton::new("trash", IconName::Trash)
+                                                    .color(Color::Danger)
                                                     .disabled(
                                                         !enabled(CommandId::MessageDelete)
                                                             && !enabled(
@@ -5260,6 +5735,7 @@ impl RootView {
                                                     shortcuts::TOGGLE_READ_OTHER,
                                                 )),
                                                 IconButton::new("toggle-read", IconName::Mail)
+                                                    .dot(!ctx.message_unread())
                                                     .disabled(!enabled(
                                                         CommandId::MessageToggleRead,
                                                     ))
@@ -5272,6 +5748,7 @@ impl RootView {
                                                 Key::ToolbarMove.tr(language),
                                                 None,
                                                 IconButton::new("move", IconName::Folder)
+                                                    .opens_menu()
                                                     .disabled(!enabled(CommandId::MoveToFolder(
                                                         SharedString::default(),
                                                     )))
@@ -5316,9 +5793,12 @@ impl RootView {
                 .into_any_element();
         }
 
-        h_flex()
+        let field = h_flex()
             .id("search")
-            .w(px(SEARCH_FIELD_WIDTH))
+            .debug_selector(|| "search-field".to_string())
+            .absolute()
+            .top_0()
+            .right_0()
             .h(px(28.0))
             .px_2()
             .gap_1p5()
@@ -5344,7 +5824,28 @@ impl RootView {
             )
             .when(self.show_search_clear_in_field(cx), |el| {
                 el.child(Self::render_search_clear_button(language, cx))
-            })
+            });
+        let field = match self.search_growth {
+            Some(growth) => field
+                .with_animation(
+                    ("search-grow", growth.token),
+                    Animation::new(SEARCH_GROW_DURATION).with_easing(ease_in_out),
+                    move |field, delta| {
+                        field.w(px(growth.from + (growth.to - growth.from) * delta))
+                    },
+                )
+                .into_any_element(),
+            None => field.w(px(SEARCH_FIELD_WIDTH)).into_any_element(),
+        };
+        // The toolbar only ever sees the field at rest: as it grows, to the left over the
+        // free space, the buttons stay where they are.
+        div()
+            .debug_selector(|| "search-slot".to_string())
+            .relative()
+            .flex_shrink_0()
+            .w(px(SEARCH_FIELD_WIDTH))
+            .h(px(28.0))
+            .child(field)
             .into_any_element()
     }
 
@@ -5478,7 +5979,7 @@ impl RootView {
 
         let mut section = v_flex().px_2().pb_2();
         for global in GlobalMailbox::ALL {
-            let selected = self.selected_mailbox == Selection::Global(global);
+            let selected = self.sidebar_shows_selected(&Selection::Global(global));
             let count = self.global_unread(global);
             let badge = (count > 0).then(|| self.render_count_badge(count, selected, cx));
 
@@ -5507,7 +6008,27 @@ impl RootView {
                 item = item.end_slot(badge);
             }
 
-            section = section.child(div().h(px(SIDEBAR_ROW_HEIGHT)).flex_shrink_0().child(item));
+            let name: SharedString = global.display_name(language).into();
+            let path = db_seed::global_folder_path(global).to_string();
+            section = section.child(
+                div()
+                    .debug_selector(|| format!("sidebar-global-{}", global as usize))
+                    .h(px(SIDEBAR_ROW_HEIGHT))
+                    .flex_shrink_0()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.open_folder_menu(
+                                event.position,
+                                None,
+                                path.clone(),
+                                name.clone(),
+                                cx,
+                            );
+                        }),
+                    )
+                    .child(item),
+            );
         }
 
         section.child(div().h(px(1.0)).mx_2().mt_1().bg(divider))
@@ -5570,13 +6091,18 @@ impl RootView {
             .get(&account.id)
             .cloned()
             .unwrap_or_default();
+        let names: HashSet<&str> = folders
+            .iter()
+            .map(|folder| folder.display_name.as_str())
+            .filter(|name| !name.is_empty())
+            .collect();
         for (mailbox_idx, folder) in folders.iter().enumerate() {
             let kind = db_seed::folder_kind_from_path(&folder.path);
-            let selected = self.selected_mailbox
-                == Selection::Mailbox {
-                    account_id: account.id,
-                    folder_path: folder.path.clone(),
-                };
+            let (depth, label) = folder_tree_position(&folder.display_name, &names);
+            let selected = self.sidebar_shows_selected(&Selection::Mailbox {
+                account_id: account.id,
+                folder_path: folder.path.clone(),
+            });
             let unread = if folder_shows_unread(&folder.path) {
                 self.db
                     .unread_in_folder(Some(account.id), &folder.path)
@@ -5609,13 +6135,9 @@ impl RootView {
                     },
                 ))
                 .child(
-                    Label::new(db_seed::folder_display_name(
-                        &folder.path,
-                        &folder.display_name,
-                        language,
-                    ))
-                    .size(LabelSize::Small)
-                    .single_line(),
+                    Label::new(db_seed::folder_display_name(&folder.path, label, language))
+                        .size(LabelSize::Small)
+                        .single_line(),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.select_mailbox(
@@ -5636,6 +6158,9 @@ impl RootView {
             // (highlight included) is indented so it reads as nested under its
             // account header.
             let drop_highlight = cx.theme().colors().element_selected;
+            let menu_path = folder.path.clone();
+            let menu_name =
+                db_seed::folder_display_name(&folder.path, &folder.display_name, language);
             let target_path = folder.path.clone();
             let drop_path = folder.path.clone();
             let accepts = move |dragged: &dyn std::any::Any, window: &mut Window, _: &mut App| {
@@ -5652,7 +6177,23 @@ impl RootView {
                     .group(FOLDER_ROW_GROUP)
                     .h(px(SIDEBAR_ROW_HEIGHT))
                     .flex_shrink_0()
-                    .pl(px(ITEM_INDENT))
+                    .pl(px(ITEM_INDENT + depth as f32 * SUBFOLDER_INDENT))
+                    .debug_selector({
+                        let path = folder.path.clone();
+                        move || format!("sidebar-folder-{path}")
+                    })
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.open_folder_menu(
+                                event.position,
+                                Some(account_id),
+                                menu_path.clone(),
+                                menu_name.clone(),
+                                cx,
+                            );
+                        }),
+                    )
                     .can_drop(accepts.clone())
                     .on_drop(cx.listener(move |this, dragged: &DraggedMessages, _, cx| {
                         this.move_messages_to_folder(&dragged.ids, &target_path, cx);
@@ -5986,8 +6527,10 @@ impl RootView {
                     let title: SharedString = message.sender.clone().into();
                     let subject: SharedString = message.subject.clone().into();
                     let language = cx.language();
+                    let list = self.list_scroll.clone();
                     move |dragged: &DraggedMessages, grab, window, cx| {
-                        dragged.progress.start(window.mouse_position());
+                        let area = list.0.borrow().base_handle.bounds();
+                        dragged.progress.start(window.mouse_position(), area);
                         let (title, subtitle) = if dragged.ids.len() > 1 {
                             (
                                 locale::messages_selected(language, dragged.ids.len()).into(),
@@ -6094,6 +6637,10 @@ impl RootView {
             id,
             focus,
             choosing_folder: false,
+            move_entry_bounds: Rc::default(),
+            over_move_entry: false,
+            over_folders: false,
+            folders_close: None,
             window_was_active: window.is_window_active(),
         });
         self.sync_app_menus(cx);
@@ -6122,7 +6669,7 @@ impl RootView {
 
     /// Closes the row menu once it has nothing left to do: the window lost the
     /// foreground, the focus went elsewhere (a menu of the menu bar opened the find
-    /// bar), its row left the list, or no folder is left to choose from.
+    /// bar) or its row left the list. With no folder left, only the folders close.
     fn sync_row_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let language = cx.language();
         let active = window.is_window_active();
@@ -6147,14 +6694,18 @@ impl RootView {
         let (focus, choosing_folder) = (menu.focus.clone(), menu.choosing_folder);
         let keep = !lost_foreground
             && focus.is_focused(window)
-            && self.list_messages.iter().any(|m| m.id == id)
-            && (!choosing_folder
-                || self
-                    .row_menu_context(id)
-                    .is_some_and(|ctx| !ctx.move_targets(language).is_empty()));
+            && self.list_messages.iter().any(|m| m.id == id);
         if !keep {
             self.row_menu = None;
             self.sync_row_menu(window, cx);
+        } else if choosing_folder
+            && self
+                .row_menu_context(id)
+                .is_none_or(|ctx| ctx.move_targets(language).is_empty())
+        {
+            if let Some(menu) = &mut self.row_menu {
+                menu.choosing_folder = false;
+            }
         }
     }
 
@@ -6211,6 +6762,7 @@ impl RootView {
             CommandId::MessageToggleRead => {
                 self.run_action_on_message(id, cx, |db, id| mail_actions::set_read(db, id, unread))
             }
+            CommandId::MessageFindFromSender => self.find_from_sender(&ctx, window, cx),
             // Not actions on a message, or handled above: listed so that a new
             // command has to be decided on here.
             CommandId::ComposeNew
@@ -6219,6 +6771,470 @@ impl RootView {
             | CommandId::SyncNow
             | CommandId::MoveToFolder(_) => {}
         }
+    }
+
+    /// The mouse entered or left the Move entry (`on_entry`) or the folders. Reaching
+    /// Move shows them; once it is on neither, they close after a moment.
+    fn hover_row_menu_folders(&mut self, on_entry: bool, hovered: bool, cx: &mut Context<Self>) {
+        let Some(menu) = &mut self.row_menu else {
+            return;
+        };
+        if on_entry {
+            menu.over_move_entry = hovered;
+            menu.choosing_folder |= hovered;
+        } else {
+            menu.over_folders = hovered;
+        }
+        menu.folders_close = (!menu.over_move_entry && !menu.over_folders).then(|| {
+            let timer = cx.background_executor().timer(ROW_MENU_FOLDERS_LINGER);
+            cx.spawn(async move |this, cx| {
+                timer.await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(menu) = &mut this.row_menu {
+                        menu.choosing_folder = false;
+                        cx.notify();
+                    }
+                });
+            })
+        });
+        cx.notify();
+    }
+
+    /// Lists the mail of the sender of what `ctx` is about, by putting the address in
+    /// the search field, with the caret after it, ready for the user to change it.
+    fn find_from_sender(
+        &mut self,
+        ctx: &CommandContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = &ctx.message_detail else {
+            return;
+        };
+        self.search_for(&detail.sender_email, window, cx);
+    }
+
+    /// Puts `text` in the search field and applies it right away, this not being typing,
+    /// with the caret after it, ready for the user to go on.
+    fn search_for(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(input) = &self.search_input {
+            input.update(cx, |field, cx| field.set_content(text, cx));
+        }
+        self.next_search_debounce_token();
+        self.sync_search_if_needed(cx);
+        self.focus_search_input(window, cx);
+    }
+
+    /// Opens the right-click menu of a mailbox in the sidebar.
+    fn open_folder_menu(
+        &mut self,
+        position: Point<Pixels>,
+        account_id: Option<i64>,
+        path: String,
+        name: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        self.folder_menu = Some(FolderMenu {
+            position,
+            account_id,
+            path,
+            name,
+        });
+        cx.notify();
+    }
+
+    /// The menu of a mailbox: searching it, a new folder beside it and, for the user's
+    /// own, renaming and deleting it. System folders stay as they are.
+    fn render_folder_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(menu) = &self.folder_menu else {
+            return div().into_any_element();
+        };
+        let language = cx.language();
+        let root = cx.weak_entity();
+        let mut items = ui::ContextMenu::new();
+        if let Some(prefix) = search_scope::scope_prefix(&menu.name) {
+            let root = root.clone();
+            items = items
+                .entry(Key::FolderMenuSearch.tr(language), move |_, window, cx| {
+                    let _ = root.update(cx, |this, cx| {
+                        this.folder_menu = None;
+                        // A floating sidebar would hide the results.
+                        if this.narrow {
+                            this.show_sidebar = false;
+                        }
+                        this.search_for(&prefix, window, cx);
+                    });
+                })
+                .icon(IconName::Search);
+        }
+        if let Some(account_id) = menu.account_id {
+            items = items.separator();
+            let on_new = root.clone();
+            items = items
+                .entry(Key::FolderMenuNew.tr(language), move |_, window, cx| {
+                    let _ = on_new.update(cx, |this, cx| {
+                        this.folder_menu = None;
+                        let kind = FolderDialogKind::Create { parent_path: None };
+                        this.open_folder_dialog(account_id, kind, None, "", window, cx);
+                    });
+                })
+                .icon(IconName::Folder);
+            if !storage::is_system_path(&menu.path) {
+                let (path, name) = (menu.path.clone(), menu.name.clone());
+                let on_new_sub = root.clone();
+                items = items
+                    .entry(Key::FolderMenuNewSub.tr(language), move |_, window, cx| {
+                        let kind = FolderDialogKind::Create {
+                            parent_path: Some(path.clone()),
+                        };
+                        let _ = on_new_sub.update(cx, |this, cx| {
+                            this.folder_menu = None;
+                            this.open_folder_dialog(
+                                account_id,
+                                kind,
+                                Some(name.to_string()),
+                                "",
+                                window,
+                                cx,
+                            );
+                        });
+                    })
+                    .icon(IconName::Folder);
+                let (path, name) = (menu.path.clone(), menu.name.clone());
+                let on_rename = root.clone();
+                items = items
+                    .entry(Key::FolderMenuRename.tr(language), move |_, window, cx| {
+                        let kind = FolderDialogKind::Rename { path: path.clone() };
+                        let _ = on_rename.update(cx, |this, cx| {
+                            this.folder_menu = None;
+                            let parent = name
+                                .rsplit_once(FOLDER_LEVEL_SEPARATOR)
+                                .map(|(parent, _)| parent.to_string());
+                            let leaf = mail_actions::folder_leaf(&name);
+                            this.open_folder_dialog(account_id, kind, parent, leaf, window, cx);
+                        });
+                    })
+                    .icon(IconName::Compose);
+                let (path, name) = (menu.path.clone(), menu.name.clone());
+                items = items
+                    .entry(Key::FolderMenuDelete.tr(language), move |_, window, cx| {
+                        let _ = root.update(cx, |this, cx| {
+                            this.folder_menu = None;
+                            this.confirm_delete_folder(account_id, path.clone(), &name, window, cx);
+                        });
+                    })
+                    .icon(IconName::Trash);
+            }
+        }
+        Self::render_dropdown(
+            "folder-menu",
+            menu.position,
+            items,
+            |this, _, _, _| this.folder_menu = None,
+            cx,
+        )
+        .into_any_element()
+    }
+
+    /// Opens the dialog for the name of a folder, with `name` in it, ready to be typed over.
+    fn open_folder_dialog(
+        &mut self,
+        account_id: i64,
+        kind: FolderDialogKind,
+        parent: Option<String>,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = Key::FolderNamePlaceholder.tr(cx.language());
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new(placeholder, cx);
+            input.set_content(name, cx);
+            input.select_all_content(cx);
+            input
+        });
+        set_native_text_focus(window);
+        window.focus(&input.read(cx).focus_handle(cx));
+        self.folder_dialog = Some(FolderDialog {
+            account_id,
+            kind,
+            parent,
+            input,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    /// Creates or renames the folder, unless the name won't do: then the dialog says why.
+    fn submit_folder_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.folder_dialog else {
+            return;
+        };
+        let content = dialog.input.read(cx).content();
+        let name = content.trim();
+        let account_id = dialog.account_id;
+        let empty = Vec::new();
+        let folders = self.folders_by_account.get(&account_id).unwrap_or(&empty);
+        let renaming = match &dialog.kind {
+            FolderDialogKind::Rename { path } => Some(path.clone()),
+            FolderDialogKind::Create { .. } => None,
+        };
+        let parent = dialog.parent.clone();
+        let kind = dialog.kind.clone();
+        let delimiters = self.db.account_delimiters(account_id).unwrap_or_default();
+        dialog.error = folder_name_problem(
+            name,
+            parent.as_deref(),
+            folders,
+            renaming.as_deref(),
+            &delimiters,
+        );
+        if dialog.error.is_none() {
+            // A subfolder of it could land on another folder.
+            let old = renaming.as_ref().and_then(|path| {
+                folders
+                    .iter()
+                    .find(|folder| folder.path == *path)
+                    .map(|folder| folder.display_name.as_str())
+            });
+            if let Some(old) = old {
+                let full = child_display_name(parent.as_deref(), name);
+                let names: Vec<&str> = folders.iter().map(|f| f.display_name.as_str()).collect();
+                if mail_actions::rename_collides(&names, old, &full) {
+                    dialog.error = Some(Key::FolderNameTaken);
+                }
+                let path = renaming.as_deref().unwrap_or_default();
+                if mail_actions::holds_system_folder(&self.db, account_id, path).unwrap_or(false) {
+                    dialog.error = Some(Key::FolderHoldsSystem);
+                }
+            }
+        }
+        cx.notify();
+        if dialog.error.is_some() {
+            return;
+        }
+        self.folder_dialog = None;
+        let result = match &kind {
+            FolderDialogKind::Rename { path } => {
+                mail_actions::rename_folder(&self.db, account_id, path, name)
+            }
+            FolderDialogKind::Create { parent_path } => {
+                mail_actions::create_folder(&self.db, account_id, parent_path.as_deref(), name)
+            }
+        };
+        match &result {
+            Ok(outcome) => self.after_action(account_id, *outcome),
+            Err(error) => {
+                let note = format!("{}: {error}", Key::StatusActionFailed.tr(cx.language()));
+                self.set_status_note(note, cx);
+                return;
+            }
+        }
+        // Local accounts have it done; on a server account the engine says when it is.
+        if let (Some(renamed), Ok(outcome)) = (&renaming, &result) {
+            if outcome.changed && !outcome.needs_sync {
+                let full = child_display_name(parent.as_deref(), name);
+                self.follow_folder_rename(account_id, renamed, &storage::user_folder_path(&full));
+            }
+        }
+        self.reload_folders_after_change(cx);
+    }
+
+    /// What was open keeps showing, under its new name: the folder or one under it.
+    fn follow_folder_rename(&mut self, account_id: i64, old_path: &str, new_path: &str) {
+        let separator = FOLDER_LEVEL_SEPARATOR.to_string();
+        for mailbox in [
+            Some(&mut self.selected_mailbox),
+            self.pre_search_mailbox.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Selection::Mailbox {
+                account_id: shown,
+                folder_path,
+            } = mailbox
+            {
+                if *shown == account_id {
+                    let moved = mail_sync::plan::name_after_rename(
+                        folder_path,
+                        old_path,
+                        new_path,
+                        &separator,
+                    );
+                    if let Some(moved) = moved {
+                        *folder_path = moved;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The folder list changed here: what shows follows now, not with the next reload.
+    fn reload_folders_after_change(&mut self, cx: &mut Context<Self>) {
+        self.reload_from_database();
+        cx.notify();
+    }
+
+    /// The dialog for the name of a folder, over the window.
+    fn render_folder_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(dialog) = &self.folder_dialog else {
+            return div().into_any_element();
+        };
+        let colors = cx.theme().colors();
+        let language = cx.language();
+        let (title, confirm) = match dialog.kind {
+            FolderDialogKind::Create { parent_path: None } => {
+                (Key::FolderNewTitle, Key::FolderCreate)
+            }
+            FolderDialogKind::Create { .. } => (Key::FolderNewSubTitle, Key::FolderCreate),
+            FolderDialogKind::Rename { .. } => (Key::FolderRenameTitle, Key::FolderRename),
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                match event.keystroke.key.as_str() {
+                    "enter" => this.submit_folder_dialog(cx),
+                    "escape" => {
+                        this.folder_dialog = None;
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            }))
+            .child(
+                v_flex()
+                    .debug_selector(|| "folder-dialog".to_string())
+                    .w(px(340.0))
+                    .p_4()
+                    .gap_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(colors.border)
+                    .bg(colors.elevated_surface_background)
+                    .shadow_lg()
+                    .child(Label::new(title.tr(language)).weight(FontWeight::SEMIBOLD))
+                    .child(
+                        h_flex()
+                            .h(px(28.0))
+                            .px_2()
+                            .rounded_md()
+                            .bg(colors.element_background)
+                            .child(dialog.input.clone()),
+                    )
+                    .when_some(dialog.error, |el, error| {
+                        el.child(
+                            Label::new(error.tr(language))
+                                .size(LabelSize::Small)
+                                .color(Color::Error),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("folder-cancel", Key::AccountCancel.tr(language))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.folder_dialog = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("folder-confirm", confirm.tr(language))
+                                    .style(ui::ButtonStyle::Filled)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.submit_folder_dialog(cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Asks before deleting a folder, saying what happens to its mail.
+    fn confirm_delete_folder(
+        &mut self,
+        account_id: i64,
+        path: String,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let language = cx.language();
+        if mail_actions::holds_system_folder(&self.db, account_id, &path).unwrap_or(false) {
+            self.set_status_note(Key::FolderHoldsSystem.tr(language), cx);
+            return;
+        }
+        let gmail = self
+            .db
+            .get_account(account_id)
+            .ok()
+            .flatten()
+            .is_some_and(|account| mail_actions::folders_are_labels(&account));
+        let detail = if gmail {
+            Key::FolderDeleteKeepsMail
+        } else {
+            Key::FolderDeleteToTrash
+        };
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &Key::FolderDeleteConfirm.tr(language).replace("{}", name),
+            Some(detail.tr(language)),
+            &[
+                Key::CommandDelete.tr(language),
+                Key::AccountCancel.tr(language),
+            ],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| this.delete_folder(account_id, &path, cx));
+        })
+        .detach();
+    }
+
+    /// Deletes a folder of the user's. If it is what the list shows, the Inbox takes over.
+    fn delete_folder(&mut self, account_id: i64, path: &str, cx: &mut Context<Self>) {
+        let language = cx.language();
+        match mail_actions::delete_folder(&self.db, account_id, path) {
+            Ok(outcome) if outcome.no_destination => {
+                self.set_status_note(Key::FolderDeleteNoTrash.tr(language), cx);
+                return;
+            }
+            Ok(outcome) => self.after_action(account_id, outcome),
+            Err(error) => {
+                self.set_status_note(
+                    format!("{}: {error}", Key::StatusActionFailed.tr(language)),
+                    cx,
+                );
+                return;
+            }
+        }
+        let shown = Selection::Mailbox {
+            account_id,
+            folder_path: path.to_string(),
+        };
+        if self.pre_search_mailbox.as_ref() == Some(&shown) {
+            self.pre_search_mailbox = Some(Selection::Global(GlobalMailbox::Inbox));
+        }
+        if self.selected_mailbox == shown {
+            let inbox = Selection::Global(GlobalMailbox::Inbox);
+            if self.searching() {
+                // The results on screen stay: only where the search goes back to changes.
+                self.selected_mailbox = inbox;
+            } else {
+                self.select_mailbox(inbox, cx);
+            }
+        }
+        self.reload_folders_after_change(cx);
     }
 
     /// After an action, the focus returns to the list instead of what had it: the action
@@ -6268,8 +7284,8 @@ impl RootView {
         self.list_messages.get(row as usize).map(|m| m.id)
     }
 
-    /// The menu of a list row: its actions, or the folders once Move was chosen.
-    fn render_row_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The menu of a list row, with the folders beside it once Move is reached.
+    fn render_row_menu(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some((menu, ctx)) = self
             .row_menu
             .as_ref()
@@ -6281,39 +7297,51 @@ impl RootView {
         let root = cx.weak_entity();
         let id = menu.id;
         let mut items = ui::ContextMenu::new();
-        if menu.choosing_folder {
-            for (label, path) in ctx.move_targets(language) {
-                let root = root.clone();
-                items = items.entry(label, move |event, _, cx| {
-                    // The folders take the place of the actions: the second click of
-                    // a double-click on Move must not choose one.
-                    if event.click_count() > 1 {
-                        return;
-                    }
-                    let _ = root.update(cx, |this, cx| this.move_from_row_menu(id, &path, cx));
+        for group in commands::row_menu_groups(language, &ctx) {
+            for entry in group {
+                let command = entry.id;
+                let is_move = matches!(command, CommandId::MoveToFolder(_));
+                let icon = commands::row_menu_icon(&command, &ctx);
+                let icon_dot = commands::row_menu_icon_dot(&command, &ctx);
+                let hint = commands::row_menu_shortcut(&command).map(|(mac, other)| {
+                    shortcuts::format_binding(shortcuts::primary_binding(mac, other))
                 });
-            }
-        } else {
-            for group in commands::row_menu_groups(language, &ctx) {
-                for entry in group {
-                    let root = root.clone();
-                    let command = entry.id;
-                    let hint = commands::row_menu_shortcut(&command).map(|(mac, other)| {
-                        shortcuts::format_binding(shortcuts::primary_binding(mac, other))
+                let on_click = root.clone();
+                let run = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = on_click.update(cx, |this, cx| {
+                        this.run_row_menu_command(id, &command, window, cx)
                     });
-                    let run = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-                        let _ = root.update(cx, |this, cx| {
-                            this.run_row_menu_command(id, &command, window, cx)
-                        });
-                    };
-                    items = match hint {
-                        Some(hint) => items.entry_with_key_hint(entry.label, hint, run),
-                        None => items.entry(entry.label, run),
-                    };
+                };
+                items = match hint {
+                    Some(hint) => items.entry_with_key_hint(entry.label, hint, run),
+                    None => items.entry(entry.label, run),
+                };
+                if let Some(icon) = icon {
+                    items = items.icon(icon).icon_dot(icon_dot);
                 }
-                items = items.separator();
+                if is_move {
+                    let root = root.clone();
+                    items = items.submenu(
+                        menu.choosing_folder,
+                        menu.move_entry_bounds.clone(),
+                        move |hovered, _, cx| {
+                            let _ = root.update(cx, |this, cx| {
+                                this.hover_row_menu_folders(true, hovered, cx)
+                            });
+                        },
+                    );
+                }
             }
+            items = items.separator();
         }
+        let folders = menu
+            .move_entry_bounds
+            .get()
+            .filter(|_| menu.choosing_folder)
+            .map(|entry| {
+                let (position, corner) = ui::submenu_anchor(entry, window.viewport_size());
+                self.render_row_menu_folders(id, &ctx, position, corner, window, cx)
+            });
         div()
             .absolute()
             .inset_0()
@@ -6329,12 +7357,6 @@ impl RootView {
                 menu.position,
                 items,
                 |this, event, window, cx| {
-                    // The second click of a double-click on Move, past a shorter folder
-                    // list: the user is still choosing.
-                    let choosing = this.row_menu.as_ref().is_some_and(|m| m.choosing_folder);
-                    if choosing && event.click_count > 1 {
-                        return;
-                    }
                     this.row_menu = None;
                     // As with a native menu, a right-click on another row moves it there.
                     if event.button == MouseButton::Right {
@@ -6345,7 +7367,87 @@ impl RootView {
                 },
                 cx,
             ))
+            .children(folders)
             .into_any_element()
+    }
+
+    /// The folders what the menu of row `id` applies to can move to, as its submenu.
+    fn render_row_menu_folders(
+        &self,
+        id: i64,
+        ctx: &CommandContext,
+        position: Point<Pixels>,
+        corner: Corner,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let root = cx.weak_entity();
+        let on_hover = root.clone();
+        let items = self
+            .move_menu_items(ctx, window, cx, move |path, cx| {
+                let _ = root.update(cx, |this, cx| this.move_from_row_menu(id, path, cx));
+            })
+            .on_hover(move |hovered, _, cx| {
+                let _ = on_hover.update(cx, |this, cx| {
+                    this.hover_row_menu_folders(false, hovered, cx)
+                });
+            });
+        deferred(
+            anchored()
+                .position(position)
+                .anchor(corner)
+                .snap_to_window_with_margin(px(8.0))
+                .child(
+                    div()
+                        .debug_selector(|| "row-menu-folders".to_string())
+                        .child(items),
+                ),
+        )
+    }
+
+    /// A Move menu: the folders of `ctx`, scrolling past a dozen, with Junk, Trash and
+    /// Archive in a block of their own below them, always in view.
+    fn move_menu_items(
+        &self,
+        ctx: &CommandContext,
+        window: &Window,
+        cx: &App,
+        choose: impl Fn(&str, &mut App) + 'static,
+    ) -> ui::ContextMenu {
+        let (folders, fixed) = commands::split_move_targets(ctx.move_targets(cx.language()));
+        let choose = Rc::new(choose);
+        let mut items = ui::ContextMenu::new();
+        if let Some(scrollbar) = self.move_menu_scrollbar.clone() {
+            items = items.scroll_first_section(
+                move_menu_visible_folders(window.viewport_size().height, fixed.len()),
+                self.move_menu_scroll.clone(),
+                scrollbar,
+            );
+        }
+        let add = |items: ui::ContextMenu, (label, path): (SharedString, SharedString)| {
+            let choose = choose.clone();
+            let icon = mailbox_icon(db_seed::folder_kind_from_path(&path));
+            items
+                .entry(label, move |_, _, cx| choose(&path, cx))
+                .icon(icon)
+        };
+        for target in folders {
+            items = add(items, target);
+        }
+        items = items.separator();
+        for target in fixed {
+            items = add(items, target);
+        }
+        items
+    }
+
+    /// A Move menu starts from the top each time it opens.
+    fn reset_move_menu_scroll(&self) {
+        let open =
+            self.move_menu.is_some() || self.row_menu.as_ref().is_some_and(|m| m.choosing_folder);
+        if !open && self.move_menu_scroll.offset() != Point::default() {
+            self.move_menu_scroll.set_offset(Point::default());
+        }
     }
 
     /// Reply and Delete, centered at the right of a row while the mouse is on it.
@@ -6394,7 +7496,7 @@ impl RootView {
                     .compact()
                     .size(IconSize::Small)
                     .color(Color::Muted)
-                    .hover_color(Color::Default)
+                    .hover_color(Color::Danger)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.delete_row_message(message_id, window, cx)
                     })),
@@ -6760,6 +7862,13 @@ impl RootView {
                                 .color(Color::Muted),
                         ),
                     )
+                    .child(
+                        div().flex_shrink_0().child(
+                            Icon::new(IconName::CaretDown)
+                                .size(IconSize::XXSmall)
+                                .color(Color::Muted),
+                        ),
+                    )
                     .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                         this.attachment_menu = Some(AttachmentMenu {
                             position: event.position(),
@@ -6827,6 +7936,23 @@ impl RootView {
         on_outside: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // Accounts can have more folders than fit on screen.
+        let menu = div()
+            .id(id)
+            .max_h(px(MENU_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .occlude()
+            .child(items);
+        Self::render_menu_backdrop(position, menu, on_outside, cx)
+    }
+
+    /// `menu` at `position`, over a backdrop that takes the clicks outside it.
+    fn render_menu_backdrop(
+        position: Point<Pixels>,
+        menu: impl IntoElement,
+        on_outside: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .absolute()
             .inset_0()
@@ -6840,15 +7966,7 @@ impl RootView {
                     .position(position)
                     .anchor(Corner::TopLeft)
                     .snap_to_window_with_margin(px(8.0))
-                    // Accounts can have more folders than fit on screen.
-                    .child(
-                        div()
-                            .id(id)
-                            .max_h(px(MENU_MAX_HEIGHT))
-                            .overflow_y_scroll()
-                            .occlude()
-                            .child(items),
-                    ),
+                    .child(menu),
             ))
     }
 
@@ -6886,26 +8004,17 @@ impl RootView {
     fn render_move_menu(
         &self,
         position: Point<Pixels>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let root = cx.weak_entity();
-        let mut items = ui::ContextMenu::new();
-        for (label, path) in self.command_context().move_targets(cx.language()) {
-            let root = root.clone();
-            items = items.entry(label, move |_, _, cx| {
-                let _ = root.update(cx, |this, cx| {
-                    this.move_menu = None;
-                    this.move_message_to_folder(&path, cx);
-                });
+        let items = self.move_menu_items(&self.command_context(), window, cx, move |path, cx| {
+            let _ = root.update(cx, |this, cx| {
+                this.move_menu = None;
+                this.move_message_to_folder(path, cx);
             });
-        }
-        Self::render_dropdown(
-            "move-menu",
-            position,
-            items,
-            |this, _, _, _| this.move_menu = None,
-            cx,
-        )
+        });
+        Self::render_menu_backdrop(position, items, |this, _, _, _| this.move_menu = None, cx)
     }
 
     /// Panel above the status bar listing unsent messages with Retry / Edit /
@@ -7388,18 +8497,21 @@ impl RootView {
                     None,
                     IconButton::new("bulk-delete-forever", IconName::Trash)
                         .size(IconSize::Small)
+                        .color(Color::Danger)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.confirm_delete_forever(this.selected_ids(), window, cx);
                         })),
                 ))
             })
             .when(!in_trash, |el| {
-                el.child(action(
+                el.child(Self::icon_button_with_tooltip(
                     "bulk-trash",
-                    IconName::Trash,
-                    Key::CommandDelete,
-                    Self::delete_message_to_trash,
-                    cx,
+                    Key::CommandDelete.tr(language),
+                    None,
+                    IconButton::new("bulk-trash", IconName::Trash)
+                        .size(IconSize::Small)
+                        .color(Color::Danger)
+                        .on_click(cx.listener(|this, _, _, cx| this.delete_message_to_trash(cx))),
                 ))
                 .when(movable, |el| {
                     el.child(action(
@@ -7428,16 +8540,19 @@ impl RootView {
                     Self::toggle_message_flag,
                     cx,
                 ))
-                .child(action(
+                .child(Self::icon_button_with_tooltip(
                     "bulk-read",
-                    IconName::Mail,
                     if has_unread {
                         Key::CommandMarkRead
                     } else {
                         Key::CommandMarkUnread
-                    },
-                    Self::toggle_message_read,
-                    cx,
+                    }
+                    .tr(language),
+                    None,
+                    IconButton::new("bulk-read", IconName::Mail)
+                        .size(IconSize::Small)
+                        .dot(!has_unread)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_message_read(cx))),
                 ))
                 .when(movable, |el| {
                     el.child(Self::icon_button_with_tooltip(
@@ -7445,6 +8560,7 @@ impl RootView {
                         Key::ToolbarMove.tr(language),
                         None,
                         IconButton::new("bulk-move", IconName::Folder)
+                            .opens_menu()
                             .size(IconSize::Small)
                             .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
                                 this.move_menu = Some(event.position());
@@ -7615,6 +8731,7 @@ impl Render for RootView {
         }
 
         self.sync_row_menu(window, cx);
+        self.reset_move_menu_scroll();
         // Make sure the scrollbar state entities exist before the panels render.
         self.ensure_scrollbar_states(cx);
         // Keyboard navigation lives on the message list: give it focus
@@ -7630,6 +8747,7 @@ impl Render for RootView {
             window.defer(cx, move |window, _| window.focus(&list_focus));
         }
         self.ensure_search_input(cx.language(), window, cx);
+        self.sync_search_growth(window, cx);
         if self.command_palette_focus_pending {
             self.command_palette_focus_pending = false;
             if let Some(input) = self
@@ -7789,10 +8907,16 @@ impl Render for RootView {
                 el.child(self.render_filter_menu(position, cx))
             })
             .when_some(self.move_menu, |el, position| {
-                el.child(self.render_move_menu(position, cx))
+                el.child(self.render_move_menu(position, window, cx))
+            })
+            .when(self.folder_menu.is_some(), |el| {
+                el.child(self.render_folder_menu(cx))
+            })
+            .when(self.folder_dialog.is_some(), |el| {
+                el.child(self.render_folder_dialog(cx))
             })
             .when(self.row_menu.is_some(), |el| {
-                el.child(self.render_row_menu(cx))
+                el.child(self.render_row_menu(window, cx))
             })
             .when(self.unsent_panel_open, |el| {
                 el.child(self.render_unsent_panel(cx))
@@ -7988,6 +9112,44 @@ mod tests {
     fn large_html_text_opens_clipped_as_plain_text() {
         let built = job(&format!("<p>{}", "x".repeat(5 << 20)), false).build();
         assert_eq!(built.notice, Some(ReaderNotice::Unrenderable));
+    }
+
+    #[gpui::test]
+    fn a_message_that_crashed_can_be_viewed_normally_and_stays_guarded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
+        let id = ids
+            .iter()
+            .copied()
+            .find(|id| {
+                view.update(cx, |view, cx| {
+                    view.set_selection(vec![*id], cx);
+                    view.selected_detail
+                        .as_ref()
+                        .is_some_and(|detail| detail.raw_format == "html")
+                })
+            })
+            .expect("a formatted message");
+        view.update(cx, |view, cx| {
+            view.crashed_messages.insert(id);
+            view.last_reader_sig = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.reader_notice, Some(ReaderNotice::Crashed));
+            assert_eq!(view.crash_guard.take_unfinished(), None);
+        });
+
+        view.update(cx, |view, cx| view.view_crashed_normally(cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.reader_notice, None);
+            assert!(!view.crashed_messages.contains(&id));
+            assert_eq!(view.crash_guard.take_unfinished(), Some(id));
+        });
     }
 
     #[test]
@@ -8298,6 +9460,77 @@ mod tests {
     }
 
     #[test]
+    fn the_search_field_only_grows_into_spare_room() {
+        let (_dir, mut view) = test_view();
+        view.narrow = false;
+        view.show_sidebar = true;
+        view.window_width = px(3000.0);
+        assert_eq!(view.search_growth_room(), SEARCH_FIELD_GROWTH);
+
+        // Just enough for the buttons and the field at rest: nothing spare.
+        view.window_width -= view.reader_segment_width()
+            - px(TOOLBAR_FIXED_OVERHEAD + SEARCH_FIELD_WIDTH + ACTIONS_3_WIDTH);
+        assert_eq!(view.visible_action_groups(), 3);
+        assert_eq!(view.search_growth_room(), 0.0);
+        // A little more: half of it, on the field's side of the centered buttons.
+        view.window_width += px(30.0);
+        assert_eq!(view.search_growth_room(), 15.0);
+    }
+
+    #[test]
+    fn the_search_field_changes_width_gradually() {
+        let started = Instant::now();
+        let growth = SearchGrowth {
+            from: 220.0,
+            to: 320.0,
+            started,
+            token: 0,
+        };
+        assert_eq!(growth.width_at(started), 220.0);
+        let halfway = growth.width_at(started + SEARCH_GROW_DURATION / 2);
+        assert!(halfway > 220.0 && halfway < 320.0, "{halfway}");
+        assert_eq!(growth.width_at(started + SEARCH_GROW_DURATION), 320.0);
+        assert_eq!(growth.width_at(started + SEARCH_GROW_DURATION * 2), 320.0);
+    }
+
+    #[gpui::test]
+    fn the_search_field_grows_with_the_focus_and_shrinks_back(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 0, cx);
+        let target = |view: &gpui::Entity<RootView>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| view.search_growth.map(|g| g.to))
+        };
+        assert_eq!(target(&view, cx), None, "at rest, nothing has moved");
+        view.update_in(cx, |view, window, cx| view.focus_search_input(window, cx));
+        cx.run_until_parked();
+        let room = view.read_with(cx, |view, _| view.search_growth_room());
+        assert!(room > 0.0, "the test window has room");
+        assert_eq!(target(&view, cx), Some(SEARCH_FIELD_WIDTH + room));
+        // The toolbar still lays it out at rest, so nothing beside it moves.
+        let slot = cx.debug_bounds("search-slot").expect("the slot");
+        assert_eq!(slot.size.width, px(SEARCH_FIELD_WIDTH));
+        let field = cx.debug_bounds("search-field").expect("the field");
+        assert_eq!(field.right(), slot.right());
+
+        view.update_in(cx, |view, window, cx| {
+            view.blur_search_if_focused(window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(target(&view, cx), Some(SEARCH_FIELD_WIDTH));
+
+        // Text keeps it wide without the focus, until it is gone.
+        view.update(cx, |view, cx| {
+            let input = view.search_input.clone().unwrap();
+            input.update(cx, |input, cx| input.set_content("someone", cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(target(&view, cx), Some(SEARCH_FIELD_WIDTH + room));
+        view.update(cx, |view, cx| view.clear_search(cx));
+        cx.run_until_parked();
+        assert_eq!(target(&view, cx), Some(SEARCH_FIELD_WIDTH));
+    }
+
+    #[test]
     fn action_groups_drop_as_reader_segment_shrinks() {
         let (_dir, mut view) = test_view();
         view.narrow = false;
@@ -8503,10 +9736,22 @@ mod tests {
     /// A row and the app's root listener, as they are wired in the real views.
     struct DragHost {
         dragged: DraggedMessages,
+        subtitle: SharedString,
+        list: Bounds<Pixels>,
+    }
+
+    /// An area of the list that a test's pointer doesn't leave.
+    fn whole_screen() -> Bounds<Pixels> {
+        Bounds::new(
+            point(px(-10000.0), px(-10000.0)),
+            size(px(20000.0), px(20000.0)),
+        )
     }
 
     impl Render for DragHost {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let subtitle = self.subtitle.clone();
+            let list = self.list;
             div()
                 .size_full()
                 .on_drag_move(|event: &DragMoveEvent<DraggedMessages>, window, cx| {
@@ -8515,15 +9760,16 @@ mod tests {
                 })
                 .child(div().id("row").w(px(300.0)).h(px(60.0)).on_drag(
                     self.dragged.clone(),
-                    |dragged, grab, window, cx| {
-                        dragged.progress.start(window.mouse_position());
+                    move |dragged, grab, window, cx| {
+                        dragged.progress.start(window.mouse_position(), list);
                         let progress = dragged.progress.clone();
+                        let subtitle = subtitle.clone();
                         cx.new(|_| DragPreview {
                             progress,
                             grab,
                             width: px(200.0),
                             title: "Ann".into(),
-                            subtitle: "Hello".into(),
+                            subtitle,
                             draws_hand: false,
                         })
                     },
@@ -8542,7 +9788,11 @@ mod tests {
             account_id: Some(1),
             progress: Rc::default(),
         };
-        let (_, cx) = cx.add_window_view(|_, _| DragHost { dragged });
+        let (_, cx) = cx.add_window_view(|_, _| DragHost {
+            dragged,
+            subtitle: "Hello".into(),
+            list: whole_screen(),
+        });
         cx.run_until_parked();
         let held = Some(MouseButton::Left);
         cx.simulate_mouse_down(
@@ -8584,11 +9834,48 @@ mod tests {
 
     /// Where the card's corner belongs for a pointer at `pointer`.
     fn pointer_inset(pointer: Point<Pixels>) -> Point<Pixels> {
-        point(pointer.x - px(12.0), pointer.y - px(12.0))
+        point(pointer.x - px(12.0), pointer.y - px(4.0))
+    }
+
+    #[gpui::test]
+    fn the_card_of_several_messages_centers_its_title_below_the_pointer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
+        let dragged = DraggedMessages {
+            row_id: 1,
+            ids: vec![1, 2],
+            account_id: Some(1),
+            progress: Rc::default(),
+        };
+        let (_, cx) = cx.add_window_view(|_, _| DragHost {
+            dragged,
+            subtitle: SharedString::default(),
+            list: whole_screen(),
+        });
+        cx.run_until_parked();
+        let start = point(px(50.0), px(20.0));
+        let pointer = point(px(300.0), px(200.0));
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(
+            start + point(px(5.0), px(5.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(pointer, MouseButton::Left, Default::default());
+        cx.run_until_parked();
+        let card = cx.debug_bounds("drag-card").expect("the card shows");
+        let title = cx.debug_bounds("drag-card-title").expect("the title");
+        assert_eq!(title.center().y, card.center().y);
+        assert!(
+            title.top() > pointer.y,
+            "{title:?} starts below the pointer"
+        );
+        cx.simulate_mouse_up(pointer, MouseButton::Left, Default::default());
     }
 
     #[test]
-    fn the_pointer_sits_12px_inside_the_top_left_corner_of_the_drag_card() {
+    fn the_pointer_sits_inside_the_top_left_corner_of_the_drag_card() {
         let grab = point(px(40.0), px(10.0));
         assert_eq!(drag_card_origin(grab), pointer_inset(grab));
     }
@@ -8597,9 +9884,9 @@ mod tests {
     fn a_drag_counts_only_past_the_threshold() {
         let origin = point(px(100.0), px(100.0));
         assert!(!drag_counts(origin, point(px(100.0), px(100.0))));
-        assert!(!drag_counts(origin, point(px(200.0), px(100.0))));
-        assert!(!drag_counts(origin, point(px(160.0), px(160.0))));
-        assert!(drag_counts(origin, point(px(201.0), px(100.0))));
+        assert!(!drag_counts(origin, point(px(150.0), px(100.0))));
+        assert!(!drag_counts(origin, point(px(130.0), px(130.0))));
+        assert!(drag_counts(origin, point(px(151.0), px(100.0))));
         assert!(drag_counts(origin, point(px(100.0), px(-1.0))));
     }
 
@@ -8609,7 +9896,7 @@ mod tests {
         let near = point(px(50.0), px(0.0));
         let started = || {
             let progress = DragProgress::default();
-            progress.start(point(px(0.0), px(0.0)));
+            progress.start(point(px(0.0), px(0.0)), whole_screen());
             DraggedMessages {
                 row_id: 1,
                 ids: vec![1],
@@ -8637,14 +9924,56 @@ mod tests {
     }
 
     #[test]
+    fn leaving_the_list_counts_however_short_the_drag_and_for_good() {
+        let list = Bounds::new(point(px(100.0), px(100.0)), size(px(300.0), px(400.0)));
+        let start = point(px(101.0), px(200.0));
+        let progress = DragProgress::default();
+        progress.start(start, list);
+        assert!(!progress.counts_at(point(px(110.0), px(200.0))));
+        // 2 px away, but past the list's left edge.
+        assert!(progress.counts_at(point(px(99.0), px(200.0))));
+        assert!(progress.counts_at(start));
+    }
+
+    #[gpui::test]
+    fn the_card_shows_as_soon_as_the_pointer_leaves_the_list(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
+        let dragged = DraggedMessages {
+            row_id: 1,
+            ids: vec![1],
+            account_id: Some(1),
+            progress: Rc::default(),
+        };
+        let (_, cx) = cx.add_window_view(|_, _| DragHost {
+            dragged,
+            subtitle: "Hello".into(),
+            list: Bounds::new(point(px(0.0), px(0.0)), size(px(300.0), px(60.0))),
+        });
+        cx.run_until_parked();
+        let held = Some(MouseButton::Left);
+        cx.simulate_mouse_down(
+            point(px(50.0), px(50.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(point(px(50.0), px(55.0)), held, Default::default());
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("drag-card"), None);
+        // Just 20 px from where it started.
+        cx.simulate_mouse_move(point(px(50.0), px(70.0)), held, Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("drag-card").is_some());
+    }
+
+    #[test]
     fn past_the_threshold_a_drag_counts_even_back_near_its_start() {
         let progress = DragProgress::default();
-        progress.start(point(px(0.0), px(0.0)));
+        progress.start(point(px(0.0), px(0.0)), whole_screen());
         assert!(!progress.counts_at(point(px(50.0), px(0.0))));
         assert!(progress.counts_at(point(px(150.0), px(0.0))));
         assert!(progress.counts_at(point(px(10.0), px(0.0))));
         // A new drag starts over.
-        progress.start(point(px(0.0), px(0.0)));
+        progress.start(point(px(0.0), px(0.0)), whole_screen());
         assert!(!progress.counts_at(point(px(10.0), px(0.0))));
     }
 
@@ -8653,7 +9982,9 @@ mod tests {
         let (_dir, view) = test_view();
         let ids = view.list_ids();
         let dragged = view.dragged_messages_of(ids[0]).unwrap();
-        dragged.progress.start(point(px(10.0), px(10.0)));
+        dragged
+            .progress
+            .start(point(px(10.0), px(10.0)), whole_screen());
         let near = point(px(14.0), px(10.0));
         assert!(dragged.is_click_on(ids[0], near));
         assert!(!dragged.is_click_on(ids[1], near));
@@ -9338,7 +10669,10 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        view.read_with(cx, |view, _| assert!(view.row_menu.is_none()));
+        // Nowhere to go: the folders close, and the rest of the menu still works.
+        view.read_with(cx, |view, _| {
+            assert!(!view.row_menu.as_ref().unwrap().choosing_folder)
+        });
     }
 
     #[gpui::test]
@@ -9383,8 +10717,8 @@ mod tests {
         };
         let before = view.read_with(cx, |view, _| [starred(view, ids[0]), starred(view, ids[1])]);
         right_click_first_row(&view, cx);
-        // Reply, Reply all, Forward, separator, Delete, Archive, Junk, separator, Star.
-        let star = cx.debug_bounds("context-menu-entry-8").expect("Star entry");
+        // Reply all, Reply, Forward, separator, Archive, Delete, Read, Star.
+        let star = cx.debug_bounds("context-menu-entry-7").expect("Star entry");
         cx.simulate_click(star.center(), Default::default());
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
@@ -9825,75 +11159,338 @@ mod tests {
         });
     }
 
+    /// Reply all, Reply, Forward, separator, Archive, Delete, Read, Star, separator, Move.
+    const MOVE_ENTRY: &str = "context-menu-entry-9";
+
     #[gpui::test]
-    fn a_double_click_on_move_chooses_no_folder(cx: &mut gpui::TestAppContext) {
+    fn hovering_move_opens_the_folders_and_a_click_moves_the_row(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().expect("tempdir");
         let (view, ids, cx) = row_menu_window(&dir, 1, cx);
         right_click_first_row(&view, cx);
-        view.update_in(cx, |view, window, cx| {
-            let move_to = CommandId::MoveToFolder(SharedString::default());
-            view.run_row_menu_command(ids[0], &move_to, window, cx);
-        });
+        assert!(cx.debug_bounds("row-menu-folders").is_none());
+
+        let entry = cx.debug_bounds(MOVE_ENTRY).expect("Move entry");
+        cx.simulate_mouse_move(entry.center(), None, Default::default());
         cx.run_until_parked();
-        let folder = cx
-            .debug_bounds("context-menu-entry-0")
-            .expect("a folder entry")
-            .center();
-        let click = |count: usize, cx: &mut gpui::VisualTestContext| {
-            cx.simulate_event(MouseDownEvent {
-                position: folder,
-                button: MouseButton::Left,
-                modifiers: Default::default(),
-                click_count: count,
-                first_mouse: false,
-            });
-            cx.simulate_event(gpui::MouseUpEvent {
-                position: folder,
-                button: MouseButton::Left,
-                modifiers: Default::default(),
-                click_count: count,
-            });
-            cx.run_until_parked();
-        };
-        click(2, cx);
+        let folders = cx.debug_bounds("row-menu-folders").expect("the folders");
+        assert!(folders.left() >= entry.right());
         view.read_with(cx, |view, _| {
-            assert!(view.row_menu.is_some());
-            assert!(view.list_ids().contains(&ids[0]));
+            assert_eq!(view.selected_message_id, Some(ids[1]))
         });
-        // A click of its own does choose it.
-        click(1, cx);
+
+        // First entry of the folders.
+        let folder = folders.origin + point(px(30.0), px(14.0));
+        cx.simulate_mouse_move(folder, None, Default::default());
+        cx.simulate_click(folder, Default::default());
+        cx.run_until_parked();
         view.read_with(cx, |view, _| {
             assert!(view.row_menu.is_none());
             assert!(!view.list_ids().contains(&ids[0]));
+            assert_eq!(view.selected_message_id, Some(ids[1]));
+        });
+    }
+
+    /// The first row, unread and open but for the wait, with another row selected before.
+    fn open_unread_row(
+        view: &gpui::Entity<RootView>,
+        ids: &[i64],
+        cx: &mut gpui::VisualTestContext,
+    ) -> i64 {
+        view.update(cx, |view, cx| {
+            view.db.set_message_unread(ids[0], true).unwrap();
+            view.db.set_message_unread(ids[1], true).unwrap();
+            view.reload_message_list();
+            view.clear_message_selection();
+            view.pending_read = None;
+            view.set_selection(vec![ids[0]], cx);
+        });
+        ids[0]
+    }
+
+    fn is_unread(view: &gpui::Entity<RootView>, id: i64, cx: &mut gpui::VisualTestContext) -> bool {
+        view.read_with(cx, |view, _| {
+            view.db.get_message(id).unwrap().unwrap().unread
+        })
+    }
+
+    #[gpui::test]
+    fn a_message_becomes_read_only_after_staying_open(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        let id = open_unread_row(&view, &ids, cx);
+        cx.executor()
+            .advance_clock(MARK_READ_DELAY - Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(is_unread(&view, id, cx));
+        view.read_with(cx, |view, _| {
+            assert!(view.list_messages.iter().any(|m| m.id == id && m.unread))
+        });
+
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(!is_unread(&view, id, cx));
+        view.read_with(cx, |view, _| {
+            assert!(view.list_messages.iter().any(|m| m.id == id && !m.unread));
+            assert!(!view.selected_detail.as_ref().unwrap().unread);
         });
     }
 
     #[gpui::test]
-    fn a_double_click_on_move_past_a_short_folder_list_keeps_it_open(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn a_quick_look_leaves_a_message_unread(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().expect("tempdir");
         let (view, ids, cx) = row_menu_window(&dir, 1, cx);
-        right_click_first_row(&view, cx);
+        let id = open_unread_row(&view, &ids, cx);
+        cx.executor().advance_clock(Duration::from_millis(1000));
+        view.update(cx, |view, cx| view.set_selection(vec![ids[1]], cx));
+        cx.executor()
+            .advance_clock(MARK_READ_DELAY - Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(
+            is_unread(&view, id, cx),
+            "it was left before the wait ended"
+        );
+        assert!(is_unread(&view, ids[1], cx), "this one's wait is not over");
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(is_unread(&view, id, cx));
+        assert!(!is_unread(&view, ids[1], cx));
+
+        // Nothing open: a message left that way stays unread too.
+        let id = open_unread_row(&view, &ids, cx);
+        view.update(cx, |view, _| view.clear_message_selection());
+        cx.executor().advance_clock(MARK_READ_DELAY);
+        cx.run_until_parked();
+        assert!(is_unread(&view, id, cx));
+    }
+
+    #[gpui::test]
+    fn coming_back_to_a_message_starts_its_wait_over(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        let id = open_unread_row(&view, &ids, cx);
+        view.update(cx, |view, cx| {
+            view.db.set_message_unread(ids[1], false).unwrap();
+            view.set_selection(vec![ids[1]], cx);
+        });
+        cx.executor()
+            .advance_clock(MARK_READ_DELAY - Duration::from_millis(100));
+        view.update(cx, |view, cx| view.set_selection(vec![id], cx));
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(is_unread(&view, id, cx), "open for just 100 ms");
+        cx.executor().advance_clock(MARK_READ_DELAY);
+        cx.run_until_parked();
+        assert!(!is_unread(&view, id, cx));
+    }
+
+    #[gpui::test]
+    fn a_message_brought_back_on_screen_waits_like_one_just_opened(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        let id = open_unread_row(&view, &ids, cx);
+        view.update(cx, |view, cx| {
+            // Off to another mailbox and back, before the wait is over.
+            view.select_mailbox(Selection::Global(GlobalMailbox::Sent), cx);
+            view.select_mailbox(Selection::Global(GlobalMailbox::Inbox), cx);
+            assert_eq!(view.selected_message_id, Some(id));
+        });
+        cx.executor().advance_clock(MARK_READ_DELAY);
+        cx.run_until_parked();
+        assert!(!is_unread(&view, id, cx));
+    }
+
+    #[gpui::test]
+    fn deleting_the_folder_a_search_started_from_keeps_the_results(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 0, cx);
+        view.update(cx, |view, cx| {
+            let (account, path, _) = view_with_custom_folder(view);
+            let shown = Selection::Mailbox {
+                account_id: account,
+                folder_path: path.clone(),
+            };
+            view.selected_mailbox = shown.clone();
+            view.pre_search_mailbox = Some(shown);
+            view.last_search_query = "x".to_string();
+            view.delete_folder(account, &path, cx);
+            assert_eq!(view.last_search_query, "x");
+            let inbox = Selection::Global(GlobalMailbox::Inbox);
+            assert_eq!(view.selected_mailbox, inbox);
+            assert_eq!(view.pre_search_mailbox, Some(inbox));
+        });
+    }
+
+    #[gpui::test]
+    fn what_the_user_marked_unread_stays_so_when_it_comes_back(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        let id = open_unread_row(&view, &ids, cx);
+        view.update(cx, |view, cx| {
+            view.toggle_message_read(cx);
+            view.toggle_message_read(cx);
+            view.select_mailbox(Selection::Global(GlobalMailbox::Sent), cx);
+            view.select_mailbox(Selection::Global(GlobalMailbox::Inbox), cx);
+            assert_eq!(view.selected_message_id, Some(id));
+        });
+        cx.executor().advance_clock(MARK_READ_DELAY);
+        cx.run_until_parked();
+        assert!(is_unread(&view, id, cx));
+
+        // Opened again, it is read like any other.
+        view.update(cx, |view, cx| {
+            view.set_selection(vec![ids[1]], cx);
+            view.set_selection(vec![id], cx);
+        });
+        cx.executor().advance_clock(MARK_READ_DELAY);
+        cx.run_until_parked();
+        assert!(!is_unread(&view, id, cx));
+    }
+
+    #[test]
+    fn a_mailbox_stays_open_while_a_folder_change_is_on_its_way() {
+        let (_dir, mut view) = test_view();
+        let account = view.accounts[0].id;
+        let shown = Selection::Mailbox {
+            account_id: account,
+            folder_path: "user:Gone".to_string(),
+        };
+        view.selected_mailbox = shown.clone();
+        let op = view
+            .db
+            .enqueue_op(account, mail_sync::plan::FOLDER_OP_KIND, None, "{}")
+            .unwrap();
+        view.reload_from_database();
+        assert_eq!(view.selected_mailbox, shown);
+        view.db.complete_op(op).unwrap();
+        view.reload_from_database();
+        assert_eq!(
+            view.selected_mailbox,
+            Selection::Global(GlobalMailbox::Inbox)
+        );
+    }
+
+    #[gpui::test]
+    fn a_dialog_stops_the_shortcuts_behind_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 0, cx);
         view.update_in(cx, |view, window, cx| {
-            let move_to = CommandId::MoveToFolder(SharedString::default());
-            view.run_row_menu_command(ids[0], &move_to, window, cx);
+            let account = view.accounts[0].id;
+            let kind = FolderDialogKind::Create { parent_path: None };
+            view.open_folder_dialog(account, kind, None, "", window, cx);
+            view.execute_command(&CommandId::MessageArchive, window, cx);
+            view.open_find_bar(window, cx);
+            assert!(view.list_ids().contains(&ids[0]));
+            assert!(view.find_bar.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn choosing_unread_during_the_wait_sticks(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        let id = open_unread_row(&view, &ids, cx);
+        view.update(cx, |view, cx| {
+            // Read, then unread again.
+            view.toggle_message_read(cx);
+            view.toggle_message_read(cx);
+        });
+        cx.executor().advance_clock(MARK_READ_DELAY);
+        cx.run_until_parked();
+        assert!(is_unread(&view, id, cx));
+    }
+
+    #[test]
+    fn a_move_menu_shows_a_dozen_folders_or_what_fits() {
+        assert_eq!(move_menu_visible_folders(px(1000.0), 3), 12);
+        assert_eq!(move_menu_visible_folders(px(300.0), 3), 6);
+        assert_eq!(move_menu_visible_folders(px(100.0), 3), 3);
+    }
+
+    #[gpui::test]
+    fn a_move_menu_opens_at_its_top(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 1, cx);
+        let down = point(px(0.0), px(-40.0));
+        view.update(cx, |view, _| {
+            view.move_menu = Some(point(px(10.0), px(10.0)));
+            view.move_menu_scroll.set_offset(down);
+            view.reset_move_menu_scroll();
+            assert_eq!(view.move_menu_scroll.offset(), down, "still open");
+            view.move_menu = None;
+            view.reset_move_menu_scroll();
+            assert_eq!(view.move_menu_scroll.offset(), Point::default());
+        });
+    }
+
+    #[gpui::test]
+    fn the_folders_close_after_the_mouse_leaves_them(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 1, cx);
+        right_click_first_row(&view, cx);
+        let entry = cx.debug_bounds(MOVE_ENTRY).expect("Move entry");
+        let linger = ROW_MENU_FOLDERS_LINGER + Duration::from_millis(1);
+        cx.simulate_mouse_move(entry.center(), None, Default::default());
+        cx.run_until_parked();
+        let folders = cx.debug_bounds("row-menu-folders").expect("the folders");
+        let open = |view: &gpui::Entity<RootView>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                view.row_menu.as_ref().unwrap().choosing_folder
+            })
+        };
+
+        // Crossing another entry on the way to the folders doesn't close them.
+        let star = cx.debug_bounds("context-menu-entry-7").expect("Star entry");
+        cx.simulate_mouse_move(star.center(), None, Default::default());
+        cx.run_until_parked();
+        assert!(open(&view, cx));
+        cx.simulate_mouse_move(folders.center(), None, Default::default());
+        cx.executor().advance_clock(linger);
+        cx.run_until_parked();
+        assert!(open(&view, cx), "the mouse reached them");
+
+        // Back on the menu, past the wait, they go, and the menu stays.
+        cx.simulate_mouse_move(star.center(), None, Default::default());
+        cx.executor().advance_clock(linger);
+        cx.run_until_parked();
+        assert!(!open(&view, cx));
+    }
+
+    #[gpui::test]
+    fn find_from_sender_searches_for_the_address_of_the_row(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        view.update_in(cx, |view, window, cx| {
+            let email = |view: &RootView, id: i64| {
+                let row = view.list_messages.iter().find(|m| m.id == id).unwrap();
+                row.sender_email.clone()
+            };
+            let (wanted, other) = (
+                email(view, ids[0]),
+                ids.iter()
+                    .copied()
+                    .find(|id| email(view, *id) != email(view, ids[0])),
+            );
+            view.open_row_menu(ids[0], point(px(10.0), px(10.0)), window, cx);
+            view.run_row_menu_command(ids[0], &CommandId::MessageFindFromSender, window, cx);
+            assert!(view.row_menu.is_none());
+            assert_eq!(view.search_query(cx), wanted);
+            assert_eq!(view.last_search_query, wanted);
+            assert!(view.list_ids().contains(&ids[0]));
+            assert!(!view.list_ids().contains(&other.expect("another sender")));
         });
         cx.run_until_parked();
-        let outside = point(px(900.0), px(500.0));
-        cx.simulate_event(MouseDownEvent {
-            position: outside,
-            button: MouseButton::Left,
-            modifiers: Default::default(),
-            click_count: 2,
-            first_mouse: false,
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.search_input_focused(window, cx));
+            let input = view.search_input.as_ref().unwrap().read(cx);
+            assert_eq!(
+                input.selected_range(),
+                input.content().len()..input.content().len()
+            );
+
+            // Clearing it goes back to what was listed and selected.
+            view.clear_search(cx);
+            assert_eq!(view.selected_message_id, Some(ids[1]));
         });
-        cx.run_until_parked();
-        view.read_with(cx, |view, _| assert!(view.row_menu.is_some()));
-        // A click of its own does close it.
-        cx.simulate_click(outside, Default::default());
-        cx.run_until_parked();
-        view.read_with(cx, |view, _| assert!(view.row_menu.is_none()));
     }
 
     #[gpui::test]
@@ -10168,8 +11765,13 @@ mod tests {
             assert_eq!(view.selection_focus, Some(ids[1]));
             let detail = view.selected_detail.as_ref().expect("it is open");
             assert_eq!(detail.id, ids[1]);
-            assert!(!detail.unread);
+            assert!(detail.unread, "it has only just opened");
             assert_eq!(view.db.message_is_in_trash(ids[0]), Ok(true));
+        });
+        cx.executor().advance_clock(MARK_READ_DELAY);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(!view.selected_detail.as_ref().unwrap().unread);
         });
     }
 
@@ -10691,6 +12293,429 @@ mod tests {
         assert!(csv.contains(storage::system::TRASH));
     }
 
+    #[gpui::test]
+    fn the_list_is_called_search_for_as_long_as_there_is_one(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, ids, cx) = row_menu_window(&dir, 1, cx);
+        let title = |view: &gpui::Entity<RootView>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| view.list_title(Language::Portuguese))
+        };
+        let inbox = title(&view, cx);
+        assert_ne!(inbox.as_ref(), "Pesquisa");
+
+        // Typing in the field, once the wait for more typing is over.
+        view.update_in(cx, |view, window, cx| view.focus_search_input(window, cx));
+        cx.run_until_parked();
+        cx.simulate_input("a");
+        cx.executor()
+            .advance_clock(Duration::from_millis(SEARCH_DEBOUNCE_MS));
+        cx.run_until_parked();
+        assert_eq!(title(&view, cx).as_ref(), "Pesquisa");
+        // Losing the focus doesn't end it.
+        view.update_in(cx, |view, window, cx| {
+            view.blur_search_if_focused(window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(title(&view, cx).as_ref(), "Pesquisa");
+        view.update(cx, |view, cx| view.clear_search(cx));
+        assert_eq!(title(&view, cx), inbox);
+
+        // Through the menu of a row.
+        view.update_in(cx, |view, window, cx| {
+            view.open_row_menu(ids[0], point(px(10.0), px(10.0)), window, cx);
+            view.run_row_menu_command(ids[0], &CommandId::MessageFindFromSender, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(title(&view, cx).as_ref(), "Pesquisa");
+    }
+
+    /// A view with mail in a folder of the user's, and one message of it known.
+    fn view_with_custom_folder(view: &mut RootView) -> (i64, String, i64) {
+        let row = view.list_messages[0].clone();
+        let account = row.account_id;
+        let path = storage::user_folder_path("Minha Pasta!");
+        view.db
+            .upsert_remote_folder(account, &path, "Minha Pasta!", "Minha Pasta!", None)
+            .unwrap();
+        view.db
+            .conn()
+            .execute(
+                "UPDATE messages SET folders_csv = ?1 WHERE id = ?2",
+                rusqlite::params![format!(",{path},"), row.id],
+            )
+            .unwrap();
+        view.folders_by_account
+            .insert(account, view.db.list_folders(account).unwrap());
+        (account, path, row.id)
+    }
+
+    fn search(view: &mut RootView, query: &str) -> Vec<i64> {
+        view.last_search_query = query.to_string();
+        view.reload_message_list();
+        view.list_ids()
+    }
+
+    #[test]
+    fn a_search_can_be_limited_to_a_folder_by_its_slug() {
+        let (_dir, mut view) = test_view();
+        let (_, path, id) = view_with_custom_folder(&mut view);
+        let word = view.db.get_message(id).unwrap().unwrap().sender_email;
+
+        assert_eq!(
+            view.folders_of_slug("minha-pasta"),
+            std::slice::from_ref(&path)
+        );
+        // The whole folder, until there is text.
+        assert_eq!(search(&mut view, "minha-pasta: "), [id]);
+        assert_eq!(view.list_folder(), Some(path));
+        // Its text is found in it, and in the Inbox it no longer is.
+        assert_eq!(search(&mut view, &format!("minha-pasta: {word}")), [id]);
+        assert!(!search(&mut view, &format!("inbox: {word}")).contains(&id));
+        assert!(search(&mut view, "minha-pasta: no such text anywhere").is_empty());
+
+        // In either language, and whatever the case.
+        let inbox = search(&mut view, "INBOX: ");
+        assert!(!inbox.is_empty() && !inbox.contains(&id));
+        assert_eq!(search(&mut view, "caixa-de-entrada: "), inbox);
+    }
+
+    #[test]
+    fn a_subfolder_is_searched_with_either_delimiter() {
+        let (_dir, mut view) = test_view();
+        let (account, _, id) = view_with_custom_folder(&mut view);
+        let path = storage::user_folder_path("ThinkSoft/Pendências");
+        view.db
+            .upsert_remote_folder(account, &path, "ThinkSoft/Pendências", "x", None)
+            .unwrap();
+        view.db
+            .conn()
+            .execute(
+                "UPDATE messages SET folders_csv = ?1 WHERE id = ?2",
+                rusqlite::params![format!(",{path},"), id],
+            )
+            .unwrap();
+        view.folders_by_account
+            .insert(account, view.db.list_folders(account).unwrap());
+        for query in ["thinksoft/pendencias: ", "thinksoft.pendencias: "] {
+            assert_eq!(search(&mut view, query), [id], "{query}");
+        }
+        assert_eq!(
+            search_scope::scope_prefix("ThinkSoft/Pendências").as_deref(),
+            Some("thinksoft/pendencias: ")
+        );
+        // Without a delimiter, the levels don't run together.
+        assert!(view.folders_of_slug("thinksoftpendencias").is_empty());
+    }
+
+    #[test]
+    fn a_starred_scope_leaves_out_the_trash_with_or_without_text() {
+        let (_dir, mut view) = test_view();
+        let id = view.list_messages[0].id;
+        mail_actions::set_starred(&view.db, id, true).unwrap();
+        let email = view.db.get_message(id).unwrap().unwrap().sender_email;
+        assert!(search(&mut view, &format!("starred: {email}")).contains(&id));
+        mail_actions::trash(&view.db, id).unwrap();
+        assert!(!search(&mut view, "starred: ").contains(&id));
+        assert!(!search(&mut view, &format!("starred: {email}")).contains(&id));
+    }
+
+    #[test]
+    fn a_word_that_names_no_folder_is_just_text() {
+        let (_dir, mut view) = test_view();
+        assert_eq!(view.folders_of_slug("re"), Vec::<String>::new());
+        assert!(search(&mut view, "re: nothing like this").is_empty());
+        assert_eq!(view.list_folder(), None);
+    }
+
+    #[test]
+    fn a_folder_name_must_be_new_to_the_account() {
+        let folders = [folder(&storage::user_folder_path("Work"), "Work")];
+        assert!(matches!(
+            folder_name_problem("", None, &folders, None, &[]),
+            Some(Key::FolderNameEmpty)
+        ));
+        assert!(matches!(
+            folder_name_problem("a/b", None, &folders, None, &[]),
+            Some(Key::FolderNameSlash)
+        ));
+        assert!(matches!(
+            folder_name_problem("WORK", None, &folders, None, &[]),
+            Some(Key::FolderNameTaken)
+        ));
+        assert!(folder_name_problem("Home", None, &folders, None, &[]).is_none());
+        // The server's delimiter would make two levels of it.
+        let dot = [".".to_string()];
+        assert!(matches!(
+            folder_name_problem("v1.2", None, &folders, None, &dot),
+            Some(Key::FolderNameSlash)
+        ));
+        assert!(folder_name_problem("v1.2", None, &folders, None, &[]).is_none());
+        // A system folder's name would make it that folder, at the top but not deeper in.
+        let with_trash = [
+            folder(&storage::user_folder_path("Work"), "Work"),
+            folder(storage::system::TRASH, ""),
+        ];
+        assert!(matches!(
+            folder_name_problem("Lixeira", None, &with_trash, None, &[]),
+            Some(Key::FolderNameReserved)
+        ));
+        assert!(folder_name_problem("Lixeira", Some("Home"), &with_trash, None, &[]).is_none());
+        // With no Trash yet, this is how the account gets one.
+        assert!(folder_name_problem("Lixeira", None, &folders, None, &[]).is_none());
+        // What never shows as a folder of its own is refused either way.
+        assert!(matches!(
+            folder_name_problem("Inbox", None, &folders, None, &[]),
+            Some(Key::FolderNameReserved)
+        ));
+        // Inside another folder, the same name is another folder.
+        assert!(folder_name_problem("Work", Some("Home"), &folders, None, &[]).is_none());
+        // Renaming a folder may change only its case.
+        let path = storage::user_folder_path("Work");
+        assert!(folder_name_problem("WORK", None, &folders, Some(&path), &[]).is_none());
+    }
+
+    #[test]
+    fn a_mailbox_that_is_gone_gives_way_to_the_inbox() {
+        let (_dir, mut view) = test_view();
+        let account = view.accounts[0].id;
+        let gone = Selection::Mailbox {
+            account_id: account,
+            folder_path: storage::user_folder_path("Gone"),
+        };
+        view.selected_mailbox = gone.clone();
+        view.pre_search_mailbox = Some(gone);
+        view.reload_from_database();
+        let inbox = Selection::Global(GlobalMailbox::Inbox);
+        assert_eq!(view.selected_mailbox, inbox);
+        assert_eq!(view.pre_search_mailbox, Some(inbox));
+    }
+
+    #[test]
+    fn what_is_open_follows_a_rename_of_it_or_of_its_parent() {
+        let (_dir, mut view) = test_view();
+        let shown = |path: &str| Selection::Mailbox {
+            account_id: 1,
+            folder_path: path.to_string(),
+        };
+        for (open, after) in [
+            ("user:Work", "user:Job"),
+            ("user:Work/Acme", "user:Job/Acme"),
+            ("user:Work 2", "user:Work 2"),
+            ("sys:inbox", "sys:inbox"),
+        ] {
+            view.selected_mailbox = shown(open);
+            view.pre_search_mailbox = Some(shown(open));
+            view.follow_folder_rename(1, "user:Work", "user:Job");
+            assert_eq!(view.selected_mailbox, shown(after), "{open}");
+            assert_eq!(view.pre_search_mailbox, Some(shown(after)), "{open}");
+            // Another account's folder of that name stays.
+            view.selected_mailbox = shown(open);
+            view.follow_folder_rename(2, "user:Work", "user:Job");
+            assert_eq!(view.selected_mailbox, shown(open));
+        }
+    }
+
+    #[gpui::test]
+    fn right_clicking_a_mailbox_opens_its_menu_and_keys_answer_the_dialog(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 0, cx);
+        let account = view.update(cx, |view, cx| {
+            let (account, _, _) = view_with_custom_folder(view);
+            cx.notify();
+            account
+        });
+        cx.run_until_parked();
+        let right_click = |selector: &'static str, cx: &mut gpui::VisualTestContext| {
+            let row = cx.debug_bounds(selector).expect("the row").center();
+            cx.simulate_mouse_down(row, MouseButton::Right, Default::default());
+            cx.simulate_mouse_up(row, MouseButton::Right, Default::default());
+            cx.run_until_parked();
+        };
+        let path = storage::user_folder_path("Minha Pasta!");
+        right_click("sidebar-folder-user:Minha Pasta!", cx);
+        view.read_with(cx, |view, _| {
+            let menu = view.folder_menu.as_ref().expect("the menu");
+            assert_eq!(menu.account_id, Some(account));
+            assert_eq!(menu.path, path);
+        });
+        // A click outside closes it.
+        cx.simulate_click(point(px(900.0), px(500.0)), Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.folder_menu.is_none()));
+
+        right_click("sidebar-global-0", cx);
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.folder_menu.as_ref().unwrap().account_id, None);
+        });
+        cx.simulate_click(point(px(900.0), px(500.0)), Default::default());
+        cx.run_until_parked();
+
+        // Typing goes to the dialog, Enter confirms and Escape cancels.
+        view.update_in(cx, |view, window, cx| {
+            let kind = FolderDialogKind::Create { parent_path: None };
+            view.open_folder_dialog(account, kind, None, "", window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_input("Typed");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.folder_dialog.is_none());
+            let folders = view.db.list_folders(account).unwrap();
+            assert!(folders.iter().any(|f| f.display_name == "Typed"));
+        });
+        view.update_in(cx, |view, window, cx| {
+            let kind = FolderDialogKind::Create { parent_path: None };
+            view.open_folder_dialog(account, kind, None, "", window, cx);
+        });
+        cx.run_until_parked();
+        // Modal: the palette stays shut behind it.
+        view.update_in(cx, |view, window, cx| {
+            view.toggle_command_palette(window, cx)
+        });
+        view.read_with(cx, |view, _| {
+            assert!(!view.command_palette.as_ref().is_some_and(|p| p.open));
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.folder_dialog.is_none()));
+    }
+
+    #[gpui::test]
+    fn the_folder_menu_searches_creates_renames_and_deletes(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (view, _, cx) = row_menu_window(&dir, 0, cx);
+        let (account, path) = view.update(cx, |view, _| {
+            let (account, path, _) = view_with_custom_folder(view);
+            (account, path)
+        });
+        let names = |view: &gpui::Entity<RootView>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                view.db
+                    .list_folders(account)
+                    .unwrap()
+                    .into_iter()
+                    .map(|f| f.display_name)
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        // Search: the prefix in the field, the caret after it, the field focused.
+        view.update_in(cx, |view, window, cx| {
+            view.search_for("minha-pasta: ", window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.search_input_focused(window, cx));
+            assert_eq!(view.search_query(cx), "minha-pasta: ");
+            view.clear_search(cx);
+        });
+
+        // New: the dialog refuses a name already taken, and stays.
+        view.update_in(cx, |view, window, cx| {
+            let kind = FolderDialogKind::Create { parent_path: None };
+            view.open_folder_dialog(account, kind, None, "Minha Pasta!", window, cx);
+            view.submit_folder_dialog(cx);
+            assert!(matches!(
+                view.folder_dialog.as_ref().unwrap().error,
+                Some(Key::FolderNameTaken)
+            ));
+            let input = view.folder_dialog.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| input.set_content("Nova", cx));
+            view.submit_folder_dialog(cx);
+            assert!(view.folder_dialog.is_none());
+        });
+        assert!(names(&view, cx).contains(&"Nova".to_string()));
+
+        // Rename: what is open follows the new name.
+        view.update_in(cx, |view, window, cx| {
+            view.selected_mailbox = Selection::Mailbox {
+                account_id: account,
+                folder_path: path.clone(),
+            };
+            let kind = FolderDialogKind::Rename { path: path.clone() };
+            view.open_folder_dialog(account, kind, None, "Minha Pasta!", window, cx);
+            let input = view.folder_dialog.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| input.set_content("Outra", cx));
+            view.submit_folder_dialog(cx);
+            assert_eq!(
+                view.selected_mailbox,
+                Selection::Mailbox {
+                    account_id: account,
+                    folder_path: storage::user_folder_path("Outra"),
+                }
+            );
+        });
+        assert!(names(&view, cx).contains(&"Outra".to_string()));
+
+        // A subfolder: only its own name is asked for, and it goes in its parent.
+        view.update_in(cx, |view, window, cx| {
+            let parent = storage::user_folder_path("Outra");
+            let kind = FolderDialogKind::Create {
+                parent_path: Some(parent.clone()),
+            };
+            view.open_folder_dialog(account, kind, Some("Outra".to_string()), "", window, cx);
+            let input = view.folder_dialog.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| input.set_content("Filha", cx));
+            view.submit_folder_dialog(cx);
+            assert!(view.folder_dialog.is_none());
+
+            let path = storage::user_folder_path("Outra/Filha");
+            let kind = FolderDialogKind::Rename { path };
+            view.open_folder_dialog(
+                account,
+                kind,
+                Some("Outra".to_string()),
+                "Filha",
+                window,
+                cx,
+            );
+            let input = view.folder_dialog.as_ref().unwrap().input.clone();
+            assert_eq!(input.read(cx).content().as_ref(), "Filha");
+            input.update(cx, |input, cx| input.set_content("Neta", cx));
+            view.submit_folder_dialog(cx);
+        });
+        assert!(names(&view, cx).contains(&"Outra/Neta".to_string()));
+
+        // Delete: the Inbox takes over from what was open.
+        view.update(cx, |view, cx| {
+            view.delete_folder(account, &storage::user_folder_path("Outra"), cx);
+            assert_eq!(
+                view.selected_mailbox,
+                Selection::Global(GlobalMailbox::Inbox)
+            );
+        });
+    }
+
+    #[test]
+    fn the_sidebar_marks_nothing_during_a_search() {
+        let (_dir, mut view) = test_view();
+        let inbox = Selection::Global(GlobalMailbox::Inbox);
+        view.selected_mailbox = inbox.clone();
+        assert!(view.sidebar_shows_selected(&inbox));
+        assert!(!view.sidebar_shows_selected(&Selection::Global(GlobalMailbox::Sent)));
+        view.last_search_query = "anything".to_string();
+        assert!(!view.sidebar_shows_selected(&inbox));
+        view.last_search_query.clear();
+        assert!(view.sidebar_shows_selected(&inbox));
+    }
+
+    #[test]
+    fn the_list_shows_a_folder_unless_it_is_a_search() {
+        let (_dir, mut view) = test_view();
+        view.selected_mailbox = Selection::Global(GlobalMailbox::Inbox);
+        assert_eq!(view.list_folder().as_deref(), Some(storage::system::INBOX));
+        view.selected_mailbox = Selection::Mailbox {
+            account_id: 1,
+            folder_path: storage::system::INBOX.to_string(),
+        };
+        assert_eq!(view.list_folder().as_deref(), Some(storage::system::INBOX));
+        view.last_search_query = "anything".to_string();
+        assert_eq!(view.list_folder(), None);
+    }
+
     #[test]
     fn command_context_reflects_trash_state() {
         let (_dir, mut view) = test_view();
@@ -10711,6 +12736,151 @@ mod tests {
             remote_name: None,
             role: None,
         }
+    }
+
+    #[test]
+    fn search_results_go_by_star_then_by_the_first_folder_they_are_in() {
+        use storage::system;
+        let key = |starred, folders: &[&str]| {
+            search_result_key(starred, &format!(",{},", folders.join(",")))
+        };
+        let mut order = [
+            key(false, &["user:zeta"]),
+            key(false, &[system::TRASH]),
+            key(false, &["user:Alpha"]),
+            key(false, &[system::ARCHIVE, system::INBOX]),
+            key(false, &[system::SENT]),
+            key(true, &["user:zeta"]),
+        ];
+        let expected = [
+            key(true, &[system::ARCHIVE]),
+            key(false, &[system::INBOX]),
+            key(false, &[system::SENT]),
+            key(false, &[system::TRASH]),
+            key(false, &["user:Alpha"]),
+            key(false, &["user:zeta"]),
+        ];
+        order.sort();
+        assert_eq!(order, expected);
+        // Flagged isn't a folder for what has no star left, and the Trash takes the star's
+        // place at the top.
+        assert_eq!(
+            key(false, &[system::FLAGGED, "user:zeta"]),
+            key(false, &["user:zeta"]),
+        );
+        assert_eq!(key(true, &[system::TRASH]), key(false, &[system::TRASH]));
+        assert!(search_result_key(false, ",,") > key(false, &["user:zeta"]));
+        // A subfolder right after its parent, as in the sidebar.
+        let mut order = [
+            key(false, &["user:work 2"]),
+            key(false, &["user:work/acme"]),
+            key(false, &["user:work"]),
+        ];
+        order.sort();
+        assert_eq!(
+            order,
+            [
+                key(false, &["user:work"]),
+                key(false, &["user:work/acme"]),
+                key(false, &["user:work 2"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_lists_each_folder_of_every_account_in_turn_newest_first() {
+        use storage::system;
+        let (_dir, mut view) = test_view();
+        let ids = view.list_ids();
+        let (first_account, other) = view
+            .db
+            .list_accounts()
+            .map(|accounts| (accounts[0].id, accounts[accounts.len() - 1].id))
+            .unwrap();
+        let place = |view: &RootView, id: i64, account: i64, folder: &str, date: i64| {
+            view.db
+                .conn()
+                .execute(
+                    "UPDATE messages SET account_id = ?1, folders_csv = ?2, date_ts = ?3,
+                            sender_email = 'same@sender.test',
+                            search_text = 'same@sender.test'
+                     WHERE id = ?4",
+                    rusqlite::params![account, format!(",{folder},"), date, id],
+                )
+                .unwrap();
+        };
+        for id in &ids[..4] {
+            view.db
+                .conn()
+                .execute("UPDATE messages SET starred = 0 WHERE id = ?1", [id])
+                .unwrap();
+        }
+        // The newest of all is in a later folder.
+        place(&view, ids[0], first_account, system::ARCHIVE, 900);
+        place(&view, ids[1], first_account, system::INBOX, 100);
+        place(&view, ids[2], other, system::INBOX, 200);
+        place(&view, ids[3], other, system::ARCHIVE, 300);
+        view.last_search_query = "same@sender.test".to_string();
+        view.reload_message_list();
+        assert_eq!(view.list_ids(), [ids[2], ids[1], ids[0], ids[3]]);
+
+        // A star brings it to the top, whatever its folder.
+        view.db
+            .conn()
+            .execute("UPDATE messages SET starred = 1 WHERE id = ?1", [ids[3]])
+            .unwrap();
+        view.reload_message_list();
+        assert_eq!(view.list_ids(), [ids[3], ids[2], ids[1], ids[0]]);
+    }
+
+    #[test]
+    fn subfolders_come_right_after_their_parent() {
+        let folders = [
+            "Work 2",
+            "Work/Zeta",
+            "Work",
+            "work/Alpha/Deep",
+            "Zebra",
+            "work/Alpha",
+        ]
+        .map(|name| folder(&storage::user_folder_path(name), name))
+        .to_vec();
+        let names: Vec<_> = sidebar_ordered(folders)
+            .into_iter()
+            .map(|folder| folder.display_name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Work",
+                "work/Alpha",
+                "work/Alpha/Deep",
+                "Work/Zeta",
+                "Work 2",
+                "Zebra"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_subfolder_shows_its_own_name_under_its_parent() {
+        let names: HashSet<&str> = ["Work", "Work/Acme", "Work/Acme/2026", "[Gmail]/Saved/Old"]
+            .into_iter()
+            .collect();
+        assert_eq!(folder_tree_position("Work", &names), (0, "Work"));
+        assert_eq!(folder_tree_position("Work/Acme", &names), (1, "Acme"));
+        assert_eq!(folder_tree_position("Work/Acme/2026", &names), (2, "2026"));
+        // A level with no row of its own stays in the name.
+        assert_eq!(
+            folder_tree_position("Work/Gone/Deep", &names),
+            (1, "Gone/Deep")
+        );
+        assert_eq!(
+            folder_tree_position("[Gmail]/Saved/Old", &names),
+            (0, "[Gmail]/Saved/Old")
+        );
+        // A system folder has no name of its own yet.
+        assert_eq!(folder_tree_position("", &names), (0, ""));
     }
 
     #[test]

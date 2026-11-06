@@ -102,6 +102,15 @@ impl AccountConfig {
     }
 }
 
+/// Whether `host` is Gmail's IMAP/SMTP endpoint.
+pub fn is_gmail_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    matches!(
+        host.as_str(),
+        "imap.gmail.com" | "imap.googlemail.com" | "smtp.gmail.com" | "smtp.googlemail.com"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

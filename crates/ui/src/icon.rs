@@ -59,6 +59,10 @@ pub enum IconName {
     Reply,
     ReplyAll,
     Forward,
+    /// Print a message.
+    Print,
+    /// Bring a message back from the Trash.
+    Restore,
     Compose,
     /// Send action (compose toolbar). Shares the paper-plane artwork with
     /// [`IconName::Sent`] but names the action distinctly from the Sent mailbox.
@@ -69,6 +73,10 @@ pub enum IconName {
     ChevronRight,
     ChevronDown,
     ChevronUp,
+    /// Small solid triangle saying a button opens a menu.
+    CaretDown,
+    /// The same triangle, saying a menu entry opens a submenu.
+    CaretRight,
     Account,
     Attachment,
     Mail,
@@ -130,6 +138,10 @@ impl IconName {
             IconName::Reply => crate::REPLY,
             IconName::ReplyAll => crate::REPLY_ALL,
             IconName::Forward => crate::FORWARD,
+            IconName::CaretDown => crate::CARET_DOWN,
+            IconName::CaretRight => crate::CARET_RIGHT,
+            IconName::Print => crate::PRINT,
+            IconName::Restore => crate::ROTATE_LEFT,
             IconName::Compose => crate::PEN_TO_SQUARE,
             IconName::Send => crate::SEND,
             IconName::Search => crate::SEARCH,
@@ -226,7 +238,11 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 52] = [
+    const ALL: [IconName; 56] = [
+        IconName::CaretRight,
+        IconName::CaretDown,
+        IconName::Print,
+        IconName::Restore,
         IconName::DragHand,
         IconName::FormatUndo,
         IconName::FormatRedo,

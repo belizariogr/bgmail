@@ -400,3 +400,5 @@ _(none — modules are files; their APIs are cataloged below.)_
 #### Tests
 
 - `clones_share_state`, `list_and_select`, `headers_flags_and_body`, `flag_changes_bump_modseq_and_filter`, `store_flags_applies_only_true_fields`, `move_delete_append_create`, `server_side_expunge_and_uid_validity_reset`, `failure_injection_and_call_log`, `header_block_variants`, `sender_records_and_fails`, `gmail_mode_reports_stable_gm_msgid`, `idle_wakes_on_change_in_its_folder_only`, `idle_times_out_stops_on_cancel_and_needs_capability`, `mutations_bump_folder_version`, `connector_hands_out_shared_connections_and_injects_failures`.
+
+- **`MailRemote::rename_folder`** / **`delete_folder`**: server folder changes; implemented by the fake (`FakeRemote::set_delimiter` picks its delimiter) and by IMAP (`RENAME`, `DELETE`).

@@ -121,8 +121,32 @@ pub struct IconButton {
     disabled: bool,
     hover_color: Option<Color>,
     compact: bool,
+    opens_menu: bool,
+    dot: bool,
     on_click: Option<ClickHandler>,
 }
+
+/// Side of the dot at the corner of an icon.
+const ICON_DOT_SIDE: Pixels = px(6.0);
+
+/// `icon` with a dot in the accent color at its top right corner: the dot that marks
+/// unread mail in the message list.
+pub(crate) fn icon_with_dot(icon: Icon, accent: Hsla) -> impl IntoElement {
+    div().relative().child(icon).child(
+        div()
+            .absolute()
+            .top(px(-2.0))
+            .right(px(-3.0))
+            .size(ICON_DOT_SIDE)
+            .rounded_full()
+            .bg(accent),
+    )
+}
+
+/// Room the triangle of a button that opens a menu adds to its width.
+const MENU_ARROW_ROOM: Pixels = px(18.0);
+/// Between the icon and the triangle of a button that opens a menu.
+const MENU_ARROW_GAP: Pixels = px(9.0);
 
 /// Group of an icon button whose icon reacts to the hover.
 const ICON_BUTTON_GROUP: &str = "icon-button";
@@ -139,6 +163,8 @@ impl IconButton {
             disabled: false,
             hover_color: None,
             compact: false,
+            opens_menu: false,
+            dot: false,
             on_click: None,
         }
     }
@@ -181,6 +207,32 @@ impl IconButton {
         self
     }
 
+    /// Shows a dot in the accent color at the icon's corner, unless the button is disabled.
+    pub fn dot(mut self, dot: bool) -> Self {
+        self.dot = dot;
+        self
+    }
+
+    /// Whether the dot shows.
+    fn shows_dot(&self) -> bool {
+        self.dot && !self.disabled
+    }
+
+    /// Says the button opens a menu: a little wider, with a small triangle after the icon.
+    pub fn opens_menu(mut self) -> Self {
+        self.opens_menu = true;
+        self
+    }
+
+    /// The button's width: its square, plus the triangle's room when it has one.
+    fn width(&self) -> Pixels {
+        if self.opens_menu {
+            self.side() + MENU_ARROW_ROOM
+        } else {
+            self.side()
+        }
+    }
+
     /// Side of the button's square.
     fn side(&self) -> Pixels {
         if self.compact {
@@ -217,7 +269,10 @@ impl RenderOnce for IconButton {
         let hover_bg = colors.element_hover;
         let selected_bg = colors.element_active;
         let color = self.effective_color();
-        let side = self.side();
+        let (side, width) = (self.side(), self.width());
+        let opens_menu = self.opens_menu;
+        let shows_dot = self.shows_dot();
+        let accent = colors.accent;
         let disabled = self.disabled;
         let hover_color = self.hover_color.filter(|_| !disabled);
         let on_click = self.on_click.filter(|_| !disabled);
@@ -230,7 +285,9 @@ impl RenderOnce for IconButton {
             .id(self.id)
             .group(ICON_BUTTON_GROUP)
             .justify_center()
-            .size(side)
+            .gap(MENU_ARROW_GAP)
+            .h(side)
+            .w(width)
             .rounded_md()
             .when(self.selected && !disabled, |el| el.bg(selected_bg))
             .when(!disabled && hover_color.is_none(), |el| {
@@ -240,7 +297,20 @@ impl RenderOnce for IconButton {
             .when(disabled, |el| {
                 el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             })
-            .child(icon)
+            .map(|el| {
+                if shows_dot {
+                    el.child(icon_with_dot(icon, accent).into_any_element())
+                } else {
+                    el.child(icon.into_any_element())
+                }
+            })
+            .when(opens_menu, |el| {
+                el.child(
+                    Icon::new(IconName::CaretDown)
+                        .size(IconSize::XXSmall)
+                        .color(color),
+                )
+            })
             .when_some(on_click, |el, handler| {
                 // See `Button`: keep title-bar dragging from swallowing button clicks.
                 el.cursor_pointer()
@@ -259,6 +329,24 @@ mod tests {
         let button = IconButton::new("b", IconName::Reply).size(IconSize::Small);
         assert_eq!(button.side(), px(28.0));
         assert_eq!(button.compact().side(), IconSize::Small.px());
+    }
+
+    #[test]
+    fn a_button_that_opens_a_menu_is_wider_than_its_square() {
+        let button = IconButton::new("b", IconName::Folder);
+        assert_eq!(button.width(), button.side());
+        let button = button.opens_menu();
+        assert_eq!(button.side(), px(28.0));
+        assert_eq!(button.width(), px(46.0));
+    }
+
+    #[test]
+    fn the_dot_of_an_icon_button_goes_with_a_disabled_button() {
+        let button = IconButton::new("b", IconName::Mail);
+        assert!(!button.shows_dot());
+        let button = button.dot(true);
+        assert!(button.shows_dot());
+        assert!(!button.disabled(true).shows_dot());
     }
 
     #[test]
