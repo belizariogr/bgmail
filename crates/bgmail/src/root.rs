@@ -327,14 +327,20 @@ fn row_after_removal(list: &[i64], removed: &[i64]) -> Option<i64> {
 }
 
 /// How a list row joins its neighbours. A run of selected rows reads as one
-/// rounded block (as in macOS Mail): only its outer corners are rounded, and the
-/// separator goes where the block meets an unselected row, so no line cuts into
-/// the rounding.
+/// rounded block (as in macOS Mail): only its outer corners are rounded, and no
+/// separator touches the block's edge, so no line cuts into the rounding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RowEdges {
     round_top: bool,
     round_bottom: bool,
-    separator: bool,
+    separator: Option<RowSeparator>,
+}
+
+/// The line under a row: the list's own, or the lighter one inside a selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowSeparator {
+    Plain,
+    Selected,
 }
 
 fn row_edges(previous_selected: bool, selected: bool, next_selected: bool) -> RowEdges {
@@ -342,9 +348,18 @@ fn row_edges(previous_selected: bool, selected: bool, next_selected: bool) -> Ro
         // An unselected row keeps all its corners for the hover fill.
         round_top: !selected || !previous_selected,
         round_bottom: !selected || !next_selected,
-        separator: selected == next_selected,
+        separator: match (selected, next_selected) {
+            (false, false) => Some(RowSeparator::Plain),
+            (true, true) => Some(RowSeparator::Selected),
+            _ => None,
+        },
     }
 }
+
+/// Where a row's separator starts: under the text, past the unread dot, as in
+/// macOS Mail (`px_3` padding + dot + `gap_2`). It ends at the text's right edge.
+const ROW_SEPARATOR_INSET: f32 = 12.0 + 8.0 + 8.0;
+const ROW_SEPARATOR_END: f32 = 12.0;
 
 /// Width the subject of a list row gives up for its action buttons, while hovered.
 fn row_actions_room(hovered: bool) -> Pixels {
@@ -6481,7 +6496,10 @@ impl RootView {
         let selected = self.row_is_selected(message.id);
         let bg_selected = colors.element_selected;
         let hover = colors.element_hover;
-        let border = colors.border_variant;
+        let separator = edges.separator.map(|kind| match kind {
+            RowSeparator::Plain => colors.border_variant,
+            RowSeparator::Selected => colors.border_selected,
+        });
         let accent = colors.accent;
 
         let sender_weight = if message.unread {
@@ -6543,12 +6561,6 @@ impl RootView {
             .gap_2()
             .px_3()
             .py_2()
-            .border_b_1()
-            .border_color(if edges.separator {
-                border
-            } else {
-                gpui::transparent_black()
-            })
             .when(edges.round_top, |el| el.rounded_t_lg())
             .when(edges.round_bottom, |el| el.rounded_b_lg())
             .when(selected, |el| el.bg(bg_selected))
@@ -6609,6 +6621,15 @@ impl RootView {
                     this.hovered_row = row;
                     cx.notify();
                 }
+            }))
+            .children(separator.map(|color| {
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left(px(ROW_SEPARATOR_INSET))
+                    .right(px(ROW_SEPARATOR_END))
+                    .h(px(1.0))
+                    .bg(color)
             }))
             .child(div().pt_1().child(unread_dot))
             .child(
@@ -11836,20 +11857,21 @@ mod tests {
 
     #[test]
     fn a_run_of_selected_rows_is_rounded_only_at_its_ends() {
+        use RowSeparator::{Plain, Selected};
         let edges = |p, s, n| {
             let e = row_edges(p, s, n);
             (e.round_top, e.round_bottom, e.separator)
         };
         // A lone selected row: a pill, no line under it.
-        assert_eq!(edges(false, true, false), (true, true, false));
-        // First, middle and last of a run.
-        assert_eq!(edges(false, true, true), (true, false, true));
-        assert_eq!(edges(true, true, true), (false, false, true));
-        assert_eq!(edges(true, true, false), (false, true, false));
+        assert_eq!(edges(false, true, false), (true, true, None));
+        // First, middle and last of a run: the lighter line inside, none at the end.
+        assert_eq!(edges(false, true, true), (true, false, Some(Selected)));
+        assert_eq!(edges(true, true, true), (false, false, Some(Selected)));
+        assert_eq!(edges(true, true, false), (false, true, None));
         // Unselected rows stay rounded for hover; the one above a run drops its
         // line so it doesn't touch the rounding.
-        assert_eq!(edges(false, false, false), (true, true, true));
-        assert_eq!(edges(true, false, true), (true, true, false));
+        assert_eq!(edges(false, false, false), (true, true, Some(Plain)));
+        assert_eq!(edges(true, false, true), (true, true, None));
     }
 
     /// A view with row `index` of its list as the only selected message.
