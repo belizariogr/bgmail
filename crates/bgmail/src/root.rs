@@ -1181,7 +1181,7 @@ pub struct RootView {
     /// Row under the mouse, whose text makes room for its action buttons.
     hovered_row: Option<i64>,
     /// Focus of the message list (key context `MessageList`: arrows/j/k move
-    /// the selection, Delete/Backspace trash). Created on first render.
+    /// the selection, Delete trashes, and Backspace on macOS). Created on first render.
     list_focus: Option<FocusHandle>,
     /// User-facing (non-inline) attachments of the selected message; empty
     /// until its body is downloaded.

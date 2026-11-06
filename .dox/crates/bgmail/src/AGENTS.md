@@ -2419,7 +2419,7 @@ in `account_setup`.
 - **const `REPLY_*` / `REPLY_ALL_*` / `FORWARD_*`**: `cmd-r`/`ctrl-r`, `cmd-shift-r`/`ctrl-shift-r`, `cmd-shift-f`/`ctrl-shift-f` (macOS Mail).
 - **const `TOGGLE_READ_MAC` / `TOGGLE_READ_OTHER`**: `cmd-shift-u` / `ctrl-shift-m` (Ctrl+Shift+U is the IBus/GTK Unicode-entry key on Linux).
 - **const `GET_MAIL_MAC` / `GET_MAIL_OTHER`**: `cmd-shift-n` / `ctrl-shift-n`.
-- **const `LIST_NEXT_KEYS` / `LIST_PREVIOUS_KEYS` / `LIST_DELETE_KEYS`**: `down`/`j`, `up`/`k`, `delete`/`backspace` — bound only in `MessageList`.
+- **const `LIST_NEXT_KEYS` / `LIST_PREVIOUS_KEYS` / `LIST_DELETE_KEYS_MAC` / `LIST_DELETE_KEYS_OTHER`** + **`list_delete_keys()`**: `down`/`j`, `up`/`k`, and `delete` plus `backspace` on macOS only (user decision: elsewhere Backspace never deletes a message) — bound only in `MessageList`.
 - **const `GLOBAL_CHORDS`** (test-only): every global chord pair, for the collision test.
 
 #### Functions / methods

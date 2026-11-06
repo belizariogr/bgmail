@@ -719,6 +719,7 @@
       the selection and is omitted in Trash
 - ✅ New-mail notifications carry the app icon on Linux (bundle icon or theme
       name + `desktop-entry` hint)
+- ✅ Backspace deletes a message from the list only on macOS (Delete everywhere)
 - ✅ Clicking a new-mail notification brings the window up in the unified Inbox at
       that message (a summary of several opens just the Inbox)
 - ⬜ Clicking a notification after the app quit: start it at that message (Windows
