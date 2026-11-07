@@ -61,6 +61,7 @@ testing and shorter incremental compile times.
 | `crates/html_view` | Native GPUI HTML rendering: Blitz layout, GPUI paint and text. | ✅ reader |
 | `crates/mail_core` | Domain types (addresses, flags, folders), MIME parse/build, reply/thread rules, `MailRemote`/`MailSender` traits + fakes. No UI, no I/O. | ✅ Stage 2 |
 | `crates/mail_sync` | Sync engine: per-account worker + IDLE threads, pure planner, optimistic actions, server-op queue, outbox. | ✅ Stage 2 |
+| `crates/auto_update` | Self-updates from GitHub Releases: install detection, release file, SHA-256 check, per-platform installers (no GPUI, no network of its own). | ✅ |
 | `crates/protocols` | IMAP (`imap` + rustls), SMTP (`lettre`), Gmail OAuth2/XOAUTH2, provider presets and autoconfig. Implements `mail_core::MailConnector`. | ✅ Stage 3 |
 
 > No `accounts` crate (decided with two opposing reviews): account config lives

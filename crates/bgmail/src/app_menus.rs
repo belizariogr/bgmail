@@ -13,11 +13,11 @@
 use gpui::{App, Global, Menu, MenuItem, SystemMenuType};
 
 use crate::actions::{
-    AppZoomIn, AppZoomOut, AppZoomReset, ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew,
-    ComposeSend, GetNewMail, MessageArchive, MessageDelete, MessageDeletePermanent, MessageForward,
-    MessageMarkJunk, MessagePrint, MessageReply, MessageReplyAll, MessageRestore,
-    MessageToggleFlag, MessageToggleRead, MoveMessageToFolder, OpenSettings, Quit,
-    ToggleCommandPalette, ToggleSidebar,
+    AppZoomIn, AppZoomOut, AppZoomReset, CheckForUpdates, ComposeAttach, ComposeClose,
+    ComposeDiscard, ComposeNew, ComposeSend, GetNewMail, MessageArchive, MessageDelete,
+    MessageDeletePermanent, MessageForward, MessageMarkJunk, MessagePrint, MessageReply,
+    MessageReplyAll, MessageRestore, MessageToggleFlag, MessageToggleRead, MoveMessageToFolder,
+    OpenSettings, Quit, ToggleCommandPalette, ToggleSidebar,
 };
 use crate::commands::{self, CommandContext, CommandId};
 use crate::locale::{Key, Language};
@@ -40,6 +40,7 @@ fn app_menu() -> Menu {
         name: "BGMail".into(),
         items: vec![
             MenuItem::action("About BGMail", gpui::NoAction),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),

@@ -10,6 +10,7 @@ mod actions;
 mod app_menus;
 mod app_zoom;
 mod attachments;
+mod auto_update_ui;
 mod brand_logos;
 mod command_palette;
 mod command_palette_overlay;
@@ -46,11 +47,11 @@ use gpui::{
 
 use crate::commands::CommandId;
 use actions::{
-    AppZoomIn, AppZoomOut, AppZoomReset, ComposeAttach, ComposeClose, ComposeDiscard, ComposeNew,
-    ComposeSend, FindInMessage, GetNewMail, MessageArchive, MessageDelete, MessageDeletePermanent,
-    MessageForward, MessageMarkJunk, MessagePrint, MessageReply, MessageReplyAll, MessageRestore,
-    MessageToggleFlag, MessageToggleRead, MoveMessageToFolder, OpenSettings, Quit,
-    ToggleCommandPalette, ToggleSidebar,
+    AppZoomIn, AppZoomOut, AppZoomReset, CheckForUpdates, ComposeAttach, ComposeClose,
+    ComposeDiscard, ComposeNew, ComposeSend, FindInMessage, GetNewMail, MessageArchive,
+    MessageDelete, MessageDeletePermanent, MessageForward, MessageMarkJunk, MessagePrint,
+    MessageReply, MessageReplyAll, MessageRestore, MessageToggleFlag, MessageToggleRead,
+    MoveMessageToFolder, OpenSettings, Quit, ToggleCommandPalette, ToggleSidebar,
 };
 use compose::ComposeView;
 use crash_guard::CrashGuard;
@@ -157,14 +158,22 @@ fn schedule_app_zoom(steps: i32, cx: &mut App) {
 /// Quits unless a message is being written. Deferred because the window the action
 /// came from is busy dispatching it, and the compose window may be the one to ask.
 pub(crate) fn schedule_quit(cx: &mut App) {
+    schedule_quit_then(cx, |_| {});
+}
+
+/// [`schedule_quit`], running `before_quit` only once quitting is certain (a
+/// draft can still keep BGMail open).
+pub(crate) fn schedule_quit_then(cx: &mut App, before_quit: impl FnOnce(&mut App) + 'static) {
     // The first-run window comes before the main one.
     let Some(main) = cx.try_global::<MainWindow>().map(|main| main.0) else {
+        before_quit(cx);
         cx.quit();
         return;
     };
     cx.defer(move |cx| {
         let may_quit = main.update(cx, |root, _, cx| root.may_quit(cx));
         if may_quit.unwrap_or(true) {
+            before_quit(cx);
             cx.quit();
         }
     });
@@ -176,6 +185,10 @@ fn register_global_menu_actions(cx: &mut App) {
     cx.on_action(|_: &FindInMessage, cx| schedule_find_in_message(cx));
     cx.on_action(|_: &ComposeNew, cx| schedule_menu_command(CommandId::ComposeNew, cx));
     cx.on_action(|_: &OpenSettings, cx| schedule_menu_command(CommandId::OpenSettings, cx));
+    cx.on_action(|_: &CheckForUpdates, cx| {
+        auto_update_ui::check_now(cx);
+        schedule_menu_command(CommandId::OpenSettings, cx);
+    });
     cx.on_action(|_: &ToggleSidebar, cx| schedule_menu_command(CommandId::ToggleSidebar, cx));
     cx.on_action(|_: &AppZoomIn, cx| schedule_app_zoom(1, cx));
     cx.on_action(|_: &AppZoomOut, cx| schedule_app_zoom(-1, cx));
@@ -298,6 +311,7 @@ fn main() {
         ui::prompt::init(cx);
         html_view::init(cx);
         cx.on_action(|_: &Quit, cx| schedule_quit(cx));
+        auto_update_ui::init(settings.auto_update, cx);
         shortcuts::bind_app_shortcuts(cx);
         cx.set_menus(app_menus());
 
@@ -376,6 +390,10 @@ fn main() {
                         // Sync starts after the window exists; it never
                         // blocks the first frame (threads + async keychain).
                         view.start_mail(cx);
+                        // The status bar shows updates that need the user.
+                        if let Some(updater) = auto_update_ui::AutoUpdater::get(cx) {
+                            cx.observe(&updater, |_, _, cx| cx.notify()).detach();
+                        }
                         cx.observe_window_activation(window, |this, window, cx| {
                             if window.is_window_active() {
                                 this.on_main_window_activated(cx);

@@ -1229,6 +1229,8 @@ pub struct RootView {
     reader_build_token: u64,
     /// Desktop notifications for new mail (Settings ▸ Notifications).
     pub(crate) notifications_enabled: bool,
+    /// Automatic update checks (Settings ▸ General ▸ Updates).
+    pub(crate) auto_update: bool,
     /// Persisted "load remote content" preference. Remote content needs
     /// networking (Stage 3), so it is kept but not offered or applied yet.
     pub(crate) load_remote_images: bool,
@@ -1818,6 +1820,7 @@ impl RootView {
             reader_preparing: false,
             reader_build_token: 0,
             notifications_enabled: settings.notifications_enabled,
+            auto_update: settings.auto_update,
             load_remote_images: settings.load_remote_images,
             remote_allowed: HashSet::new(),
             reader_white_background: settings.reader_white_background,
@@ -3551,6 +3554,15 @@ impl RootView {
         }
     }
 
+    pub(crate) fn set_auto_update(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.auto_update != value {
+            self.auto_update = value;
+            crate::auto_update_ui::set_enabled(value, cx);
+            self.request_save(cx);
+            cx.notify();
+        }
+    }
+
     /// Prints the selected message: a standalone print page (light theme,
     /// header, remote content blocked; `mail_html::print_document`) written
     /// to a private temporary file and opened in the system browser, which
@@ -4036,6 +4048,7 @@ impl RootView {
             list_width: f32::from(self.preferred_list_width),
             load_remote_images: self.load_remote_images,
             notifications_enabled: self.notifications_enabled,
+            auto_update: self.auto_update,
             reader_white_background: self.reader_white_background,
             compose_white_background: self.compose_white_background,
             language: self.language.code().to_string(),
@@ -8809,7 +8822,35 @@ impl RootView {
 
     // ----- Status bar -----------------------------------------------------
 
+    /// An update that needs the user (see `auto_update_ui::indicator`): restart
+    /// to run it, or open Settings ▸ General for the rest.
+    fn render_update_indicator(
+        &self,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let updater = crate::auto_update_ui::AutoUpdater::get(cx)?;
+        let indicator = crate::auto_update_ui::indicator(updater.read(cx).status())?;
+        Some(
+            div()
+                .id("update-status")
+                .cursor_pointer()
+                .child(
+                    Label::new(indicator.label().tr(language))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Accent),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| match indicator {
+                    crate::auto_update_ui::Indicator::Restart => {
+                        crate::auto_update_ui::restart(cx);
+                    }
+                    _ => this.open_settings(window, cx),
+                })),
+        )
+    }
+
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let update_indicator = self.render_update_indicator(cx.language(), cx);
         let colors = cx.theme().colors();
         let language = cx.language();
         let total_unread: usize = self.db.global_unread(storage::system::INBOX).unwrap_or(0);
@@ -8853,6 +8894,7 @@ impl RootView {
                                 .color(Color::Muted),
                         )
                     })
+                    .children(update_indicator)
                     .when(!self.unsent.is_empty(), |this| {
                         this.child(
                             div()

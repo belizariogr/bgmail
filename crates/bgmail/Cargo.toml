@@ -22,6 +22,8 @@ storage.workspace = true
 mail_core.workspace = true
 protocols.workspace = true
 mail_sync.workspace = true
+# Updates from GitHub Releases (`auto_update_ui` drives it).
+auto_update.workspace = true
 # Message actions return storage's error type (same version as `storage`).
 rusqlite = "0.37"
 # Sync events are pushed from engine threads and awaited by a GPUI task.

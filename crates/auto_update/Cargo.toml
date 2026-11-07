@@ -1,0 +1,12 @@
+[package]
+name = "auto_update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Updates the app from its GitHub Releases: versions, how this copy was installed,
+# which release file replaces it, and the platform installers. No GPUI and no
+# network code of its own (the caller supplies a `ReleaseSource`), so it builds
+# for every target without a C toolchain.
+[dependencies]
+sha2 = "0.10"

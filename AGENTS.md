@@ -86,6 +86,7 @@ BGMail/
     ├── mail_core/ ← mail domain: addresses, MIME, reply/forward, remote traits
     ├── protocols/ ← IMAP/SMTP clients, Gmail OAuth2, presets/autoconfig
     ├── mail_sync/ ← sync engine (worker/IDLE threads, op queue, outbox)
+    ├── auto_update/ ← self-updates from GitHub Releases (install detection, installers)
     ├── html_view/ ← native GPUI HTML (mail body) rendering on Blitz
     └── bgmail/ ← binary (window + layout + state + localization; packaging config)
 ```
@@ -98,7 +99,8 @@ BGMail/
   XOAUTH2) live in `crates/protocols`, driven by `crates/mail_sync`; remote
   images are fetched by `html_view` only when the user allows them; brand
   logos (BIMI: DNS lookups and the mark certificate from its authority, per
-  sender domain, cached) by `protocols::bimi`, as Gmail and Apple Mail do. All
+  sender domain, cached) by `protocols::bimi`, as Gmail and Apple Mail do; app
+  updates (GitHub Releases) by `protocols::release`, driven by `auto_update`. All
   network IO runs off the UI thread. POP3 is postponed.
 - Sample / seed data stays isolated (`crates/bgmail/src/data.rs`,
   `crates/bgmail/src/db_seed.rs`, `storage::seed`) so it can be replaced by the

@@ -27,10 +27,12 @@ use crate::account_setup::{
     SECURITY_OPTIONS,
 };
 use crate::actions::ComposeClose;
+use crate::auto_update_ui::{self, AutoUpdater};
 use crate::data;
 use crate::default_mail_app;
 use crate::locale::{ActiveLanguage, Key, Language};
 use crate::root::RootView;
+use auto_update::Status;
 
 /// Pause after the last keystroke in the e-mail field before discovering
 /// server settings (avoids one lookup per typed character).
@@ -286,6 +288,10 @@ pub(crate) struct SettingsView {
     account_messages: HashMap<i64, FailureMessage>,
     /// Shows only the "Add account" form, embedded in the first-run setup.
     form_only: bool,
+    /// Re-renders the Updates block when the updater moves on.
+    updater_observation: Option<Subscription>,
+    /// The password field shown when polkit could not ask for it.
+    update_password: Option<Entity<TextInput>>,
 }
 
 impl SettingsView {
@@ -307,6 +313,8 @@ impl SettingsView {
             oauth: None,
             account_messages: HashMap::new(),
             form_only: false,
+            updater_observation: None,
+            update_password: None,
         }
     }
 
@@ -935,6 +943,140 @@ impl SettingsView {
             }))
     }
 
+    /// Settings ▸ General ▸ Updates: the automatic-check switch, a manual
+    /// check, the updater's status and what the user can do about it.
+    fn render_updates(
+        &mut self,
+        language: Language,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let Some(updater) = AutoUpdater::get(cx) else {
+            return div().into_any_element();
+        };
+        if self.updater_observation.is_none() {
+            self.updater_observation = Some(cx.observe(&updater, |_, _, cx| cx.notify()));
+        }
+        let status = updater.read(cx).status().clone();
+        let enabled = self
+            .root
+            .upgrade()
+            .map(|root| root.read(cx).auto_update)
+            .unwrap_or(true);
+
+        let needs_password = matches!(status, Status::NeedsPassword { .. });
+        if !needs_password {
+            self.update_password = None;
+        } else if self.update_password.is_none() {
+            let placeholder = Key::UpdatesPasswordPlaceholder.tr(language);
+            let input = cx.new(|cx| {
+                let mut input = TextInput::new(placeholder, cx);
+                input.set_masked(true, cx);
+                input
+            });
+            input.read(cx).focus_handle(cx).focus(window);
+            self.update_password = Some(input);
+        }
+        let (text, detail) = auto_update_ui::status_text(&status, language).unzip();
+        let version = match &status {
+            Status::ReadyToInstall(prepared) | Status::NeedsPassword { prepared, .. } => {
+                Some(prepared.version.clone())
+            }
+            Status::Updated { version, .. } | Status::Available { version } => {
+                Some(version.clone())
+            }
+            _ => None,
+        };
+
+        let mut actions = h_flex().gap_2();
+        match &status {
+            Status::ReadyToInstall(_) | Status::NeedsPassword { .. } => {
+                let password = self.update_password.clone();
+                actions = actions.child(
+                    Button::new("install-update", Key::UpdatesInstall.tr(language))
+                        .style(ButtonStyle::Filled)
+                        .on_click(move |_, _, cx| {
+                            let typed = password.as_ref().map(|input| {
+                                let text = input.read(cx).content().to_string();
+                                input.update(cx, |input, cx| input.clear(cx));
+                                text
+                            });
+                            updater.update(cx, |updater, cx| updater.install(typed, cx));
+                        }),
+                );
+            }
+            Status::Updated { .. } => {
+                actions = actions.child(
+                    Button::new("restart-to-update", Key::UpdatesRestart.tr(language))
+                        .style(ButtonStyle::Filled)
+                        .on_click(|_, _, cx| auto_update_ui::restart(cx)),
+                );
+            }
+            Status::Available { .. } | Status::Errored(_) => {
+                actions = actions.child(
+                    Button::new(
+                        "update-download-page",
+                        Key::UpdatesDownloadPage.tr(language),
+                    )
+                    .on_click(|_, _, cx| cx.open_url(auto_update::RELEASES_URL)),
+                );
+            }
+            _ => {}
+        }
+        if version.is_some() {
+            actions = actions.child(
+                Button::new("update-whats-new", Key::UpdatesWhatsNew.tr(language))
+                    .style(ButtonStyle::Subtle)
+                    .on_click(|_, _, cx| cx.open_url(auto_update::RELEASES_URL)),
+            );
+        }
+
+        v_flex()
+            .gap_2()
+            .child(Label::new(Key::UpdatesTitle.tr(language)).weight(FontWeight::SEMIBOLD))
+            .child(
+                Switch::new("auto-update", enabled)
+                    .label(Key::UpdatesAutomatic.tr(language))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let _ = this.root.update(cx, |root, cx| {
+                            root.set_auto_update(!enabled, cx);
+                        });
+                        cx.notify();
+                    })),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .when(auto_update_ui::should_check(&status), |row| {
+                        row.child(
+                            Button::new("check-updates", Key::UpdatesCheck.tr(language))
+                                .on_click(|_, _, cx| auto_update_ui::check_now(cx)),
+                        )
+                    })
+                    .children(text.map(|text| Label::new(text).size(LabelSize::Small))),
+            )
+            .children(detail.flatten().map(|detail| {
+                Label::new(detail)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+            }))
+            .when_some(self.update_password.clone(), |el, input| {
+                el.child(div().max_w(px(320.0)).child(input_box(&input, window, cx)))
+            })
+            .when(
+                matches!(status, Status::NeedsPassword { wrong: true, .. }),
+                |el| {
+                    el.child(
+                        Label::new(Key::UpdatesWrongPassword.tr(language))
+                            .size(LabelSize::Small)
+                            .color(Color::Error),
+                    )
+                },
+            )
+            .child(actions)
+            .into_any_element()
+    }
+
     fn render_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let language = cx.language();
@@ -1005,6 +1147,8 @@ impl SettingsView {
                         )),
                 )
                 .child(self.render_default_mail_app(language, cx))
+                .child(div().h(px(1.0)).my_2().bg(cx.theme().colors().border))
+                .child(self.render_updates(language, window, cx))
                 .into_any_element(),
             SettingsSection::Accounts => self.render_accounts(window, cx).into_any_element(),
             SettingsSection::Appearance => {

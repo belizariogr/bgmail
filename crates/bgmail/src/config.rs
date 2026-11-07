@@ -77,6 +77,9 @@ pub struct Config {
     pub light_theme: bool,
     /// Whether the first-run setup was finished, even with no account added.
     pub onboarding_completed: bool,
+    /// Look for a new release at startup and every few hours, and install it
+    /// (see `auto_update`). On by default.
+    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -107,6 +110,7 @@ impl Default for Config {
             ui_scale: 1.0,
             light_theme: false,
             onboarding_completed: false,
+            auto_update: true,
         }
     }
 }
@@ -204,6 +208,7 @@ mod tests {
             ui_scale: 1.25,
             light_theme: true,
             onboarding_completed: true,
+            auto_update: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
@@ -298,6 +303,13 @@ mod tests {
     }
 
     #[test]
+    fn automatic_updates_default_on_also_for_older_configs() {
+        assert!(Config::default().auto_update);
+        let old: Config = serde_json::from_str(r#"{"window_width": 900.0}"#).unwrap();
+        assert!(old.auto_update);
+    }
+
+    #[test]
     fn invalid_json_loads_defaults() {
         let path = unique_temp_path();
         std::fs::write(&path, b"not json at all").unwrap();
@@ -333,6 +345,7 @@ mod tests {
             ui_scale: 1.25,
             light_theme: true,
             onboarding_completed: true,
+            auto_update: true,
         };
         save_to(&path, &config).unwrap();
         assert_eq!(load_from(path.clone()), config);

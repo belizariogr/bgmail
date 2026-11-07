@@ -19,6 +19,7 @@ mod http;
 pub mod imap_remote;
 pub mod oauth;
 pub mod presets;
+pub mod release;
 pub mod smtp;
 pub mod tls;
 

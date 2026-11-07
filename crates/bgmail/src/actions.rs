@@ -9,6 +9,7 @@ actions!(
         ToggleCommandPalette,
         ComposeNew,
         OpenSettings,
+        CheckForUpdates,
         ToggleSidebar,
         AppZoomIn,
         AppZoomOut,

@@ -29,6 +29,23 @@ pub(crate) fn agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::new_with_config(config)
 }
 
+/// Agent for large downloads: no overall deadline (a slow link may need
+/// minutes), but connecting and each wait for data are bounded.
+pub(crate) fn download_agent() -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .http_status_as_error(false)
+        .user_agent(concat!("BGMail/", env!("CARGO_PKG_VERSION")))
+        .tls_config(
+            TlsConfig::builder()
+                .root_certs(RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .build();
+    ureq::Agent::new_with_config(config)
+}
+
 /// GET `url`, reading at most a few MB of text.
 pub(crate) fn get(url: &str, timeout: Duration) -> Result<HttpResponse, RemoteError> {
     let response = agent(timeout).get(url).call().map_err(map_error)?;

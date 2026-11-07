@@ -12,7 +12,8 @@ wiring to `storage`.
   (`[package.metadata.packager]`, `packaging/`), `RootView`, compose/settings windows, toolbar/sidebar/list/
   reader chrome, locale catalog, persisted `config.json`, mail HTML
   sanitization/theming (`mail_html`), command palette, menus/shortcuts, window drag/CSD helpers, DB seed
-  bridge.
+  bridge, and the update UI (`auto_update_ui`: schedule, status bar indicator,
+  Settings ▸ General ▸ Updates; the work is `crates/auto_update`).
 - Does not own: theme palettes (`theme`), reusable widgets (`ui`), SQLite
   schema/API (`storage`), shared icon SVG sources (`assets/icons`).
 

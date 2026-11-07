@@ -126,6 +126,7 @@ Brand logos, shown only when the message passes DMARC through an aligned DKIM si
 
 - **`agent`** (pub(crate)) — `fn agent(timeout: Duration) -> ureq::Agent`
   - Behavior: global timeout, non-2xx returned as data (`http_status_as_error(false)`), `BGMail/<version>` user agent, `RootCerts::PlatformVerifier`.
+- **`download_agent`** (pub(crate)) — like `agent` but no overall deadline: connect 20 s, response 60 s (large release downloads).
 - **`get`** (pub(crate)) — `fn get(url: &str, timeout: Duration) -> Result<HttpResponse, RemoteError>`: GET and read the body as text.
 - **`get_bytes`** (pub(crate)) — `fn get_bytes(url, timeout, limit: u64) -> Result<Option<Vec<u8>>, RemoteError>`: GET as bytes; `None` for a non-2xx status, an error past `limit` bytes.
 - **`post_form`** (pub(crate)) — `fn post_form(url: &str, form: &[(&str, &str)], timeout: Duration) -> Result<HttpResponse, RemoteError>`: urlencoded POST, body as text.
@@ -140,6 +141,14 @@ Brand logos, shown only when the message passes DMARC through an aligned DKIM si
 
 - **struct `Request { method, target, body }`**.
 - **`serve`** — `fn serve(handler: impl Fn(&Request) -> (u16, String) + Send + 'static) -> (String, Arc<Mutex<Vec<Request>>>)`: one-thread HTTP/1.1 server on `127.0.0.1:0`; reads request line, headers, `Content-Length` body; answers `handler`'s status/body with `Connection: close`; returns base URL and request log.
+
+### `src/release.rs`
+
+- **struct `Release { tag_name, assets: Vec<ReleaseAsset> }`**, **struct `ReleaseAsset { name, browser_download_url, size, digest: Option<"sha256:…"> }`** (serde from the GitHub API).
+- **`latest_release(repo)`** (pub) — `latest_release_at` of `api.github.com/repos/<repo>/releases/latest`.
+- **`latest_release_at(url)`** (pub) — GET with `Accept: application/vnd.github+json`, 30 s; non-2xx → `Network`; body ≤ 4 MiB; bad JSON → `Protocol`. Also the app's `BGMAIL_UPDATE_API` override.
+- **`download(url, dest, progress)`** (pub) — streams into `<dest>.part` (64 KiB chunks, `progress(received)`), `sync_all`, renames to `dest`; on any error deletes the `.part`. Non-2xx → `Network`.
+- **`download_to`** (private) — the streaming part, via `http::download_agent`.
 
 ### `build.rs` + `src/dotenv.rs`
 

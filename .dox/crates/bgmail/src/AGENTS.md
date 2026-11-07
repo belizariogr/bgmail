@@ -89,7 +89,7 @@ network calls are injected as closures so the job bodies are unit-tested.
 
 #### Types / constants
 
-- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`, `FindInMessage`, `MessagePrint`, `MessageReply`, `MessageReplyAll`, `MessageForward`, `MessageToggleRead`, `GetNewMail`, `SelectNextMessage`, `SelectPreviousMessage`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
+- **actions `Quit`, `ToggleCommandPalette`, `ComposeNew`, `OpenSettings`, `CheckForUpdates` (macOS app menu: manual update check + Settings ▸ General), `ToggleSidebar`, `MessageDelete`, `MessageDeletePermanent`, `MessageRestore`, `MessageArchive`, `MessageMarkJunk`, `MessageToggleFlag`, `ComposeSend`, `ComposeAttach`, `ComposeDiscard`, `ComposeClose`, `FindInMessage`, `MessagePrint`, `MessageReply`, `MessageReplyAll`, `MessageForward`, `MessageToggleRead`, `GetNewMail`, `SelectNextMessage`, `SelectPreviousMessage`**: GPUI action types declared via the `actions!` macro under the `bgmail` namespace. Each is a zero-sized dispatch token wired to menus, key bindings, and `cx.on_action` handlers in `main.rs`.
 - `SelectNextMessage` / `SelectPreviousMessage` are handled by the message list itself (key context `MessageList`), not globally.
 - **struct `MoveMessageToFolder`**: Parameterized action carrying a folder storage path (`path: SharedString`). Dispatched when the user picks a move target from menus or the command palette.
 
@@ -118,7 +118,7 @@ _(No functions — only action types.)_
 - **`app_menu`** (private, L36)
   - Signature: `fn app_menu() -> Menu`
   - Purpose: Builds the application menu (macOS app menu / first menu slot).
-  - Behavior: Returns a menu named "BGMail" with About (no-op), Services OS submenu, separator, and Quit bound to `Quit`.
+  - Behavior: Returns a menu named "BGMail" with About (no-op), "Check for Updates…" (`CheckForUpdates`), Services OS submenu, separator, and Quit bound to `Quit`.
 
 - **`edit_menu`** (private, L49)
   - Signature: `fn edit_menu() -> Menu`
@@ -606,9 +606,9 @@ window.
 #### Types / constants
 
 - **`Config`** (pub, L22)
-  - Signature: `pub struct Config { window_x, window_y, window_width, window_height, maximized, max_x, max_y, max_width, max_height, sidebar_width, list_width, load_remote_images, reader_white_background, compose_white_background, collapsed_accounts, compose_x, compose_y, compose_width, compose_height }`
+  - Signature: `pub struct Config { window_x, window_y, window_width, window_height, maximized, max_x, max_y, max_width, max_height, sidebar_width, list_width, load_remote_images, reader_white_background, compose_white_background, collapsed_accounts, compose_x, compose_y, compose_width, compose_height, …, auto_update }`
   - Purpose: Serializable persisted layout and privacy settings (logical pixels).
-  - Behavior: Loaded from `~/.config/BGMail/config.json`. `#[serde(default)]` fills missing fields from `Default`. Tracks main-window geometry (restored and maximized frames), column widths, remote-image opt-in, reader/compose white-background prefs, collapsed sidebar account indices, and compose-window bounds.
+  - Behavior: Loaded from `~/.config/BGMail/config.json`. `#[serde(default)]` fills missing fields from `Default`. Tracks main-window geometry (restored and maximized frames), column widths, remote-image opt-in, reader/compose white-background prefs, collapsed sidebar account indices, compose-window bounds, and `auto_update` (automatic update checks; default on, also for configs that predate it).
 
 #### Functions / methods
 
@@ -761,6 +761,25 @@ The reader's brand logos, found off the UI thread (`protocols::bimi`).
 - **`spawn_worker(db_path, results)`** (private): one thread `bgmail-brand-logos` with its own `Database` and a `BrandChecker` built on first need; answers in order; ends when the sender drops.
 - **`check(db, checker, request)`** (private): a fresh cached none → `None` with no network; no raw body → `NotReady`; the message's authenticated domain must equal the sender's; a fresh cached logo is reused, else `BrandChecker::logo` refreshes the cache (a failed fetch keeps the stale finding).
 - Tests: sender domains, freshness, ask once / show what was found, body-less retry only after `body_ready`, domainless sender, cached absence needs no resolver.
+
+### `src/auto_update_ui.rs`
+
+Drives the `auto_update` crate from the app. Constants: `FIRST_CHECK_DELAY` 10 s, `CHECK_INTERVAL` 12 h (Thunderbird/Firefox `app.update.interval`).
+
+- **struct `AutoUpdater { status, enabled, relaunch }`** (pub(crate)), held by the private global `GlobalAutoUpdater`.
+- **struct `GitHub`** (private) — `ReleaseSource` over `protocols::release` (`latest_release(REPO)`, or `latest_release_at($BGMAIL_UPDATE_API)` for staging/test releases); errors as `RemoteError::message`.
+- **`updates_dir`** (private) — `~/.config/BGMail/updates` (temp dir fallback).
+- **`init(enabled, cx)`** (pub(crate)) — creates the entity (its `on_app_quit` calls `auto_update::on_quit(status, relaunch)`), sets the global; when `automatic_checks_allowed`, waits `FIRST_CHECK_DELAY` then checks every `CHECK_INTERVAL` while `enabled`. Called from `main` before any window.
+- **`set_enabled(enabled, cx)`**, **`check_now(cx)`** (pub(crate)) — the Settings switch; a manual check (Settings button, macOS menu).
+- **`restart(cx)`** (pub(crate)) — `schedule_quit_then` marking `relaunch`: a draft can still cancel the quit (and the relaunch).
+- **`should_check(status)`** (pub(crate)) — not while busy, nor once found (`ReadyToInstall`, `NeedsPassword`, `Updated`).
+- **`AutoUpdater::get(cx)`**, **`status()`** (pub(crate)).
+- **`AutoUpdater::check(manual, cx)`** (pub(crate)) — `Checking`, then `auto_update::detect` + `auto_update::check` (GitHub, `System`) on the background executor; every reported status goes over an `async_channel` to a foreground task that stores it and notifies.
+- **`AutoUpdater::install(password, cx)`** (pub(crate)) — from `ReadyToInstall` (password ignored) or `NeedsPassword`; `Installing`, then `install_with_root` with `elevation_for(Os::current(), password, UpdatesAdminPrompt)` in the background; stores the result.
+- **enum `Indicator { Restart, Install, Available, Failed }`** (pub(crate)) — `label()` → `StatusUpdate*` key.
+- **`indicator(status)`** (pub(crate)) — `Updated` → Restart; `ReadyToInstall`/`NeedsPassword` → Install; `Available`; `Errored` → Failed; else none (checks and downloads stay quiet).
+- **`status_text(status, language)`** (pub(crate)) — Settings text (`{version}` filled; download percent) + optional error detail; `None` for `Idle`; Windows `Updated { apply_on_quit }` says it installs on restart/quit.
+- Tests: `should_check`, `indicator`, `status_text`.
 
 ### `src/attachments.rs`
 
@@ -1120,7 +1139,7 @@ Message dates in the local zone (chrono `clock`); the formatting core takes expl
 - **`Key`** (pub, L38)
   - Signature: `pub enum Key { … }` (66 UI string keys)
   - Purpose: Typed catalog of translatable UI chrome strings.
-  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`), plain-text fallback notices (`NoticeTooDeep`, `NoticeCrashed`), status strings, Settings ▸ Accounts (`Account*`: form labels, provider notes, health, errors) and `NotificationsHint`.
+  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`), plain-text fallback notices (`NoticeTooDeep`, `NoticeCrashed`), status strings, Settings ▸ Accounts (`Account*`: form labels, provider notes, health, errors), `NotificationsHint`, Settings ▸ General ▸ Updates (`Updates*`, `{version}` placeholders filled by `auto_update_ui::status_text`) and the status bar's `StatusUpdate*`.
 
 - **`GlobalLanguage`** (private, L332)
   - Signature: `struct GlobalLanguage(Language)`
@@ -1316,6 +1335,9 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Purpose: Defers palette toggle to the main RootView.
   - Behavior: Reads `MainWindow` global and schedules `RootView::toggle_command_palette` on the next frame.
 
+- **`schedule_quit`** (pub(crate)) — `schedule_quit_then` with nothing to run.
+- **`schedule_quit_then(cx, before_quit)`** (pub(crate)) — quits unless `RootView::may_quit` refuses (a draft); `before_quit` runs only when quitting (no main window yet: at once). Deferred because the dispatching window is busy.
+- `run`: `auto_update_ui::init(settings.auto_update)` after the Quit action; the main view observes the updater (status bar); `CheckForUpdates` → `check_now` + Settings.
 - **`schedule_menu_command`** (private, L71)
   - Signature: `fn schedule_menu_command(id: CommandId, cx: &mut App)`
   - Purpose: Defers a menu command to RootView if enabled.
@@ -1501,7 +1523,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`may_quit`** (pub(crate))
   - Signature: `pub(crate) fn may_quit(&mut self, cx: &mut Context<Self>) -> bool`
   - Purpose: Whether the app may quit now.
-  - Behavior: With edits in compose, activates it, asks through `discard_draft` and returns `false`; the user quits again after answering. Called from `on_window_should_close` of the main window and `schedule_quit` (`main.rs`: Quit action, caption close button; deferred because the dispatching window is busy).
+  - Behavior: With edits in compose, activates it, asks through `discard_draft` and returns `false`; the user quits again after answering. Called from `on_window_should_close` of the main window and `schedule_quit`/`schedule_quit_then` (`main.rs`: Quit action, caption close button; deferred because the dispatching window is busy).
 
 - **`close_settings_window`** (pub(crate), L672)
   - Signature: `pub(crate) fn close_settings_window(&mut self, cx: &mut Context<Self>)`
@@ -1604,6 +1626,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`request_brand_logo(cx)`** (private): asks `brand_logos` about the message the reader shows unless settled; on first use starts the task that takes the worker's findings (`receive`, notifies when a logo shows).
 - **`open_from_notification(message_id, cx)`** (pub(crate)): what a clicked notification opens (nothing during onboarding): the unified Inbox (search ended, via `select_mailbox` unless already there), then the message if given and listed — not listed, the list reloads once with `ListFilter::All`; still missing, only the Inbox shows. Already the open message: not reloaded (no reader flash). Revealed in the list.
 - **`set_notifications_enabled`** (pub(crate)): Settings ▸ Notifications switch: sets `notifications_enabled`, persists via `request_save`, notifies.
+- **`set_auto_update`** (pub(crate)): Settings ▸ General ▸ Updates switch: sets `auto_update`, tells `auto_update_ui::set_enabled`, persists, notifies.
 
 - **`print_message`** (pub(crate))
   - Signature: `pub(crate) fn print_message(&mut self, cx: &mut Context<Self>)`
@@ -2073,10 +2096,11 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Purpose: Renders reading pane.
   - Behavior: First `request_brand_logo`. Empty state, fixed header with subject, privacy shield, then one block of avatar (`ui::Avatar`, with `brand_logos.logo(id)` when verified) + sender name/address/date and the recipients line right under it (no gap, so the three lines are evenly spaced), attachments, and the body area hosting the reader `HtmlView` (white background when forced).
 
+- **`render_update_indicator(language, cx)`** (private): when `auto_update_ui::indicator` has something for the user, an accent `XSmall` label (`StatusUpdate*`); click → `auto_update_ui::restart` for `Restart`, else `open_settings` (General).
 - **`render_status_bar`** (private, L3300)
   - Signature: `fn render_status_bar(&self, cx) -> impl IntoElement`
   - Purpose: Bottom status bar.
-  - Behavior: Counts on the left; on the right the reader zoom (`status_zoom`, only when not 100%), "N unsent" (`status_unsent`, `Color::Warning`, click → `toggle_unsent_panel`) while `unsent` is non-empty, the sync text and the unread count; the hovered link URL centered when present.
+  - Behavior: Counts on the left; on the right the update indicator (`render_update_indicator`), the reader zoom (`status_zoom`, only when not 100%), "N unsent" (`status_unsent`, `Color::Warning`, click → `toggle_unsent_panel`) while `unsent` is non-empty, the sync text and the unread count; the hovered link URL centered when present.
 ##### Context: `Render for RootView`
 
 - **`render`** (private, L3697)
@@ -2376,7 +2400,8 @@ in `account_setup`.
 - **`save_password(cx)`** (private): non-empty → `RootView::update_account_secret` (stores in the keychain, reconnects); closes the editor.
 - **`confirm_remove(account_id, window, cx)`** (private): `window.prompt` (Warning; local mail is deleted) with Remove / Cancel; Remove → `RootView::remove_account`, clears row state.
 - **`render_nav(cx)`** (private): section list with icons; click switches section.
-- **`render_content(window, cx)`** (private): section title + body. General: name/version/language; Accounts: `render_accounts`; Appearance: theme + white reader/compose switches; Notifications: switch bound to `RootView::notifications_enabled` (`set_notifications_enabled`) + hint; Privacy: always-load-remote-images switch.
+- **`render_updates(language, window, cx)`** (private): Settings ▸ General ▸ Updates: observes the updater on first render; switch bound to `RootView::auto_update`; "Check for updates" only when `should_check`; `status_text` (+ muted detail); a masked password field (focused) while `NeedsPassword`, "Wrong password…" in `Color::Error`; actions: Install (`AutoUpdater::install` with the typed password, field cleared), Restart now (`auto_update_ui::restart`), Open download page (`Available`/`Errored`), What's new (when a version is known; `RELEASES_URL`).
+- **`render_content(window, cx)`** (private): section title + body. General: name/version/language/default app, then `render_updates`; Accounts: `render_accounts`; Appearance: theme + white reader/compose switches; Notifications: switch bound to `RootView::notifications_enabled` (`set_notifications_enabled`) + hint; Privacy: always-load-remote-images switch.
 - **`render_accounts(window, cx)`** (private): bordered list of `render_account_row`, then the form (created lazily) when `form_open` or no remote account exists, else an "Add account…" button.
 - **`render_account_row(account, last, window, cx)`** (private): name + provider badge, e-mail, health text (error/warning/success/muted color; "Finish signing in…" while its sign-in runs). Actions: Cancel (sign-in running) / "Sign in again" (OAuth) / "Update password" (password, non-local), and "Remove" (all, incl. local). Inline password editor (Save / Cancel) and the row's failure message below.
 - **`render_form(has_remote, window, cx)`** (private): title, Name, E-mail, preset note; Google mode: "Sign in with Google" + "Use an app password instead"; otherwise (Gmail without client: the `BGMAIL_GOOGLE_CLIENT_ID/SECRET` explanation) Password (+ "Sign in with Google instead" for Gmail with a client). "Manual settings" disclosure with the "Looking up…" hint (hidden in Google mode). Message, then footer: while signing in "Finish signing in in your browser…" + Cancel; else Cancel (only when a remote account exists) and Connect ("Checking…" and no click while busy).

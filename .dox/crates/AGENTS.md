@@ -15,7 +15,7 @@ isolated tests, and shorter incremental compiles.
 ## Local Contracts
 
 - Members (see root `Cargo.toml`): `theme`, `ui`, `storage`, `mail_core`,
-  `protocols`, `html_view`, `mail_sync`, `bgmail`.
+  `protocols`, `html_view`, `mail_sync`, `auto_update`, `bgmail`.
 - **Dependency direction:** UI depends on domain/storage, never the reverse.
   Domain and protocols must not know about GPUI. Today: `bgmail` → `ui` →
   `theme`; `bgmail` → `storage`; `storage` has no GPUI/`ui`/`theme` deps.
@@ -28,6 +28,9 @@ isolated tests, and shorter incremental compiles.
   `protocols` (IMAP/SMTP/OAuth/discovery/BIMI) → `mail_core` only (no GPUI, no
   `storage`/`ui`/`theme`); blocking clients on std threads, one rustls 0.23
   (ring) shared by `imap`, `lettre` and `ureq`.
+  `auto_update` (app self-updates) depends on `sha2` only: no GPUI, no
+  network (the app passes a `ReleaseSource` over `protocols::release`), no C
+  deps, so it checks for every target; `bgmail` → `auto_update`.
 - No `accounts` crate (decided): config in `storage`, secrets via GPUI's
   credential API in `bgmail`, OAuth/presets in `protocols`.
 - `gpui` is `0.2.2` from crates.io, replaced by a patched copy in `vendor/gpui`
@@ -65,4 +68,5 @@ isolated tests, and shorter incremental compiles.
 | `crates/protocols/` | [`.dox/crates/protocols/AGENTS.md`](protocols/AGENTS.md) | IMAP (`ImapRemote`), SMTP (`SmtpSender`), OAuth PKCE loopback, `ImapSmtpConnector`, provider presets + autoconfig |
 | `crates/mail_sync/` | [`.dox/crates/mail_sync/AGENTS.md`](mail_sync/AGENTS.md) | Sync engine: per-account worker/IDLE threads, sync planner, op/outbox replay, optimistic UI actions |
 | `crates/html_view/` | [`.dox/crates/html_view/AGENTS.md`](html_view/AGENTS.md) | Native GPUI HTML rendering (Blitz layout, GPUI paint/text) |
+| `crates/auto_update/` | [`.dox/crates/auto_update/AGENTS.md`](auto_update/AGENTS.md) | Self-updates from GitHub Releases: versions, install detection, release file choice, digest check, platform installers |
 | `crates/bgmail/` | [`.dox/crates/bgmail/AGENTS.md`](bgmail/AGENTS.md) | App binary: windows, layout, reader, i18n |

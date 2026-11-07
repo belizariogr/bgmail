@@ -144,6 +144,30 @@ Copy `.env.example` to `.env` and fill in your OAuth client (desktop app type).
 empty one is created by the first build. Without a client, Gmail is still offered
 but sign-in explains that the client isn't configured.
 
+## Updates
+
+BGMail checks GitHub for a new release 10 s after it starts and then every 12
+hours (Settings ▸ General ▸ Updates turns this off or checks by hand, as does
+BGMail ▸ Check for Updates… on macOS). A newer release's file that matches how
+this copy was installed is downloaded, checked against the SHA-256 digest
+GitHub publishes, and installed; the new version runs after a restart
+("Restart to update" in the status bar):
+
+| Installed with | Updated from | Password |
+|---|---|---|
+| `install.sh` into `~/.local` | `bgmail-linux-<arch>.tar.gz` | no, silent |
+| `script/install-linux-system` (`/usr`, `/usr/local`) | the same tarball | root (polkit, or `sudo`) |
+| `.deb`, `.rpm`, Arch package (also `script/install-arch`) | the same format, through apt / dnf·zypper·yum / pacman | root (polkit, or `sudo`) |
+| AppImage | the `.AppImage` | only if its folder is not writable |
+| macOS `.dmg` | the `.dmg` for the Mac's CPU (same Developer ID required) | only if the app's folder is not writable |
+| Windows setup / MSI | the `-setup.exe` / `.msi`, run when BGMail quits or restarts | MSI: Windows asks (UAC) |
+
+Root is requested through the desktop's polkit agent (`pkexec`); without one,
+BGMail asks for the password itself and runs `sudo`. Copies built from source
+only say that a new version exists. Debug builds and `BGMAIL_NO_UPDATE=1` skip
+the automatic checks; `BGMAIL_UPDATE_API=<url>` reads a test release instead of
+GitHub's. The work is in `crates/auto_update`.
+
 ## Structure
 
 ```
@@ -151,6 +175,7 @@ crates/
 ├── theme/   # themes and colors (light/dark)
 ├── ui/      # reusable visual components (Label, Icon, Button, ListItem…)
 ├── storage/ # SQLite persistence (mail.db under ~/.config/BGMail/)
+├── auto_update/ # self-updates from GitHub Releases
 └── bgmail/   # binary: window, layout, UI state and localization
 ```
 

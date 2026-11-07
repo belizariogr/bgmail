@@ -761,6 +761,15 @@
       `bgmail-linux-<arch>.{deb,rpm,pkg.tar.zst}` (rpm: `bgmail.spec`; pacman:
       the PKGBUILD in an Arch container). Next: check the first release run, and
       aarch64 Linux packages (no aarch64 job yet)
+- ✅ Automatic updates (ported from BGPaint): `crates/auto_update` (install detection,
+      release file, SHA-256 check, `install.sh` for tarball/prefix/AppImage/deb/rpm/pacman/.app,
+      Windows setup/MSI after quit, relaunch that waits for the old process),
+      `protocols::release` (GitHub API + download), `auto_update_ui` (10 s after start + every
+      12 h, status bar "Restart to update", Settings ▸ General ▸ Updates with password fallback,
+      macOS "Check for Updates…"). Only builds from source just report. Verified end to end on
+      Linux (`~/.local` bundle against a local fake release). Next: check the first real release
+      on each platform: polkit/sudo for deb/rpm/pacman, the macOS admin prompt, and the Windows
+      NSIS `/S` and MSI runs (written but not yet run on Windows/macOS)
 - ⬜ Windows signing: apply to SignPath Foundation (free for OSS) and swap the
       PFX import step for its action
 

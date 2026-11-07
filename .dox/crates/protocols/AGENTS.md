@@ -6,7 +6,8 @@ Real implementations of `mail_core`'s blocking contracts: IMAP
 (`ImapRemote: MailRemote`), SMTP submission (`SmtpSender: MailSender`), the
 account connector (`ImapSmtpConnector: MailConnector`), OAuth 2.0 sign-in
 (PKCE + loopback redirect, refresh, XOAUTH2), and server discovery (provider
-presets, Thunderbird autoconfig, guess).
+presets, Thunderbird autoconfig, guess), and the app's own GitHub Releases
+(`release`: latest release + download, for `auto_update`).
 
 ## Ownership
 
