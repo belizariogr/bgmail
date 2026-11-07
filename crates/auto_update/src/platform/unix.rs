@@ -260,6 +260,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // Prefix installs exist only on Linux (`classify`), and the mode uses GNU
+    // `sed -i` and `install -D`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_prefix_gets_absolute_desktop_paths() {
         let dir = temp("prefix");
