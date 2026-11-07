@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Builds ${CARGO_TARGET_DIR:-target}/release/bgmail-linux-<arch>.pkg.tar.zst
+# with makepkg from crates/bgmail/packaging/linux/PKGBUILD. Dependencies are not
+# checked (--nodeps): the package is built, not installed. Set BGMAIL_BINARY to
+# package an existing binary instead of building.
+
+set -euo pipefail
+
+if [[ $# -gt 0 ]]; then
+    echo "Usage: ${0##*/}"
+    exit 1
+fi
+
+cd "$(dirname "$0")/.."
+repo="$PWD"
+
+if ! command -v makepkg >/dev/null 2>&1; then
+    echo "error: makepkg not found (Arch Linux, or an archlinux container)" >&2
+    exit 1
+fi
+
+target_dir="${CARGO_TARGET_DIR:-target}"
+mkdir -p "$target_dir/release"
+out="$(cd "$target_dir/release" && pwd)/bgmail-linux-$(uname -m).pkg.tar.zst"
+if [[ -n "${BGMAIL_BINARY:-}" ]]; then
+    BGMAIL_BINARY="$(realpath "$BGMAIL_BINARY")"
+    export BGMAIL_BINARY
+fi
+
+# makepkg writes src/, pkg/ and the package next to the PKGBUILD; a temp copy
+# keeps the checkout clean.
+temp="$(mktemp -d)"
+trap 'rm -rf "$temp"' EXIT
+cp crates/bgmail/packaging/linux/PKGBUILD "$temp/"
+mkdir "$temp/out"
+(
+    cd "$temp"
+    BGMAIL_SRC="$repo" BUILDDIR="$temp" PKGDEST="$temp/out" PKGEXT=.pkg.tar.zst \
+        makepkg --nodeps --force --noconfirm >&2
+)
+mv "$temp"/out/bgmail-*.pkg.tar.zst "$out"
+echo "$out"

@@ -93,4 +93,83 @@ if PREFIX="$prefix" script/install-linux-system --bogus > /dev/null 2>&1; then
     fail "accepted an unknown option"
 fi
 
+# install.sh picks the distro's package. Fake curl (serves the dummy tarball,
+# fails for names in FAKE_MISSING), sudo and package managers log their calls.
+arch="$(uname -m)"
+fakes="$temp/fakes"
+mkdir -p "$fakes"
+cat > "$fakes/curl" <<'FAKE'
+#!/bin/sh
+echo "$4" >> "$FAKE_LOG.curl"
+case " $FAKE_MISSING " in *" ${4##*/} "*) exit 22 ;; esac
+case "$4" in
+    *.tar.gz) cp "$FAKE_BUNDLE" "$3" ;;
+    *) echo package > "$3" ;;
+esac
+FAKE
+printf '#!/bin/sh\necho "sudo $*" >> "$FAKE_LOG"\nexec "$@"\n' > "$fakes/sudo"
+for tool in pacman apt-get dnf zypper; do
+    printf '#!/bin/sh\necho "%s $*" >> "$FAKE_LOG"\n' "$tool" > "$fakes/$tool"
+done
+chmod +x "$fakes"/*
+
+# distro <name> <os-release lines> <tools...>: runs install.sh with only those
+# package managers; output in $temp/<name>.out, calls in $temp/<name>.log.
+distro() {
+    local name="$1" os_release="$2"
+    shift 2
+    local bin="$temp/bin-$name"
+    mkdir -p "$bin" "$temp/home-$name"
+    ln -sf "$fakes/curl" "$fakes/sudo" "$bin/"
+    for tool in "$@"; do ln -sf "$fakes/$tool" "$bin/"; done
+    printf '%b\n' "$os_release" > "$temp/os-release-$name"
+    : > "$temp/$name.log"
+    : > "$temp/$name.log.curl"
+    HOME="$temp/home-$name" PATH="$bin:$PATH" BGMAIL_OS_RELEASE="$temp/os-release-$name" \
+        FAKE_LOG="$temp/$name.log" FAKE_BUNDLE="$bundle" FAKE_MISSING="${FAKE_MISSING:-}" \
+        sh script/install.sh > "$temp/$name.out" 2>&1 || fail "$name: $(cat "$temp/$name.out")"
+}
+latest="https://github.com/belizariogr/bgmail/releases/latest/download"
+
+distro arch 'ID=arch' pacman
+grep -qx "$latest/bgmail-linux-$arch.pkg.tar.zst" "$temp/arch.log.curl" || fail "arch: wrong download"
+grep -q "^sudo pacman -U --noconfirm /.*/bgmail-linux-$arch.pkg.tar.zst$" "$temp/arch.log" \
+    || fail "arch: $(cat "$temp/arch.log")"
+grep -q "sudo pacman -R bgmail" "$temp/arch.out" || fail "arch: no uninstall hint"
+[[ ! -e "$temp/home-arch/.local/bgmail.app" ]] || fail "arch: also installed into ~/.local"
+
+BGMAIL_VERSION=v9.9.9 distro mint 'ID=linuxmint\nID_LIKE="ubuntu debian"' apt-get
+grep -qx "https://github.com/belizariogr/bgmail/releases/download/v9.9.9/bgmail-linux-$arch.deb" \
+    "$temp/mint.log.curl" || fail "mint: wrong download $(cat "$temp/mint.log.curl")"
+grep -q "^sudo apt-get install -y /.*\.deb$" "$temp/mint.log" || fail "mint: $(cat "$temp/mint.log")"
+
+distro suse 'ID="opensuse-tumbleweed"\nID_LIKE="opensuse suse"' zypper
+grep -q "^sudo zypper --non-interactive install --allow-unsigned-rpm /.*\.rpm$" "$temp/suse.log" \
+    || fail "suse: $(cat "$temp/suse.log")"
+
+distro rocky 'ID=rocky\nID_LIKE="rhel centos fedora"' dnf
+grep -q "^sudo dnf install -y /.*\.rpm$" "$temp/rocky.log" || fail "rocky: $(cat "$temp/rocky.log")"
+
+# No package in the release, no package manager, an unknown distro, or asked
+# for: the tarball into ~/.local, without root.
+FAKE_MISSING="bgmail-linux-$arch.rpm" distro fedora 'ID=fedora' dnf
+distro nodnf 'ID=fedora'
+distro gentoo 'ID=gentoo' pacman apt-get dnf zypper
+BGMAIL_INSTALL=local distro local 'ID=arch' pacman
+for name in fedora nodnf gentoo local; do
+    [[ "$("$temp/home-$name/.local/bin/bgmail")" == dummy-bgmail ]] || fail "$name: no ~/.local install"
+    [[ ! -s "$temp/$name.log" ]] || fail "$name: ran $(cat "$temp/$name.log")"
+done
+grep -q "no .rpm package" "$temp/fedora.out" || fail "fedora: fallback not explained"
+
+# A package install replaces an earlier ~/.local one, keeping user data.
+mkdir -p "$temp/home-arch/.config/BGMail"
+touch "$temp/home-arch/.config/BGMail/mail.db"
+HOME="$temp/home-arch" BGMAIL_BUNDLE_PATH="$bundle" sh script/install.sh > /dev/null
+distro arch 'ID=arch' pacman
+[[ ! -e "$temp/home-arch/.local/bgmail.app" ]] || fail "~/.local app kept beside the package"
+[[ ! -e "$temp/home-arch/.local/bin/bgmail" ]] || fail "~/.local link kept beside the package"
+[[ ! -e "$temp/home-arch/.local/share/applications/BGMail.desktop" ]] || fail "~/.local desktop kept"
+[[ -f "$temp/home-arch/.config/BGMail/mail.db" ]] || fail "package install deleted user data"
+
 echo "install scripts OK"

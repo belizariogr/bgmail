@@ -1,0 +1,63 @@
+# Maintainer: Belizário Ribeiro
+#
+# Arch Linux package built from a BGMail source checkout (the working tree as it
+# is, uncommitted changes included). `script/install-arch` runs it; running
+# `makepkg -si` in this directory also works, and script/bundle-linux-pacman
+# makes the release package from it. BGMAIL_SRC overrides the checkout;
+# BGMAIL_BINARY packages an existing binary instead of building.
+
+_root="${BGMAIL_SRC:-$(git -C "${startdir:-.}" rev-parse --show-toplevel 2>/dev/null)}"
+_version="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "$_root/Cargo.toml")"
+
+pkgname=bgmail
+# Cargo prereleases (`1.0.0-beta.1`) lose the hyphen, which pkgver forbids;
+# vercmp still sorts `1.0.0beta.1` before `1.0.0`.
+pkgver="${_version//-/}"
+pkgrel=1
+pkgdesc="Native desktop e-mail client built on GPUI"
+arch=('x86_64' 'aarch64')
+url="https://github.com/belizariogr/bgmail"
+license=('MIT')
+# Linked: xcb + xkbcommon. dlopen'ed by GPUI: wayland, Vulkan, fontconfig.
+# Same set as the deb/pacman lists in crates/bgmail/Cargo.toml.
+depends=(
+    'gcc-libs'
+    'glibc'
+    'libxcb'
+    'libxkbcommon'
+    'libxkbcommon-x11'
+    'wayland'
+    'vulkan-icd-loader'
+    'fontconfig'
+    'xdg-utils'
+)
+# bindgen needs libclang. A rustup cargo on PATH counts (pacman can't see it).
+makedepends=('clang' 'git')
+command -v cargo >/dev/null 2>&1 || makedepends+=('cargo')
+optdepends=('org.freedesktop.secrets: keyring that stores account passwords')
+conflicts=('bg-mail')
+# makepkg's default LTO puts -flto in the C deps' flags (sqlite, freetype),
+# which Rust's linker can't use; debug would rebuild everything with debuginfo.
+options=('!lto' '!debug')
+
+# A target dir of its own: makepkg's RUSTFLAGS differ from a plain `cargo build`,
+# so sharing `target/release` would rebuild it from scratch each switch.
+_target="$_root/target/pacman"
+
+build() {
+    [[ -n "${BGMAIL_BINARY:-}" ]] && return
+    cd "$_root"
+    CARGO_TARGET_DIR="$_target" cargo build --release --locked -p bgmail --bin BGMail
+}
+
+package() {
+    cd "$_root"
+    # bundle-linux renders the desktop entry and lays out the icons; reuse it.
+    local archive
+    archive="$(CARGO_TARGET_DIR="$_target" \
+        BGMAIL_BINARY="${BGMAIL_BINARY:-$_target/release/BGMail}" script/bundle-linux)"
+    rm -rf "$srcdir/bgmail.app"
+    tar -xzf "$archive" -C "$srcdir"
+    install -d "$pkgdir/usr"
+    cp -r --no-preserve=ownership "$srcdir/bgmail.app/." "$pkgdir/usr/"
+}

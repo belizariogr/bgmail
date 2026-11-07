@@ -72,7 +72,7 @@ release instead.
 | OS | Packages |
 |---|---|
 | macOS (Apple silicon, Intel) | `BGMail.app` inside a `.dmg` (min. macOS 10.15.7) |
-| Linux x86_64 | `.deb`, `.AppImage`, pacman `.tar.gz` + `PKGBUILD` |
+| Linux x86_64 | `.deb`, `.rpm`, Arch `.pkg.tar.zst`, `.AppImage`, standalone `.tar.gz` |
 | Windows x86_64 | NSIS `-setup.exe` (per-user, no admin) and WiX `.msi` |
 
 macOS builds are signed with a Developer ID certificate and notarized (the
@@ -81,16 +81,36 @@ configured; unsigned, SmartScreen asks for confirmation. On Linux, account passw
 Service, so a keyring (GNOME Keyring, KWallet ≥ 5.97, KeePassXC…) must be
 running.
 
-On Linux, these scripts install without a package manager (same layout as
-Zed's). Only the system-wide one needs root:
+On Linux, `install.sh` installs the latest release with your package manager:
+the `.deb` on Debian/Ubuntu and derivatives, the `.rpm` on Fedora/RHEL/openSUSE,
+the `.pkg.tar.zst` on Arch and derivatives (asks for sudo). Anywhere else, or
+with `BGMAIL_INSTALL=local`, it unpacks the standalone build into `~/.local`
+without root:
 
 ```bash
-curl -fL https://github.com/belizariogr/bgmail/releases/latest/download/install.sh | sh  # latest release, into ~/.local
+curl -fL https://github.com/belizariogr/bgmail/releases/latest/download/install.sh | sh
+```
+
+These scripts install without a package manager (same layout as Zed's). Only
+the system-wide one needs root:
+
+```bash
 script/install-linux            # build this checkout, into ~/.local
 script/install-linux-system     # build this checkout, into /usr (asks for sudo)
 script/uninstall.sh             # remove the ~/.local install; asks before deleting mail
 script/install-linux-system --uninstall
 ```
+
+On Arch Linux (and derivatives), install this checkout as a real pacman package
+instead, so pacman tracks, upgrades and removes it:
+
+```bash
+script/install-arch        # makepkg -si on crates/bgmail/packaging/linux/PKGBUILD
+sudo pacman -R bgmail      # remove; ~/.config/BGMail is kept
+```
+
+It installs missing build dependencies (`clang`, plus `rust` unless a rustup
+`cargo` is on PATH) and keeps the built package in `target/pacman/`.
 
 To build packages locally, use [cargo-packager](https://github.com/crabnebula-dev/cargo-packager)
 (configured in `[package.metadata.packager]` of `crates/bgmail/Cargo.toml`):

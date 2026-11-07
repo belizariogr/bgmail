@@ -24,8 +24,8 @@ wiring to `storage`.
   configured once in `[package.metadata.packager]` of `Cargo.toml` (paths
   relative to this crate): product `BGMail`, identifier
   `io.github.belizariogr.bgmail`, icons from `assets/appIcon/`, per-OS default
-  formats (macOS app+dmg, Linux deb+AppImage+pacman, Windows NSIS; CI adds
-  WiX). Run `cargo packager --release` (its before-packaging hook builds the
+  formats (macOS app+dmg, Linux deb+AppImage+pacman, Windows NSIS; release CI
+  builds only deb+AppImage on Linux, adds WiX). Run `cargo packager --release` (its before-packaging hook builds the
   release binary); outputs land in `target/[<triple>/]release/`.
   - Linux: `packaging/linux/BGMail.desktop` is the Handlebars desktop template
     for deb/AppImage/pacman (`Categories=Network;Email;`, mailto handler,
@@ -36,6 +36,24 @@ wiring to `storage`.
     linked/dlopen'ed libs (xcb, xkbcommon, wayland, Vulkan + ICD, fontconfig);
     secrets go over D-Bus Secret Service (pure Rust), so a keyring daemon
     (gnome-keyring, KeePassXC…) is needed at runtime but not a package dep.
+  - Arch: `packaging/linux/PKGBUILD` builds the native `bgmail` package from
+    the source checkout (`BGMAIL_SRC`, else the git toplevel of `$startdir`;
+    `BGMAIL_BINARY` skips the build). `pkgver` is the `[workspace.package]`
+    version without hyphens; `cargo build --release --locked` into
+    `target/pacman` (own dir: makepkg's RUSTFLAGS differ); `package()` reuses
+    `script/bundle-linux` and copies its tree into `/usr`. Depends mirror the
+    pacman list in `Cargo.toml` (+ glibc, gcc-libs); makedepends `clang`,
+    `git`, and `cargo` only when none is on PATH (rustup); optdepends
+    `org.freedesktop.secrets`; conflicts with cargo-packager's `bg-mail`;
+    `options=(!lto !debug)`. Driven by `script/install-arch`, tested by
+    `script/test-arch-package`; `script/bundle-linux-pacman` makes the release
+    `.pkg.tar.zst` from it.
+  - RPM: `packaging/linux/bgmail.spec` repackages a `bundle-linux` tree
+    (`bgmail_version`, `bundle` macros; no debuginfo, no brp). Linked libs come
+    from rpm's automatic deps; the dlopen'ed ones are `Requires` by soname
+    (`libwayland-client.so.0()(64bit)`, `-cursor`, `libvulkan.so.1`,
+    `libfontconfig.so.1`) so Fedora and openSUSE resolve them alike, plus
+    `xdg-utils`. Built by `script/bundle-linux-rpm`.
   - macOS: `minimum-system-version` 10.15.7 (Zed's floor); signing identity
     is injected by CI only (never committed). Releases package only the `.app`
     here; the `.dmg` comes from `script/bundle-macos-dmg` with the art and

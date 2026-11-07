@@ -22,7 +22,10 @@ Continuous integration on the three desktop platforms and release packaging
     pkg-config), then `cargo fmt --all --check`,
     `cargo clippy --workspace --all-targets -- -D warnings`,
     `cargo test --workspace --no-fail-fast` (one failing crate must not hide the others on platforms nobody runs locally).
-  - The Linux job also runs `script/test-install`.
+  - The Linux job also runs `script/test-install`, `script/test-rpm-package`
+    (apt `rpm`) and `script/test-arch-package` in an `archlinux:base-devel`
+    container (git installed, a user with the runner's uid: makepkg refuses
+    root).
   - `macos` (macos-15) and `windows` (windows-latest): `cargo build -p bgmail`
     + `cargo test --workspace --no-fail-fast`; macOS also installs dmgbuild
     1.6.7 in a venv and runs `script/test-macos-dmg`.
@@ -51,7 +54,11 @@ Continuous integration on the three desktop platforms and release packaging
     - Pushed `v*` tag: publishes a **draft** for that tag.
     - A `-` in the tag makes it a prerelease.
   - `package` matrix (checks out `prepare.sha`): linux-x86_64 (ubuntu-22.04:
-    deb, AppImage, pacman), macos-aarch64 and macos-x86_64 (both macos-15;
+    cargo-packager deb + AppImage; then the `bundle-linux` tarball, the deb
+    renamed `bgmail-linux-<arch>.deb`, `script/bundle-linux-rpm` (apt `rpm`)
+    and `script/bundle-linux-pacman` in an `archlinux:base-devel` container as
+    a user with the runner's uid, all from the same `BGMail` binary; stable
+    names for `install.sh`), macos-aarch64 and macos-x86_64 (both macos-15;
     x86_64 cross-compiled via `CARGO_BUILD_TARGET` + `--target`: packager
     `app`, then `script/bundle-macos-dmg` → `BGMail_<version>_<arch>.dmg` in
     `target/<triple>/release/`, dmgbuild pinned `DMGBUILD_VERSION`),
@@ -109,7 +116,7 @@ Continuous integration on the three desktop platforms and release packaging
 ## Work Guidance
 
 - Keep the apt package list in sync between `ci.yml` and `release.yml`.
-- New package formats go in the matrix `formats` and the upload globs.
+- New package formats go in the matrix `formats` (or a Linux packaging step) and the upload globs; packages `install.sh` downloads keep stable `bgmail-linux-<arch>.*` names.
 - When bumping cargo-packager, re-check config keys and the desktop template
   variables (`crates/bgmail/packaging/linux/BGMail.desktop`).
 

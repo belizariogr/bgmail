@@ -32,7 +32,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config clang \
             libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev \
-            libwayland-dev libvulkan1 libfontconfig-dev libfreetype-dev
+            libwayland-dev libvulkan1 libfontconfig-dev libfreetype-dev \
+            rpm
       - name: Install Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -40,6 +41,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --no-fail-fast
       - run: script/test-install
+      - run: script/test-rpm-package
+      # makepkg refuses root; the checkout's owner builds it.
+      - name: Arch package (archlinux container)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src archlinux:base-devel bash -c '
+            pacman -Sy --noconfirm --needed git >/dev/null
+            useradd -m -u '"$(id -u)"' builder
+            su builder -c "git config --global --add safe.directory /src && script/test-arch-package"'
 
   macos:
     name: macOS (build, test)

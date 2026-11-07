@@ -752,6 +752,15 @@
       app → Applications), built from the command line by dmgbuild
       (`script/bundle-macos-dmg`, tested by `script/test-macos-dmg`)
 - ✅ App icon: envelope centered on the tile (`script/generate-app-icons`)
+- ✅ Arch Linux: native pacman package `bgmail` from this checkout
+      (`crates/bgmail/packaging/linux/PKGBUILD`, `script/install-arch` = makepkg -si,
+      tested by `script/test-arch-package`). Next: publish an AUR `bgmail-bin`
+      from the release tarball
+- ✅ `install.sh` installs the distro's native package (deb / rpm / pkg.tar.zst,
+      from `/etc/os-release`), else the `~/.local` tarball; releases publish
+      `bgmail-linux-<arch>.{deb,rpm,pkg.tar.zst}` (rpm: `bgmail.spec`; pacman:
+      the PKGBUILD in an Arch container). Next: check the first release run, and
+      aarch64 Linux packages (no aarch64 job yet)
 - ⬜ Windows signing: apply to SignPath Foundation (free for OSS) and swap the
       PFX import step for its action
 

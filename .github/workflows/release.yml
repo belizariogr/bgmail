@@ -19,6 +19,8 @@ on:
       - crates/bgmail/packaging/**
       - rust-toolchain.toml
       - script/bundle-linux
+      - script/bundle-linux-pacman
+      - script/bundle-linux-rpm
       - script/bundle-macos-dmg
   workflow_dispatch:
     inputs:
@@ -144,7 +146,8 @@ jobs:
         include:
           - name: linux-x86_64
             os: ubuntu-22.04
-            formats: deb,appimage,pacman
+            # rpm and pacman come from script/bundle-linux-{rpm,pacman}.
+            formats: deb,appimage
           - name: macos-aarch64
             os: macos-15
             target: aarch64-apple-darwin
@@ -341,16 +344,30 @@ jobs:
           BGMAIL_GOOGLE_CLIENT_SECRET: ${{ github.event_name != 'pull_request' && secrets.BGMAIL_GOOGLE_CLIENT_SECRET || '' }}
         run: script/bundle-linux
 
+      # Stable names, so script/install.sh finds each one under
+      # releases/latest/download. Same binary as the tarball.
+      - name: Native Linux packages (deb, rpm, pacman)
+        if: runner.os == 'Linux'
+        run: |
+          arch=$(uname -m)
+          mv target/release/*.deb "target/release/bgmail-linux-$arch.deb"
+          sudo apt-get install -y --no-install-recommends rpm
+          BGMAIL_BINARY=target/release/BGMail script/bundle-linux-rpm
+          # makepkg refuses root; the checkout's owner builds it.
+          docker run --rm -v "$PWD:/src" -w /src archlinux:base-devel bash -c '
+            useradd -m -u '"$(id -u)"' builder
+            su builder -c "BGMAIL_BINARY=/src/target/release/BGMail script/bundle-linux-pacman"'
+
       - uses: actions/upload-artifact@v4
         with:
           name: BGMail-${{ matrix.name }}
           if-no-files-found: error
           path: |
             target/**/release/bgmail-linux-*.tar.gz
-            target/**/release/*.deb
+            target/**/release/bgmail-linux-*.deb
+            target/**/release/bgmail-linux-*.rpm
+            target/**/release/bgmail-linux-*.pkg.tar.zst
             target/**/release/*.AppImage
-            target/**/release/BGMail_*.tar.gz
-            target/**/release/PKGBUILD
             target/**/release/*.dmg
             target/**/release/*-setup.exe
             target/**/release/*.msi

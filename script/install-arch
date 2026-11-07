@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<USAGE
+Usage: ${0##*/} [makepkg options]
+
+Builds this checkout into an Arch Linux package (bgmail) with makepkg and
+installs it through pacman, so it upgrades and uninstalls like any package:
+
+  sudo pacman -R bgmail      Remove it (~/.config/BGMail is never touched)
+
+The package is kept in target/pacman/. Extra options go to makepkg
+(e.g. --noconfirm). Build dependencies are installed with pacman when missing.
+USAGE
+}
+
+case "${1:-}" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+esac
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+repo="$PWD"
+
+if ! command -v makepkg >/dev/null 2>&1; then
+    echo "error: makepkg not found. This script is for Arch Linux and its derivatives." >&2
+    exit 1
+fi
+if ! command -v cargo >/dev/null 2>&1 && [[ -f "$HOME/.cargo/env" ]]; then
+    # shellcheck source=/dev/null
+    source "$HOME/.cargo/env"
+fi
+
+# pacman refuses to overwrite files it doesn't own, after the whole build.
+if [[ -e /usr/bin/bgmail ]] && ! pacman -Qqo /usr/bin/bgmail >/dev/null 2>&1; then
+    echo "error: /usr/bin/bgmail is not owned by any package." >&2
+    echo "       Remove that install first: script/install-linux-system --uninstall" >&2
+    exit 1
+fi
+
+# makepkg writes src/ and pkg/ next to the PKGBUILD;
+# build in a temp copy so the checkout stays clean.
+build_dir="$(mktemp -d)"
+trap 'rm -rf "$build_dir"' EXIT
+cp crates/bgmail/packaging/linux/PKGBUILD "$build_dir/"
+mkdir -p target/pacman
+
+cd "$build_dir"
+BGMAIL_SRC="$repo" BUILDDIR="$build_dir" PKGDEST="$repo/target/pacman" \
+    makepkg --syncdeps --install --force "$@"
+
+if [[ -e "$HOME/.local/share/applications/BGMail.desktop" ]]; then
+    echo "Note: ~/.local has its own BGMail install, whose launcher entry takes precedence."
+    echo "      Remove it with script/uninstall.sh"
+fi

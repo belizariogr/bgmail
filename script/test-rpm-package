@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Builds the RPM (script/bundle-linux-rpm, bgmail.spec) around a dummy binary and
+# checks its metadata and contents. No cargo build, no install, no network;
+# skipped where rpmbuild is missing.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if ! command -v rpmbuild >/dev/null 2>&1; then
+    echo "SKIP: rpmbuild not found"
+    exit 0
+fi
+
+temp="$(mktemp -d)"
+trap 'rm -rf "$temp"' EXIT
+
+fail() {
+    echo "FAIL: $1" >&2
+    exit 1
+}
+
+printf '#!/bin/sh\necho dummy-bgmail\n' > "$temp/fake"
+chmod +x "$temp/fake"
+CARGO_TARGET_DIR="$temp/target" BGMAIL_BINARY="$temp/fake" script/bundle-linux-rpm \
+    > "$temp/out.txt" 2> "$temp/rpmbuild.log" || {
+    cat "$temp/rpmbuild.log" >&2
+    fail "bundle-linux-rpm failed"
+}
+package="$temp/target/release/bgmail-linux-$(uname -m).rpm"
+[[ "$(cat "$temp/out.txt")" == "$package" ]] || fail "printed $(cat "$temp/out.txt"), not $package"
+[[ -f "$package" ]] || fail "no package"
+
+version="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+query() { rpm -qp "$@" "$package" 2>/dev/null; }
+[[ "$(query --queryformat '%{NAME} %{VERSION} %{ARCH}')" == "bgmail ${version//-/\~} $(uname -m)" ]] \
+    || fail "name/version/arch: $(query --queryformat '%{NAME} %{VERSION} %{ARCH}')"
+requires="$(query --requires)"
+for dep in 'libvulkan.so.1()(64bit)' 'libwayland-client.so.0()(64bit)' xdg-utils; do
+    grep -qxF "$dep" <<<"$requires" || fail "requires $dep missing: $requires"
+done
+
+files="$(query --list)"
+for path in /usr/bin/bgmail /usr/share/applications/BGMail.desktop \
+    /usr/share/icons/hicolor/16x16/apps/bgmail.png \
+    /usr/share/icons/hicolor/1024x1024/apps/bgmail.png; do
+    grep -qx "$path" <<<"$files" || fail "$path missing"
+done
+if grep -qv '^/usr/' <<<"$files"; then fail "files outside /usr: $files"; fi
+# Directories like /usr/bin belong to the filesystem package, not to BGMail.
+if grep -qx '/usr/bin' <<<"$files"; then fail "owns /usr/bin"; fi
+
+mkdir "$temp/root"
+(cd "$temp/root" && rpm2cpio "$package" | cpio -idm --quiet)
+[[ "$("$temp/root/usr/bin/bgmail")" == dummy-bgmail ]] || fail "packaged binary doesn't run"
+desktop="$temp/root/usr/share/applications/BGMail.desktop"
+grep -qx "Exec=bgmail %u" "$desktop" || fail "Exec: $(grep ^Exec "$desktop")"
+grep -qx "Icon=bgmail" "$desktop" || fail "Icon: $(grep ^Icon "$desktop")"
+
+echo "OK"

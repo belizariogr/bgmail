@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Builds ${CARGO_TARGET_DIR:-target}/release/bgmail-linux-<arch>.rpm from the
+# script/bundle-linux tree (crates/bgmail/packaging/linux/bgmail.spec). Needs
+# rpmbuild. Set BGMAIL_BINARY to package an existing binary instead of building.
+
+set -euo pipefail
+
+if [[ $# -gt 0 ]]; then
+    echo "Usage: ${0##*/}"
+    exit 1
+fi
+
+cd "$(dirname "$0")/.."
+
+if ! command -v rpmbuild >/dev/null 2>&1; then
+    echo "error: rpmbuild not found (Debian/Ubuntu: apt install rpm; Arch: pacman -S rpm-tools)" >&2
+    exit 1
+fi
+
+target_dir="${CARGO_TARGET_DIR:-target}"
+archive="$(script/bundle-linux)"
+
+temp="$(mktemp -d)"
+trap 'rm -rf "$temp"' EXIT
+tar -xzf "$archive" -C "$temp"
+
+version="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+arch="$(uname -m)"
+# Version can't hold "-"; "~" sorts a prerelease before its final version.
+rpmbuild -bb --quiet --target "$arch" \
+    --define "_topdir $temp/rpmbuild" \
+    --define "bgmail_version ${version//-/\~}" \
+    --define "bundle $temp/bgmail.app" \
+    crates/bgmail/packaging/linux/bgmail.spec >&2
+
+out="$target_dir/release/bgmail-linux-$arch.rpm"
+mv "$temp"/rpmbuild/RPMS/"$arch"/bgmail-*.rpm "$out"
+echo "$out"

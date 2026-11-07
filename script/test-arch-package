@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Builds the Arch package (script/bundle-linux-pacman, PKGBUILD) around a dummy
+# binary and checks its metadata and contents. No cargo build, no install, no
+# network; skipped where makepkg is missing (non-Arch CI runners).
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+repo="$PWD"
+
+if ! command -v makepkg >/dev/null 2>&1; then
+    echo "SKIP: makepkg not found"
+    exit 0
+fi
+
+temp="$(mktemp -d)"
+trap 'rm -rf "$temp"' EXIT
+
+fail() {
+    echo "FAIL: $1" >&2
+    exit 1
+}
+
+printf '#!/bin/sh\necho dummy-bgmail\n' > "$temp/fake"
+chmod +x "$temp/fake"
+status_before="$(git status --porcelain)"
+CARGO_TARGET_DIR="$temp/target" BGMAIL_BINARY="$temp/fake" script/bundle-linux-pacman \
+    > "$temp/out.txt" 2> "$temp/makepkg.log" || {
+    cat "$temp/makepkg.log" >&2
+    fail "bundle-linux-pacman failed"
+}
+package="$temp/target/release/bgmail-linux-$(uname -m).pkg.tar.zst"
+[[ "$(cat "$temp/out.txt")" == "$package" ]] || fail "printed $(cat "$temp/out.txt"), not $package"
+[[ -f "$package" ]] || fail "no package"
+
+version="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+info="$(tar -xOf "$package" .PKGINFO)"
+grep -qx "pkgname = bgmail" <<<"$info" || fail "pkgname: $info"
+grep -qx "pkgver = ${version//-/}-1" <<<"$info" || fail "pkgver is not Cargo's $version"
+grep -qx "depend = vulkan-icd-loader" <<<"$info" || fail "runtime deps missing"
+grep -qx "conflict = bg-mail" <<<"$info" || fail "no conflict with cargo-packager's package"
+
+files="$(tar -tf "$package")"
+for path in usr/bin/bgmail usr/share/applications/BGMail.desktop \
+    usr/share/icons/hicolor/16x16/apps/bgmail.png \
+    usr/share/icons/hicolor/1024x1024/apps/bgmail.png; do
+    grep -qx "$path" <<<"$files" || fail "$path missing"
+done
+if grep -v '^\.' <<<"$files" | grep -qv '^usr/'; then fail "files outside /usr"; fi
+
+mkdir "$temp/root"
+tar -xf "$package" -C "$temp/root"
+[[ "$("$temp/root/usr/bin/bgmail")" == dummy-bgmail ]] || fail "packaged binary doesn't run"
+desktop="$temp/root/usr/share/applications/BGMail.desktop"
+# Bare names: /usr/bin is on PATH and the icon is in the system theme.
+grep -qx "Exec=bgmail %u" "$desktop" || fail "Exec: $(grep ^Exec "$desktop")"
+grep -qx "Icon=bgmail" "$desktop" || fail "Icon: $(grep ^Icon "$desktop")"
+grep -qx "StartupWMClass=com.bgmail.main" "$desktop" || fail "StartupWMClass lost"
+if grep -q "{{" "$desktop"; then fail "unrendered template"; fi
+
+[[ "$(git status --porcelain)" == "$status_before" ]] || fail "makepkg dirtied the checkout"
+
+echo "OK"
