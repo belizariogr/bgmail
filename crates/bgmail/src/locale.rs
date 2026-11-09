@@ -513,8 +513,8 @@ impl Key {
             (SearchNoResults, P) => "Nenhuma mensagem corresponde à busca",
             (ReaderNoSelection, E) => "No Message Selected",
             (ReaderNoSelection, P) => "Nenhuma Mensagem Selecionada",
-            (ReaderZoomReset, E) => "Reset to 100%",
-            (ReaderZoomReset, P) => "Restaurar 100%",
+            (ReaderZoomReset, E) => "Reset",
+            (ReaderZoomReset, P) => "Restaurar",
 
             (ToolbarToggleSidebar, E) => "Show or hide sidebar",
             (ToolbarToggleSidebar, P) => "Mostrar ou ocultar barra lateral",
@@ -1155,14 +1155,19 @@ pub fn status_updated_at(language: Language, time: &str) -> String {
     }
 }
 
-/// A zoom level as text (`zoom` = 1 for 100%): the app's in the status bar, an open
-/// message's in the reader.
+/// A zoom level as text (`zoom` = 1 for 100%): the status bar's note for the whole app,
+/// the tooltip of the reader's zoom icon.
 pub fn status_zoom(language: Language, zoom: f32) -> String {
-    let percent = (zoom * 100.0).round();
+    let percent = zoom_percent(zoom);
     match language {
-        Language::English => format!("Zoom {percent}%"),
-        Language::Portuguese => format!("Zoom {percent}%"),
+        Language::English => format!("Zoom {percent}"),
+        Language::Portuguese => format!("Zoom {percent}"),
     }
+}
+
+/// A zoom level as a percentage (`zoom` = 1 for `100%`).
+pub fn zoom_percent(zoom: f32) -> String {
+    format!("{}%", (zoom * 100.0).round())
 }
 
 /// Global holding the active UI language.
@@ -1582,6 +1587,8 @@ mod tests {
         let pt = status_unread(Language::Portuguese, 9);
         assert!(pt.contains('9') && pt.contains("não lidas"));
         assert_eq!(status_zoom(Language::English, 1.25), "Zoom 125%");
+        assert_eq!(zoom_percent(2.0), "200%");
+        assert_eq!(zoom_percent(0.67), "67%");
         assert_eq!(
             status_updated_at(Language::Portuguese, "14:05"),
             "Atualizado às 14:05"

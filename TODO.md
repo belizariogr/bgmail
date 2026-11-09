@@ -382,7 +382,8 @@
       (`app_zoom`, content scale patched into `vendor/gpui`).
 - ✅ The reader's page zoom (Ctrl/Cmd + wheel) belongs to each message: the next one
       opens at 100%, and coming back finds the zoom it was left at (for the session, in
-      `reader_zooms`). The level and "Reset to 100%" show next to the subject.
+      `reader_zooms`). While it isn't 100%, a small icon next to the subject says so; clicking it opens
+      a popover with the level, −, + and Reset.
 - ✅ Each mailbox remembers its selected messages for the session.
 - ✅ Deleting the open message (or a multiple selection) opens the next row, or the
       previous one after the last, as in Thunderbird. Archive, Junk and Move still
@@ -1001,7 +1002,7 @@
      - ✅ Zoom: page zoom as Blitz's scale factor (text reflows and stays
        sharp); Ctrl/Cmd `+`/`-`/`0` and Ctrl/Cmd + wheel over the reader,
        Chromium's levels (25%–500%). Now per message (see above), shown
-       next to the subject when it isn't 100%. Not persisted between runs yet.
+       as an icon next to the subject when it isn't 100%. Not persisted between runs yet.
      - ✅ Print (Cmd/Ctrl+P, Message menu, palette): decided with two
        opposing reviews to print through the system browser (native
        dialog, pagination, "Save as PDF"): a light print page with a header

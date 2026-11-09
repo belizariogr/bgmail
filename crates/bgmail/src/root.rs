@@ -52,6 +52,7 @@ use crate::mail_service::{self, MailService, OverallStatus, StartError};
 use crate::search_scope;
 use crate::settings::SettingsView;
 use crate::shortcuts;
+use html_view::element::zoom_step;
 use html_view::{
     has_too_many_tags, Appearance as PageAppearance, DetachedDocument, DocumentOptions, HitInfo,
     HtmlDocument, HtmlView, HtmlViewEvent, RenderError,
@@ -735,6 +736,13 @@ pub(crate) fn clipped_text(text: &str) -> Option<&str> {
     })
 }
 
+/// The reader's zoom popover, open for `message` below `position`.
+#[derive(Clone, Copy)]
+struct ReaderZoomMenu {
+    message: i64,
+    position: Point<Pixels>,
+}
+
 /// Whether a page zoom is 100%.
 fn is_actual_size(zoom: f32) -> bool {
     (zoom - 1.0).abs() < 0.001
@@ -1133,6 +1141,8 @@ pub struct RootView {
     /// Page zoom of the messages the user zoomed this session. One message's zoom says
     /// nothing about the next one's, so those at 100% have no entry.
     reader_zooms: HashMap<i64, f32>,
+    /// The zoom icon's popover, while open.
+    reader_zoom_menu: Option<ReaderZoomMenu>,
     /// Handle to the separate settings window while it is open (like Zed, the
     /// preferences live in their own window). `None` when it has never been
     /// opened or was closed.
@@ -1776,6 +1786,7 @@ impl RootView {
             drag_anchor: point(px(0.0), px(0.0)),
             hovered_link: String::new(),
             reader_zooms: HashMap::new(),
+            reader_zoom_menu: None,
             settings_window: None,
             compose_window: None,
             compose_origin,
@@ -4418,6 +4429,9 @@ impl RootView {
     /// sanitizes and themes the body, parses it with `html_view` and hands it
     /// to the reader view, which lays it out at the pane width.
     fn sync_reader(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // It belongs to one message: another one showing, by any route, closes it.
+        let shown = self.reader_detail().map(|detail| detail.id);
+        self.reader_zoom_menu = self.reader_zoom_menu.filter(|m| Some(m.message) == shown);
         let Some(detail) = self.reader_detail() else {
             self.last_reader_sig = None;
             self.reader_notice = None;
@@ -4558,54 +4572,153 @@ impl RootView {
         }
     }
 
-    /// Puts the open message back at 100%. Its entry goes here and not through the view's
-    /// event: while the message builds, the view is on the previous one and may already be
-    /// at 100%, which reports nothing.
-    fn reset_reader_zoom(&mut self, cx: &mut Context<Self>) {
+    /// Puts the open message at `zoom`. Recorded here and not through the view's event:
+    /// while the message builds, the view is on the previous one and may already be at
+    /// that zoom, which reports nothing.
+    fn set_reader_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
         if let Some(id) = self.reader_detail().map(|detail| detail.id) {
-            self.reader_zooms.remove(&id);
+            self.remember_reader_zoom(id, zoom);
         }
         if let Some(view) = &self.reader_view {
-            view.update(cx, |view, cx| view.set_zoom(1.0, cx));
+            view.update(cx, |view, cx| view.set_zoom(zoom, cx));
         }
         cx.notify();
     }
 
-    /// Next to the subject while the open message isn't at 100%: its zoom and the way back.
+    /// Moves the open message `steps` zoom levels from where it is.
+    fn step_reader_zoom(&mut self, steps: i32, cx: &mut Context<Self>) {
+        if let Some(id) = self.reader_detail().map(|detail| detail.id) {
+            let zoom = zoom_step(self.reader_zoom_of(id), steps);
+            self.set_reader_zoom(zoom, cx);
+        }
+    }
+
+    /// Opens the zoom popover of the open message, below `position`.
+    fn open_reader_zoom_menu(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.reader_zoom_menu = self.reader_detail().map(|detail| ReaderZoomMenu {
+            message: detail.id,
+            position,
+        });
+        cx.notify();
+    }
+
+    /// Next to the subject while the open message isn't at 100%, or its popover is open
+    /// (stepping through 100% must not pull it away): says so, and a click opens the
+    /// popover.
     fn render_reader_zoom(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let zoom = self.reader_zoom_of(self.reader_detail()?.id);
-        if is_actual_size(zoom) {
+        let id = self.reader_detail()?.id;
+        let zoom = self.reader_zoom_of(id);
+        if is_actual_size(zoom) && self.reader_zoom_menu.is_none() {
             return None;
         }
-        let colors = cx.theme().colors();
-        let language = cx.language();
         Some(
-            h_flex()
+            div()
+                .id("reader-zoom")
+                .flex()
                 .flex_shrink_0()
-                .gap_2()
+                .size(px(20.0))
                 .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .tooltip(Tooltip::text(locale::status_zoom(cx.language(), zoom)))
+                .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                    this.open_reader_zoom_menu(event.position(), cx);
+                }))
                 .child(
-                    Label::new(locale::status_zoom(language, zoom))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .single_line(),
-                )
-                .child(
-                    div()
-                        .id("reader-zoom-reset")
-                        .px_1()
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .hover(|el| el.bg(colors.element_hover))
-                        .child(
-                            Label::new(Key::ReaderZoomReset.tr(language))
-                                .size(LabelSize::Small)
-                                .color(Color::Accent)
-                                .single_line(),
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.reset_reader_zoom(cx))),
+                    Icon::new(IconName::Zoom)
+                        .size(IconSize::Small)
+                        .color(Color::Accent),
                 ),
         )
+    }
+
+    /// A zoom button of the popover: dead at the end of the levels.
+    fn render_reader_zoom_step(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        tooltip: Key,
+        (zoom, steps): (f32, i32),
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .tooltip(Tooltip::text(tooltip.tr(cx.language())))
+            .child(
+                IconButton::new(SharedString::from(format!("{id}-button")), icon)
+                    .size(IconSize::Small)
+                    .disabled(zoom_step(zoom, steps) == zoom)
+                    .on_click(cx.listener(move |this, _, _, cx| this.step_reader_zoom(steps, cx))),
+            )
+    }
+
+    /// The zoom icon's popover: the level, steps either way and back to 100%. A
+    /// mouse-down outside closes it.
+    fn render_reader_zoom_menu(
+        &self,
+        menu: ReaderZoomMenu,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let zoom = self.reader_zoom_of(menu.message);
+        let controls = h_flex()
+            .id("reader-zoom-menu")
+            .occlude()
+            .p_1p5()
+            .gap_1()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.elevated_surface_background)
+            .shadow_md()
+            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .child(
+                // Wide enough for "500%", so the buttons stay under the pointer.
+                div().w(px(40.0)).pl_1().child(
+                    Label::new(locale::zoom_percent(zoom))
+                        .size(LabelSize::Small)
+                        .single_line(),
+                ),
+            )
+            .child(self.render_reader_zoom_step(
+                "reader-zoom-out",
+                IconName::Minus,
+                Key::ViewZoomOut,
+                (zoom, -1),
+                cx,
+            ))
+            .child(self.render_reader_zoom_step(
+                "reader-zoom-in",
+                IconName::Plus,
+                Key::ViewZoomIn,
+                (zoom, 1),
+                cx,
+            ))
+            .child(
+                Button::new("reader-zoom-reset", Key::ReaderZoomReset.tr(cx.language())).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.reader_zoom_menu = None;
+                        this.set_reader_zoom(1.0, cx);
+                    }),
+                ),
+            );
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.reader_zoom_menu = None;
+                cx.notify();
+            }))
+            .child(deferred(
+                anchored()
+                    .position(menu.position)
+                    .anchor(Corner::TopRight)
+                    .offset(point(px(0.0), px(10.0)))
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(controls),
+            ))
     }
 
     /// Notice above a message shown as plain text, explaining why; large
@@ -9223,6 +9336,9 @@ impl Render for RootView {
             .when(self.reader_menu.is_some(), |el| {
                 el.child(self.render_reader_menu(cx))
             })
+            .when_some(self.reader_zoom_menu, |el, menu| {
+                el.child(self.render_reader_zoom_menu(menu, cx))
+            })
             .when(self.attachment_menu.is_some(), |el| {
                 el.child(self.render_attachment_menu(cx))
             })
@@ -10692,7 +10808,7 @@ mod tests {
         reader.update(cx, |reader, cx| reader.zoom_by(3, cx));
         cx.run_until_parked();
 
-        view.update(cx, |view, cx| view.reset_reader_zoom(cx));
+        view.update(cx, |view, cx| view.set_reader_zoom(1.0, cx));
         cx.run_until_parked();
         reader.read_with(cx, |reader, _| assert_eq!(reader.zoom(), 1.0));
         view.update(cx, |view, cx| {
@@ -10702,9 +10818,30 @@ mod tests {
             // With the view already at 100% (it is on another message, say), the
             // message still goes back.
             view.reader_zooms.insert(ids[0], 2.0);
-            view.reset_reader_zoom(cx);
+            view.set_reader_zoom(1.0, cx);
             assert!(view.reader_zooms.is_empty());
+
+            // The popover's steps follow the same levels and stop at the end.
+            view.step_reader_zoom(1, cx);
+            assert_eq!(view.reader_zoom_of(ids[0]), 1.1);
+            view.step_reader_zoom(-1, cx);
+            assert!(view.reader_zooms.is_empty(), "back at 100%");
+            view.set_reader_zoom(5.0, cx);
+            view.step_reader_zoom(1, cx);
+            assert_eq!(view.reader_zoom_of(ids[0]), 5.0);
         });
+        reader.read_with(cx, |reader, _| assert_eq!(reader.zoom(), 5.0));
+
+        // Its icon stays while the popover is open, even back at 100%, and the
+        // popover goes when another message opens.
+        view.update(cx, |view, cx| {
+            view.open_reader_zoom_menu(point(px(10.0), px(10.0)), cx);
+            view.set_reader_zoom(1.0, cx);
+            assert!(view.reader_zoom_menu.is_some());
+            assert!(view.render_reader_zoom(cx).is_some());
+        });
+        open(ids[1], cx);
+        view.read_with(cx, |view, _| assert!(view.reader_zoom_menu.is_none()));
     }
 
     #[test]

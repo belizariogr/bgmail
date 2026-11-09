@@ -134,8 +134,8 @@ wiring to `storage`.
   (`FindInMessage`, also a global action) opens the find bar. The reader
   zoom (Ctrl/Cmd + wheel; `HtmlView`) belongs to each message for the session
   (`RootView::reader_zooms`; user decision): another message opens at its own
-  zoom, and while it isn't 100% the level and "Reset to 100%" show next to the
-  subject.
+  zoom. While it isn't 100% a small icon shows next to the subject; clicking it
+  opens a popover with the level, −, + and Reset (user decision, as Chrome's).
   `html_view::init` is called at startup.
 - Printing (`MessagePrint`, Cmd/Ctrl+P) goes through the system browser
   (decided with two opposing reviews; GPUI has no print API): `print`
