@@ -735,6 +735,11 @@ pub(crate) fn clipped_text(text: &str) -> Option<&str> {
     })
 }
 
+/// Whether a page zoom is 100%.
+fn is_actual_size(zoom: f32) -> bool {
+    (zoom - 1.0).abs() < 0.001
+}
+
 /// Everything a reader document is made from, so it can be built on any thread.
 struct ReaderJob {
     colors: DocumentColors,
@@ -1125,8 +1130,9 @@ pub struct RootView {
     /// Destination URL of the link currently under the cursor in the reader
     /// (empty when none). Shown centered in the status bar.
     hovered_link: String,
-    /// The reader's page zoom (1 = 100%), shown in the status bar otherwise.
-    reader_zoom: f32,
+    /// Page zoom of the messages the user zoomed this session. One message's zoom says
+    /// nothing about the next one's, so those at 100% have no entry.
+    reader_zooms: HashMap<i64, f32>,
     /// Handle to the separate settings window while it is open (like Zed, the
     /// preferences live in their own window). `None` when it has never been
     /// opened or was closed.
@@ -1769,7 +1775,7 @@ impl RootView {
             drag_start: point(px(0.0), px(0.0)),
             drag_anchor: point(px(0.0), px(0.0)),
             hovered_link: String::new(),
-            reader_zoom: 1.0,
+            reader_zooms: HashMap::new(),
             settings_window: None,
             compose_window: None,
             compose_origin,
@@ -4513,8 +4519,13 @@ impl RootView {
         self.content_blocked_count = built.blocked_images;
         self.reader_notice = built.notice;
         let document = built.document.into_inner();
+        let zoom = self
+            .reader_document_id()
+            .map_or(1.0, |id| self.reader_zoom_of(id));
         match &self.reader_view {
-            Some(view) => view.update(cx, |view, cx| view.set_document(document, cx)),
+            Some(view) => view.update(cx, |view, cx| {
+                view.set_document_at_zoom(document, zoom, cx);
+            }),
             None => {
                 let view = cx.new(|cx| HtmlView::new(document, cx));
                 self._reader_subscription = Some(cx.subscribe(&view, Self::on_reader_event));
@@ -4523,6 +4534,78 @@ impl RootView {
         }
         // Keep an open find bar's query applied to the new document.
         self.run_find(cx);
+    }
+
+    /// The message the reader's document belongs to. Ahead of the selection, which moves
+    /// a frame earlier: until then the view still shows the message before it.
+    fn reader_document_id(&self) -> Option<i64> {
+        self.last_reader_sig
+            .map(|signature| signature.selected)
+            .or_else(|| self.reader_detail().map(|detail| detail.id))
+    }
+
+    /// The page zoom of message `id` (1 = 100%).
+    fn reader_zoom_of(&self, id: i64) -> f32 {
+        self.reader_zooms.get(&id).copied().unwrap_or(1.0)
+    }
+
+    /// Records the page zoom the user gave message `id`.
+    fn remember_reader_zoom(&mut self, id: i64, zoom: f32) {
+        if is_actual_size(zoom) {
+            self.reader_zooms.remove(&id);
+        } else {
+            self.reader_zooms.insert(id, zoom);
+        }
+    }
+
+    /// Puts the open message back at 100%. Its entry goes here and not through the view's
+    /// event: while the message builds, the view is on the previous one and may already be
+    /// at 100%, which reports nothing.
+    fn reset_reader_zoom(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.reader_detail().map(|detail| detail.id) {
+            self.reader_zooms.remove(&id);
+        }
+        if let Some(view) = &self.reader_view {
+            view.update(cx, |view, cx| view.set_zoom(1.0, cx));
+        }
+        cx.notify();
+    }
+
+    /// Next to the subject while the open message isn't at 100%: its zoom and the way back.
+    fn render_reader_zoom(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let zoom = self.reader_zoom_of(self.reader_detail()?.id);
+        if is_actual_size(zoom) {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let language = cx.language();
+        Some(
+            h_flex()
+                .flex_shrink_0()
+                .gap_2()
+                .items_center()
+                .child(
+                    Label::new(locale::status_zoom(language, zoom))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .single_line(),
+                )
+                .child(
+                    div()
+                        .id("reader-zoom-reset")
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|el| el.bg(colors.element_hover))
+                        .child(
+                            Label::new(Key::ReaderZoomReset.tr(language))
+                                .size(LabelSize::Small)
+                                .color(Color::Accent)
+                                .single_line(),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.reset_reader_zoom(cx))),
+                ),
+        )
     }
 
     /// Notice above a message shown as plain text, explaining why; large
@@ -4577,7 +4660,7 @@ impl RootView {
     }
 
     /// Reacts to the reader: link under the pointer (status bar), link clicks
-    /// (opened outside the app), page zoom (status bar) and context menus.
+    /// (opened outside the app), page zoom (per message) and context menus.
     fn on_reader_event(
         &mut self,
         view: Entity<HtmlView>,
@@ -4595,7 +4678,9 @@ impl RootView {
                 }
             }
             HtmlViewEvent::ZoomChanged(zoom) => {
-                self.reader_zoom = *zoom;
+                if let Some(id) = self.reader_document_id() {
+                    self.remember_reader_zoom(id, *zoom);
+                }
                 cx.notify();
             }
             HtmlViewEvent::ContextMenu { position, hit } => {
@@ -8488,6 +8573,7 @@ impl RootView {
                                 .single_line(),
                         ),
                     )
+                    .children(self.render_reader_zoom(cx))
                     .child(self.render_privacy_shield(cx)),
             )
             // The recipients line follows the sender's two lines with no gap, so the
@@ -8887,13 +8973,6 @@ impl RootView {
             .child(
                 h_flex()
                     .gap_3()
-                    .when((self.reader_zoom - 1.0).abs() > 0.001, |this| {
-                        this.child(
-                            Label::new(locale::status_zoom(language, self.reader_zoom))
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                    })
                     .children(update_indicator)
                     .when(!self.unsent.is_empty(), |this| {
                         this.child(
@@ -10562,6 +10641,77 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert_eq!(view.find_bar.as_ref().unwrap().current, 0);
         });
+    }
+
+    #[gpui::test]
+    fn each_message_has_its_own_page_zoom(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            locale::init(Language::default(), cx);
+            html_view::init(cx);
+        });
+        let path = dir.path().join("mail.db");
+        let (view, cx) =
+            cx.add_window_view(|_, _| RootView::new_with_database(Config::default(), &path, true));
+        let open = |id: i64, cx: &mut gpui::VisualTestContext| {
+            view.update(cx, |view, cx| {
+                view.selected_message_id = Some(id);
+                view.reload_selected_detail();
+                view.mark_content_ready(cx);
+                cx.notify();
+            });
+            cx.run_until_parked();
+        };
+        let ids = view.read_with(cx, |view, _| view.list_ids());
+        open(ids[0], cx);
+        let reader = view.read_with(cx, |view, _| view.reader_view.clone().unwrap());
+
+        reader.update(cx, |reader, cx| reader.zoom_by(3, cx));
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            assert_eq!(view.reader_zoom_of(ids[0]), 1.5);
+            assert!(view.render_reader_zoom(cx).is_some(), "says it is zoomed");
+        });
+
+        open(ids[1], cx);
+        reader.read_with(cx, |reader, _| assert_eq!(reader.zoom(), 1.0));
+        view.update(cx, |view, cx| {
+            assert_eq!(view.reader_zoom_of(ids[1]), 1.0);
+            assert!(view.render_reader_zoom(cx).is_none());
+        });
+
+        // Coming back finds it as it was left.
+        open(ids[0], cx);
+        reader.read_with(cx, |reader, _| assert_eq!(reader.zoom(), 1.5));
+
+        // Zooming back to 100% by hand is the same as never having zoomed.
+        reader.update(cx, |reader, cx| reader.zoom_by(-3, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.reader_zooms.is_empty()));
+        reader.update(cx, |reader, cx| reader.zoom_by(3, cx));
+        cx.run_until_parked();
+
+        view.update(cx, |view, cx| view.reset_reader_zoom(cx));
+        cx.run_until_parked();
+        reader.read_with(cx, |reader, _| assert_eq!(reader.zoom(), 1.0));
+        view.update(cx, |view, cx| {
+            assert!(view.reader_zooms.is_empty());
+            assert!(view.render_reader_zoom(cx).is_none());
+
+            // With the view already at 100% (it is on another message, say), the
+            // message still goes back.
+            view.reader_zooms.insert(ids[0], 2.0);
+            view.reset_reader_zoom(cx);
+            assert!(view.reader_zooms.is_empty());
+        });
+    }
+
+    #[test]
+    fn only_100_percent_is_the_actual_size() {
+        assert!(is_actual_size(1.0));
+        assert!(!is_actual_size(1.1));
+        assert!(!is_actual_size(0.9));
     }
 
     #[gpui::test]

@@ -114,9 +114,9 @@ positions Blitz computed.
   pending timer; nothing runs for still mail or hidden views).
 - **Zoom:** `HtmlDocument::set_zoom` is Blitz's scale factor (layout at
   `width / zoom` CSS px, text shaped at the zoomed size, so text reflows and
-  stays sharp); the API stays in pixels. `HtmlView` keeps the zoom across
-  documents and zooms with Ctrl/Cmd `+`/`-`/`0` and Ctrl/Cmd + wheel
-  (Chromium's levels), reporting `ZoomChanged`.
+  stays sharp); the API stays in pixels. `HtmlView` zooms with Ctrl/Cmd + wheel (Chromium's levels), reporting
+  `ZoomChanged`. `set_document` keeps the zoom across documents;
+  `set_document_at_zoom` is for hosts with a zoom per document (no event).
 - **Hostile input:** style/layout recurse per nesting level (~2,000 levels
   overflow an 8 MB stack). `try_parse` refuses trees deeper than
   `MAX_NESTING_DEPTH` (256) with `RenderError::TooDeep`, and `layout`/paint

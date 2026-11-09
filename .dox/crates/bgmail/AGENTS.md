@@ -132,8 +132,10 @@ wiring to `storage`.
   `mail_html::is_openable_link` (http/https/mailto), secondary clicks open a
   `ui::ContextMenu` (open/copy link, copy, select all), and Cmd/Ctrl+F
   (`FindInMessage`, also a global action) opens the find bar. The reader
-  zoom (Ctrl/Cmd + wheel; `HtmlView`) shows in the
-  status bar when not 100%.
+  zoom (Ctrl/Cmd + wheel; `HtmlView`) belongs to each message for the session
+  (`RootView::reader_zooms`; user decision): another message opens at its own
+  zoom, and while it isn't 100% the level and "Reset to 100%" show next to the
+  subject.
   `html_view::init` is called at startup.
 - Printing (`MessagePrint`, Cmd/Ctrl+P) goes through the system browser
   (decided with two opposing reviews; GPUI has no print API): `print`

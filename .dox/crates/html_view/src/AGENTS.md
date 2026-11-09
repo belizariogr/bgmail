@@ -513,6 +513,7 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   PageDown, ScrollToTop, ScrollToBottom])`;
   `const KEY_CONTEXT = "HtmlView"`; `const LINE_SCROLL` (40px, private).
 - `const ZOOM_LEVELS`: Chromium's zoom levels, 25%–500%.
+- `fn clamp_zoom(zoom)` (private): `zoom` within the range of `ZOOM_LEVELS`.
 - `fn zoom_step(zoom, steps)`: the level `steps` away (from between two
   levels, the next one in the step's direction), clamped to the range.
 - `fn init(cx)`: binds `secondary-c`/`secondary-a`, arrows, page keys,
@@ -551,9 +552,10 @@ element/view. `html_view.rs` is the crate root and re-exports the public types.
   for animated images or remote loads, the earliest wins; on firing,
   arrived remote resources invalidate the cached paint); private
   `mark_rendered(cx)` (emits `Rendered` the first time per document);
-  `new(document, cx)`; `set_document` (applies the view's zoom; forgets the
-  paint cache's document images; resets scroll, drag, cursor, hovered link and
-  `rendered`); `zoom()`; `set_zoom(zoom, cx)`
+  `new(document, cx)`; `set_document` (`set_document_at_zoom` at the view's
+  zoom); `set_document_at_zoom(document, zoom, cx)` (applies `zoom`, clamped,
+  without `ZoomChanged`; forgets the paint cache's document images; resets
+  scroll, drag, cursor, hovered link and `rendered`); `zoom()`; `set_zoom(zoom, cx)`
   (clamped; scales the scroll offset to keep the same content at the top,
   emits `ZoomChanged`); `zoom_by(steps, cx)`;
   `document()`; `scroll_handle()`; `has_selection()`; `copy_selection(cx)`;

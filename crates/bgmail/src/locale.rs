@@ -117,6 +117,7 @@ pub enum Key {
     SearchActiveTitle,
     SearchNoResults,
     ReaderNoSelection,
+    ReaderZoomReset,
 
     ToolbarToggleSidebar,
     ToolbarReply,
@@ -512,6 +513,8 @@ impl Key {
             (SearchNoResults, P) => "Nenhuma mensagem corresponde à busca",
             (ReaderNoSelection, E) => "No Message Selected",
             (ReaderNoSelection, P) => "Nenhuma Mensagem Selecionada",
+            (ReaderZoomReset, E) => "Reset to 100%",
+            (ReaderZoomReset, P) => "Restaurar 100%",
 
             (ToolbarToggleSidebar, E) => "Show or hide sidebar",
             (ToolbarToggleSidebar, P) => "Mostrar ou ocultar barra lateral",
@@ -1152,7 +1155,8 @@ pub fn status_updated_at(language: Language, time: &str) -> String {
     }
 }
 
-/// Status bar note for the reader's page zoom (`zoom` = 1 for 100%).
+/// A zoom level as text (`zoom` = 1 for 100%): the app's in the status bar, an open
+/// message's in the reader.
 pub fn status_zoom(language: Language, zoom: f32) -> String {
     let percent = (zoom * 100.0).round();
     match language {
@@ -1208,7 +1212,7 @@ mod tests {
         assert_eq!(Language::from_code(""), Language::default());
     }
 
-    const ALL_KEYS: [Key; 304] = [
+    const ALL_KEYS: [Key; 305] = [
         Key::StatusDatabaseReplaced,
         Key::ViewZoomIn,
         Key::ViewZoomOut,
@@ -1268,6 +1272,7 @@ mod tests {
         Key::SearchActiveTitle,
         Key::SearchNoResults,
         Key::ReaderNoSelection,
+        Key::ReaderZoomReset,
         Key::ToolbarToggleSidebar,
         Key::ToolbarReply,
         Key::ToolbarReplyAll,

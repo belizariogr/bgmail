@@ -56,6 +56,11 @@ pub fn zoom_step(zoom: f32, steps: i32) -> f32 {
     ZOOM_LEVELS[index.clamp(0, ZOOM_LEVELS.len() as i32 - 1) as usize]
 }
 
+/// `zoom` within the range of [`ZOOM_LEVELS`].
+fn clamp_zoom(zoom: f32) -> f32 {
+    zoom.clamp(ZOOM_LEVELS[0], ZOOM_LEVELS[ZOOM_LEVELS.len() - 1])
+}
+
 /// Key context of a focused [`HtmlView`].
 pub const KEY_CONTEXT: &str = "HtmlView";
 
@@ -400,7 +405,8 @@ pub struct HtmlView {
     hovered_link: Option<String>,
     /// Whether a primary-button press started in the document (selection drag).
     dragging: bool,
-    /// Page zoom, kept across documents like a browser tab's.
+    /// Page zoom. Stays across documents, like a browser tab's, unless the host gives
+    /// each its own (see [`Self::set_document_at_zoom`]).
     zoom: f32,
     /// Extra scale set by the host, apart from the user's zoom, which stays as it is.
     display_scale: f32,
@@ -440,8 +446,21 @@ impl HtmlView {
         self.document.borrow().content_height()
     }
 
-    /// Replaces the displayed document and scrolls back to the top.
-    pub fn set_document(&mut self, mut document: HtmlDocument, cx: &mut Context<Self>) {
+    /// Replaces the displayed document, at the current zoom, and scrolls back to the top.
+    pub fn set_document(&mut self, document: HtmlDocument, cx: &mut Context<Self>) {
+        self.set_document_at_zoom(document, self.zoom, cx);
+    }
+
+    /// [`Self::set_document`] at `zoom`, for a host that keeps a zoom per document. No
+    /// [`HtmlViewEvent::ZoomChanged`]: the host already knows, and that event would read as
+    /// the user changing this document's zoom.
+    pub fn set_document_at_zoom(
+        &mut self,
+        mut document: HtmlDocument,
+        zoom: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.zoom = clamp_zoom(zoom);
         document.set_zoom(self.zoom * self.display_scale);
         self.document = Rc::new(RefCell::new(document));
         // A new parse has new image ids: the old textures can never be hit
@@ -499,7 +518,7 @@ impl HtmlView {
     /// Sets the page zoom (clamped to [`ZOOM_LEVELS`]' range), keeping the
     /// same part of the document at the top of the view.
     pub fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-        let zoom = zoom.clamp(ZOOM_LEVELS[0], ZOOM_LEVELS[ZOOM_LEVELS.len() - 1]);
+        let zoom = clamp_zoom(zoom);
         if zoom == self.zoom {
             return;
         }
@@ -790,6 +809,35 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(count.get(), 2);
+    }
+
+    #[gpui::test]
+    fn a_document_can_come_with_its_own_zoom(cx: &mut gpui::TestAppContext) {
+        cx.update(init);
+        let (view, cx) = cx.add_window_view(|_, cx| HtmlView::new(document("<p>One</p>"), cx));
+        let changes = Rc::new(Cell::new(0));
+        let counted = changes.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &HtmlViewEvent, _| {
+                if matches!(event, HtmlViewEvent::ZoomChanged(_)) {
+                    counted.set(counted.get() + 1);
+                }
+            })
+            .detach()
+        });
+        view.update(cx, |view, cx| {
+            view.set_document_at_zoom(document("<p>Two</p>"), 1.5, cx);
+            assert_eq!(view.zoom(), 1.5);
+            assert_eq!(view.document().borrow().zoom(), 1.5);
+            // Out of range is brought back, as when the user zooms.
+            view.set_document_at_zoom(document("<p>Three</p>"), 9.0, cx);
+            assert_eq!(view.zoom(), 5.0);
+            // A plain replacement stays at the zoom the view has.
+            view.set_document(document("<p>Four</p>"), cx);
+            assert_eq!(view.document().borrow().zoom(), 5.0);
+        });
+        cx.run_until_parked();
+        assert_eq!(changes.get(), 0, "only the user's changes are reported");
     }
 
     #[test]

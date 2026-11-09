@@ -1199,7 +1199,7 @@ Message dates in the local zone (chrono `clock`); the formatting core takes expl
 
 - **`status_zoom`** (pub)
   - Signature: `pub fn status_zoom(language: Language, zoom: f32) -> String`
-  - Purpose: Status bar note for the reader's page zoom: `"Zoom {percent}%"` (both languages).
+  - Purpose: A zoom level as text, for the app's in the status bar and an open message's in the reader: `"Zoom {percent}%"` (both languages).
 
 - **`init`** (pub, L337)
   - Signature: `pub fn init(language: Language, cx: &mut App)`
@@ -1817,7 +1817,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`on_reader_event`** (private)
   - Signature: `fn on_reader_event(&mut self, view: Entity<HtmlView>, event: &HtmlViewEvent, cx)`
   - Purpose: Handles reader events.
-  - Behavior: `LinkHovered` → status bar `hovered_link`; `LinkActivated` → `cx.open_url` when `is_openable_link`; `ZoomChanged` → `reader_zoom` (status bar); `ContextMenu` → opens `ReaderMenu` (records whether text is selected); `Rendered` → `reader_mark.rendered()`, ignored while another message builds (`reader_preparing`: the view still shows the previous one).
+  - Behavior: `LinkHovered` → status bar `hovered_link`; `LinkActivated` → `cx.open_url` when `is_openable_link`; `ZoomChanged` → `remember_reader_zoom` for `reader_document_id`; `ContextMenu` → opens `ReaderMenu` (records whether text is selected); `Rendered` → `reader_mark.rendered()`, ignored while another message builds (`reader_preparing`: the view still shows the previous one).
 
 - **`open_find_bar`** (pub(crate))
   - Signature: `pub(crate) fn open_find_bar(&mut self, window, cx)`
@@ -2011,7 +2011,8 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_selection_stack`** / **`reader_detail`** / **`reload_multi_preview`** / **`fetch_multi_preview_body`** / **`sheet_corners`** (private): reader for a multiple selection: the previewed message (never marked read) on a sheet, tilted sheets behind it, floating actions.
 - **`select_only`** (private): one row selected, multiple selection and preview ended. **`bulk_selection`** / **`apply_action_keeping_selection`** / **`confirm_delete_selection`** (private): summary of a multiple selection for the commands, bulk star/read keeping the selection, and the confirmed permanent deletion.
 - **`clipped_text`** (pub(crate)): what shows of a plain-text body: up to the last line within `MAX_SHOWN_TEXT_BYTES` (2 MiB), `None` if it all fits. `ReaderNotice::Clipped` says so; the quote uses it too.
-- **`ReaderJob`** (`runs_in_background`: large bodies of either format; `build`: `has_too_many_tags` first, then sanitize and parse) / **`BuiltReader`** / **`install_reader`** (private): a reader document's inputs, buildable on any thread, its result, and handing it to the view.
+- **`ReaderJob`** (`runs_in_background`: large bodies of either format; `build`: `has_too_many_tags` first, then sanitize and parse) / **`BuiltReader`** / **`install_reader`** (private): a reader document's inputs, buildable on any thread, its result, and handing it to the view at that message's zoom.
+- **`is_actual_size`** / **`RootView::reader_document_id`** / **`reader_zoom_of`** / **`remember_reader_zoom`** / **`reset_reader_zoom`** / **`render_reader_zoom`** (private): the per-message page zoom: whether a zoom is 100%; the message the document belongs to (the last signature, ahead of the selection, which moves a frame earlier); a message's zoom (1 without an entry); recording one (100% drops the entry); back to 100% (drops the entry itself, since a view already at 100% reports nothing); the level and reset action next to the subject, only when not 100%.
 - **`open_mailto`** (`pub(crate)`): prefilled compose from a `mailto:` link, through `open_compose_with`.
 - **`request_delete`** (`pub(crate)`) / **`confirm_delete_forever`** / **`delete_row_message`** (private): Delete from anywhere: to the Trash, or for good, confirmed, for what is already there.
 - **`short_recipient`** / **`unique_recipients`** (private, `root`): the reader's recipients line, as in Gmail. Each name is muted and turns to the default text color under the pointer (`hovered_recipient`, set by **`hover_recipient`**, which a name left behind doesn't clear for the next; a GPUI hover style can't recolor text, laid out before the hover is known); its tooltip has the address.
@@ -2100,7 +2101,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`render_status_bar`** (private, L3300)
   - Signature: `fn render_status_bar(&self, cx) -> impl IntoElement`
   - Purpose: Bottom status bar.
-  - Behavior: Counts on the left; on the right the update indicator (`render_update_indicator`), the reader zoom (`status_zoom`, only when not 100%), "N unsent" (`status_unsent`, `Color::Warning`, click → `toggle_unsent_panel`) while `unsent` is non-empty, the sync text and the unread count; the hovered link URL centered when present.
+  - Behavior: Counts on the left; on the right the update indicator (`render_update_indicator`), "N unsent" (`status_unsent`, `Color::Warning`, click → `toggle_unsent_panel`) while `unsent` is non-empty, the sync text and the unread count; the hovered link URL centered when present.
 ##### Context: `Render for RootView`
 
 - **`render`** (private, L3697)
