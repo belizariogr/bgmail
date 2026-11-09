@@ -88,8 +88,10 @@ pub enum IconName {
     ShieldSolid,
     Plus,
     Minus,
-    /// A page shown at another zoom.
-    Zoom,
+    /// A page shown larger than its actual size.
+    ZoomIn,
+    /// A page shown smaller than its actual size.
+    ZoomOut,
     Check,
     /// Dismiss / clear (search field, etc.).
     Clear,
@@ -167,7 +169,8 @@ impl IconName {
             IconName::Clear => crate::XMARK,
             IconName::Plus => crate::PLUS,
             IconName::Minus => crate::MINUS,
-            IconName::Zoom => crate::MAGNIFYING_GLASS_PLUS,
+            IconName::ZoomIn => crate::MAGNIFYING_GLASS_PLUS,
+            IconName::ZoomOut => crate::MAGNIFYING_GLASS_MINUS,
             IconName::WindowMinimize => crate::WINDOW_MINIMIZE,
             IconName::WindowMaximize => crate::WINDOW_MAXIMIZE,
             IconName::WindowRestore => crate::WINDOW_RESTORE,
@@ -245,7 +248,7 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 59] = [
+    const ALL: [IconName; 60] = [
         IconName::CaretRight,
         IconName::CaretDown,
         IconName::Print,
@@ -291,7 +294,8 @@ mod tests {
         IconName::Shield,
         IconName::Plus,
         IconName::Minus,
-        IconName::Zoom,
+        IconName::ZoomIn,
+        IconName::ZoomOut,
         IconName::ShieldSolid,
         IconName::Check,
         IconName::Clear,

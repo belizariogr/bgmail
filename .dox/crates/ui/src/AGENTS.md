@@ -175,7 +175,7 @@ _300 functions/methods documented._
 - **enum `IconName`**: Stable icon identifiers for BGMail UI. Variants map to
   embedded SVG paths via `path()` — mailbox/actions (`Inbox`, `Sent`, `Drafts`,
   `Trash`, `Junk`, `Archive`, `Star`, `StarFilled`, `Print`, `Restore`, …), compose/navigation
-  (`Compose`, `Send`, `Search`, `ChevronRight`, `ChevronDown`, `ChevronUp`, `Plus`, `Minus`, `Zoom`, …), chrome
+  (`Compose`, `Send`, `Search`, `ChevronRight`, `ChevronDown`, `ChevronUp`, `Plus`, `Minus`, `ZoomIn`, `ZoomOut`, …), chrome
   (`Sidebar`, `Settings`, `WindowMinimize`, `WindowMaximize`, `WindowRestore`,
   …), attachment families (`File`, `FileImage`, `FilePdf`, `FileArchive`,
   `FileAudio`, `FileVideo`, `FileText`). `Sent` and `Send` share the paper-plane artwork but are distinct enum

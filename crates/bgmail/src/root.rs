@@ -743,6 +743,15 @@ struct ReaderZoomMenu {
     position: Point<Pixels>,
 }
 
+/// The magnifier of the zoom button, which says which way the page is zoomed.
+fn reader_zoom_icon(zoom: f32) -> IconName {
+    if zoom < 1.0 {
+        IconName::ZoomOut
+    } else {
+        IconName::ZoomIn
+    }
+}
+
 /// Whether a page zoom is 100%.
 fn is_actual_size(zoom: f32) -> bool {
     (zoom - 1.0).abs() < 0.001
@@ -4621,7 +4630,7 @@ impl RootView {
                 .mr(px(-6.0))
                 .tooltip(Tooltip::text(locale::status_zoom(cx.language(), zoom)))
                 .child(
-                    IconButton::new("reader-zoom-button", IconName::Zoom)
+                    IconButton::new("reader-zoom-button", reader_zoom_icon(zoom))
                         .size(IconSize::Medium)
                         .color(Color::Muted)
                         .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
@@ -10842,6 +10851,14 @@ mod tests {
         });
         open(ids[1], cx);
         view.read_with(cx, |view, _| assert!(view.reader_zoom_menu.is_none()));
+    }
+
+    #[test]
+    fn the_zoom_button_shows_which_way_the_page_is_zoomed() {
+        assert_eq!(reader_zoom_icon(0.9), IconName::ZoomOut);
+        assert_eq!(reader_zoom_icon(1.1), IconName::ZoomIn);
+        // Stepping through 100% with the popover open.
+        assert_eq!(reader_zoom_icon(1.0), IconName::ZoomIn);
     }
 
     #[test]

@@ -79,6 +79,7 @@ icon_assets! {
     (PLUS, "icons/plus.svg"),
     (MINUS, "icons/minus.svg"),
     (MAGNIFYING_GLASS_PLUS, "icons/magnifying-glass-plus.svg"),
+    (MAGNIFYING_GLASS_MINUS, "icons/magnifying-glass-minus.svg"),
     (WINDOW_MINIMIZE, "icons/window-minimize.svg"),
     (WINDOW_MAXIMIZE, "icons/window-maximize.svg"),
     (WINDOW_RESTORE, "icons/window-restore.svg"),
