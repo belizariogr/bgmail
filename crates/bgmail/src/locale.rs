@@ -1157,12 +1157,8 @@ pub fn status_updated_at(language: Language, time: &str) -> String {
 
 /// A zoom level as text (`zoom` = 1 for 100%): the status bar's note for the whole app,
 /// the tooltip of the reader's zoom icon.
-pub fn status_zoom(language: Language, zoom: f32) -> String {
-    let percent = zoom_percent(zoom);
-    match language {
-        Language::English => format!("Zoom {percent}"),
-        Language::Portuguese => format!("Zoom {percent}"),
-    }
+pub fn status_zoom(zoom: f32) -> String {
+    format!("Zoom {}", zoom_percent(zoom))
 }
 
 /// A zoom level as a percentage (`zoom` = 1 for `100%`).
@@ -1586,7 +1582,7 @@ mod tests {
         assert!(en.contains('2') && en.contains('8') && en.contains("accounts"));
         let pt = status_unread(Language::Portuguese, 9);
         assert!(pt.contains('9') && pt.contains("não lidas"));
-        assert_eq!(status_zoom(Language::English, 1.25), "Zoom 125%");
+        assert_eq!(status_zoom(1.25), "Zoom 125%");
         assert_eq!(zoom_percent(2.0), "200%");
         assert_eq!(zoom_percent(0.67), "67%");
         assert_eq!(

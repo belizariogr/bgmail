@@ -737,10 +737,12 @@ pub(crate) fn clipped_text(text: &str) -> Option<&str> {
 }
 
 /// The reader's zoom popover, open for `message` below `position`.
-#[derive(Clone, Copy)]
 struct ReaderZoomMenu {
     message: i64,
     position: Point<Pixels>,
+    focus: FocusHandle,
+    /// Where the focus was before: it goes back there when the popover closes.
+    focus_before: Option<FocusHandle>,
 }
 
 /// The magnifier of the zoom button, which says which way the page is zoomed.
@@ -759,6 +761,7 @@ fn is_actual_size(zoom: f32) -> bool {
 
 /// Everything a reader document is made from, so it can be built on any thread.
 struct ReaderJob {
+    message: i64,
     colors: DocumentColors,
     body: MessageBody,
     remote: bool,
@@ -770,6 +773,7 @@ struct ReaderJob {
 
 /// A reader document ready to be shown.
 struct BuiltReader {
+    message: i64,
     document: DetachedDocument,
     notice: Option<ReaderNotice>,
     blocked_images: usize,
@@ -848,6 +852,7 @@ impl ReaderJob {
             document.prepare(self.width);
         }
         BuiltReader {
+            message: self.message,
             document: DetachedDocument::new(document),
             blocked_images: if notice.is_some() {
                 0
@@ -1152,6 +1157,9 @@ pub struct RootView {
     reader_zooms: HashMap<i64, f32>,
     /// The zoom icon's popover, while open.
     reader_zoom_menu: Option<ReaderZoomMenu>,
+    /// The message whose document the reader view holds. Not the selection: that moves
+    /// first, and the view shows the previous message until the new document arrives.
+    reader_document: Option<i64>,
     /// Handle to the separate settings window while it is open (like Zed, the
     /// preferences live in their own window). `None` when it has never been
     /// opened or was closed.
@@ -1796,6 +1804,7 @@ impl RootView {
             hovered_link: String::new(),
             reader_zooms: HashMap::new(),
             reader_zoom_menu: None,
+            reader_document: None,
             settings_window: None,
             compose_window: None,
             compose_origin,
@@ -4438,9 +4447,17 @@ impl RootView {
     /// sanitizes and themes the body, parses it with `html_view` and hands it
     /// to the reader view, which lays it out at the pane width.
     fn sync_reader(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // It belongs to one message: another one showing, by any route, closes it.
+        // It belongs to one message and sits over the reader: another message showing, or
+        // a dialog opening over it, by any route, closes it.
         let shown = self.reader_detail().map(|detail| detail.id);
-        self.reader_zoom_menu = self.reader_zoom_menu.filter(|m| Some(m.message) == shown);
+        let covered = self.command_palette.is_some() || self.folder_dialog.is_some();
+        if self
+            .reader_zoom_menu
+            .as_ref()
+            .is_some_and(|menu| covered || Some(menu.message) != shown)
+        {
+            self.close_reader_zoom_menu(window, cx);
+        }
         let Some(detail) = self.reader_detail() else {
             self.last_reader_sig = None;
             self.reader_notice = None;
@@ -4483,6 +4500,7 @@ impl RootView {
             return;
         }
         let job = ReaderJob {
+            message: id,
             colors: doc_colors,
             body: db_seed::message_body_from_detail(detail),
             remote,
@@ -4542,9 +4560,8 @@ impl RootView {
         self.content_blocked_count = built.blocked_images;
         self.reader_notice = built.notice;
         let document = built.document.into_inner();
-        let zoom = self
-            .reader_document_id()
-            .map_or(1.0, |id| self.reader_zoom_of(id));
+        self.reader_document = Some(built.message);
+        let zoom = self.reader_zoom_of(built.message);
         match &self.reader_view {
             Some(view) => view.update(cx, |view, cx| {
                 view.set_document_at_zoom(document, zoom, cx);
@@ -4557,14 +4574,6 @@ impl RootView {
         }
         // Keep an open find bar's query applied to the new document.
         self.run_find(cx);
-    }
-
-    /// The message the reader's document belongs to. Ahead of the selection, which moves
-    /// a frame earlier: until then the view still shows the message before it.
-    fn reader_document_id(&self) -> Option<i64> {
-        self.last_reader_sig
-            .map(|signature| signature.selected)
-            .or_else(|| self.reader_detail().map(|detail| detail.id))
     }
 
     /// The page zoom of message `id` (1 = 100%).
@@ -4581,15 +4590,17 @@ impl RootView {
         }
     }
 
-    /// Puts the open message at `zoom`. Recorded here and not through the view's event:
-    /// while the message builds, the view is on the previous one and may already be at
-    /// that zoom, which reports nothing.
+    /// Puts the open message at `zoom`. While it builds, the view still holds the previous
+    /// message, which must stay as it is: the new document picks the zoom up on arrival.
     fn set_reader_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-        if let Some(id) = self.reader_detail().map(|detail| detail.id) {
-            self.remember_reader_zoom(id, zoom);
-        }
-        if let Some(view) = &self.reader_view {
-            view.update(cx, |view, cx| view.set_zoom(zoom, cx));
+        let Some(id) = self.reader_detail().map(|detail| detail.id) else {
+            return;
+        };
+        self.remember_reader_zoom(id, zoom);
+        if self.reader_document == Some(id) {
+            if let Some(view) = &self.reader_view {
+                view.update(cx, |view, cx| view.set_zoom(zoom, cx));
+            }
         }
         cx.notify();
     }
@@ -4603,11 +4614,36 @@ impl RootView {
     }
 
     /// Opens the zoom popover of the open message, below `position`.
-    fn open_reader_zoom_menu(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.reader_zoom_menu = self.reader_detail().map(|detail| ReaderZoomMenu {
-            message: detail.id,
+    fn open_reader_zoom_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(message) = self.reader_detail().map(|detail| detail.id) else {
+            return;
+        };
+        let focus = cx.focus_handle();
+        let focus_before = window.focused(cx);
+        window.focus(&focus);
+        self.reader_zoom_menu = Some(ReaderZoomMenu {
+            message,
             position,
+            focus,
+            focus_before,
         });
+        cx.notify();
+    }
+
+    /// Closes the zoom popover and gives the focus back, unless it already moved on.
+    /// Deferred because this can run while the window draws.
+    fn close_reader_zoom_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.reader_zoom_menu.take() else {
+            return;
+        };
+        if let Some(before) = menu.focus_before.filter(|_| menu.focus.is_focused(window)) {
+            window.defer(cx, move |window, _| window.focus(&before));
+        }
         cx.notify();
     }
 
@@ -4628,13 +4664,13 @@ impl RootView {
                 // not the hover background, lines up with the date below.
                 .my(px(-4.0))
                 .mr(px(-6.0))
-                .tooltip(Tooltip::text(locale::status_zoom(cx.language(), zoom)))
+                .tooltip(Tooltip::text(locale::status_zoom(zoom)))
                 .child(
                     IconButton::new("reader-zoom-button", reader_zoom_icon(zoom))
                         .size(IconSize::Medium)
                         .color(Color::Muted)
-                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
-                            this.open_reader_zoom_menu(event.position(), cx);
+                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                            this.open_reader_zoom_menu(event.position(), window, cx);
                         })),
                 ),
         )
@@ -4649,24 +4685,23 @@ impl RootView {
         (zoom, steps): (f32, i32),
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .id(id)
-            .tooltip(Tooltip::text(tooltip.tr(cx.language())))
-            .child(
-                IconButton::new(SharedString::from(format!("{id}-button")), icon)
-                    .size(IconSize::Small)
-                    .disabled(zoom_step(zoom, steps) == zoom)
-                    .on_click(cx.listener(move |this, _, _, cx| this.step_reader_zoom(steps, cx))),
-            )
+        Self::icon_button_with_tooltip(
+            id,
+            tooltip.tr(cx.language()),
+            None,
+            IconButton::new(SharedString::from(format!("{id}-button")), icon)
+                .size(IconSize::Small)
+                .disabled(zoom_step(zoom, steps) == zoom)
+                .on_click(cx.listener(move |this, _, _, cx| this.step_reader_zoom(steps, cx))),
+        )
     }
 
-    /// The zoom icon's popover: the level, steps either way and back to 100%. A
+    /// The zoom icon's popover: the level, steps either way and back to 100%. Escape or a
     /// mouse-down outside closes it.
-    fn render_reader_zoom_menu(
-        &self,
-        menu: ReaderZoomMenu,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_reader_zoom_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(menu) = &self.reader_zoom_menu else {
+            return div().into_any_element();
+        };
         let colors = cx.theme().colors();
         let zoom = self.reader_zoom_of(menu.message);
         let controls = h_flex()
@@ -4705,8 +4740,8 @@ impl RootView {
             ))
             .child(
                 Button::new("reader-zoom-reset", Key::ReaderZoomReset.tr(cx.language())).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.reader_zoom_menu = None;
+                    cx.listener(|this, _, window, cx| {
+                        this.close_reader_zoom_menu(window, cx);
                         this.set_reader_zoom(1.0, cx);
                     }),
                 ),
@@ -4714,19 +4749,21 @@ impl RootView {
         div()
             .absolute()
             .inset_0()
-            .occlude()
-            .on_any_mouse_down(cx.listener(|this, _, _, cx| {
-                this.reader_zoom_menu = None;
-                cx.notify();
+            .track_focus(&menu.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_reader_zoom_menu(window, cx);
+                    cx.stop_propagation();
+                }
             }))
-            .child(deferred(
-                anchored()
-                    .position(menu.position)
-                    .anchor(Corner::TopRight)
-                    .offset(point(px(0.0), px(10.0)))
-                    .snap_to_window_with_margin(px(8.0))
-                    .child(controls),
+            .child(Self::render_menu_backdrop(
+                menu.position + point(px(0.0), px(10.0)),
+                Corner::TopRight,
+                controls,
+                |this, _, window, cx| this.close_reader_zoom_menu(window, cx),
+                cx,
             ))
+            .into_any_element()
     }
 
     /// Notice above a message shown as plain text, explaining why; large
@@ -4799,7 +4836,7 @@ impl RootView {
                 }
             }
             HtmlViewEvent::ZoomChanged(zoom) => {
-                if let Some(id) = self.reader_document_id() {
+                if let Some(id) = self.reader_document {
                     self.remember_reader_zoom(id, *zoom);
                 }
                 cx.notify();
@@ -4925,7 +4962,7 @@ impl RootView {
         if let Some(handle) = self.compose_window {
             let _ = handle.update(cx, |_, window, cx| window.set_content_scale(scale, cx));
         }
-        self.set_status_note(locale::status_zoom(cx.language(), scale), cx);
+        self.set_status_note(locale::status_zoom(scale), cx);
         self.request_save(cx);
         cx.notify();
     }
@@ -8349,12 +8386,14 @@ impl RootView {
             .overflow_y_scroll()
             .occlude()
             .child(items);
-        Self::render_menu_backdrop(position, menu, on_outside, cx)
+        Self::render_menu_backdrop(position, Corner::TopLeft, menu, on_outside, cx)
     }
 
-    /// `menu` at `position`, over a backdrop that takes the clicks outside it.
+    /// `menu` with its `corner` at `position`, over a backdrop that takes the clicks
+    /// outside it.
     fn render_menu_backdrop(
         position: Point<Pixels>,
+        corner: Corner,
         menu: impl IntoElement,
         on_outside: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -8370,7 +8409,7 @@ impl RootView {
             .child(deferred(
                 anchored()
                     .position(position)
-                    .anchor(Corner::TopLeft)
+                    .anchor(corner)
                     .snap_to_window_with_margin(px(8.0))
                     .child(menu),
             ))
@@ -8420,7 +8459,13 @@ impl RootView {
                 this.move_message_to_folder(path, cx);
             });
         });
-        Self::render_menu_backdrop(position, items, |this, _, _, _| this.move_menu = None, cx)
+        Self::render_menu_backdrop(
+            position,
+            Corner::TopLeft,
+            items,
+            |this, _, _, _| this.move_menu = None,
+            cx,
+        )
     }
 
     /// Panel above the status bar listing unsent messages with Retry / Edit /
@@ -9345,8 +9390,8 @@ impl Render for RootView {
             .when(self.reader_menu.is_some(), |el| {
                 el.child(self.render_reader_menu(cx))
             })
-            .when_some(self.reader_zoom_menu, |el, menu| {
-                el.child(self.render_reader_zoom_menu(menu, cx))
+            .when(self.reader_zoom_menu.is_some(), |el| {
+                el.child(self.render_reader_zoom_menu(cx))
             })
             .when(self.attachment_menu.is_some(), |el| {
                 el.child(self.render_attachment_menu(cx))
@@ -9486,6 +9531,7 @@ mod tests {
 
     fn job(html: &str, crashed: bool) -> ReaderJob {
         ReaderJob {
+            message: 1,
             colors: DocumentColors {
                 background: gpui::white(),
                 text: gpui::black(),
@@ -10843,14 +10889,46 @@ mod tests {
 
         // Its icon stays while the popover is open, even back at 100%, and the
         // popover goes when another message opens.
-        view.update(cx, |view, cx| {
-            view.open_reader_zoom_menu(point(px(10.0), px(10.0)), cx);
+        view.update_in(cx, |view, window, cx| {
+            view.open_reader_zoom_menu(point(px(10.0), px(10.0)), window, cx);
             view.set_reader_zoom(1.0, cx);
             assert!(view.reader_zoom_menu.is_some());
             assert!(view.render_reader_zoom(cx).is_some());
         });
         open(ids[1], cx);
         view.read_with(cx, |view, _| assert!(view.reader_zoom_menu.is_none()));
+
+        // Escape closes it too.
+        view.update_in(cx, |view, window, cx| {
+            view.open_reader_zoom_menu(point(px(10.0), px(10.0)), window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.reader_zoom_menu.is_none()));
+
+        // The selection moved, but the view still holds the message before it: a wheel
+        // step belongs to that one, and a step of the popover waits for the new document.
+        view.update(cx, |view, _| {
+            view.selected_message_id = Some(ids[0]);
+            view.reload_selected_detail();
+            view.last_reader_sig = None;
+        });
+        reader.update(cx, |reader, cx| reader.zoom_by(1, cx));
+        view.update(cx, |view, cx| {
+            assert_eq!(view.reader_zoom_of(ids[1]), 1.1);
+            assert_eq!(view.reader_zoom_of(ids[0]), 1.0);
+            // As while the new document builds (the wheel's frame already brought it).
+            view.reader_document = Some(ids[1]);
+            view.last_reader_sig = None;
+            let before = reader.read(cx).zoom();
+            view.set_reader_zoom(2.0, cx);
+            assert_eq!(view.reader_zoom_of(ids[0]), 2.0);
+            assert_eq!(view.reader_zoom_of(ids[1]), 1.1);
+            assert_eq!(reader.read(cx).zoom(), before, "still the previous message");
+        });
+        cx.run_until_parked();
+        reader.read_with(cx, |reader, _| assert_eq!(reader.zoom(), 2.0));
     }
 
     #[test]

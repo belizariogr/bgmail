@@ -1000,7 +1000,7 @@
          and bidi order identical. Multi-MB mail timed in milestone 4.
   5. ✅ Zoom, print, animated GIF.
      - ✅ Zoom: page zoom as Blitz's scale factor (text reflows and stays
-       sharp); Ctrl/Cmd `+`/`-`/`0` and Ctrl/Cmd + wheel over the reader,
+       sharp); Ctrl/Cmd + wheel over the reader,
        Chromium's levels (25%–500%). Now per message (see above), shown
        as an icon next to the subject when it isn't 100%. Not persisted between runs yet.
      - ✅ Print (Cmd/Ctrl+P, Message menu, palette): decided with two
