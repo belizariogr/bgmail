@@ -16,7 +16,8 @@ theme tinting.
 - One SVG per icon; normalized square `viewBox` for a consistent footprint.
 - Artwork baseline: FontAwesome 6 Free Solid (Star outline uses Regular);
   `chevron-right.svg` is a hand-drawn stroke chevron (must rotate for sidebar
-  disclosure).
+  disclosure); `magnifying-glass-plus.svg` is a hand-drawn outline (FA Free has
+  only the solid one).
 - Adding an icon requires: new SVG here, `IconName` variant, and embed entry in
   `crates/ui/src/assets.rs`.
 - Narrow FA glyphs are centered in a square box by widening the `viewBox`

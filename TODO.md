@@ -382,7 +382,7 @@
       (`app_zoom`, content scale patched into `vendor/gpui`).
 - ✅ The reader's page zoom (Ctrl/Cmd + wheel) belongs to each message: the next one
       opens at 100%, and coming back finds the zoom it was left at (for the session, in
-      `reader_zooms`). While it isn't 100%, a small icon next to the subject says so; clicking it opens
+      `reader_zooms`). While it isn't 100%, a small button at the end of the subject row says so; clicking it opens
       a popover with the level, −, + and Reset.
 - ✅ Each mailbox remembers its selected messages for the session.
 - ✅ Deleting the open message (or a multiple selection) opens the next row, or the

@@ -4614,20 +4614,19 @@ impl RootView {
         Some(
             div()
                 .id("reader-zoom")
-                .flex()
                 .flex_shrink_0()
-                .size(px(20.0))
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
+                // The button overhangs its row: the row keeps its height, and the icon,
+                // not the hover background, lines up with the date below.
+                .my(px(-4.0))
+                .mr(px(-6.0))
                 .tooltip(Tooltip::text(locale::status_zoom(cx.language(), zoom)))
-                .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
-                    this.open_reader_zoom_menu(event.position(), cx);
-                }))
                 .child(
-                    Icon::new(IconName::Zoom)
-                        .size(IconSize::Small)
-                        .color(Color::Accent),
+                    IconButton::new("reader-zoom-button", IconName::Zoom)
+                        .size(IconSize::Medium)
+                        .color(Color::Muted)
+                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                            this.open_reader_zoom_menu(event.position(), cx);
+                        })),
                 ),
         )
     }
@@ -8686,8 +8685,9 @@ impl RootView {
                                 .single_line(),
                         ),
                     )
-                    .children(self.render_reader_zoom(cx))
-                    .child(self.render_privacy_shield(cx)),
+                    // Last: the shield's slot is there even when empty.
+                    .child(self.render_privacy_shield(cx))
+                    .children(self.render_reader_zoom(cx)),
             )
             // The recipients line follows the sender's two lines with no gap, so the
             // three read as one block with even spacing.
