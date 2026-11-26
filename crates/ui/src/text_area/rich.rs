@@ -713,8 +713,34 @@ impl RichText {
                 if content.is_empty() {
                     out.push_str("<br>");
                 }
-                for (run, style) in self.runs_in(range) {
-                    push_styled(&mut out, &text[run], &style);
+                let links = link_ranges(content);
+                // Runs are cut at the links' edges, so each link wraps whole pieces.
+                let mut cuts: Vec<usize> = links
+                    .iter()
+                    .flat_map(|(link, _)| [range.start + link.start, range.start + link.end])
+                    .collect();
+                cuts.sort_unstable();
+                for (run, style) in self.runs_in(range.clone()) {
+                    let mut start = run.start;
+                    for end in cuts
+                        .iter()
+                        .copied()
+                        .filter(|cut| *cut > run.start && *cut < run.end)
+                        .chain([run.end])
+                    {
+                        let local = start - range.start;
+                        if let Some((_, href)) = links.iter().find(|(link, _)| link.start == local)
+                        {
+                            out.push_str("<a href=\"");
+                            push_escaped(&mut out, href);
+                            out.push_str("\">");
+                        }
+                        push_styled(&mut out, &text[start..end], &style);
+                        if links.iter().any(|(link, _)| link.end == end - range.start) {
+                            out.push_str("</a>");
+                        }
+                        start = end;
+                    }
                 }
             }
             out.push_str("</");
@@ -765,6 +791,53 @@ impl RichText {
         }
         self.runs = merged;
     }
+}
+
+/// Web and e-mail addresses in `line`, linked as Gmail's composer links them while
+/// typing: (byte range, href). Punctuation around an address stays out of it.
+pub fn link_ranges(line: &str) -> Vec<(Range<usize>, String)> {
+    const LEADING: &[char] = &['(', '<', '[', '"', '\''];
+    const TRAILING: &[char] = &['.', ',', ';', ':', '!', '?', ')', '>', ']', '"', '\''];
+    let mut links = Vec::new();
+    let mut offset = 0;
+    for token in line.split(' ') {
+        let start = offset + (token.len() - token.trim_start_matches(LEADING).len());
+        let word = token.trim_start_matches(LEADING).trim_end_matches(TRAILING);
+        offset += token.len() + 1;
+        let lower = word.to_ascii_lowercase();
+        let href = if ["http://", "https://", "mailto:"]
+            .iter()
+            .any(|scheme| lower.starts_with(scheme) && word.len() > scheme.len())
+        {
+            Some(word.to_string())
+        } else if lower.starts_with("www.") && word[4..].contains('.') {
+            Some(format!("http://{word}"))
+        } else if is_email(word) {
+            Some(format!("mailto:{word}"))
+        } else {
+            None
+        };
+        if let Some(href) = href.filter(|_| !word.chars().any(char::is_whitespace)) {
+            links.push((start..start + word.len(), href));
+        }
+    }
+    links
+}
+
+/// Whether `word` reads as an e-mail address: `name@domain.tld`.
+fn is_email(word: &str) -> bool {
+    let Some((local, domain)) = word.split_once('@') else {
+        return false;
+    };
+    let labels: Vec<&str> = domain.split('.').collect();
+    !local.is_empty()
+        && local
+            .chars()
+            .all(|c| c.is_alphanumeric() || "._%+-".contains(c))
+        && labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty() && label.chars().all(|c| c.is_alphanumeric() || c == '-')
+        })
 }
 
 /// Where `range` goes when `removed` is replaced by `inserted_len` bytes: text put at
@@ -1274,5 +1347,37 @@ mod tests {
         dangling.rich.images.clear();
         assert!(dangling.validated().rich.is_plain());
         assert_eq!(RichDocument::plain("a\r\nb").text, "a\nb");
+    }
+
+    #[test]
+    fn web_and_mail_addresses_become_links_without_their_punctuation() {
+        let line = "Site: www.acme.com, mail (ann@acme.com). See https://acme.com/a?b=1&c!";
+        let links = link_ranges(line);
+        let found: Vec<(&str, &str)> = links
+            .iter()
+            .map(|(range, href)| (&line[range.clone()], href.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("www.acme.com", "http://www.acme.com"),
+                ("ann@acme.com", "mailto:ann@acme.com"),
+                ("https://acme.com/a?b=1&c", "https://acme.com/a?b=1&c"),
+            ]
+        );
+        for plain in ["@", "a@b", "a@.com", "www.", "http://", "x.y", "e-mail"] {
+            assert!(link_ranges(plain).is_empty(), "{plain}");
+        }
+    }
+
+    #[test]
+    fn a_link_wraps_its_pieces_in_the_html() {
+        let text = "Mail ann@acme.com now";
+        let mut rich = RichText::new(text);
+        rich.update_chars(5..8, |style| style.bold = true);
+        assert!(rich
+            .to_html(text)
+            .contains("Mail <a href=\"mailto:ann@acme.com\"><b>ann</b>@acme.com</a> now"));
+        assert_eq!(rich.to_plain(text), text);
     }
 }

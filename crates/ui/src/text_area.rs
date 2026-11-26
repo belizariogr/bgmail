@@ -256,6 +256,8 @@ struct LayoutKey {
     font_size: Pixels,
     line_height: Pixels,
     color: Hsla,
+    /// Of the web and e-mail addresses, which go out as links.
+    link_color: Hsla,
 }
 
 /// Where a logical line goes and how it is drawn.
@@ -349,6 +351,49 @@ fn line_runs(
         ));
     }
     runs
+}
+
+/// `runs` with the addresses at `links` (byte ranges of the line) underlined in
+/// `color`, as they go out: links.
+fn show_links(runs: Vec<TextRun>, links: &[(Range<usize>, String)], color: Hsla) -> Vec<TextRun> {
+    if links.is_empty() {
+        return runs;
+    }
+    let in_link = |offset: usize| links.iter().any(|(link, _)| link.contains(&offset));
+    let mut cuts: Vec<usize> = links
+        .iter()
+        .flat_map(|(link, _)| [link.start, link.end])
+        .collect();
+    cuts.sort_unstable();
+    let mut out = Vec::new();
+    let mut start = 0;
+    for run in runs {
+        let end = start + run.len;
+        let mut piece_start = start;
+        for piece_end in cuts
+            .iter()
+            .copied()
+            .filter(|cut| *cut > start && *cut < end)
+            .chain([end])
+        {
+            let mut piece = TextRun {
+                len: piece_end - piece_start,
+                ..run.clone()
+            };
+            if in_link(piece_start) {
+                piece.color = color;
+                piece.underline = Some(UnderlineStyle {
+                    color: Some(color),
+                    thickness: px(1.0),
+                    wavy: false,
+                });
+            }
+            out.push(piece);
+            piece_start = piece_end;
+        }
+        start = end;
+    }
+    out
 }
 
 /// Fonts used for text, by [`FontFamily`].
@@ -495,7 +540,11 @@ impl TextLayout {
                 ),
                 None => (
                     SharedString::from(content.to_string()),
-                    line_runs(&key, &rich, range.clone(), &families),
+                    show_links(
+                        line_runs(&key, &rich, range.clone(), &families),
+                        &rich::link_ranges(content),
+                        key.link_color,
+                    ),
                 ),
             };
             let line = window
@@ -1715,6 +1764,7 @@ impl TextAreaElement {
             } else {
                 style.color
             },
+            link_color: cx.theme().colors().text_accent,
         }
     }
 }
@@ -2255,6 +2305,28 @@ mod tests {
         area.read_with(cx, |area, _| {
             assert_eq!(area.selected_range(), 0..IMAGE_CHAR.len_utf8());
         });
+    }
+
+    #[test]
+    fn addresses_show_underlined_in_the_link_color() {
+        let link = hsla(0.6, 1., 0.5, 1.);
+        let runs = vec![
+            TextRun {
+                len: 5,
+                ..base_run()
+            },
+            TextRun {
+                len: 10,
+                ..base_run()
+            },
+        ];
+        let shown = show_links(runs.clone(), &[(3..8, String::new())], link);
+        let lens: Vec<_> = shown.iter().map(|run| run.len).collect();
+        assert_eq!(lens, [3, 2, 3, 7]);
+        let linked: Vec<_> = shown.iter().map(|run| run.underline.is_some()).collect();
+        assert_eq!(linked, [false, true, true, false]);
+        assert_eq!(shown[1].color, link);
+        assert_eq!(show_links(runs.clone(), &[], link), runs);
     }
 
     #[test]
