@@ -76,7 +76,8 @@ fn keep_private(path: &Path) {
 fn keep_private(_: &Path) {}
 
 /// What a new database takes from a damaged one.
-const RECOVERED_TABLES: [(&str, &str); 2] = [
+const RECOVERED_TABLES: [(&str, &str); 3] = [
+    ("signatures", ""),
     ("accounts", ""),
     (
         "outbox",
@@ -975,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn a_replaced_database_keeps_its_accounts() {
+    fn a_replaced_database_keeps_its_accounts_and_signatures() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mail.db");
         let db = Database::open(&path).unwrap();
@@ -985,9 +986,16 @@ mod tests {
                 [],
             )
             .unwrap();
+        let signature = db.create_signature("Ann", "{}").unwrap();
+        let account = db.list_accounts().unwrap()[0].id;
+        db.set_account_signatures(account, Some(signature), None)
+            .unwrap();
         drop(db);
         let db = Database::replace_corrupt(&path).unwrap();
-        assert_eq!(db.list_accounts().unwrap().len(), 1);
+        let accounts = db.list_accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].signature_new, Some(signature));
+        assert_eq!(db.list_signatures().unwrap()[0].name, "Ann");
         assert!(dir.path().join("mail.db.corrupt").exists());
     }
 

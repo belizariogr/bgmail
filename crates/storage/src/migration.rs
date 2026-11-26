@@ -8,8 +8,9 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use crate::folder::folder_csv_needle;
 use crate::schema::{
     CREATE_ACCOUNTS, CREATE_FOLDERS, CREATE_MESSAGES, CREATE_META, INDEX_MESSAGES_ACCOUNT,
-    INDEX_MESSAGES_FOLDERS, INDEX_MESSAGES_SEARCH, SCHEMA_VERSION, V2_COLUMNS, V2_OBJECTS,
-    V3_COLUMNS, V3_OBJECTS, V4_OBJECTS, V5_COLUMNS, V7_COLUMNS, V8_COLUMNS, V9_OBJECTS,
+    INDEX_MESSAGES_FOLDERS, INDEX_MESSAGES_SEARCH, SCHEMA_VERSION, V10_COLUMNS, V10_OBJECTS,
+    V2_COLUMNS, V2_OBJECTS, V3_COLUMNS, V3_OBJECTS, V4_OBJECTS, V5_COLUMNS, V7_COLUMNS, V8_COLUMNS,
+    V9_OBJECTS,
 };
 
 /// Brings the database to [`SCHEMA_VERSION`] inside one `IMMEDIATE` transaction,
@@ -69,6 +70,13 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if version < 9 {
         tx.execute_batch(V9_OBJECTS)?;
         version = 9;
+    }
+    if version < 10 {
+        tx.execute_batch(V10_OBJECTS)?;
+        for (table, column, definition) in V10_COLUMNS {
+            add_column_if_missing(&tx, table, column, definition)?;
+        }
+        version = 10;
     }
     if version != start || schema_version(&tx)?.is_none() {
         tx.execute(
@@ -232,6 +240,8 @@ mod tests {
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].provider, "local");
         assert_eq!(accounts[0].config_json, "{}");
+        assert_eq!(accounts[0].signature_new, None);
+        assert!(db.list_signatures().unwrap().is_empty());
 
         let folders = db.list_folders(accounts[0].id).unwrap();
         assert_eq!(folders[0].path, system::INBOX);

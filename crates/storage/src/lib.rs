@@ -12,6 +12,7 @@ mod queue;
 mod schema;
 mod search;
 mod seed;
+mod signatures;
 mod sync;
 #[cfg(test)]
 mod test_support;
@@ -31,6 +32,7 @@ pub use seed::{
     plain_text_from_raw, preview_from_plain, seed, seed_if_empty, SeedAccount, SeedMailbox,
     SeedMessage,
 };
+pub use signatures::Signature;
 pub use sync::{BODY_STATE_FULL, BODY_STATE_HEADERS};
 pub use types::{
     Account, AttachmentRow, Folder, FolderSyncState, MailListQuery, MessageDetail, MessageListItem,

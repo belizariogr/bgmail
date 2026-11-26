@@ -1531,6 +1531,8 @@ mod tests {
             provider: PROVIDER_LOCAL.into(),
             config_json: String::new(),
             sender_name: String::new(),
+            signature_new: None,
+            signature_reply: None,
         }));
     }
 }
