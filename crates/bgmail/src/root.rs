@@ -1520,6 +1520,7 @@ fn compose_init_from_outgoing(row: &OutgoingRow, parsed: &ParsedMessage) -> Comp
             in_reply_to: parsed.in_reply_to.clone(),
             references: parsed.references.clone(),
             attachments: forwarded_attachments(&row.raw, parsed, &[]),
+            inline_images: Vec::new(),
         },
         replaces_outgoing: Some(row.id),
         quoted_original: None,

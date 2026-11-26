@@ -2013,6 +2013,7 @@ fn build_draft(
         in_reply_to: reply.in_reply_to.clone(),
         references: reply.references.clone(),
         attachments: attachments.to_vec(),
+        inline_images: Vec::new(),
     })
 }
 
