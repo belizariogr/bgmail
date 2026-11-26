@@ -175,7 +175,7 @@ wiring to `storage`.
   picker / drag-and-drop read off the UI thread (25 MB total cap). Formatting tools on
   the send button's row, as in Gmail (undo, font, size, B/I/U, color, align, lists, indent,
   image; `format_bar::FormatBar`) drive `ui::TextArea`; formatted text is sent as HTML with a plain-text version, and
-  unformatted new mail stays plain text. Send (button, `ComposeSend`, Cmd/Ctrl+Enter) validates with
+  unformatted new mail without addresses to link stays plain text. Send (button, `ComposeSend`, Cmd/Ctrl+Enter) validates with
   `mail_core::parse_address_list` (inline per-field errors) and hands the
   `Draft` to `RootView::send_draft` in a task (never while root is leased);
   success closes the window, errors show in a banner. Replies prefill from
@@ -338,14 +338,16 @@ wiring to `storage`.
   and the toolbar's signature menu changes or removes it ("Manage signatures…"
   opens the settings). Swapping isn't an edit (closing doesn't ask). Which
   signature the body holds is read from its text, so undo never leaves it stale;
-  an empty signature signs nothing. Edited unsent messages keep the one in their
-  text, and the images of their body come back as attachments (the editor gets the
-  text back, not the formatting). Signatures are read from the database only when a message opens or
+  an empty signature signs nothing. Changing From replaces even an edited signature,
+  as Gmail does (then it counts as an edit). Edited unsent messages keep the one in
+  their text, which the picker recognizes and changes, and the images of their body
+  come back as attachments (the editor gets the text back, not the formatting). Signatures are read from the database only when a message opens or
   the settings show them; stored as `RichDocument` JSON (images base64), a damaged
   one reads as empty.
 - Images in the body (Insert image, a signature's) go out as `cid:` parts of a
   `multipart/related` (`ii_<salt>_<id>@bgmail`, unique per message), count with
-  the attachments (25 MB), and are left out of the plain-text version. One goes in
+  the attachments (25 MB), and are left out of the plain-text version. A body with
+  a web or e-mail address goes out as HTML too, so the address is a link. One goes in
   sized as it shows once turned by its EXIF, and no bigger than 40 megapixels. Web and e-mail addresses go out as
   links.
 - Replies follow Gmail: the editor holds only what the user writes, and below

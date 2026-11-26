@@ -86,8 +86,10 @@ an e-mail client, without Zed-scale bloat.
   undo), `replace_range_with_document` (one undoable step that keeps images alone
   on their lines; programmatic, so no `Changed`). A tracked range (`set_tracked_range`) follows the edits so
   its owner can replace that part later; text typed at its edges stays out.
-- Web and e-mail addresses in the text (`rich::link_ranges`) go out as links and
-  show underlined in the theme's `text_accent`, as Gmail's composer does.
+- Web and e-mail addresses in the text (`rich::link_ranges`) go out as links (so a
+  text with one goes out as HTML) and show underlined in the theme's `text_accent`,
+  or the host's `set_link_color`, as Gmail's composer does. Backspace/Delete next to
+  an image take it only when it is on the side they delete toward.
 - `TextArea` keeps GPUI-free editing logic (text/selection/undo in
   `text_area/buffer.rs`, soft-wrap row math in `text_area/rows.rs`) separate
   from the element so it is unit-tested without a window; reshaping happens

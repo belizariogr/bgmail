@@ -122,6 +122,8 @@ impl SignaturesPage {
     /// Shows signature `id` in the editor, saving the one shown first.
     fn select(&mut self, id: Option<i64>, cx: &mut Context<Self>) {
         self.save_now(cx);
+        // An image still being picked was for the signature going away.
+        self.format_bar.update(cx, |bar, _| bar.cancel_image());
         self.selected = id.filter(|id| self.signatures.iter().any(|entry| entry.id == *id));
         self.message = None;
         let entry = self
@@ -724,6 +726,20 @@ mod tests {
             .map(|entry| entry.name)
             .collect();
         assert_eq!(names, ["Closing"]);
+    }
+
+    #[gpui::test]
+    fn an_image_still_being_picked_stays_with_its_signature(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, page, cx) = page(&dir.path().join("mail.db"), cx);
+        page.update_in(cx, |page, window, cx| {
+            page.create(window, cx);
+            page.format_bar
+                .update(cx, |bar, _| bar.start_image_for_tests());
+            // Another signature is shown before the file is picked.
+            page.create(window, cx);
+            assert!(!page.format_bar.read(cx).image_pending());
+        });
     }
 
     #[gpui::test]

@@ -510,7 +510,7 @@ window.
 - **`default_mail_app`**: `status()` / `set_default()` (pub, per OS), enums `Status`, `Outcome`, `Error`; on Linux `status_with` / `set_default_with` / `status_from_query` / `application_dirs`.
 - **`instance`**: `mailto_argument` / `lock_profile` / `hand_over` / `listen`, `ProfileLock`, `ACTIVATE` (pub); `lock_at` (file lock at `instance.lock`; I/O failure = `Unavailable`, which starts anyway), `hand_over_through` (retries while the running process starts), `forward_through`, `serve`, `read_message`, `new_token`, `write_private`, `instance_file` (private): one process per profile; a later launch hands over its `mailto:` link, or `ACTIVATE` to show the window, and exits.
 - **`refresh_default_app`** / **`make_default_app`** / **`render_default_mail_app`** / **`default_app_message`** (private, `settings`): the Settings row.
-- **`message_html`** / **`body_selection_color`** / **`body_scrollbar_colors`** (private, `compose`): what is sent, and the body's page colors. The formatting bar is `format_bar::FormatBar` (below), held as `format_bar`; its `ImageFailed` goes to the banner.
+- **`message_html`** / **`body_selection_color`** / **`body_link_color`** / **`body_scrollbar_colors`** (private, `compose`): what is sent, and the body's page colors (links on a white page take the light theme's `text_accent`). The formatting bar is `format_bar::FormatBar` (below), held as `format_bar`; its `ImageFailed` goes to the banner.
 - **`has_edits`** (`pub(crate)`, `compose`): whether replacing the content would lose typed text.
 - **`quotable_text`** (pub, `mail_html`): a plain-text original for a reply's quote.
 - **`DocumentColors::dark_page`** (pub, `mail_html`): colors for `html_view` to keep text readable on a dark page.
@@ -528,7 +528,7 @@ window.
 - **`apply_init`** (pub(crate), L305)
   - Behavior: Closes the format bar's dropdown and cancels an image still being picked or read (`FormatBar::cancel_image`: it was for the content going away). Replaces every field from `init` (blank when `None`): From via `account_index(init.account_id)`, `replaces_outgoing`, To/Cc/Bcc via `format_address_list`, subject, body signed by `sign_body` (caret at start), attachments, reply headers; the signature slot (blank → `NewMail`; `init.signature`; `None` → the signature doesn't follow the account) and `forward`; shows Cc/Bcc when prefilled; clears errors, menus and `edited`; focuses per `initial_focus`. Root calls it when a reply is opened while the window is already open.
 
-- **`sign_body`** (private) — the body as `signatures::body_with_signature` of the text (above the original when `quote_in_editor`) with the From account's signature for this slot (when it follows the account), as a document; the signature's range (empty where one goes) becomes the editor's tracked range and its id the tracked tag. Not an edit.
+- **`sign_body`** (private) — the body as `signatures::body_with_signature` of the text (above the original when `quote_in_editor`) with the From account's signature for this slot (when it follows the account), as a document; the signature's range (empty where one goes) becomes the editor's tracked range and its id the tracked tag; a message whose signature doesn't follow the account (an edited unsent one) tracks the one it already has (`find_signature`). Not an edit.
 - **`account_signature`** / **`signature_entry`** (private) — the signature the From account puts in this message; a saved one by id, only with something in it (an empty one signs nothing).
 - **`use_signature`** (private) — replaces the tracked range with signature `id`'s document (`None` or an empty one empties it); into an empty range with the room of `signature_insertion`; the tracked range follows where the document landed and the tag is its id; the caret stays (`caret_after_replace`). One undoable step, not an edit (it loses nothing typed).
 - **`signature_in_body`** (private) — `signatures::signature_in_body` of the body and its tracked tag: read from the text, so undo can't leave it stale. The picker checks it; From changes use `needs_signature_change`.
@@ -546,7 +546,7 @@ window.
 
 - **`toggle_from_menu`** / **`close_from_menu`** (private, L364/L369) — open/close the From picker (never opens without accounts); closing also closes the signature menu and the format bar's dropdown.
 
-- **`select_from_account`** (private, L375) — sets the From index (when in range), clears the banner, closes the picker; a new account swaps the body's signature for its own (`use_signature`) when the signature follows the account and `needs_signature_change`, as in Gmail. Not an edit.
+- **`select_from_account`** (private, L375) — sets the From index (when in range), clears the banner, closes the picker; a new account swaps the body's signature for its own (`use_signature`) when the signature follows the account and `needs_signature_change`, as in Gmail. Not an edit, unless the signature replaced was edited (that loses typing; undo brings it back).
 
 - **`selected_account`** (private, L383) — the chosen `ComposeAccount`, if any.
 
@@ -628,7 +628,7 @@ compose window and the signature editor.
 - **`shown_size`** (private) — `width`×`height` narrowed to `MAX_IMAGE_WIDTH`, proportions kept.
 - **enum `FormatBarEvent`** (pub) — `ImageFailed(String)` (localized).
 - **struct `FormatBar`** (pub) — `editor: Entity<TextArea>`, `menu`, `max_image_bytes`, the image task, an observation of the editor (re-renders with its caret).
-  - **`new(editor, max_image_bytes, cx)`** (pub); **`menu_open`** / **`close_menu`** (pub): for the owner's click catcher; **`cancel_image`** (pub): drops an image still being picked or read.
+  - **`new(editor, max_image_bytes, cx)`** (pub); **`menu_open`** / **`close_menu`** (pub): for the owner's click catcher; **`cancel_image`** (pub): drops an image still being picked or read; **`image_pending`** / **`start_image_for_tests`** (test).
   - **`pick_image`** (private): file picker (one file), `read_inline_image` on the background executor, then **`finish_image`** (private): `TextArea::insert_image` and focus, or `ImageFailed`.
   - **`format_body`** / **`toggle_format_menu`** (private): run a formatting command on the editor and keep typing there; open/close a dropdown.
   - **`render_bar`** (private): undo, redo, font, size, B/I/U, color, align, numbered/bullet lists, indent less/more, Insert image (`IconName::Image`), one row that wraps. **`render_style_button`**, **`render_menu_button`**, **`format_dropdown`** (above its button: the bars sit under their text), **`format_menu_of`**, **`render_font_picker`**, **`render_size_picker`**, **`render_align_picker`**, **`render_color_picker`** (private): its parts.
@@ -647,13 +647,14 @@ line ("Insert this signature before quoted text in replies and remove the
 - **enum `SignatureSlot`** (pub) — `NewMail | Reply` (replies and forwards).
 - **`account_signature(account, slot)`** (pub) — the `ComposeAccount`'s choice.
 - **`signature_offset(text, quote_in_editor)`** (pub) — end of the text (the quote isn't in the editor), or where the original starts when the editor holds it (`original_start`, else after the leading line breaks).
+- **`find_signature(text, quote_in_editor, signatures)`** (pub) — the signature a body already has (an edited unsent message): the saved one whose plain text (images left out, as it went out) ends nearest above the original or the end; its range and id.
 - **`original_start(text)`** (pub) — the line where a held original starts: a forwarded block's header (`---------- … ----------`, any language) or an attribution line (ends in `:`, next line starts with `>`); `None` without one. Also tells `root` that a re-edited unsent message holds one.
 - **enum `SignatureInBody`** (pub) — `Nothing`, `Saved(id)` (a saved signature as saved), `Edited`. **`signature_in_body(text, tracked, tag, signatures)`** (pub): what the tracked range holds — with a tag, that signature if its text is still as saved, else `Edited`; without one, the first saved signature with that text (empty signatures never match). **`needs_signature_change(held, wanted)`** (pub): whether the body must change to have `wanted`.
 - **`signature_insertion(text, at, signature)`** (pub) — the document to insert at `at` (a blank line before it and a line to type on at the start; a blank line after it when text follows) and the signature's range in it.
 - **`body_with_signature(text, quote_in_editor, signature)`** (pub; the offset is taken on the normalized text, so `\r\n` can't push it past the end) — the body document and the signature's range; without one (or an empty one), the text and the empty range where one goes.
 - **`caret_after_replace(caret, replaced, inserted_len)`** (pub) — the caret stays before, moves with the text after, goes to the start from inside.
 - **`new_signature_name(template, existing)`** (pub) — `template` with `{n}` numbered after the existing ones, skipping a taken name.
-- Tests: `new_mail_and_replies_take_their_own_signature`, `the_signature_follows_a_blank_line_with_a_line_above_to_type_on`, `a_forward_is_signed_above_the_forwarded_message`, `without_a_signature_the_place_for_one_is_kept`, `a_signature_added_later_gets_the_same_room`, `a_signature_brings_its_images`, `the_caret_stays_out_of_a_replaced_signature`, `a_new_signature_is_numbered_after_the_others`, `the_signature_in_the_body_is_read_from_its_text` (twins told apart by the tag), `a_reply_holding_its_quote_is_signed_above_it`, `a_re_edited_reply_or_forward_is_signed_above_its_original`, `a_body_with_windows_line_endings_is_signed_inside_it`, `a_signature_from_a_newer_version_keeps_its_text`.
+- Tests: `new_mail_and_replies_take_their_own_signature`, `the_signature_follows_a_blank_line_with_a_line_above_to_type_on`, `a_forward_is_signed_above_the_forwarded_message`, `without_a_signature_the_place_for_one_is_kept`, `a_signature_added_later_gets_the_same_room`, `a_signature_brings_its_images`, `the_caret_stays_out_of_a_replaced_signature`, `a_new_signature_is_numbered_after_the_others`, `the_signature_in_the_body_is_read_from_its_text` (twins told apart by the tag), `a_reply_holding_its_quote_is_signed_above_it`, `a_re_edited_reply_or_forward_is_signed_above_its_original`, `a_body_with_windows_line_endings_is_signed_inside_it`, `a_signature_from_a_newer_version_keeps_its_text`, `the_signature_an_unsent_message_has_is_found_above_its_original`.
 
 ### `src/signature_settings.rs`
 
@@ -666,13 +667,13 @@ Settings ▸ Signatures (Gmail's signature settings).
   - **`new`** (pub(crate)): editors, subscriptions (name/editor edits → `schedule_save`; `ImageFailed` → message, `on_release` → `save_on_release`), the database path (`RootView::database_path`); selects the first signature.
   - **`save_on_release`** (private): edits still waiting when the page goes (window closed, app quitting) are written synchronously on a connection of its own, as the main view may already be gone.
   - **`reload`** (private): `RootView::signatures`.
-  - **`select`** (private): saves the shown one, then loads `id`'s name and document (not edits).
+  - **`select`** (private): saves the shown one, cancels an image still being picked for it, then loads `id`'s name and document (not edits).
   - **`create`** (private): saves, `RootView::create_signature` named `new_signature_name(Key::SignatureDefaultName)`, selects it and selects its name to type over.
   - **`confirm_delete`** / **`delete`** (private): `window.prompt` (`SignatureDeleteConfirm`, `SignatureDeleteDetail`), then `RootView::delete_signature` (pending edits dropped), selecting the first left.
   - **`schedule_save`** / **`save_now`** / **`edited_signature`** (private): debounced save through `RootView::save_signature`; a blank name keeps the old one.
   - **`toggle_defaults_menu`** / **`close_menus`** (pub(crate); `close_menus` also from `SettingsView` when the section changes) / **`set_default`** (private): the defaults dropdowns; setting one keeps the account's other choice (`RootView::set_account_signatures`). **`defaults_menu_open`** (test).
   - **`render_list`**, **`render_editor`** (name field via `settings::input_box`, editor box with the bar under the text, error, Delete), **`render_defaults`** (accounts that can send: name, address, two pickers), **`render_default_picker`** (private). `Render`: hint, list, New signature, editor, defaults, and a click catcher while a dropdown is open.
-- Tests (helper `page`): `a_new_signature_is_named_and_saves_its_edits` (debounced save, blank name kept, switching saves at once), `edits_still_waiting_are_saved_when_the_page_goes`, `its_dropdowns_close_together`, `each_account_picks_its_signatures_and_deleting_one_clears_them`; `settings.rs` `leaving_the_signatures_section_closes_its_dropdowns`.
+- Tests (helper `page`): `a_new_signature_is_named_and_saves_its_edits` (debounced save, blank name kept, switching saves at once), `edits_still_waiting_are_saved_when_the_page_goes`, `an_image_still_being_picked_stays_with_its_signature`, `its_dropdowns_close_together`, `each_account_picks_its_signatures_and_deleting_one_clears_them`; `settings.rs` `leaving_the_signatures_section_closes_its_dropdowns`.
 
 
 ### `src/config.rs`

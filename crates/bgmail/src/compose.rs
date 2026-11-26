@@ -43,9 +43,9 @@ use crate::locale::{ActiveLanguage, Key, Language};
 use crate::root::{clipped_text, RootView};
 use crate::settings::SettingsSection;
 use crate::signatures::{
-    account_signature, body_with_signature, caret_after_replace, needs_signature_change,
-    signature_in_body, signature_insertion, signature_offset, SignatureEntry, SignatureInBody,
-    SignatureSlot,
+    account_signature, body_with_signature, caret_after_replace, find_signature,
+    needs_signature_change, signature_in_body, signature_insertion, signature_offset,
+    SignatureEntry, SignatureInBody, SignatureSlot,
 };
 
 /// Default width of the compose window on first open, in pixels.
@@ -351,6 +351,7 @@ impl ComposeView {
                 .min_lines(BODY_MIN_LINES);
             area.track_scroll(&body_scroll);
             area.set_selection_color(body_selection_color(white_background, cx), cx);
+            area.set_link_color(body_link_color(white_background), cx);
             area
         });
 
@@ -492,8 +493,10 @@ impl ComposeView {
         if self.white_background != value {
             self.white_background = value;
             let selection = body_selection_color(value, cx);
-            self.body
-                .update(cx, |area, cx| area.set_selection_color(selection, cx));
+            self.body.update(cx, |area, cx| {
+                area.set_selection_color(selection, cx);
+                area.set_link_color(body_link_color(value), cx);
+            });
             self.drop_quote_view();
             if self.quote_expanded {
                 self.build_quote_view(cx);
@@ -606,11 +609,20 @@ impl ComposeView {
             self.quote_in_editor,
             entry.as_ref().map(|entry| &entry.document),
         );
-        let tag = entry.as_ref().map(|entry| entry.id);
+        let mut tracked = (range, entry.as_ref().map(|entry| entry.id));
+        // A message that already has its signature (an edited unsent one): the
+        // picker changes that one.
+        if !self.signature_follows_account {
+            if let Some((found, id)) =
+                find_signature(&body.text, self.quote_in_editor, &self.signatures)
+            {
+                tracked = (found, Some(id));
+            }
+        }
         self.body.update(cx, |area, cx| {
             area.set_document(body, cx);
-            area.set_tracked_range(Some(range));
-            area.set_tracked_tag(tag);
+            area.set_tracked_range(Some(tracked.0));
+            area.set_tracked_tag(tracked.1);
         });
     }
 
@@ -629,7 +641,7 @@ impl ComposeView {
 
     /// Puts signature `id` in place of the one in the body (`None` takes it out),
     /// where it is or, without one, where it goes. The caret stays where it was. Not
-    /// an edit: it loses nothing the user typed.
+    /// an edit by itself: replacing a signature as saved loses nothing typed.
     fn use_signature(&mut self, id: Option<i64>, cx: &mut Context<Self>) {
         let entry = id.and_then(|id| self.signature_entry(id)).cloned();
         let quote_in_editor = self.quote_in_editor;
@@ -794,11 +806,14 @@ impl ComposeView {
             let wanted = self
                 .account_signature()
                 .filter(|id| self.signature_entry(*id).is_some());
-            if changed
-                && self.signature_follows_account
-                && needs_signature_change(self.signature_in_body(cx), wanted)
-            {
+            let held = self.signature_in_body(cx);
+            if changed && self.signature_follows_account && needs_signature_change(held, wanted) {
+                // As in Gmail, an edited signature goes too; that loses typing (undo
+                // brings it back), so it is an edit.
                 self.use_signature(wanted, cx);
+                if held == SignatureInBody::Edited {
+                    self.mark_edited(cx);
+                }
             }
         }
         self.close_from_menu(cx);
@@ -1536,6 +1551,12 @@ fn body_selection_color(white_background: bool, cx: &App) -> Option<Hsla> {
     white_background.then(|| white().blend(cx.theme().colors().accent.opacity(0.35)))
 }
 
+/// Color of the addresses linked in the body: on a white page the light theme's,
+/// whatever the app's theme is; otherwise the theme's.
+fn body_link_color(white_background: bool) -> Option<Hsla> {
+    white_background.then(|| Theme::light().colors().text_accent)
+}
+
 /// Thumb of the body's scrollbar (resting, dragged): it must show on the page's
 /// color, not the app's.
 fn body_scrollbar_colors(white_background: bool, cx: &App) -> (Hsla, Hsla) {
@@ -2150,7 +2171,18 @@ mod tests {
             .update(cx, |view, _, cx| {
                 assert_eq!(body_text(view, cx), "\n\nBob");
                 assert!(!view.has_edits(), "closing it or a reply mustn't ask");
+                // A signature the user edited goes too, and that is an edit.
+                view.body.update(cx, |area, cx| {
+                    area.replace_range_with_document(3..3, &RichDocument::plain("o"), cx);
+                });
+                let ann_index = view.accounts.iter().position(|a| a.id == ann).unwrap();
+                view.select_from_account(ann_index, cx);
+                assert_eq!(body_text(view, cx), "\n\nAnn");
             })
+            .expect("open");
+        cx.run_until_parked();
+        compose
+            .update(cx, |view, _, _| assert!(view.has_edits()))
             .expect("open");
     }
 
@@ -2407,7 +2439,7 @@ mod tests {
     fn an_edited_unsent_message_keeps_its_own_signature(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("mail.db");
-        let ([ann, bob], _) = signed_database(&path);
+        let ([ann, bob], [ann_signature, bob_signature, _]) = signed_database(&path);
         let init = ComposeInit {
             account_id: Some(ann),
             draft: mail_core::Draft {
@@ -2428,6 +2460,13 @@ mod tests {
                     .unwrap();
                 view.select_from_account(bob_index, cx);
                 assert_eq!(body_text(view, cx), "Hi\n\nAnn");
+                // The picker knows the one it has, and changes that one.
+                assert_eq!(
+                    view.signature_in_body(cx),
+                    SignatureInBody::Saved(ann_signature)
+                );
+                view.use_signature(Some(bob_signature), cx);
+                assert_eq!(body_text(view, cx), "Hi\n\nBob");
             })
             .expect("open");
     }
@@ -2706,6 +2745,15 @@ mod tests {
             message_html(&plain, &formatted).as_deref(),
             Some("<b>x</b>")
         );
+    }
+
+    #[test]
+    fn links_on_a_white_page_take_the_light_theme_color() {
+        assert_eq!(
+            body_link_color(true),
+            Some(Theme::light().colors().text_accent)
+        );
+        assert_eq!(body_link_color(false), None);
     }
 
     #[test]

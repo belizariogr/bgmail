@@ -363,7 +363,9 @@ fn decode_image(data: &[u8], fit: (u32, u32)) -> Option<RenderImage> {
     limits.max_alloc = Some(MAX_DECODE_ALLOC);
     reader.limits(limits);
     let mut decoder = reader.into_decoder().ok()?;
-    let orientation = image::ImageDecoder::orientation(&mut decoder).ok()?;
+    // A damaged EXIF leaves the picture as stored, as when it went in.
+    let orientation = image::ImageDecoder::orientation(&mut decoder)
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
     let mut decoded = image::DynamicImage::from_decoder(decoder).ok()?;
     decoded.apply_orientation(orientation);
     if decoded.width() > fit.0 || decoded.height() > fit.1 {
@@ -850,6 +852,9 @@ pub struct TextArea {
     /// Selection highlight when it isn't the theme's: the text may sit on a page
     /// of another color.
     selection_color: Option<Hsla>,
+    /// Color of the addresses shown as links when it isn't the theme's, for the
+    /// same reason.
+    link_color: Option<Hsla>,
     /// Formatting of the text.
     rich: RichText,
     format_revision: u64,
@@ -879,6 +884,7 @@ impl TextArea {
             goal_x: None,
             scroll_handle: None,
             selection_color: None,
+            link_color: None,
             rich: RichText::default(),
             format_revision: 0,
             pending_style: None,
@@ -910,6 +916,12 @@ impl TextArea {
     /// Sets the selection highlight; `None` follows the theme.
     pub fn set_selection_color(&mut self, color: Option<Hsla>, cx: &mut Context<Self>) {
         self.selection_color = color;
+        cx.notify();
+    }
+
+    /// Sets the color addresses show in as links; `None` follows the theme.
+    pub fn set_link_color(&mut self, color: Option<Hsla>, cx: &mut Context<Self>) {
+        self.link_color = color;
         cx.notify();
     }
 
@@ -999,9 +1011,11 @@ impl TextArea {
         }
     }
 
-    /// The text as e-mail HTML, when anything is formatted; images as `data:` URIs.
+    /// The text as e-mail HTML, when anything is formatted or an address is to be
+    /// linked; images as `data:` URIs.
     pub fn formatted_html(&self) -> Option<String> {
-        (!self.rich.is_plain()).then(|| self.rich.to_html(self.buffer.text()))
+        let text = self.buffer.text();
+        (!self.rich.is_plain_text(text)).then(|| self.rich.to_html(text))
     }
 
     /// The text as e-mail HTML, when anything is formatted, each image's `src` from
@@ -1010,7 +1024,8 @@ impl TextArea {
         &self,
         image_src: impl Fn(&InlineImage) -> String,
     ) -> Option<String> {
-        (!self.rich.is_plain()).then(|| self.rich.to_html_with(self.buffer.text(), image_src))
+        let text = self.buffer.text();
+        (!self.rich.is_plain_text(text)).then(|| self.rich.to_html_with(text, image_src))
     }
 
     /// The images the text shows, each once, in order.
@@ -1107,8 +1122,11 @@ impl TextArea {
             cx.spawn(async move |this, cx| {
                 let decoded = decode.await;
                 let _ = this.update(cx, |area, cx| {
-                    // Unless the image left the text meanwhile.
-                    if let Some(state) = area.layout.borrow_mut().decoded.get_mut(&id) {
+                    // Unless the image left the text meanwhile, or another decode of it
+                    // finished first (its texture may already be drawn).
+                    if let Some(state @ Decoded::Pending) =
+                        area.layout.borrow_mut().decoded.get_mut(&id)
+                    {
                         *state = decoded
                             .map_or(Decoded::Failed, |image| Decoded::Ready(Arc::new(image)));
                     }
@@ -1413,11 +1431,21 @@ impl TextArea {
         let Some((range, kind)) = self.buffer.deletion(forward) else {
             return;
         };
-        let range = match kind {
-            EditKind::Typing => self.rich.deletion_range(self.buffer.text(), range),
-            EditKind::Other => range,
+        let deleted = match kind {
+            EditKind::Typing => {
+                self.rich
+                    .deletion_range(self.buffer.text(), range.clone(), forward)
+            }
+            EditKind::Other => Some(range.clone()),
         };
-        self.replace_keeping_images(Some(range), "", kind, cx);
+        match deleted {
+            Some(deleted) => {
+                self.replace_keeping_images(Some(deleted), "", kind, cx);
+            }
+            // Joining would put the image on a line with text: the key only crosses
+            // the break.
+            None => self.move_to(if forward { range.end } else { range.start }, cx),
+        }
     }
 
     /// Target of a horizontal move: with a selection, its edge; otherwise
@@ -1636,18 +1664,18 @@ impl TextArea {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.buffer.selected_range().is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(clipboard_text(
-                self.buffer.selected_text(),
-            )));
+        let copied = clipboard_text(self.buffer.selected_text());
+        // An image alone has no text: the clipboard keeps what it had.
+        if !copied.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(copied));
         }
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.buffer.selected_range().is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(clipboard_text(
-                self.buffer.selected_text(),
-            )));
+        let copied = clipboard_text(self.buffer.selected_text());
+        // Pasting couldn't bring an image back: it stays (Delete removes it).
+        if !copied.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(copied));
             self.replace_keeping_images(None, "", EditKind::Other, cx);
         }
     }
@@ -1888,7 +1916,7 @@ impl TextAreaElement {
             } else {
                 style.color
             },
-            link_color: cx.theme().colors().text_accent,
+            link_color: area.link_color.unwrap_or(cx.theme().colors().text_accent),
         }
     }
 }
@@ -2445,6 +2473,65 @@ mod tests {
             1,
             "only the image the user put in is an edit"
         );
+    }
+
+    #[gpui::test]
+    fn next_to_an_image_a_key_toward_the_other_side_only_crosses_the_break(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let area = area(cx, "ab");
+        area.update(cx, |area, cx| {
+            area.buffer.move_to(2);
+            area.insert_image(logo(4, 2), cx);
+            let text = area.buffer.text().to_owned();
+            // Backspace right before the image, Delete right after it.
+            area.buffer.move_to(3);
+            area.delete_toward(false, cx);
+            assert_eq!(
+                (area.buffer.text(), area.cursor_offset()),
+                (text.as_str(), 2)
+            );
+            area.buffer.move_to(2);
+            area.delete_toward(true, cx);
+            assert_eq!(area.buffer.text(), "ab\n", "Delete takes the image ahead");
+        });
+    }
+
+    #[gpui::test]
+    fn an_image_alone_is_neither_copied_nor_cut(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
+        let area = area(cx, "");
+        area.update(cx, |area, cx| {
+            area.insert_image(logo(4, 2), cx);
+            area.buffer.select_range(0, IMAGE_CHAR.len_utf8());
+        });
+        let (_, cx) = cx.add_window_view(|_, _| DragHost(area.clone()));
+        cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("kept".into())));
+        area.update_in(cx, |area, window, cx| {
+            area.copy(&Copy, window, cx);
+            area.cut(&Cut, window, cx);
+        });
+        let clipboard = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(clipboard.as_deref(), Some("kept"));
+        area.read_with(cx, |area, _| assert_eq!(area.images().len(), 1));
+    }
+
+    #[gpui::test]
+    fn a_host_can_set_the_link_color_for_its_page(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
+        let area = area(cx, "www.acme.com");
+        let link = hsla(0.6, 1., 0.3, 1.);
+        area.update(cx, |area, cx| area.set_link_color(Some(link), cx));
+        let (_, cx) = cx.add_window_view(|_, _| DragHost(area.clone()));
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| {
+            let layout = area.layout.borrow();
+            assert_eq!(layout.key.as_ref().map(|key| key.link_color), Some(link));
+            assert!(area
+                .formatted_html()
+                .unwrap()
+                .contains("<a href=\"http://www.acme.com\">"));
+        });
     }
 
     #[gpui::test]

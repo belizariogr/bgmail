@@ -146,6 +146,33 @@ pub fn body_with_signature(
     }
 }
 
+/// The signature a body already has (an edited unsent message): the saved one whose
+/// plain text (as it went out: images left out) ends nearest above the original, or
+/// the end. Its range and id.
+pub fn find_signature(
+    text: &str,
+    quote_in_editor: bool,
+    signatures: &[SignatureEntry],
+) -> Option<(Range<usize>, i64)> {
+    let limit = if quote_in_editor {
+        original_start(text).unwrap_or(text.len())
+    } else {
+        text.len()
+    };
+    let searched = &text[..limit];
+    signatures
+        .iter()
+        .filter_map(|entry| {
+            let plain = entry.document.to_plain();
+            let plain = plain.trim_end_matches('\n');
+            let start = (!plain.trim().is_empty())
+                .then(|| searched.rfind(plain))
+                .flatten()?;
+            Some((start..start + plain.len(), entry.id))
+        })
+        .max_by_key(|(range, _)| (range.end, range.len()))
+}
+
 /// What the body holds where its signature goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignatureInBody {
@@ -404,5 +431,34 @@ mod tests {
             r#"{"text":"Ann\nCEO","rich":{"runs":[[7,{"family":"Futura"}]],"paras":[{},{}]}}"#;
         assert_eq!(read_document(json), RichDocument::plain("Ann\nCEO"));
         assert_eq!(read_document("{}"), RichDocument::default());
+    }
+
+    #[test]
+    fn the_signature_an_unsent_message_has_is_found_above_its_original() {
+        let entry = |id: i64, text: &str| SignatureEntry {
+            id,
+            name: String::new(),
+            document: RichDocument::plain(text),
+        };
+        let saved = [entry(1, "Ann"), entry(2, "Ann Smith\nCEO"), entry(3, "")];
+        let reply = "Hi Ann\n\nAnn Smith\nCEO\n\nOn Mon, Zoe wrote:\n> Ann";
+        let (range, id) = find_signature(reply, true, &saved).unwrap();
+        assert_eq!((&reply[range], id), ("Ann Smith\nCEO", 2));
+        assert_eq!(find_signature("Hi there", false, &saved), None);
+        // With its image, it is found by the text that went out.
+        let text = format!("Bob\n{}", ui::IMAGE_CHAR);
+        let mut logo = RichDocument::plain(&text);
+        let ix = logo
+            .rich
+            .add_image(ui::InlineImage::new("l.png", "image/png", vec![1], 1, 1));
+        logo.rich
+            .update_chars(4..text.len(), move |style| style.image = Some(ix));
+        let with_logo = [SignatureEntry {
+            id: 9,
+            name: String::new(),
+            document: logo,
+        }];
+        let (range, id) = find_signature("Hi\n\nBob", false, &with_logo).unwrap();
+        assert_eq!((range, id), (4..7, 9));
     }
 }

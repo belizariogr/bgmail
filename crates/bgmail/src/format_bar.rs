@@ -202,6 +202,17 @@ impl FormatBar {
         self._image_task = None;
     }
 
+    /// Whether an image is still being picked or read.
+    #[cfg(test)]
+    pub fn image_pending(&self) -> bool {
+        self._image_task.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn start_image_for_tests(&mut self) {
+        self._image_task = Some(Task::ready(()));
+    }
+
     /// Picks an image file and puts it at the caret, read off the UI thread.
     fn pick_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;

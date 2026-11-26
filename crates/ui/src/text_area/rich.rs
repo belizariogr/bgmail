@@ -318,13 +318,31 @@ impl RichDocument {
                         .image
                         .is_none_or(|ix| usize::try_from(ix).is_ok_and(|ix| ix < images))
             });
-        if valid {
-            Self {
-                rich: self.rich.compacted(),
-                text: self.text,
-            }
-        } else {
-            Self::plain(&self.text)
+        if !valid {
+            return Self::plain(&self.text);
+        }
+        // An image style shows an image only on an image character alone on its line.
+        let mut rich = self.rich;
+        let mut start = 0;
+        let misplaced: Vec<Range<usize>> = rich
+            .runs
+            .iter()
+            .filter_map(|(len, style)| {
+                let run = start..start + len;
+                start = run.end;
+                let line = line_bounds(&self.text, run.start);
+                let alone = run.len() == IMAGE_LEN && line == run;
+                (style.image.is_some()
+                    && !(alone && self.text[run.clone()].starts_with(IMAGE_CHAR)))
+                .then_some(run)
+            })
+            .collect();
+        for run in misplaced {
+            rich.update_chars(run, |style| style.image = None);
+        }
+        Self {
+            rich: rich.compacted(),
+            text: self.text,
         }
     }
 
@@ -587,19 +605,33 @@ impl RichText {
         (before, after)
     }
 
-    /// What a Backspace or Delete of `range` takes: the image next to it too when
-    /// deleting `range` alone would join that image's line with text.
-    pub fn deletion_range(&self, text: &str, range: Range<usize>) -> Range<usize> {
+    /// What a Backspace (`forward == false`) or Delete of `range` takes when
+    /// deleting it alone would join an image's line with text: the image, when it is
+    /// on the side the key deletes toward. `None` when it is on the other side: the
+    /// key then only crosses the line break.
+    pub fn deletion_range(
+        &self,
+        text: &str,
+        range: Range<usize>,
+        forward: bool,
+    ) -> Option<Range<usize>> {
         if self.image_separators(text, range.clone(), "") == ("", "") {
-            return range;
+            return Some(range);
         }
-        if range.start >= IMAGE_LEN && self.image_at(text, range.start - IMAGE_LEN).is_some() {
-            range.start - IMAGE_LEN..range.end
-        } else if self.image_at(text, range.end).is_some() {
-            range.start..range.end + IMAGE_LEN
-        } else {
-            range
+        let image_before =
+            range.start >= IMAGE_LEN && self.image_at(text, range.start - IMAGE_LEN).is_some();
+        let image_after = self.image_at(text, range.end).is_some();
+        match forward {
+            false if image_before => Some(range.start - IMAGE_LEN..range.end),
+            true if image_after => Some(range.start..range.end + IMAGE_LEN),
+            _ => None,
         }
+    }
+
+    /// Whether `text` goes out as plain text: nothing formatted and no address to
+    /// link (an address goes out as a link, which needs HTML).
+    pub fn is_plain_text(&self, text: &str) -> bool {
+        self.is_plain() && text.split('\n').all(|line| link_ranges(line).is_empty())
     }
 
     /// The range set with [`Self::set_tracked`], as edits left it.
@@ -937,6 +969,15 @@ fn is_email(word: &str) -> bool {
         && labels.iter().all(|label| {
             !label.is_empty() && label.chars().all(|c| c.is_alphanumeric() || c == '-')
         })
+}
+
+/// The line of `text` holding `offset`, without its line break.
+fn line_bounds(text: &str, offset: usize) -> Range<usize> {
+    let start = text[..offset].rfind('\n').map_or(0, |ix| ix + 1);
+    let end = text[offset..]
+        .find('\n')
+        .map_or(text.len(), |ix| offset + ix);
+    start..end
 }
 
 /// Where `range` goes when `removed` is replaced by `inserted_len` bytes: text put at
@@ -1358,12 +1399,46 @@ mod tests {
         let doc = image_doc("ab\n", "\ncd");
         let (text, rich) = (&doc.text, &doc.rich);
         // Backspace at the start of "cd"; Delete at the end of "ab".
-        assert_eq!(rich.deletion_range(text, 6..7), 3..7);
-        assert_eq!(rich.deletion_range(text, 2..3), 2..6);
-        assert_eq!(rich.deletion_range(text, 0..1), 0..1);
+        assert_eq!(rich.deletion_range(text, 6..7, false), Some(3..7));
+        assert_eq!(rich.deletion_range(text, 2..3, true), Some(2..6));
+        assert_eq!(rich.deletion_range(text, 0..1, false), Some(0..1));
+        // Toward the other side they only cross the break: Backspace before the
+        // image, Delete after it.
+        assert_eq!(rich.deletion_range(text, 2..3, false), None);
+        assert_eq!(rich.deletion_range(text, 6..7, true), None);
         // An empty line below it goes alone.
         let doc = image_doc("", "\n\nx");
-        assert_eq!(doc.rich.deletion_range(&doc.text, 3..4), 3..4);
+        assert_eq!(doc.rich.deletion_range(&doc.text, 3..4, false), Some(3..4));
+    }
+
+    #[test]
+    fn an_address_needs_html_even_without_formatting() {
+        let rich = RichText::new("Site: www.acme.com");
+        assert!(rich.is_plain());
+        assert!(!rich.is_plain_text("Site: www.acme.com"));
+        assert!(RichText::new("Hi").is_plain_text("Hi"));
+    }
+
+    #[test]
+    fn a_saved_image_style_off_an_image_line_is_dropped() {
+        let mut doc = image_doc("", "");
+        doc.text = "Bob".into();
+        doc.rich = RichText::new("Bob");
+        doc.rich
+            .images
+            .push(InlineImage::new("a", "image/png", vec![1], 1, 1));
+        doc.rich.update_chars(0..3, |style| style.image = Some(0));
+        let checked = doc.validated();
+        assert!(checked.rich.is_plain() && checked.images().is_empty());
+        // Sharing its line with text, it isn't an image either.
+        let text = format!("a{IMAGE_CHAR}");
+        let mut rich = RichText::new(&text);
+        let ix = rich.add_image(InlineImage::new("a", "image/png", vec![1], 1, 1));
+        rich.update_chars(1..text.len(), move |style| style.image = Some(ix));
+        let checked = RichDocument { text, rich }.validated();
+        assert!(checked.images().is_empty());
+        // In place, it stays.
+        assert_eq!(image_doc("a\n", "").validated().images().len(), 1);
     }
 
     #[test]
