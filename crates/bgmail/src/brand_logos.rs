@@ -262,8 +262,12 @@ mod tests {
         assert!(!is_fresh(&none, day));
     }
 
+    /// A cache that can't open on any OS: its folder is the test binary, a file. A
+    /// made-up absolute path isn't enough: on Windows `/nonexistent` lands on `C:\`,
+    /// which an administrator (as CI runs) can create.
     fn logos() -> BrandLogos {
-        BrandLogos::new(PathBuf::from("/nonexistent/mail.db"))
+        let exe = std::env::current_exe().unwrap();
+        BrandLogos::new(exe.join("mail.db"))
     }
 
     #[test]
