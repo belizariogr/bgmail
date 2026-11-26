@@ -32,6 +32,7 @@ use crate::data;
 use crate::default_mail_app;
 use crate::locale::{ActiveLanguage, Key, Language};
 use crate::root::RootView;
+use crate::signature_settings::SignaturesPage;
 use auto_update::Status;
 
 /// Pause after the last keystroke in the e-mail field before discovering
@@ -47,15 +48,17 @@ const OAUTH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub(crate) enum SettingsSection {
     General,
     Accounts,
+    Signatures,
     Appearance,
     Notifications,
     Privacy,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 5] = [
+    pub(crate) const ALL: [SettingsSection; 6] = [
         SettingsSection::General,
         SettingsSection::Accounts,
+        SettingsSection::Signatures,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Privacy,
@@ -65,6 +68,7 @@ impl SettingsSection {
         match self {
             SettingsSection::General => Key::SettingsGeneral,
             SettingsSection::Accounts => Key::SettingsAccounts,
+            SettingsSection::Signatures => Key::SettingsSignatures,
             SettingsSection::Appearance => Key::SettingsAppearance,
             SettingsSection::Notifications => Key::SettingsNotifications,
             SettingsSection::Privacy => Key::SettingsPrivacy,
@@ -75,6 +79,7 @@ impl SettingsSection {
         match self {
             SettingsSection::General => IconName::Settings,
             SettingsSection::Accounts => IconName::Account,
+            SettingsSection::Signatures => IconName::Signature,
             SettingsSection::Appearance => IconName::Palette,
             SettingsSection::Notifications => IconName::Flag,
             SettingsSection::Privacy => IconName::Shield,
@@ -292,6 +297,8 @@ pub(crate) struct SettingsView {
     updater_observation: Option<Subscription>,
     /// The password field shown when polkit could not ask for it.
     update_password: Option<Entity<TextInput>>,
+    /// Created the first time the Signatures section shows.
+    signatures_page: Option<Entity<SignaturesPage>>,
 }
 
 impl SettingsView {
@@ -315,6 +322,7 @@ impl SettingsView {
             form_only: false,
             updater_observation: None,
             update_password: None,
+            signatures_page: None,
         }
     }
 
@@ -1151,6 +1159,13 @@ impl SettingsView {
                 .child(self.render_updates(language, window, cx))
                 .into_any_element(),
             SettingsSection::Accounts => self.render_accounts(window, cx).into_any_element(),
+            SettingsSection::Signatures => {
+                let root = self.root.clone();
+                self.signatures_page
+                    .get_or_insert_with(|| cx.new(|cx| SignaturesPage::new(root, cx)))
+                    .clone()
+                    .into_any_element()
+            }
             SettingsSection::Appearance => {
                 let reader_white = self
                     .root
@@ -1930,7 +1945,7 @@ pub(crate) fn default_app_message(
 }
 
 /// Bordered box around a text field; the border follows focus.
-fn input_box(input: &Entity<TextInput>, window: &Window, cx: &App) -> impl IntoElement {
+pub(crate) fn input_box(input: &Entity<TextInput>, window: &Window, cx: &App) -> impl IntoElement {
     let colors = cx.theme().colors();
     let focused = input.read(cx).focus_handle(cx).is_focused(window);
     h_flex()

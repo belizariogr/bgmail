@@ -25,8 +25,8 @@ use theme::ActiveTheme;
 use ui::prelude::*;
 use ui::{
     set_native_text_focus, Button, Color, FocusNext, FocusPrevious, Icon, IconButton, IconName,
-    IconSize, Label, LabelSize, ListItem, Scrollbar, ScrollbarState, TextInput, TextInputEvent,
-    Tooltip,
+    IconSize, Label, LabelSize, ListItem, RichDocument, Scrollbar, ScrollbarState, TextInput,
+    TextInputEvent, Tooltip,
 };
 
 use crate::actions::{
@@ -52,6 +52,7 @@ use crate::mail_service::{self, MailService, OverallStatus, StartError};
 use crate::search_scope;
 use crate::settings::SettingsView;
 use crate::shortcuts;
+use crate::signatures::{self, SignatureEntry, SignatureSlot};
 use html_view::element::zoom_step;
 use html_view::{
     has_too_many_tags, Appearance as PageAppearance, DetachedDocument, DocumentOptions, HitInfo,
@@ -1524,6 +1525,9 @@ fn compose_init_from_outgoing(row: &OutgoingRow, parsed: &ParsedMessage) -> Comp
         },
         replaces_outgoing: Some(row.id),
         quoted_original: None,
+        // Its text has the signature it was written with.
+        signature: None,
+        forward: false,
     }
 }
 
@@ -3038,6 +3042,93 @@ impl RootView {
             ),
         }
         cx.notify();
+    }
+
+    // ----- Signatures ---------------------------------------------------------
+
+    /// The saved signatures, read now: they're only needed when a message opens or
+    /// the settings show them, never at startup.
+    pub(crate) fn signatures(&self) -> Vec<SignatureEntry> {
+        self.db
+            .list_signatures()
+            .unwrap_or_default()
+            .iter()
+            .map(SignatureEntry::from_row)
+            .collect()
+    }
+
+    /// Adds a signature named `name` with nothing in it; its id, or `None` after a
+    /// status note.
+    pub(crate) fn create_signature(&mut self, name: &str, cx: &mut Context<Self>) -> Option<i64> {
+        let document = signatures::document_json(&RichDocument::default());
+        let created = self.db.create_signature(name, &document);
+        self.after_signature_change(created.map(Some), cx)
+    }
+
+    /// Saves signature `id`. Messages being written keep the copy they have.
+    pub(crate) fn save_signature(
+        &mut self,
+        id: i64,
+        name: &str,
+        document: &RichDocument,
+        cx: &mut Context<Self>,
+    ) {
+        let saved = self
+            .db
+            .update_signature(id, name, &signatures::document_json(document));
+        self.after_signature_change(saved.map(|()| None), cx);
+    }
+
+    /// Deletes signature `id`; the accounts that used it go without one.
+    pub(crate) fn delete_signature(&mut self, id: i64, cx: &mut Context<Self>) {
+        let deleted = self.db.delete_signature(id);
+        self.after_signature_change(deleted.map(|()| None), cx);
+    }
+
+    /// Which signature account `account_id` puts in new mail and in replies and forwards.
+    pub(crate) fn set_account_signatures(
+        &mut self,
+        account_id: i64,
+        new_mail: Option<i64>,
+        replies: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        let set = self
+            .db
+            .set_account_signatures(account_id, new_mail, replies);
+        self.after_signature_change(set.map(|()| None), cx);
+    }
+
+    /// Rereads what a signature change touched and hands it to the compose window.
+    fn after_signature_change(
+        &mut self,
+        result: rusqlite::Result<Option<i64>>,
+        cx: &mut Context<Self>,
+    ) -> Option<i64> {
+        let id = match result {
+            Ok(id) => id,
+            Err(error) => {
+                let note = format!("{}: {error}", Key::SignatureSaveFailed.tr(cx.language()));
+                self.set_status_note(note, cx);
+                return None;
+            }
+        };
+        self.accounts = self.db.list_accounts().unwrap_or_default();
+        if !self.removing_accounts.is_empty() {
+            let removing = &self.removing_accounts;
+            self.accounts
+                .retain(|account| !removing.contains(&account.id));
+        }
+        if self.compose_window.is_some() {
+            let signatures = self.signatures();
+            let accounts = self.compose_accounts();
+            let _ = self.with_compose_window(cx, |view, _, cx| {
+                view.set_accounts(accounts);
+                view.set_signatures(signatures, cx);
+            });
+        }
+        cx.notify();
+        id
     }
 
     pub(crate) fn update_account_secret(
@@ -5134,6 +5225,8 @@ impl RootView {
                 name: account.from_name().to_string(),
                 email: account.email.clone(),
                 can_send: account.provider != storage::PROVIDER_LOCAL,
+                signature_new: account.signature_new,
+                signature_reply: account.signature_reply,
             })
             .collect();
         accounts.sort_by_key(|account| !account.can_send);
@@ -5217,6 +5310,8 @@ impl RootView {
             draft,
             replaces_outgoing: None,
             quoted_original,
+            signature: Some(SignatureSlot::Reply),
+            forward: kind == ReplyKind::Forward,
         };
         self.open_compose_with(Some(init), window, cx);
     }
@@ -5303,6 +5398,7 @@ impl RootView {
         };
         let init = ComposeInit {
             draft,
+            signature: Some(SignatureSlot::NewMail),
             ..Default::default()
         };
         self.open_compose_with(Some(init), window, cx);
@@ -5315,13 +5411,16 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let contacts = self.db.list_contacts().unwrap_or_default();
+        let signatures = self.signatures();
         if let Some(handle) = self.compose_window {
             let init_for_open = init.clone();
             let contacts_for_open = contacts.clone();
             let accounts_for_open = self.compose_accounts();
+            let signatures_for_open = signatures.clone();
             match handle.update(cx, |view, window, cx| {
                 view.set_contacts(contacts_for_open, cx);
                 view.set_accounts(accounts_for_open);
+                view.set_signatures(signatures_for_open, cx);
                 window.activate_window();
                 // A message being written is never replaced by another.
                 let busy = init_for_open.is_some() && view.has_edits();
@@ -5364,7 +5463,16 @@ impl RootView {
             window.set_content_scale(ui_scale, cx);
             let root_for_close = root.clone();
             let view = cx.new(|cx| {
-                ComposeView::new(accounts, contacts, root, compose_white, init, window, cx)
+                ComposeView::new(
+                    accounts,
+                    contacts,
+                    signatures,
+                    root,
+                    compose_white,
+                    init,
+                    window,
+                    cx,
+                )
             });
             let compose = view.downgrade();
             window.on_window_should_close(cx, move |window, cx| {

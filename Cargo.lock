@@ -595,6 +595,7 @@ dependencies = [
  "html-escape",
  "html5ever",
  "html_view",
+ "image",
  "lol_html",
  "mail_core",
  "mail_sync",

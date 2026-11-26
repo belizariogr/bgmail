@@ -11,35 +11,41 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
-    anchored, black, deferred, size, white, AnyElement, AnyWindowHandle, App, Bounds, ClickEvent,
-    Context, Corner, Entity, ExternalPaths, Focusable, FontWeight, Global, Hsla, KeyBinding,
-    MouseButton, PathPromptOptions, Point, PromptButton, PromptLevel, Render, ScrollHandle, Size,
-    Subscription, Task, WeakEntity, Window, WindowBounds,
+    anchored, black, deferred, size, white, AnyWindowHandle, App, Bounds, ClickEvent, Context,
+    Corner, Entity, ExternalPaths, Focusable, Global, Hsla, KeyBinding, MouseButton,
+    PathPromptOptions, Point, PromptButton, PromptLevel, Render, ScrollHandle, Size, Subscription,
+    Task, WeakEntity, Window, WindowBounds,
 };
 use html_view::{
     has_too_many_tags, with_render_stack, Appearance as PageAppearance, DetachedDocument,
     DocumentOptions, HtmlDocument, HtmlView, HtmlViewEvent, Resources,
 };
-use mail_core::{Address, Draft, OutgoingAttachment};
+use mail_core::{Address, Draft, OutgoingAttachment, OutgoingInlineImage};
 use storage::Contact;
-use theme::{ActiveTheme, Theme, ThemeColors, MAIL_TEXT_COLORS};
+use theme::{ActiveTheme, Theme, ThemeColors};
 
 use crate::data::MessageBody;
 use crate::mail_html::{email_document, DocumentColors};
 use crate::recipients::{RecipientInput, RecipientsChanged};
 use ui::prelude::*;
 use ui::{
-    font_for_family, Align, Button, ButtonStyle, Color, ContextMenu, FontFamily, Icon, IconButton,
-    IconName, IconSize, Label, LabelSize, ListKind, Scrollbar, ScrollbarState, TextArea,
-    TextAreaEvent, TextInput, TextInputEvent, TextSize, Tooltip, MAX_INDENT,
+    Button, ButtonStyle, Color, ContextMenu, Icon, IconButton, IconName, IconSize, InlineImage,
+    Label, LabelSize, RichDocument, Scrollbar, ScrollbarState, TextArea, TextAreaEvent, TextInput,
+    TextInputEvent, Tooltip,
 };
 
 use crate::actions::{ComposeAttach, ComposeClose, ComposeDiscard, ComposeSend};
 use crate::app_menus;
 use crate::attachments::{file_family, human_size};
 use crate::crash_guard::{CrashGuard, RenderMark};
+use crate::format_bar::{FormatBar, FormatBarEvent};
 use crate::locale::{ActiveLanguage, Key, Language};
 use crate::root::{clipped_text, RootView};
+use crate::settings::SettingsSection;
+use crate::signatures::{
+    account_signature, body_with_signature, caret_after_replace, signature_insertion,
+    signature_offset, SignatureEntry, SignatureSlot,
+};
 
 /// Default width of the compose window on first open, in pixels.
 pub const COMPOSE_DEFAULT_WIDTH: f32 = 790.0;
@@ -57,6 +63,9 @@ pub const COMPOSE_POSITION_UNSET: f32 = -1.0;
 /// Total size allowed for all attachments of one message. Most providers
 /// reject messages above ~25 MB (and base64 grows the payload by a third).
 pub const ATTACHMENT_LIMIT_BYTES: usize = 25 * 1024 * 1024;
+
+/// Largest image file put in the body; the images count with the attachments.
+pub const BODY_IMAGE_LIMIT_BYTES: usize = 5 * 1024 * 1024;
 
 /// Key context of the compose root element (scopes the send shortcut).
 const KEY_CONTEXT: &str = "ComposeView";
@@ -107,6 +116,9 @@ pub struct ComposeAccount {
     pub email: String,
     /// Local/demo accounts have no server to send through.
     pub can_send: bool,
+    /// Its signature for new mail, and for replies and forwards.
+    pub signature_new: Option<i64>,
+    pub signature_reply: Option<i64>,
 }
 
 /// Content the compose window opens with (reply, reply all, forward).
@@ -120,32 +132,11 @@ pub struct ComposeInit {
     pub replaces_outgoing: Option<i64>,
     /// What a reply quotes, to send it with its formatting.
     pub quoted_original: Option<QuotedOriginal>,
-}
-
-/// Name of a font in the menu; the fonts' own names aren't translated.
-fn family_label(family: FontFamily, language: Language) -> &'static str {
-    match family {
-        FontFamily::Sans => Key::FormatSansSerif.tr(language),
-        FontFamily::Serif => Key::FormatSerif.tr(language),
-        FontFamily::Mono => Key::FormatFixedWidth.tr(language),
-        FontFamily::Wide => Key::FormatWide.tr(language),
-        FontFamily::Narrow => Key::FormatNarrow.tr(language),
-        FontFamily::ComicSans => "Comic Sans MS",
-        FontFamily::Garamond => "Garamond",
-        FontFamily::Georgia => "Georgia",
-        FontFamily::Tahoma => "Tahoma",
-        FontFamily::Trebuchet => "Trebuchet MS",
-        FontFamily::Verdana => "Verdana",
-    }
-}
-
-/// A dropdown of the formatting toolbar.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FormatMenu {
-    Font,
-    Size,
-    Color,
-    Align,
+    /// Which of the account's signatures the message starts with; `None` for one
+    /// that has its own already (an edited unsent message).
+    pub signature: Option<SignatureSlot>,
+    /// A forward: its signature goes above the forwarded message, in the editor.
+    pub forward: bool,
 }
 
 /// Width the quoted original is first laid out at, before the real one is known.
@@ -194,6 +185,8 @@ struct ComposeFields {
     body: String,
     /// HTML of what was written, when anything is formatted.
     body_html: Option<String>,
+    /// Images the HTML shows (`cid:` of [`image_content_id`]).
+    images: Vec<InlineImage>,
 }
 
 /// Threading headers carried over from the message being answered.
@@ -297,8 +290,20 @@ pub struct ComposeView {
     white_background: bool,
     /// The quoted original shows, as in Gmail, only after asking for it.
     quote_expanded: bool,
-    /// Formatting dropdown open in the toolbar.
-    format_menu: Option<FormatMenu>,
+    /// The formatting tools, on the send button's row, as in Gmail.
+    format_bar: Entity<FormatBar>,
+    /// The saved signatures, to sign with and to pick from.
+    signatures: Vec<SignatureEntry>,
+    /// Which of the account's signatures this message takes.
+    signature_slot: SignatureSlot,
+    /// The signature follows the From account (not for an edited unsent message,
+    /// which has its own in its text).
+    signature_follows_account: bool,
+    /// A forward: the signature goes above the forwarded message.
+    forward: bool,
+    /// The signature in the body, in the editor's tracked range.
+    signature: Option<i64>,
+    signature_menu_open: bool,
     /// The quoted original, parsed the first time it is shown.
     quote_view: Option<Entity<HtmlView>>,
     _quote_task: Option<Task<()>>,
@@ -313,9 +318,11 @@ impl ComposeView {
     /// Creates the compose view: real editors for every field, the From
     /// account preselected (`init.account_id`, else the first account that can
     /// send) and, with `init`, everything prefilled from its draft.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         accounts: Vec<ComposeAccount>,
         contacts: Vec<Contact>,
+        signatures: Vec<SignatureEntry>,
         root: WeakEntity<RootView>,
         white_background: bool,
         init: Option<ComposeInit>,
@@ -345,7 +352,20 @@ impl ComposeView {
             area
         });
 
+        let format_bar = cx.new(|cx| FormatBar::new(body.clone(), BODY_IMAGE_LIMIT_BYTES, cx));
+
         let mut subscriptions = Vec::new();
+        subscriptions.push(
+            cx.subscribe(
+                &format_bar,
+                |this, _, event: &FormatBarEvent, cx| match event {
+                    FormatBarEvent::ImageFailed(message) => {
+                        this.errors.banner = Some(message.clone());
+                        cx.notify();
+                    }
+                },
+            ),
+        );
         for (input, field) in [
             (&to, AddressField::To),
             (&cc, AddressField::Cc),
@@ -390,7 +410,13 @@ impl ComposeView {
             last_title: String::new(),
             white_background,
             quote_expanded: false,
-            format_menu: None,
+            format_bar,
+            signatures,
+            signature_slot: SignatureSlot::NewMail,
+            signature_follows_account: true,
+            forward: false,
+            signature: None,
+            signature_menu_open: false,
             quote_view: None,
             _quote_task: None,
             quote_mark: None,
@@ -411,6 +437,7 @@ impl ComposeView {
         cx: &mut Context<Self>,
     ) {
         let focus = initial_focus(init.as_ref());
+        let init_kind = init.is_some();
         let init = init.unwrap_or_default();
         let draft = init.draft;
         self.from_account = account_index(&self.accounts, init.account_id);
@@ -422,9 +449,18 @@ impl ComposeView {
         self.bcc
             .update(cx, |field, cx| field.set_addresses(&draft.bcc, cx));
         set_input(&self.subject, &draft.subject, cx);
-        // `set_content` leaves the caret at the start: above a quoted reply.
-        self.body
-            .update(cx, |area, cx| area.set_content(&draft.text, cx));
+        // A blank message is a new one; anything else says what it takes.
+        let (slot, follows) = match (&init_kind, init.signature) {
+            (false, _) => (SignatureSlot::NewMail, true),
+            (true, Some(slot)) => (slot, true),
+            (true, None) => (SignatureSlot::NewMail, false),
+        };
+        self.signature_slot = slot;
+        self.signature_follows_account = follows;
+        self.forward = init.forward;
+        self.signature_menu_open = false;
+        // The caret starts at the start: above the signature and a quoted reply.
+        self.sign_body(&draft.text, cx);
         self.show_cc_bcc = !draft.cc.is_empty() || !draft.bcc.is_empty();
         self.attachments = draft.attachments;
         self.reply = ReplyHeaders {
@@ -436,7 +472,7 @@ impl ComposeView {
         self.drop_quote_view();
         self.errors = ComposeErrors::default();
         self.from_menu_open = false;
-        self.format_menu = None;
+        self.format_bar.update(cx, |bar, cx| bar.close_menu(cx));
         self.edited = false;
         let handle = match focus {
             ComposeFocus::To => self.to.focus_handle(cx),
@@ -551,6 +587,115 @@ impl ComposeView {
         }));
     }
 
+    /// The body: `text` with the From account's signature for this message, when it
+    /// takes one, in the range the editor tracks to replace it later.
+    fn sign_body(&mut self, text: &str, cx: &mut Context<Self>) {
+        let entry = self
+            .signature_follows_account
+            .then(|| self.account_signature())
+            .flatten()
+            .and_then(|id| self.signature_entry(id))
+            .cloned();
+        let (body, range) = body_with_signature(
+            text,
+            self.forward,
+            entry.as_ref().map(|entry| &entry.document),
+        );
+        self.signature = entry.map(|entry| entry.id);
+        self.body.update(cx, |area, cx| {
+            area.set_document(body, cx);
+            area.set_tracked_range(Some(range));
+        });
+    }
+
+    /// The signature the From account puts in this message.
+    fn account_signature(&self) -> Option<i64> {
+        self.selected_account()
+            .and_then(|account| account_signature(account, self.signature_slot))
+    }
+
+    fn signature_entry(&self, id: i64) -> Option<&SignatureEntry> {
+        self.signatures.iter().find(|entry| entry.id == id)
+    }
+
+    /// Puts signature `id` in place of the one in the body (`None` takes it out),
+    /// where it is or, without one, where it goes. The caret stays where it was.
+    fn use_signature(&mut self, id: Option<i64>, cx: &mut Context<Self>) {
+        let entry = id.and_then(|id| self.signature_entry(id)).cloned();
+        self.signature = entry.as_ref().map(|entry| entry.id);
+        let forward = self.forward;
+        self.body.update(cx, |area, cx| {
+            let text = area.content();
+            let range = area
+                .tracked_range()
+                .filter(|range| range.end <= text.len())
+                .unwrap_or_else(|| {
+                    let at = signature_offset(&text, forward);
+                    at..at
+                });
+            let (insertion, signed) = match &entry {
+                Some(entry) if range.is_empty() => {
+                    signature_insertion(&text, range.start, &entry.document)
+                }
+                Some(entry) => (entry.document.clone(), 0..entry.document.text.len()),
+                None => (RichDocument::default(), 0..0),
+            };
+            if range.is_empty() && insertion.is_empty() {
+                return;
+            }
+            let caret = area.cursor_offset();
+            area.replace_range_with_document(range.clone(), &insertion, cx);
+            area.set_tracked_range(Some(range.start + signed.start..range.start + signed.end));
+            area.set_cursor_offset(caret_after_replace(caret, &range, insertion.text.len()), cx);
+        });
+        cx.notify();
+    }
+
+    /// The signature the picker checks: the one in the body, while any of it is there.
+    fn shown_signature(&self, cx: &App) -> Option<i64> {
+        self.signature.filter(|_| {
+            self.body
+                .read(cx)
+                .tracked_range()
+                .is_some_and(|range| !range.is_empty())
+        })
+    }
+
+    /// Replaces the saved signatures offered; the body keeps the one it has.
+    pub(crate) fn set_signatures(
+        &mut self,
+        signatures: Vec<SignatureEntry>,
+        cx: &mut Context<Self>,
+    ) {
+        self.signatures = signatures;
+        cx.notify();
+    }
+
+    fn toggle_signature_menu(&mut self, cx: &mut Context<Self>) {
+        self.signature_menu_open = !self.signature_menu_open;
+        self.from_menu_open = false;
+        cx.notify();
+    }
+
+    /// Picks `id` in the signature menu.
+    fn pick_signature(&mut self, id: Option<i64>, window: &mut Window, cx: &mut Context<Self>) {
+        self.signature_menu_open = false;
+        self.use_signature(id, cx);
+        window.focus(&self.body.focus_handle(cx));
+    }
+
+    /// Opens Settings ▸ Signatures.
+    fn manage_signatures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.signature_menu_open = false;
+        cx.notify();
+        let root = self.root.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = root.update(cx, |root, cx| {
+                root.open_settings_section(SettingsSection::Signatures, window, cx);
+            });
+        });
+    }
+
     /// Replaces the catalog offered in the recipient fields.
     pub(crate) fn set_contacts(&mut self, contacts: Vec<Contact>, cx: &mut Context<Self>) {
         let contacts: Rc<[Contact]> = contacts.into();
@@ -609,15 +754,22 @@ impl ComposeView {
 
     fn close_from_menu(&mut self, cx: &mut Context<Self>) {
         self.from_menu_open = false;
-        self.format_menu = None;
+        self.signature_menu_open = false;
+        self.format_bar.update(cx, |bar, cx| bar.close_menu(cx));
         cx.notify();
     }
 
-    /// Picks the From account (picker entry).
+    /// Picks the From account (picker entry). As in Gmail, the body takes that
+    /// account's signature in place of the other's.
     fn select_from_account(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.accounts.len() {
+            let changed = index != self.from_account;
             self.from_account = index;
             self.errors.banner = None;
+            let wanted = self.account_signature();
+            if changed && self.signature_follows_account && wanted != self.signature {
+                self.use_signature(wanted, cx);
+            }
         }
         self.close_from_menu(cx);
     }
@@ -633,7 +785,11 @@ impl ComposeView {
             bcc: self.bcc.read(cx).content(cx),
             subject: self.subject.read(cx).content().to_string(),
             body: self.body.read(cx).plain_export(),
-            body_html: self.body.read(cx).formatted_html(),
+            body_html: self
+                .body
+                .read(cx)
+                .formatted_html_with(|image| format!("cid:{}", image_content_id(image))),
+            images: self.body.read(cx).images(),
         }
     }
 
@@ -829,455 +985,7 @@ impl ComposeView {
         }
     }
 
-    /// Runs `apply` on the body and keeps typing there: the toolbar's clicks must
-    /// not take the caret away.
-    fn format_body(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        apply: impl FnOnce(&mut TextArea, &mut Context<TextArea>),
-    ) {
-        self.format_menu = None;
-        self.body.update(cx, apply);
-        window.focus(&self.body.focus_handle(cx));
-        cx.notify();
-    }
-
-    fn toggle_format_menu(&mut self, menu: FormatMenu, cx: &mut Context<Self>) {
-        self.format_menu = (self.format_menu != Some(menu)).then_some(menu);
-        cx.notify();
-    }
-
-    /// The formatting tools, on the send button's row, as in Gmail.
-    fn render_format_bar(
-        &self,
-        language: Language,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let colors = cx.theme().colors();
-        let border = colors.border;
-        let area = self.body.read(cx);
-        let format = area.format();
-        let (can_undo, can_redo) = (area.can_undo(), area.can_redo());
-        let icon = |id: &'static str,
-                    label: Key,
-                    shortcut: Option<(&str, &str)>,
-                    icon: IconName,
-                    active: bool,
-                    enabled: bool,
-                    cx: &mut Context<Self>,
-                    apply: fn(&mut TextArea, &mut Context<TextArea>)| {
-            let holder = div().id(id);
-            let holder = match shortcut {
-                Some((mac, other)) => holder.tooltip(Tooltip::with_shortcut(
-                    label.tr(language),
-                    crate::shortcuts::format_binding(crate::shortcuts::primary_binding(mac, other)),
-                )),
-                None => holder.tooltip(Tooltip::text(label.tr(language))),
-            };
-            holder.child(
-                IconButton::new(id, icon)
-                    .size(IconSize::Small)
-                    .selected(active)
-                    .disabled(!enabled)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.format_body(window, cx, apply);
-                    })),
-            )
-        };
-        let separator = || div().w(px(1.0)).h(px(18.0)).mx_1().bg(border);
-        let chars = format.chars;
-        let para = format.para;
-        // Takes the room left of the send button, and wraps in a narrow window.
-        h_flex()
-            .flex_1()
-            .min_w_0()
-            .flex_wrap()
-            .child(icon(
-                "format-undo",
-                Key::FormatUndo,
-                Some(("cmd-z", "ctrl-z")),
-                IconName::FormatUndo,
-                false,
-                can_undo,
-                cx,
-                TextArea::undo_step,
-            ))
-            .child(icon(
-                "format-redo",
-                Key::FormatRedo,
-                Some(("cmd-shift-z", "ctrl-y")),
-                IconName::FormatRedo,
-                false,
-                can_redo,
-                cx,
-                TextArea::redo_step,
-            ))
-            .child(separator())
-            .child(self.render_font_picker(chars.family, language, window, cx))
-            .child(separator())
-            .child(self.render_size_picker(para.size, language, cx))
-            .child(separator())
-            .child(self.render_style_button(
-                "format-bold",
-                Key::FormatBold,
-                ("cmd-b", "ctrl-b"),
-                chars.bold,
-                language,
-                cx,
-                TextArea::toggle_bold,
-            ))
-            .child(self.render_style_button(
-                "format-italic",
-                Key::FormatItalic,
-                ("cmd-i", "ctrl-i"),
-                chars.italic,
-                language,
-                cx,
-                TextArea::toggle_italic,
-            ))
-            .child(self.render_style_button(
-                "format-underline",
-                Key::FormatUnderline,
-                ("cmd-u", "ctrl-u"),
-                chars.underline,
-                language,
-                cx,
-                TextArea::toggle_underline,
-            ))
-            .child(self.render_color_picker(chars.color, language, cx))
-            .child(separator())
-            .child(self.render_align_picker(para.align, language, cx))
-            .child(icon(
-                "format-numbered",
-                Key::FormatNumbered,
-                None,
-                IconName::FormatListNumbered,
-                para.list == Some(ListKind::Numbered),
-                true,
-                cx,
-                |area, cx| area.toggle_list(ListKind::Numbered, cx),
-            ))
-            .child(icon(
-                "format-bullets",
-                Key::FormatBullets,
-                None,
-                IconName::FormatListBullet,
-                para.list == Some(ListKind::Bullet),
-                true,
-                cx,
-                |area, cx| area.toggle_list(ListKind::Bullet, cx),
-            ))
-            .child(icon(
-                "format-indent-less",
-                Key::FormatIndentLess,
-                None,
-                IconName::FormatIndentLess,
-                false,
-                para.indent > 0,
-                cx,
-                |area, cx| area.indent(-1, cx),
-            ))
-            .child(icon(
-                "format-indent-more",
-                Key::FormatIndentMore,
-                None,
-                IconName::FormatIndentMore,
-                false,
-                para.indent < MAX_INDENT,
-                cx,
-                |area, cx| area.indent(1, cx),
-            ))
-    }
-
-    /// B, I or U: a letter showing the style it applies.
-    #[allow(clippy::too_many_arguments)]
-    fn render_style_button(
-        &self,
-        id: &'static str,
-        label: Key,
-        shortcut: (&str, &str),
-        active: bool,
-        language: Language,
-        cx: &mut Context<Self>,
-        apply: fn(&mut TextArea, &mut Context<TextArea>),
-    ) -> impl IntoElement {
-        let colors = cx.theme().colors();
-        let (hover, selected, accent, text) = (
-            colors.element_hover,
-            colors.element_active,
-            colors.text_accent,
-            colors.text,
-        );
-        let (letter, weight, italic, underline) = match id {
-            "format-bold" => ("B", FontWeight::BOLD, false, false),
-            "format-italic" => ("I", FontWeight::NORMAL, true, false),
-            _ => ("U", FontWeight::NORMAL, false, true),
-        };
-        let binding = crate::shortcuts::format_binding(crate::shortcuts::primary_binding(
-            shortcut.0, shortcut.1,
-        ));
-        h_flex()
-            .id(id)
-            .size(px(28.0))
-            .justify_center()
-            .rounded_md()
-            .cursor_pointer()
-            .when(active, |el| el.bg(selected))
-            .hover(move |el| el.bg(hover))
-            .tooltip(Tooltip::with_shortcut(label.tr(language), binding))
-            .text_color(if active { accent } else { text })
-            .font_weight(weight)
-            .when(italic, |el| el.italic())
-            .when(underline, |el| el.underline())
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.format_body(window, cx, apply);
-            }))
-            .child(letter)
-    }
-
-    /// A button with text that opens one of the formatting dropdowns above it.
-    #[allow(clippy::too_many_arguments)]
-    fn render_menu_button(
-        &self,
-        id: &'static str,
-        menu: FormatMenu,
-        tooltip: Key,
-        content: impl IntoElement,
-        dropdown: Option<AnyElement>,
-        language: Language,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let hover = cx.theme().colors().element_hover;
-        h_flex()
-            .id(id)
-            .relative()
-            .h(px(28.0))
-            .px_1p5()
-            .gap_1()
-            .rounded_md()
-            .cursor_pointer()
-            .hover(move |el| el.bg(hover))
-            .tooltip(Tooltip::text(tooltip.tr(language)))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_format_menu(menu, cx)))
-            .child(content)
-            .child(
-                Icon::new(IconName::CaretDown)
-                    .size(IconSize::XXSmall)
-                    .color(Color::Muted),
-            )
-            .children(dropdown.filter(|_| self.format_menu == Some(menu)))
-    }
-
-    /// Right above its button, which is its positioning parent: the toolbar is at
-    /// the bottom of the window.
-    fn format_dropdown(content: impl IntoElement) -> AnyElement {
-        deferred(div().absolute().left_0().bottom(px(30.0)).child(content))
-            .with_priority(1)
-            .into_any_element()
-    }
-
-    /// A menu whose entries run `apply` on the body with their value, the
-    /// current one checked.
-    fn format_menu_of<T: Copy + PartialEq + 'static>(
-        &self,
-        options: &[(T, Key)],
-        current: T,
-        language: Language,
-        cx: &mut Context<Self>,
-        apply: fn(&mut TextArea, T, &mut Context<TextArea>),
-    ) -> AnyElement {
-        let view = cx.weak_entity();
-        let mut menu = ContextMenu::new();
-        for (value, key) in options.iter().copied() {
-            let view = view.clone();
-            let handler = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                let _ = view.update(cx, |this, cx| {
-                    this.format_body(window, cx, |area, cx| apply(area, value, cx));
-                });
-            };
-            menu = if value == current {
-                menu.entry_with_key_hint(key.tr(language), "✓", handler)
-            } else {
-                menu.entry(key.tr(language), handler)
-            };
-        }
-        Self::format_dropdown(menu)
-    }
-
-    fn render_font_picker(
-        &self,
-        current: FontFamily,
-        language: Language,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let dropdown = (self.format_menu == Some(FormatMenu::Font)).then(|| {
-            let inherited = window.text_style().font().family;
-            let view = cx.weak_entity();
-            let mut menu = ContextMenu::new();
-            for family in FontFamily::ALL {
-                let view = view.clone();
-                let handler = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    let _ = view.update(cx, |this, cx| {
-                        this.format_body(window, cx, |area, cx| area.set_font_family(family, cx));
-                    });
-                };
-                let label = family_label(family, language);
-                menu = if family == current {
-                    menu.entry_with_key_hint(label, "✓", handler)
-                } else {
-                    menu.entry(label, handler)
-                }
-                .in_font(font_for_family(family, &inherited, window));
-            }
-            Self::format_dropdown(menu)
-        });
-        self.render_menu_button(
-            "format-font",
-            FormatMenu::Font,
-            Key::FormatFont,
-            Label::new(family_label(current, language)).size(LabelSize::Small),
-            dropdown,
-            language,
-            cx,
-        )
-    }
-
-    fn render_size_picker(
-        &self,
-        current: TextSize,
-        language: Language,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        const OPTIONS: [(TextSize, Key); 4] = [
-            (TextSize::Small, Key::FormatSmall),
-            (TextSize::Normal, Key::FormatNormal),
-            (TextSize::Large, Key::FormatLarge),
-            (TextSize::Huge, Key::FormatHuge),
-        ];
-        let dropdown =
-            self.format_menu_of(&OPTIONS, current, language, cx, TextArea::set_text_size);
-        self.render_menu_button(
-            "format-size",
-            FormatMenu::Size,
-            Key::FormatSize,
-            div().font_weight(FontWeight::BOLD).child("TT"),
-            Some(dropdown),
-            language,
-            cx,
-        )
-    }
-
-    fn render_align_picker(
-        &self,
-        current: Align,
-        language: Language,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        const OPTIONS: [(Align, Key); 3] = [
-            (Align::Left, Key::FormatAlignLeft),
-            (Align::Center, Key::FormatAlignCenter),
-            (Align::Right, Key::FormatAlignRight),
-        ];
-        let dropdown = self.format_menu_of(&OPTIONS, current, language, cx, TextArea::set_align);
-        let icon = match current {
-            Align::Left => IconName::FormatAlignLeft,
-            Align::Center => IconName::FormatAlignCenter,
-            Align::Right => IconName::FormatAlignRight,
-        };
-        self.render_menu_button(
-            "format-align",
-            FormatMenu::Align,
-            Key::FormatAlign,
-            Icon::new(icon).size(IconSize::Small),
-            Some(dropdown),
-            language,
-            cx,
-        )
-    }
-
-    /// "A" underlined with the current color, and a grid of colors.
-    fn render_color_picker(
-        &self,
-        current: Option<u32>,
-        language: Language,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let colors = cx.theme().colors();
-        let (surface, border, accent, text) = (
-            colors.elevated_surface_background,
-            colors.border,
-            colors.accent,
-            colors.text,
-        );
-        let swatch = |id: usize, color: Option<u32>, cx: &mut Context<Self>| {
-            h_flex()
-                .id(("format-color", id))
-                .size(px(22.0))
-                .justify_center()
-                .rounded_sm()
-                .cursor_pointer()
-                .border_1()
-                .border_color(if color == current { accent } else { border })
-                .when_some(color, |el, rgb_value| el.bg(gpui::rgb(rgb_value)))
-                .when(color.is_none(), |el| {
-                    el.child(Icon::new(IconName::Clear).size(IconSize::XSmall))
-                })
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.format_body(window, cx, |area, cx| area.set_text_color(color, cx));
-                }))
-        };
-        let mut grid = div()
-            .occlude()
-            .w(px(166.0))
-            .p_1()
-            .flex()
-            .flex_wrap()
-            .gap_1()
-            .bg(surface)
-            .border_1()
-            .border_color(border)
-            .rounded_md()
-            .shadow_lg()
-            .child(swatch(0, None, cx));
-        for (ix, color) in MAIL_TEXT_COLORS.into_iter().enumerate() {
-            grid = grid.child(swatch(ix + 1, Some(color), cx));
-        }
-        self.render_menu_button(
-            "format-color-menu",
-            FormatMenu::Color,
-            Key::FormatColor,
-            v_flex()
-                .items_center()
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .line_height(px(16.0))
-                        .child("A"),
-                )
-                .child(
-                    div()
-                        .w(px(12.0))
-                        .h(px(2.0))
-                        .bg(current.map_or(text, |rgb_value| gpui::rgb(rgb_value).into())),
-                ),
-            Some(Self::format_dropdown(grid)),
-            language,
-            cx,
-        )
-    }
-
-    fn render_toolbar(
-        &self,
-        language: Language,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_toolbar(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement {
         let can_send = self.can_send_now();
         h_flex()
             .items_center()
@@ -1299,7 +1007,7 @@ impl ComposeView {
                     ),
             )
             .child(div().w(px(1.0)).h(px(18.0)).bg(cx.theme().colors().border))
-            .child(self.render_format_bar(language, window, cx))
+            .child(self.format_bar.clone())
             .when(self.pending_attachment_loads > 0, |el| {
                 el.child(
                     Label::new(Key::ComposeAttachLoading.tr(language))
@@ -1307,6 +1015,7 @@ impl ComposeView {
                         .color(Color::Muted),
                 )
             })
+            .child(self.render_signature_picker(language, cx))
             .child(
                 div()
                     .id("compose-attach")
@@ -1330,6 +1039,64 @@ impl ComposeView {
                         button
                     })
             })
+    }
+
+    /// Gmail's "Insert signature": no signature, the saved ones, and a way to them.
+    fn render_signature_picker(
+        &self,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let menu = self.signature_menu_open.then(|| {
+            let current = self.shown_signature(cx);
+            let view = cx.weak_entity();
+            let pick = |id: Option<i64>| {
+                let view = view.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = view.update(cx, |this, cx| this.pick_signature(id, window, cx));
+                }
+            };
+            let entry = |menu: ContextMenu, label: SharedString, checked: bool, id: Option<i64>| {
+                if checked {
+                    menu.entry_with_key_hint(label, "✓", pick(id))
+                } else {
+                    menu.entry(label, pick(id))
+                }
+            };
+            let mut menu = entry(
+                ContextMenu::new(),
+                Key::SignatureNone.tr(language).into(),
+                current.is_none(),
+                None,
+            );
+            for signature in &self.signatures {
+                menu = entry(
+                    menu,
+                    signature.name.clone().into(),
+                    current == Some(signature.id),
+                    Some(signature.id),
+                );
+            }
+            let manage = view.clone();
+            menu = menu.separator().entry(
+                Key::ComposeManageSignatures.tr(language),
+                move |_, window, cx| {
+                    let _ = manage.update(cx, |this, cx| this.manage_signatures(window, cx));
+                },
+            );
+            deferred(div().absolute().right_0().bottom(px(34.0)).child(menu)).with_priority(1)
+        });
+        div()
+            .id("compose-signature")
+            .relative()
+            .tooltip(Tooltip::text(Key::ComposeSignature.tr(language)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                IconButton::new("compose-signature", IconName::Signature)
+                    .selected(self.signature_menu_open)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_signature_menu(cx))),
+            )
+            .children(menu)
     }
 
     fn render_header(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1843,18 +1610,21 @@ impl Render for ComposeView {
             })
             .child(self.render_body(cx))
             .children(self.render_error_banner(cx))
-            .child(self.render_toolbar(language, window, cx))
+            .child(self.render_toolbar(language, cx))
             // Outside clicks close the From picker (the picker itself is
             // deferred, so it paints above this catcher).
-            .when(self.from_menu_open || self.format_menu.is_some(), |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .occlude()
-                        .on_any_mouse_down(cx.listener(|this, _, _, cx| this.close_from_menu(cx))),
-                )
-            })
+            .when(
+                self.from_menu_open
+                    || self.signature_menu_open
+                    || self.format_bar.read(cx).menu_open(),
+                |el| {
+                    el.child(
+                        div().absolute().inset_0().occlude().on_any_mouse_down(
+                            cx.listener(|this, _, _, cx| this.close_from_menu(cx)),
+                        ),
+                    )
+                },
+            )
     }
 }
 
@@ -2002,6 +1772,22 @@ fn build_draft(
         errors.banner = Some(Key::ComposeBodyTooLarge.tr(language).to_string());
         return Err(errors);
     }
+    let inline_images: Vec<OutgoingInlineImage> = fields
+        .images
+        .iter()
+        .filter(|_| html.is_some())
+        .map(|image| OutgoingInlineImage {
+            content_id: image_content_id(image),
+            filename: image.name.clone(),
+            mime_type: image.mime_type.clone(),
+            data: image.data.to_vec(),
+        })
+        .collect();
+    let images_total: usize = inline_images.iter().map(|image| image.data.len()).sum();
+    if attachments_total(attachments) + images_total > ATTACHMENT_LIMIT_BYTES {
+        errors.banner = Some(Key::ComposeAttachTooLarge.tr(language).to_string());
+        return Err(errors);
+    }
     Ok(Draft {
         from: Address::new(Some(account.name.clone()), account.email.clone()),
         to,
@@ -2013,8 +1799,13 @@ fn build_draft(
         in_reply_to: reply.in_reply_to.clone(),
         references: reply.references.clone(),
         attachments: attachments.to_vec(),
-        inline_images: Vec::new(),
+        inline_images,
     })
+}
+
+/// The Content-ID an image of the body goes out with, as Gmail names them.
+fn image_content_id(image: &InlineImage) -> String {
+    format!("ii_{}@bgmail", image.id())
 }
 
 /// Whether a message's body is over the limit for all mail, attachments apart.
@@ -2123,7 +1914,69 @@ mod tests {
             name: format!("User {id}"),
             email: format!("user{id}@example.com"),
             can_send,
+            signature_new: None,
+            signature_reply: None,
         }
+    }
+
+    /// Two sending accounts, each signing its new mail with its own signature and
+    /// replies with a third one that has an image: (accounts, signatures).
+    fn signed_database(path: &std::path::Path) -> ([i64; 2], [i64; 3]) {
+        let db = storage::Database::open(path).expect("database");
+        let ann = db
+            .create_account("Ann", "ann@x.test", storage::PROVIDER_IMAP, "{}")
+            .unwrap();
+        let bob = db
+            .create_account("Bob", "bob@x.test", storage::PROVIDER_IMAP, "{}")
+            .unwrap();
+        let mut bold = RichDocument::plain("Bob");
+        bold.rich.update_chars(0..3, |style| style.bold = true);
+        let text = format!("Thanks\n{}", ui::IMAGE_CHAR);
+        let mut logo = RichDocument::plain(&text);
+        let index = logo.rich.add_image(InlineImage::new(
+            "logo.png",
+            "image/png",
+            vec![1, 2, 3],
+            8,
+            8,
+        ));
+        logo.rich
+            .update_chars(7..text.len(), move |style| style.image = Some(index));
+        let json = crate::signatures::document_json;
+        let signatures = [
+            db.create_signature("Ann", &json(&RichDocument::plain("Ann")))
+                .unwrap(),
+            db.create_signature("Bob", &json(&bold)).unwrap(),
+            db.create_signature("Logo", &json(&logo)).unwrap(),
+        ];
+        db.set_account_signatures(ann, Some(signatures[0]), Some(signatures[2]))
+            .unwrap();
+        db.set_account_signatures(bob, Some(signatures[1]), None)
+            .unwrap();
+        ([ann, bob], signatures)
+    }
+
+    /// A main window over the signed database, and compose open with `init`.
+    fn composing_signed<'a>(
+        init: ComposeInit,
+        path: &std::path::Path,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (WindowHandle<ComposeView>, &'a mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            crate::locale::init(Language::default(), cx);
+        });
+        let (root, cx) = cx.add_window_view(|_, _| RootView::for_tests(path));
+        root.update_in(cx, |root, window, cx| {
+            root.open_compose_with(Some(init), window, cx);
+        });
+        cx.run_until_parked();
+        let compose = root.read_with(cx, |root, _| root.compose_window_for_tests());
+        (compose.expect("the compose window opened"), cx)
+    }
+
+    fn body_text(view: &ComposeView, cx: &App) -> String {
+        view.body.read(cx).content().to_string()
     }
 
     fn fields(to: &str) -> ComposeFields {
@@ -2194,6 +2047,156 @@ mod tests {
                 view.from_account = 1;
                 view.set_accounts(vec![account(3, true), account(1, true), account(2, true)]);
                 assert_eq!(view.accounts[view.from_account].id, 2);
+            })
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn a_new_message_is_signed_and_takes_the_signature_of_its_from(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let ([ann, bob], [ann_signature, _, _]) = signed_database(&path);
+        let init = ComposeInit {
+            account_id: Some(ann),
+            signature: Some(SignatureSlot::NewMail),
+            ..Default::default()
+        };
+        let (compose, cx) = composing_signed(init, &path, cx);
+        compose
+            .update(cx, |view, _, cx| {
+                assert_eq!(body_text(view, cx), "\n\nAnn");
+                assert_eq!(view.body.read(cx).cursor_offset(), 0);
+                assert!(!view.has_edits(), "a signature isn't an edit");
+                // What the user writes stays; the signature follows the account.
+                view.body.update(cx, |area, cx| {
+                    area.replace_range_with_document(0..0, &RichDocument::plain("Hi"), cx);
+                });
+                let bob_index = view
+                    .accounts
+                    .iter()
+                    .position(|account| account.id == bob)
+                    .unwrap();
+                view.select_from_account(bob_index, cx);
+                assert_eq!(body_text(view, cx), "Hi\n\nBob");
+                assert_eq!(view.body.read(cx).cursor_offset(), 2);
+                assert!(view.fields(cx).body_html.unwrap().contains("<b>Bob</b>"));
+                // The picker takes it out and puts one back where it goes.
+                view.use_signature(None, cx);
+                assert_eq!(body_text(view, cx), "Hi\n\n");
+                assert_eq!(view.shown_signature(cx), None);
+                view.use_signature(Some(ann_signature), cx);
+                assert_eq!(body_text(view, cx), "Hi\n\nAnn");
+                assert_eq!(view.shown_signature(cx), Some(ann_signature));
+            })
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn a_reply_is_signed_above_its_quote_and_sends_the_images(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let ([ann, _], _) = signed_database(&path);
+        let init = ComposeInit {
+            account_id: Some(ann),
+            draft: mail_core::Draft {
+                to: vec![Address::new(None::<String>, "zoe@x.test")],
+                in_reply_to: Some("parent@x".into()),
+                ..Default::default()
+            },
+            quoted_original: Some(QuotedOriginal {
+                block: "Zoe wrote:\n> Hello".into(),
+                attribution: "Zoe wrote:".into(),
+                html: "<b>Hello</b>".into(),
+                load_remote: false,
+                render_guard: None,
+            }),
+            signature: Some(SignatureSlot::Reply),
+            ..Default::default()
+        };
+        let (compose, cx) = composing_signed(init, &path, cx);
+        compose
+            .update(cx, |view, _, cx| {
+                assert_eq!(
+                    body_text(view, cx),
+                    format!("\n\nThanks\n{}", ui::IMAGE_CHAR)
+                );
+                let fields = view.fields(cx);
+                let draft = build_draft(
+                    view.selected_account(),
+                    &fields,
+                    &view.reply,
+                    &[],
+                    Language::English,
+                )
+                .expect("a draft");
+                let html = draft.html.unwrap();
+                let image = &draft.inline_images[0];
+                let signature_at = html.find(&format!("cid:{}", image.content_id)).unwrap();
+                assert!(signature_at < html.find("gmail_quote").unwrap(), "{html}");
+                assert_eq!(
+                    (image.filename.as_str(), image.data.as_slice()),
+                    ("logo.png", &[1, 2, 3][..])
+                );
+                // The plain version leaves the image out.
+                assert_eq!(draft.text, "\n\nThanks\n\nZoe wrote:\n> Hello");
+            })
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn a_forward_is_signed_above_the_forwarded_message(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let ([ann, _], _) = signed_database(&path);
+        let init = ComposeInit {
+            account_id: Some(ann),
+            draft: mail_core::Draft {
+                text: "\n\n---------- Forwarded message ----------\nFrom: Zoe".into(),
+                ..Default::default()
+            },
+            signature: Some(SignatureSlot::Reply),
+            forward: true,
+            ..Default::default()
+        };
+        let (compose, cx) = composing_signed(init, &path, cx);
+        compose
+            .update(cx, |view, _, cx| {
+                assert_eq!(
+                    body_text(view, cx),
+                    format!(
+                        "\n\nThanks\n{}\n\n---------- Forwarded message ----------\nFrom: Zoe",
+                        ui::IMAGE_CHAR
+                    )
+                );
+            })
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn an_edited_unsent_message_keeps_its_own_signature(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let ([ann, bob], _) = signed_database(&path);
+        let init = ComposeInit {
+            account_id: Some(ann),
+            draft: mail_core::Draft {
+                text: "Hi\n\nAnn".into(),
+                ..Default::default()
+            },
+            replaces_outgoing: Some(7),
+            ..Default::default()
+        };
+        let (compose, cx) = composing_signed(init, &path, cx);
+        compose
+            .update(cx, |view, _, cx| {
+                assert_eq!(body_text(view, cx), "Hi\n\nAnn");
+                let bob_index = view
+                    .accounts
+                    .iter()
+                    .position(|account| account.id == bob)
+                    .unwrap();
+                view.select_from_account(bob_index, cx);
+                assert_eq!(body_text(view, cx), "Hi\n\nAnn");
             })
             .expect("open");
     }
@@ -2482,15 +2485,6 @@ mod tests {
         assert!(on_white.icon.l < 0.5, "{:?}", on_white.icon);
         let on_dark = quote_toggle_colors(false, dark.colors());
         assert_eq!(on_dark.background, dark.colors().element_active);
-    }
-
-    #[test]
-    fn every_font_has_a_distinct_label() {
-        let labels: std::collections::HashSet<_> = FontFamily::ALL
-            .into_iter()
-            .map(|family| family_label(family, Language::Portuguese))
-            .collect();
-        assert_eq!(labels.len(), FontFamily::ALL.len());
     }
 
     #[test]
