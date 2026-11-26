@@ -167,6 +167,8 @@ pub struct FormatBar {
     /// Dropdown open.
     menu: Option<FormatMenu>,
     max_image_bytes: usize,
+    /// A file dialog is open, or the picked file being read.
+    picking_image: bool,
     _image_task: Option<Task<()>>,
     _subscription: Subscription,
 }
@@ -181,6 +183,7 @@ impl FormatBar {
             editor,
             menu: None,
             max_image_bytes,
+            picking_image: false,
             _image_task: None,
             _subscription: subscription,
         }
@@ -200,22 +203,29 @@ impl FormatBar {
     /// Forgets an image still being picked or read: the text it was for is gone.
     pub fn cancel_image(&mut self) {
         self._image_task = None;
+        self.picking_image = false;
     }
 
     /// Whether an image is still being picked or read.
     #[cfg(test)]
     pub fn image_pending(&self) -> bool {
-        self._image_task.is_some()
+        self.picking_image
     }
 
     #[cfg(test)]
     pub fn start_image_for_tests(&mut self) {
         self._image_task = Some(Task::ready(()));
+        self.picking_image = true;
     }
 
     /// Picks an image file and puts it at the caret, read off the UI thread.
     fn pick_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
+        // A dialog is already open (or its file being read): a second would drop it.
+        if self.picking_image {
+            return;
+        }
+        self.picking_image = true;
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -224,17 +234,25 @@ impl FormatBar {
         });
         let max_bytes = self.max_image_bytes;
         self._image_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else {
-                return;
+            let path = match paths.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                _ => None,
             };
-            let Some(path) = paths.into_iter().next() else {
-                return;
+            let read = match path {
+                Some(path) => Some(
+                    cx.background_executor()
+                        .spawn(async move { read_inline_image(&path, max_bytes) })
+                        .await,
+                ),
+                None => None,
             };
-            let read = cx
-                .background_executor()
-                .spawn(async move { read_inline_image(&path, max_bytes) })
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| this.finish_image(read, window, cx));
+            let _ = this.update_in(cx, |this, window, cx| {
+                // Picked, failed or cancelled: the button works again.
+                this.picking_image = false;
+                if let Some(read) = read {
+                    this.finish_image(read, window, cx);
+                }
+            });
         }));
     }
 
@@ -901,9 +919,23 @@ mod tests {
             bar.toggle_format_menu(FormatMenu::Size, cx);
             bar.close_menu(cx);
             assert!(!bar.menu_open());
-            bar._image_task = Some(Task::ready(()));
+            bar.start_image_for_tests();
             bar.cancel_image();
-            assert!(bar._image_task.is_none());
+            assert!(bar._image_task.is_none() && !bar.image_pending());
+        });
+        // A second click while a dialog is open leaves that one be.
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            crate::locale::init(Language::default(), cx);
+        });
+        let (bar, cx) = cx.add_window_view(|_, cx| {
+            let editor = cx.new(|cx| TextArea::new("", cx));
+            FormatBar::new(editor, 1 << 20, cx)
+        });
+        bar.update_in(cx, |bar, window, cx| {
+            bar.start_image_for_tests();
+            bar.pick_image(window, cx);
+            assert!(bar.image_pending());
         });
     }
 

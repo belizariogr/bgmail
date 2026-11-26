@@ -3070,17 +3070,23 @@ impl RootView {
     /// The saved signatures, read now: they're only needed when a message opens or
     /// the settings show them, never at startup.
     pub(crate) fn signatures(&self) -> Vec<SignatureEntry> {
-        self.signature_cache
-            .borrow_mut()
-            .get_or_insert_with(|| {
-                self.db
-                    .list_signatures()
-                    .unwrap_or_default()
-                    .iter()
-                    .map(SignatureEntry::from_row)
-                    .collect()
-            })
-            .clone()
+        if let Some(cached) = self.signature_cache.borrow().as_ref() {
+            return cached.clone();
+        }
+        match self.db.list_signatures() {
+            Ok(rows) => {
+                let entries: Vec<SignatureEntry> =
+                    rows.iter().map(SignatureEntry::from_row).collect();
+                *self.signature_cache.borrow_mut() = Some(entries.clone());
+                entries
+            }
+            // Not kept: the next call reads again, so one failed read doesn't hide
+            // them for the session.
+            Err(error) => {
+                eprintln!("BGMail: could not read the signatures: {error}");
+                Vec::new()
+            }
+        }
     }
 
     /// Adds a signature named `name` with nothing in it; its id, or `None` after a
@@ -14038,6 +14044,23 @@ mod tests {
         assert_eq!(init.draft.attachments.len(), 1);
         assert_eq!(init.draft.attachments[0].filename, "a.txt");
         assert_eq!(init.draft.attachments[0].data, b"hello");
+    }
+
+    #[test]
+    fn a_failed_read_of_the_signatures_is_tried_again() {
+        let (_dir, view) = test_view();
+        let id = view.db.create_signature("Ann", "{}").unwrap();
+        view.db
+            .conn()
+            .execute_batch("ALTER TABLE signatures RENAME TO hidden;")
+            .unwrap();
+        assert!(view.signatures().is_empty());
+        view.db
+            .conn()
+            .execute_batch("ALTER TABLE hidden RENAME TO signatures;")
+            .unwrap();
+        let ids: Vec<i64> = view.signatures().iter().map(|entry| entry.id).collect();
+        assert_eq!(ids, [id]);
     }
 
     #[test]

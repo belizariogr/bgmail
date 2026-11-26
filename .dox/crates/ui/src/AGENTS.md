@@ -1556,7 +1556,8 @@ core lives in `text_area/buffer.rs` and `text_area/rows.rs` (below).
 - **`paste`** (private, L696)
   - Signature: `fn paste(&mut self, _: &Paste, …)`
   - Purpose: Inserts clipboard text, keeping newlines (`\r\n`/`\r` → `\n`), one undo step;
-    `IMAGE_CHAR` is stripped (a copied image's character carries no image).
+    `IMAGE_CHAR` is stripped (a copied image's character carries no image); nothing left,
+    nothing happens (the selection stays).
 
 - **`copy`** (private, L702)
   - Signature: `fn copy(&mut self, _: &Copy, …)`

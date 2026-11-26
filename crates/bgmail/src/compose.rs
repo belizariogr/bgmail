@@ -305,6 +305,9 @@ pub struct ComposeView {
     signature_follows_account: bool,
     /// The editor holds the original: the signature goes above it.
     quote_in_editor: bool,
+    /// The text each signature had when put in this body: one changed in the settings
+    /// since is still the user's untouched copy.
+    inserted_signatures: std::collections::HashMap<i64, String>,
     signature_menu_open: bool,
     /// The quoted original, parsed the first time it is shown.
     quote_view: Option<Entity<HtmlView>>,
@@ -418,6 +421,7 @@ impl ComposeView {
             signature_slot: SignatureSlot::NewMail,
             signature_follows_account: true,
             quote_in_editor: false,
+            inserted_signatures: std::collections::HashMap::new(),
             signature_menu_open: false,
             quote_view: None,
             _quote_task: None,
@@ -465,11 +469,18 @@ impl ComposeView {
         let restored = self.sign_body(&draft.text, cx);
         self.show_cc_bcc = !draft.cc.is_empty() || !draft.bcc.is_empty();
         self.attachments = draft.attachments;
-        self.attachments.retain(|attachment| {
-            !restored
-                .iter()
-                .any(|image| *image.data == *attachment.data.as_slice())
-        });
+        // One copy per image put back, the one the message carried for it: another
+        // with the same bytes was the user's own.
+        for image in restored {
+            let copy = self.attachments.iter().position(|attachment| {
+                attachment.filename == image.name
+                    && attachment.mime_type == image.mime_type
+                    && *attachment.data == *image.data
+            });
+            if let Some(copy) = copy {
+                self.attachments.remove(copy);
+            }
+        }
         self.reply = ReplyHeaders {
             in_reply_to: draft.in_reply_to,
             references: draft.references,
@@ -616,6 +627,11 @@ impl ComposeView {
             self.quote_in_editor,
             entry.as_ref().map(|entry| &entry.document),
         );
+        self.inserted_signatures.clear();
+        if let Some(entry) = &entry {
+            self.inserted_signatures
+                .insert(entry.id, entry.document.text.clone());
+        }
         let (mut body, mut tracked) = (body, (range, entry.as_ref().map(|entry| entry.id)));
         let mut restored = Vec::new();
         // A message that already has its signature (an edited unsent one): it comes
@@ -630,6 +646,8 @@ impl ComposeView {
                     Some(entry.id),
                 );
                 restored = entry.document.images();
+                self.inserted_signatures
+                    .insert(entry.id, entry.document.text.clone());
             }
         }
         self.body.update(cx, |area, cx| {
@@ -658,6 +676,10 @@ impl ComposeView {
     /// an edit by itself: replacing a signature as saved loses nothing typed.
     fn use_signature(&mut self, id: Option<i64>, cx: &mut Context<Self>) {
         let entry = id.and_then(|id| self.signature_entry(id)).cloned();
+        if let Some(entry) = &entry {
+            self.inserted_signatures
+                .insert(entry.id, entry.document.text.clone());
+        }
         let quote_in_editor = self.quote_in_editor;
         self.body.update(cx, |area, cx| {
             let text = area.content();
@@ -691,12 +713,17 @@ impl ComposeView {
     /// What the body holds where its signature goes.
     fn signature_in_body(&self, cx: &App) -> SignatureInBody {
         let area = self.body.read(cx);
-        signature_in_body(
-            &area.content(),
-            area.tracked_range(),
-            area.tracked_tag(),
-            &self.signatures,
-        )
+        let text = area.content();
+        let (tracked, tag) = (area.tracked_range(), area.tracked_tag());
+        // As it was put there, even if the settings changed it since: untouched.
+        let as_inserted = tag.zip(tracked.clone()).is_some_and(|(tag, range)| {
+            !range.is_empty()
+                && self.inserted_signatures.get(&tag).map(String::as_str) == text.get(range)
+        });
+        match tag {
+            Some(tag) if as_inserted => SignatureInBody::Saved(tag),
+            _ => signature_in_body(&text, tracked, tag, &self.signatures),
+        }
     }
 
     /// Takes the saved form of one edited signature; the body keeps its copy.
@@ -731,7 +758,12 @@ impl ComposeView {
     /// Picks `id` in the signature menu.
     fn pick_signature(&mut self, id: Option<i64>, window: &mut Window, cx: &mut Context<Self>) {
         self.signature_menu_open = false;
+        let before = self.body.read(cx).content();
         self.use_signature(id, cx);
+        // The user's choice, unlike the one a change of From makes: closing asks.
+        if self.body.read(cx).content() != before {
+            self.mark_edited(cx);
+        }
         window.focus(&self.body.focus_handle(cx));
     }
 
@@ -2265,12 +2297,35 @@ mod tests {
                     view.signature_entry(ann_signature).unwrap().name,
                     "Ann at work"
                 );
-                // The body keeps the copy it has, now edited as far as the catalog knows.
+                // The body keeps the copy it has, untouched by the user.
                 assert_eq!(body_text(view, cx), "\n\nAnn");
-                assert_eq!(view.signature_in_body(cx), SignatureInBody::Edited);
+                assert_eq!(
+                    view.signature_in_body(cx),
+                    SignatureInBody::Saved(ann_signature)
+                );
                 view.set_signatures(vec![new], cx);
                 assert_eq!(view.signatures.len(), 1);
             })
+            .expect("open");
+        cx.run_until_parked();
+        compose
+            .update(cx, |view, _, cx| {
+                // Changing From over it is no edit: the user typed nothing.
+                view.set_signatures(
+                    vec![SignatureEntry {
+                        id: ann_signature,
+                        name: "Ann".into(),
+                        document: RichDocument::plain("Ann Smith"),
+                    }],
+                    cx,
+                );
+                let other = view.accounts.iter().position(|a| a.id != ann).unwrap();
+                view.select_from_account(other, cx);
+            })
+            .expect("open");
+        cx.run_until_parked();
+        compose
+            .update(cx, |view, _, _| assert!(!view.has_edits()))
             .expect("open");
     }
 
@@ -2340,6 +2395,7 @@ mod tests {
                 view.pick_signature(Some(bob_signature), window, cx);
                 assert!(!view.signature_menu_open);
                 assert_eq!(body_text(view, cx), "\n\nBob");
+                assert!(view.has_edits(), "the user's choice: closing asks");
                 assert!(view.body.read(cx).focus_handle(cx).is_focused(window));
                 // An empty one signs nothing, as none.
                 view.pick_signature(Some(empty), window, cx);
@@ -2502,6 +2558,12 @@ mod tests {
                         data: vec![1, 2, 3],
                     },
                     attachment("report.pdf", 4),
+                    // The user's own copy of the same file.
+                    OutgoingAttachment {
+                        filename: "logo.png".into(),
+                        mime_type: "image/png".into(),
+                        data: vec![1, 2, 3],
+                    },
                 ],
                 ..Default::default()
             },
@@ -2526,7 +2588,7 @@ mod tests {
                     .iter()
                     .map(|a| a.filename.as_str())
                     .collect();
-                assert_eq!(names, ["report.pdf"]);
+                assert_eq!(names, ["report.pdf", "logo.png"]);
             })
             .expect("open");
     }

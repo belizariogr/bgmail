@@ -1666,7 +1666,10 @@ impl TextArea {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             // The clipboard has the character of a copied image, not the image.
             let text = text.replace(IMAGE_CHAR, "");
-            self.replace_keeping_images(None, &text, EditKind::Other, cx);
+            // Nothing left to paste: the selection stays.
+            if !text.is_empty() {
+                self.replace_keeping_images(None, &text, EditKind::Other, cx);
+            }
         }
     }
 
@@ -2562,6 +2565,14 @@ mod tests {
         });
         let clipboard = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
         assert_eq!(clipboard.as_deref(), Some("Bob\n"));
+        // Pasting only an object's character leaves the selection alone.
+        let object = IMAGE_CHAR.to_string();
+        cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string(object)));
+        area.update_in(cx, |area, window, cx| {
+            area.buffer.select_range(0, 3);
+            area.paste(&Paste, window, cx);
+            assert!(area.buffer.text().starts_with("Bob"));
+        });
     }
 
     #[gpui::test]
