@@ -1171,6 +1171,14 @@ pub struct RootView {
     /// The saved signatures as read, kept until one is added or deleted (an edit
     /// updates its entry): reading means parsing JSON and decoding images.
     signature_cache: std::cell::RefCell<Option<Vec<SignatureEntry>>>,
+    /// Signature edits waiting to be written, the latest of each with its generation.
+    signature_writes: std::collections::BTreeMap<i64, (u64, String, RichDocument)>,
+    /// The generation of each signature's latest edit: a write of an older one is
+    /// skipped (a newer one was written, or will be).
+    signature_latest: HashMap<i64, u64>,
+    signature_generation: u64,
+    /// Writes `signature_writes` one at a time; `None` while there's nothing to write.
+    signature_writer: Option<Task<()>>,
     /// Last observed position and size of the compose window, persisted so it
     /// reopens where/how the user left it.
     compose_origin: Point<Pixels>,
@@ -1823,6 +1831,10 @@ impl RootView {
             settings_window: None,
             compose_window: None,
             signature_cache: std::cell::RefCell::new(None),
+            signature_writes: std::collections::BTreeMap::new(),
+            signature_latest: HashMap::new(),
+            signature_generation: 0,
+            signature_writer: None,
             compose_origin,
             compose_size,
             list_scroll: UniformListScrollHandle::new(),
@@ -3075,8 +3087,18 @@ impl RootView {
         }
         match self.db.list_signatures() {
             Ok(rows) => {
-                let entries: Vec<SignatureEntry> =
-                    rows.iter().map(SignatureEntry::from_row).collect();
+                // Edits not written yet are newer than their rows.
+                let entries: Vec<SignatureEntry> = rows
+                    .iter()
+                    .map(|row| match self.signature_writes.get(&row.id) {
+                        Some((_, name, document)) => SignatureEntry {
+                            id: row.id,
+                            name: name.clone(),
+                            document: document.clone(),
+                        },
+                        None => SignatureEntry::from_row(row),
+                    })
+                    .collect();
                 *self.signature_cache.borrow_mut() = Some(entries.clone());
                 entries
             }
@@ -3094,11 +3116,21 @@ impl RootView {
     pub(crate) fn create_signature(&mut self, name: &str, cx: &mut Context<Self>) -> Option<i64> {
         let document = signatures::document_json(&RichDocument::default());
         let created = self.db.create_signature(name, &document);
-        self.signature_cache.get_mut().take();
+        if let (Ok(id), Some(cached)) = (&created, self.signature_cache.get_mut()) {
+            cached.push(SignatureEntry {
+                id: *id,
+                name: name.to_string(),
+                document: RichDocument::default(),
+            });
+        }
         self.after_signature_change(created.map(Some), true, cx)
     }
 
     /// Saves signature `id`. Messages being written keep the copy they have.
+    ///
+    /// The cache and an open compose window take it at once; the database gets it
+    /// from a background writer (encoding its images is the heavy part), the latest
+    /// edit of each signature only.
     pub(crate) fn save_signature(
         &mut self,
         id: i64,
@@ -3106,14 +3138,93 @@ impl RootView {
         document: &RichDocument,
         cx: &mut Context<Self>,
     ) {
-        let saved = self
+        let generation = self.signature_edited(id, name, document, cx);
+        self.signature_writes
+            .insert(id, (generation, name.to_string(), document.clone()));
+        self.write_signatures_in_background(cx);
+    }
+
+    /// [`Self::save_signature`] written before it returns (a page going away).
+    pub(crate) fn save_signature_now(
+        &mut self,
+        id: i64,
+        name: &str,
+        document: &RichDocument,
+        cx: &mut Context<Self>,
+    ) {
+        self.signature_edited(id, name, document, cx);
+        self.signature_writes.remove(&id);
+        let written = self
             .db
             .update_signature(id, name, &signatures::document_json(document));
-        if let Err(error) = saved {
-            let note = format!("{}: {error}", Key::SignatureSaveFailed.tr(cx.language()));
-            self.set_status_note(note, cx);
+        self.signature_write_result(written, cx);
+    }
+
+    /// Writes every signature edit still waiting, before the app quits.
+    pub(crate) fn flush_signature_writes(&mut self) {
+        for (id, (_, name, document)) in std::mem::take(&mut self.signature_writes) {
+            let written =
+                self.db
+                    .update_signature(id, &name, &signatures::document_json(&document));
+            if let Err(error) = written {
+                eprintln!("BGMail: could not save the signature: {error}");
+            }
+        }
+    }
+
+    /// Starts the writer of `signature_writes` unless it runs: one at a time, the
+    /// JSON (images in base64) built on the background executor, the row written
+    /// here only if no newer edit of that signature came meanwhile.
+    fn write_signatures_in_background(&mut self, cx: &mut Context<Self>) {
+        if self.signature_writer.is_some() {
             return;
         }
+        self.signature_writer = Some(cx.spawn(async move |this, cx| loop {
+            let next = this.update(cx, |root, _| {
+                let next = root.signature_writes.pop_first();
+                if next.is_none() {
+                    root.signature_writer = None;
+                }
+                next
+            });
+            let Ok(Some((id, (generation, name, document)))) = next else {
+                break;
+            };
+            let json = cx
+                .background_executor()
+                .spawn(async move { signatures::document_json(&document) })
+                .await;
+            let written = this.update(cx, |root, cx| {
+                if root.signature_latest.get(&id) == Some(&generation) {
+                    let written = root.db.update_signature(id, &name, &json);
+                    root.signature_write_result(written, cx);
+                }
+            });
+            if written.is_err() {
+                break;
+            }
+        }));
+    }
+
+    fn signature_write_result(&mut self, written: rusqlite::Result<()>, cx: &mut Context<Self>) {
+        if let Err(error) = written {
+            let note = format!("{}: {error}", Key::SignatureSaveFailed.tr(cx.language()));
+            self.set_status_note(note, cx);
+        }
+    }
+
+    /// Takes an edit of a signature in the cache and an open compose window, and
+    /// returns its generation.
+    fn signature_edited(
+        &mut self,
+        id: i64,
+        name: &str,
+        document: &RichDocument,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        self.signature_generation += 1;
+        let generation = self.signature_generation;
+        self.signature_latest.insert(id, generation);
         // Only this one changed: the cache and an open compose window take it as it
         // is, without reading and decoding every signature again.
         let entry = SignatureEntry {
@@ -3128,12 +3239,18 @@ impl RootView {
             }
         }
         let _ = self.with_compose_window(cx, |view, _, cx| view.update_signature(entry, cx));
+        generation
     }
 
     /// Deletes signature `id`; the accounts that used it go without one.
     pub(crate) fn delete_signature(&mut self, id: i64, cx: &mut Context<Self>) {
+        // An edit still to be written goes with it.
+        self.signature_writes.remove(&id);
+        self.signature_latest.remove(&id);
         let deleted = self.db.delete_signature(id);
-        self.signature_cache.get_mut().take();
+        if let Some(cached) = self.signature_cache.get_mut() {
+            cached.retain(|entry| entry.id != id);
+        }
         self.after_signature_change(deleted.map(|()| None), true, cx);
     }
 
@@ -9623,6 +9740,11 @@ impl RootView {
 
     pub(crate) fn compose_window_for_tests(&self) -> Option<WindowHandle<ComposeView>> {
         self.compose_window
+    }
+
+    /// Drops the read signatures, as a failed read leaves them.
+    pub(crate) fn forget_signatures_for_tests(&mut self) {
+        self.signature_cache.get_mut().take();
     }
 
     pub(crate) fn settings_window_for_tests(&self) -> Option<WindowHandle<SettingsView>> {

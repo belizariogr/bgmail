@@ -329,8 +329,9 @@ wiring to `storage`.
 - Signatures follow Gmail (product decision from Gmail's settings, the user's
   preference for Gmail/Thunderbird over asking): Settings ▸ Signatures keeps named
   signatures written in the compose window's editor (formatting, images up to
-  1 MB each, links), saved by themselves 400 ms after the last edit (and when the
-  window closes). Each account picks one for new mail and one for replies and
+  1 MB each, links), saved by themselves 400 ms after the last edit by a background
+  writer (latest edit per signature; encoding off the UI thread), at once when the
+  page goes and before the app quits. Each account picks one for new mail and one for replies and
   forwards ("Signature defaults"). A message starts with it in the editor after a
   blank line, before the quote (above the original when the editor holds it: a
   forward, or a reply whose quote couldn't be kept out), without the `-- ` line; it

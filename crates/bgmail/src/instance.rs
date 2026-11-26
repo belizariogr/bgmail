@@ -207,7 +207,16 @@ mod tests {
         assert!(matches!(held, ProfileLock::Held(_)));
         assert!(matches!(lock_at(&path), ProfileLock::Busy));
         drop(held);
-        assert!(matches!(lock_at(&path), ProfileLock::Held(_)));
+        // A process another test starts meanwhile shares the open lock between its
+        // fork and its exec (flock follows the file description): wait that out.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !matches!(lock_at(&path), ProfileLock::Held(_)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lock was never given back"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]

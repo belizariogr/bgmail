@@ -369,6 +369,7 @@ fn main() {
                         // — within the `request_save` debounce window — isn't lost.
                         cx.on_app_quit(|view: &mut RootView, _cx| {
                             view.persist_now();
+                            view.flush_signature_writes();
                             async {}
                         })
                         .detach();

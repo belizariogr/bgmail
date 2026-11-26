@@ -691,9 +691,9 @@
       `accounts.signature_new/_reply`)
 - ⬜ Signatures: import an HTML signature made elsewhere (a file, or pasted HTML, as
       Thunderbird's "Use HTML"); today one is written in the editor
-- ⬜ Saving a signature serializes it (images as base64) and writes it on the UI
-      thread, 400 ms after the last edit, and opening compose reads and decodes every
-      signature: fine for logos, heavy for many 1 MB images (a cache, writes off-thread)
+- ✅ Signatures save off the UI thread (a background writer of the latest edit of
+      each; written at once when the settings close or the app quits) and are read
+      once per session (a cache kept current by every change)
 - ⬜ Set `\\Answered` on the original after a reply is sent
 - ✅ Move / delete / archive / junk, reflected on the server (optimistic
       local change + queued op, MOVE or COPY/EXPUNGE)

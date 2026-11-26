@@ -242,7 +242,9 @@ impl SignaturesPage {
         // Through the main view while it is there (an open compose window learns of
         // it); at quit it may be gone.
         if let Some(root) = self.root.upgrade() {
-            root.update(cx, |root, cx| root.save_signature(id, &name, &document, cx));
+            root.update(cx, |root, cx| {
+                root.save_signature_now(id, &name, &document, cx);
+            });
             return;
         }
         let Some(path) = self.db_path.as_ref() else {
@@ -696,6 +698,13 @@ mod tests {
         });
         cx.executor().advance_clock(SAVE_DELAY * 2);
         cx.run_until_parked();
+        // Written by the background writer.
+        let stored = storage::Database::open(dir.path().join("mail.db"))
+            .unwrap()
+            .list_signatures()
+            .unwrap();
+        let stored = crate::signatures::read_document(&stored[0].document);
+        assert_eq!(stored.text, "Ann");
         let saved = root.read_with(cx, |root, _| root.signatures());
         assert_eq!(saved.len(), 1);
         assert_eq!((saved[0].id, saved[0].name.as_str()), (id, "Signature 1"));
@@ -775,6 +784,44 @@ mod tests {
             .unwrap();
         assert_eq!(stored[0].name, "At quit");
         drop(root);
+    }
+
+    #[gpui::test]
+    fn the_latest_edit_of_a_signature_is_the_one_written(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let (_, root, page, cx) = page(&path, cx);
+        page.update_in(cx, |page, window, cx| page.create(window, cx));
+        let id = page.read_with(cx, |page, _| page.selected).unwrap();
+        let stored_name = |path: &std::path::Path| {
+            storage::Database::open(path)
+                .unwrap()
+                .list_signatures()
+                .unwrap()[0]
+                .name
+                .clone()
+        };
+        // A background write overtaken by one written at once is skipped.
+        root.update(cx, |root, cx| {
+            root.save_signature(id, "Older", &RichDocument::plain("a"), cx);
+            root.save_signature_now(id, "Newer", &RichDocument::plain("b"), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(stored_name(&path), "Newer");
+        // At quit, what still waits is written before the app goes.
+        root.update(cx, |root, cx| {
+            root.save_signature(id, "At quit", &RichDocument::plain("c"), cx);
+            root.flush_signature_writes();
+        });
+        assert_eq!(stored_name(&path), "At quit");
+        // Reading them meanwhile gives the edits, not the rows.
+        root.update(cx, |root, cx| {
+            root.save_signature(id, "Pending", &RichDocument::plain("d"), cx);
+            root.forget_signatures_for_tests();
+            assert_eq!(root.signatures()[0].name, "Pending");
+        });
+        cx.run_until_parked();
+        assert_eq!(stored_name(&path), "Pending");
     }
 
     #[gpui::test]
