@@ -3,8 +3,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mail_builder::headers::address::Address as BuilderAddress;
+use mail_builder::headers::content_type::ContentType;
 use mail_builder::headers::date::Date;
 use mail_builder::headers::message_id::MessageId;
+use mail_builder::mime::MimePart;
 use mail_builder::MessageBuilder;
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +15,16 @@ use crate::address::Address;
 /// A file the user attached in the composer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutgoingAttachment {
+    pub filename: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
+/// An image the HTML body shows through `cid:`, sent beside it (a signature's logo).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutgoingInlineImage {
+    /// Without angle brackets; the HTML refers to it as `cid:<content_id>`.
+    pub content_id: String,
     pub filename: String,
     pub mime_type: String,
     pub data: Vec<u8>,
@@ -58,6 +70,9 @@ pub struct Draft {
     /// Thread ancestry, oldest first, without angle brackets.
     pub references: Vec<String>,
     pub attachments: Vec<OutgoingAttachment>,
+    /// Images of the HTML body; ignored without one.
+    #[serde(default)]
+    pub inline_images: Vec<OutgoingInlineImage>,
 }
 
 /// Serializes `draft` to raw bytes. Message-ID and Date are explicit inputs so
@@ -91,19 +106,57 @@ pub fn build_message(draft: &Draft, message_id: &str, date_unix: i64) -> Vec<u8>
     if !references.is_empty() {
         builder = builder.references(MessageId::from(references));
     }
-    builder = builder.text_body(draft.text.as_str());
-    if let Some(html) = &draft.html {
-        builder = builder.html_body(html.as_str());
-    }
-    for attachment in &draft.attachments {
-        builder = builder.attachment(
-            attachment.mime_type.as_str(),
-            attachment.filename.as_str(),
-            attachment.data.as_slice(),
-        );
-    }
+    builder = match (&draft.html, draft.inline_images.is_empty()) {
+        (Some(html), false) => builder.body(related_body(draft, html)),
+        _ => {
+            builder = builder.text_body(draft.text.as_str());
+            if let Some(html) = &draft.html {
+                builder = builder.html_body(html.as_str());
+            }
+            for attachment in &draft.attachments {
+                builder = builder.attachment(
+                    attachment.mime_type.as_str(),
+                    attachment.filename.as_str(),
+                    attachment.data.as_slice(),
+                );
+            }
+            builder
+        }
+    };
     // Writing into a Vec cannot fail.
     builder.write_to_vec().unwrap_or_default()
+}
+
+/// The body of a message whose HTML shows images, as Gmail sends it: the text and HTML
+/// versions with the images in a `multipart/related`, inside a `multipart/mixed` with
+/// the attachments when there are any.
+fn related_body<'x>(draft: &'x Draft, html: &'x str) -> MimePart<'x> {
+    let alternative = MimePart::new(
+        "multipart/alternative",
+        vec![
+            MimePart::new("text/plain", draft.text.as_str()),
+            MimePart::new("text/html", html),
+        ],
+    );
+    let mut related = vec![alternative];
+    related.extend(draft.inline_images.iter().map(|image| {
+        MimePart::new(image.mime_type.as_str(), image.data.as_slice())
+            .header(
+                "Content-Disposition",
+                ContentType::new("inline").attribute("filename", image.filename.as_str()),
+            )
+            .cid(image.content_id.as_str())
+    }));
+    let related = MimePart::new("multipart/related", related);
+    if draft.attachments.is_empty() {
+        return related;
+    }
+    let mut mixed = vec![related];
+    mixed.extend(draft.attachments.iter().map(|attachment| {
+        MimePart::new(attachment.mime_type.as_str(), attachment.data.as_slice())
+            .attachment(attachment.filename.as_str())
+    }));
+    MimePart::new("multipart/mixed", mixed)
 }
 
 /// Message-ID (without brackets) as `<unix>.<unique>.bgmail@<domain>`. The
@@ -349,6 +402,55 @@ mod tests {
             attachment_content(&raw, att.index).unwrap(),
             b"%PDF-1.4 fake".to_vec()
         );
+    }
+
+    #[test]
+    fn images_of_the_html_go_beside_it_as_related_parts() {
+        let mut d = draft();
+        d.html = Some("<p>Bob</p><img src=\"cid:logo.1@bgmail\">".into());
+        d.inline_images.push(OutgoingInlineImage {
+            content_id: "logo.1@bgmail".into(),
+            filename: "logo.png".into(),
+            mime_type: "image/png".into(),
+            data: b"\x89PNG fake".to_vec(),
+        });
+        let raw = build_message(&d, "id@x", 0);
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("multipart/related"), "{text}");
+        assert!(text.contains("multipart/alternative"));
+        assert!(!text.contains("multipart/mixed"));
+        assert!(text.contains("Content-ID: <logo.1@bgmail>"));
+        let parsed = parse_message(&raw).unwrap();
+        assert!(parsed.html.unwrap().contains("cid:logo.1@bgmail"));
+        assert!(parsed.text.unwrap().contains("Hello there"));
+        assert!(parsed.attachments.iter().all(|att| att.inline));
+        let images = crate::parse::inline_images(&raw);
+        assert_eq!(images.len(), 1, "{images:?}");
+
+        // With an attachment, all of it goes in a mixed part.
+        d.attachments.push(OutgoingAttachment {
+            filename: "a.pdf".into(),
+            mime_type: "application/pdf".into(),
+            data: b"%PDF".to_vec(),
+        });
+        let raw = build_message(&d, "id@x", 0);
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("multipart/mixed") && text.contains("multipart/related"));
+        let parsed = parse_message(&raw).unwrap();
+        let attachment = parsed.attachments.iter().find(|att| !att.inline).unwrap();
+        assert_eq!(attachment.filename, "a.pdf");
+        // Without HTML the images have nothing to be shown in.
+        d.html = None;
+        let raw = build_message(&d, "id@x", 0);
+        assert!(!String::from_utf8_lossy(&raw).contains("multipart/related"));
+    }
+
+    #[test]
+    fn a_draft_saved_before_inline_images_still_loads() {
+        let mut value = serde_json::to_value(draft()).unwrap();
+        value.as_object_mut().unwrap().remove("inline_images");
+        let back: Draft = serde_json::from_value(value).unwrap();
+        assert!(back.inline_images.is_empty());
     }
 
     #[test]

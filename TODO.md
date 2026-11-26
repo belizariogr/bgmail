@@ -674,9 +674,26 @@
 - ✅ HTML composing: formatting bar in the compose window (font, size, B/I/U, color,
       alignment, lists, indent, undo/redo)
 - ⬜ Text size within a line (per paragraph today: GPUI shapes a line at one size);
-      links and images in the editor; pasting with formatting; editing an unsent
-      message loses its formatting
+      pasting with formatting; editing an unsent message loses its formatting
+- ✅ Images in the editor (Insert image: PNG/JPEG/GIF on their own line, sent as
+      `cid:` parts of a `multipart/related`) and web/e-mail addresses linked as Gmail
+      does while typing
+- ⬜ Images inside a line of text, resizing an image (Gmail: small/medium/large/
+      original), pasting or dropping an image into the editor, and links with text
+      other than the address (Insert link)
 - ⬜ Drafts (save/resume)
+- ✅ Signatures, as in Gmail: a catalog in Settings ▸ Signatures (name + the compose
+      editor, with formatting, images and links; saved 400 ms after the last edit),
+      per account one for new mail and one for replies/forwards ("Signature
+      defaults"), inserted in the editor after a blank line and before the quote
+      (above the forwarded message), without the `-- ` line; changing From swaps it,
+      a toolbar menu changes or removes it. Schema v10 (`signatures`,
+      `accounts.signature_new/_reply`)
+- ⬜ Signatures: import an HTML signature made elsewhere (a file, or pasted HTML, as
+      Thunderbird's "Use HTML"); today one is written in the editor
+- ✅ Signatures save off the UI thread (a background writer of the latest edit of
+      each; written at once when the settings close or the app quits) and are read
+      once per session (a cache kept current by every change)
 - ⬜ Set `\\Answered` on the original after a reply is sent
 - ✅ Move / delete / archive / junk, reflected on the server (optimistic
       local change + queued op, MOVE or COPY/EXPUNGE)

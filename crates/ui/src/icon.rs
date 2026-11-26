@@ -115,6 +115,10 @@ pub enum IconName {
     FileVideo,
     /// Text / document attachment.
     FileText,
+    /// Image put in the text.
+    Image,
+    /// Signature of a message.
+    Signature,
 }
 
 impl IconName {
@@ -176,6 +180,8 @@ impl IconName {
             IconName::WindowRestore => crate::WINDOW_RESTORE,
             IconName::File => crate::FILE,
             IconName::FileImage => crate::FILE_IMAGE,
+            IconName::Image => crate::IMAGE,
+            IconName::Signature => crate::SIGNATURE,
             IconName::FilePdf => crate::FILE_PDF,
             IconName::FileArchive => crate::FILE_ZIPPER,
             IconName::FileAudio => crate::FILE_AUDIO,
@@ -248,7 +254,7 @@ mod tests {
     use gpui::AssetSource;
 
     /// Every icon variant, so coverage tests can iterate over the full set.
-    const ALL: [IconName; 60] = [
+    const ALL: [IconName; 62] = [
         IconName::CaretRight,
         IconName::CaretDown,
         IconName::Print,
@@ -309,6 +315,8 @@ mod tests {
         IconName::FileAudio,
         IconName::FileVideo,
         IconName::FileText,
+        IconName::Image,
+        IconName::Signature,
     ];
 
     #[test]

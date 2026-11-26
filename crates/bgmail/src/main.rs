@@ -22,6 +22,7 @@ mod data;
 mod dates;
 mod db_seed;
 mod default_mail_app;
+mod format_bar;
 mod instance;
 mod locale;
 mod mail_html;
@@ -34,6 +35,8 @@ mod root;
 mod search_scope;
 mod settings;
 mod shortcuts;
+mod signature_settings;
+mod signatures;
 mod startup;
 mod window_drag;
 mod window_frame;
@@ -366,6 +369,7 @@ fn main() {
                         // — within the `request_save` debounce window — isn't lost.
                         cx.on_app_quit(|view: &mut RootView, _cx| {
                             view.persist_now();
+                            view.flush_signature_writes();
                             async {}
                         })
                         .detach();

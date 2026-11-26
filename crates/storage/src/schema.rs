@@ -3,7 +3,7 @@
 //! The v1 DDL below is the base every database starts from; later versions are
 //! applied as in-place steps by `migration.rs` so existing user data survives.
 
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 pub const CREATE_ACCOUNTS: &str = "
 CREATE TABLE IF NOT EXISTS accounts (
@@ -206,3 +206,28 @@ CREATE TABLE IF NOT EXISTS brand_logos (
 /// v7: when the user last asked for a retry, from which an unsent message's age counts.
 pub const V7_COLUMNS: &[(&str, &str, &str)] =
     &[("outbox", "retry_from", "INTEGER NOT NULL DEFAULT 0")];
+
+/// v10: signatures (`document` is the editor's, opaque here) and which one each
+/// account puts in new mail and in replies/forwards; deleting one leaves them without.
+pub const V10_OBJECTS: &str = "
+CREATE TABLE IF NOT EXISTS signatures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    document TEXT NOT NULL DEFAULT '',
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+";
+
+/// v10 account columns: `(table, column, definition)`.
+pub const V10_COLUMNS: &[(&str, &str, &str)] = &[
+    (
+        "accounts",
+        "signature_new",
+        "INTEGER REFERENCES signatures(id) ON DELETE SET NULL",
+    ),
+    (
+        "accounts",
+        "signature_reply",
+        "INTEGER REFERENCES signatures(id) ON DELETE SET NULL",
+    ),
+];

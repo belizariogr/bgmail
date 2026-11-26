@@ -38,7 +38,8 @@ pub use list_item::*;
 pub use scrollbar::*;
 pub use switch::*;
 pub use text_area::rich::{
-    Align, CharStyle, FontFamily, Format, ListKind, ParaStyle, TextSize, MAX_INDENT,
+    Align, CharStyle, FontFamily, Format, InlineImage, ListKind, ParaStyle, RichDocument, TextSize,
+    IMAGE_CHAR, MAX_INDENT,
 };
 pub use text_area::{font_for_family, TextArea, TextAreaEvent};
 pub use text_input::*;

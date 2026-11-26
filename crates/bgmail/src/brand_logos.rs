@@ -164,13 +164,16 @@ fn spawn_worker(
     let spawned = std::thread::Builder::new()
         .name("bgmail-brand-logos".into())
         .spawn(move || {
-            let Ok(db) = Database::open(&db_path) else {
-                return;
-            };
+            // Without its cache it checks nothing: every message is answered "none",
+            // so none is asked about again and again.
+            let db = Database::open(&db_path).ok();
             // Built on the first message that needs the network.
             let mut checker: Option<Option<BrandChecker>> = None;
             for request in incoming {
-                let finding = check(&db, &mut checker, &request);
+                let finding = match &db {
+                    Some(db) => check(db, &mut checker, &request),
+                    None => Finding::None,
+                };
                 if results
                     .send_blocking((request.message_id, finding))
                     .is_err()
@@ -267,11 +270,17 @@ mod tests {
     fn a_message_is_asked_about_once_and_shows_what_was_found() {
         let mut logos = logos();
         let mut started = 0;
-        assert!(logos.request(1, "a@nubank.com.br", |_| started += 1));
+        // Its answers stay readable, as in the app, so the worker stays.
+        let mut answers = None;
+        assert!(logos.request(1, "a@nubank.com.br", |incoming| {
+            answers = Some(incoming);
+            started += 1;
+        }));
         // Pending: not asked again, and the worker started only once.
         assert!(!logos.request(1, "a@nubank.com.br", |_| started += 1));
         assert!(logos.request(2, "b@nubank.com.br", |_| started += 1));
         assert_eq!(started, 1);
+        assert!(answers.is_some());
         assert!(logos.logo(1).is_none());
 
         let svg = b"<svg/>".to_vec();
@@ -292,12 +301,23 @@ mod tests {
     #[test]
     fn a_message_without_its_body_is_asked_about_again_once_it_arrives() {
         let mut logos = logos();
-        assert!(logos.request(3, "a@x.com", |_| {}));
+        let mut answers = None;
+        assert!(logos.request(3, "a@x.com", |incoming| answers = Some(incoming)));
         assert!(!logos.receive(3, Finding::NotReady));
         // Not on every render meanwhile.
         assert!(!logos.needs_request(3));
         logos.body_ready(3);
         assert!(logos.needs_request(3));
+    }
+
+    #[test]
+    fn without_its_cache_every_message_is_answered_none() {
+        let mut logos = logos();
+        let mut answers = None;
+        assert!(logos.request(5, "a@x.com", |incoming| answers = Some(incoming)));
+        let (id, finding) = answers.unwrap().recv_blocking().unwrap();
+        assert_eq!(id, 5);
+        assert!(matches!(finding, Finding::None));
     }
 
     #[test]

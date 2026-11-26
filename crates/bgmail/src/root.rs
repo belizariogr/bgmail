@@ -25,8 +25,8 @@ use theme::ActiveTheme;
 use ui::prelude::*;
 use ui::{
     set_native_text_focus, Button, Color, FocusNext, FocusPrevious, Icon, IconButton, IconName,
-    IconSize, Label, LabelSize, ListItem, Scrollbar, ScrollbarState, TextInput, TextInputEvent,
-    Tooltip,
+    IconSize, Label, LabelSize, ListItem, RichDocument, Scrollbar, ScrollbarState, TextInput,
+    TextInputEvent, Tooltip,
 };
 
 use crate::actions::{
@@ -52,6 +52,7 @@ use crate::mail_service::{self, MailService, OverallStatus, StartError};
 use crate::search_scope;
 use crate::settings::SettingsView;
 use crate::shortcuts;
+use crate::signatures::{self, SignatureEntry, SignatureSlot};
 use html_view::element::zoom_step;
 use html_view::{
     has_too_many_tags, Appearance as PageAppearance, DetachedDocument, DocumentOptions, HitInfo,
@@ -1167,6 +1168,17 @@ pub struct RootView {
     /// Handle to the separate compose window while it is open. `None` when it
     /// has never been opened or was closed.
     compose_window: Option<WindowHandle<ComposeView>>,
+    /// The saved signatures as read, kept until one is added or deleted (an edit
+    /// updates its entry): reading means parsing JSON and decoding images.
+    signature_cache: std::cell::RefCell<Option<Vec<SignatureEntry>>>,
+    /// Signature edits waiting to be written, the latest of each with its generation.
+    signature_writes: std::collections::BTreeMap<i64, (u64, String, RichDocument)>,
+    /// The generation of each signature's latest edit: a write of an older one is
+    /// skipped (a newer one was written, or will be).
+    signature_latest: HashMap<i64, u64>,
+    signature_generation: u64,
+    /// Writes `signature_writes` one at a time; `None` while there's nothing to write.
+    signature_writer: Option<Task<()>>,
     /// Last observed position and size of the compose window, persisted so it
     /// reopens where/how the user left it.
     compose_origin: Point<Pixels>,
@@ -1386,6 +1398,7 @@ fn forwarded_attachments(
     raw: &[u8],
     parsed: &ParsedMessage,
     shown: &[AttachmentRow],
+    keep_inline: bool,
 ) -> Vec<mail_core::OutgoingAttachment> {
     // What the reader lists goes too: an image too big to embed is inline to the parser.
     let mime_type = |info: &mail_core::AttachmentInfo| match &info.charset {
@@ -1396,7 +1409,7 @@ fn forwarded_attachments(
     let attachments: Vec<_> = parsed
         .attachments
         .iter()
-        .filter(|info| !info.inline || listed.contains(&(info.index as i64)))
+        .filter(|info| keep_inline || !info.inline || listed.contains(&(info.index as i64)))
         .collect();
     let indexes: Vec<usize> = attachments.iter().map(|info| info.index).collect();
     attachments
@@ -1519,15 +1532,25 @@ fn compose_init_from_outgoing(row: &OutgoingRow, parsed: &ParsedMessage) -> Comp
             html: None,
             in_reply_to: parsed.in_reply_to.clone(),
             references: parsed.references.clone(),
-            attachments: forwarded_attachments(&row.raw, parsed, &[]),
+            // The editor gets the text back, not the formatting: the images of the body
+            // come back as attachments rather than be lost.
+            attachments: forwarded_attachments(&row.raw, parsed, &[], true),
+            inline_images: Vec::new(),
         },
         replaces_outgoing: Some(row.id),
         quoted_original: None,
+        // Its text has the signature it was written with; one picked later goes above
+        // the original it may hold.
+        signature: None,
+        quote_in_editor: signatures::holds_original(
+            parsed.text.as_deref().unwrap_or_default(),
+            parsed.in_reply_to.is_some(),
+        ),
     }
 }
 
 /// Process-unique number for Message-IDs (time + counter + random seed).
-fn unique_token() -> u64 {
+pub(crate) fn unique_token() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1807,6 +1830,11 @@ impl RootView {
             reader_document: None,
             settings_window: None,
             compose_window: None,
+            signature_cache: std::cell::RefCell::new(None),
+            signature_writes: std::collections::BTreeMap::new(),
+            signature_latest: HashMap::new(),
+            signature_generation: 0,
+            signature_writer: None,
             compose_origin,
             compose_size,
             list_scroll: UniformListScrollHandle::new(),
@@ -2799,12 +2827,7 @@ impl RootView {
 
     /// Re-reads accounts, folders and the current list from the database.
     pub(crate) fn reload_from_database(&mut self) {
-        self.accounts = self.db.list_accounts().unwrap_or_default();
-        if !self.removing_accounts.is_empty() {
-            let removing = &self.removing_accounts;
-            self.accounts
-                .retain(|account| !removing.contains(&account.id));
-        }
+        self.reload_accounts();
         self.folders_by_account = self
             .accounts
             .iter()
@@ -2818,6 +2841,21 @@ impl RootView {
         self.leave_missing_mailboxes();
         self.reload_message_list();
         self.refresh_unsent();
+    }
+
+    /// Re-reads the accounts, without those being removed.
+    fn reload_accounts(&mut self) {
+        self.accounts = self.db.list_accounts().unwrap_or_default();
+        if !self.removing_accounts.is_empty() {
+            let removing = &self.removing_accounts;
+            self.accounts
+                .retain(|account| !removing.contains(&account.id));
+        }
+    }
+
+    /// The database file, for work on its own connection.
+    pub(crate) fn database_path(&self) -> &std::path::Path {
+        &self.db_path
     }
 
     /// What was open may be gone, or may be back under its old name after the server
@@ -3037,6 +3075,228 @@ impl RootView {
             ),
         }
         cx.notify();
+    }
+
+    // ----- Signatures ---------------------------------------------------------
+
+    /// The saved signatures, read now: they're only needed when a message opens or
+    /// the settings show them, never at startup.
+    pub(crate) fn signatures(&self) -> Vec<SignatureEntry> {
+        if let Some(cached) = self.signature_cache.borrow().as_ref() {
+            return cached.clone();
+        }
+        match self.db.list_signatures() {
+            Ok(rows) => {
+                // Edits not written yet are newer than their rows.
+                let entries: Vec<SignatureEntry> = rows
+                    .iter()
+                    .map(|row| match self.signature_writes.get(&row.id) {
+                        Some((_, name, document)) => SignatureEntry {
+                            id: row.id,
+                            name: name.clone(),
+                            document: document.clone(),
+                        },
+                        None => SignatureEntry::from_row(row),
+                    })
+                    .collect();
+                *self.signature_cache.borrow_mut() = Some(entries.clone());
+                entries
+            }
+            // Not kept: the next call reads again, so one failed read doesn't hide
+            // them for the session.
+            Err(error) => {
+                eprintln!("BGMail: could not read the signatures: {error}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Adds a signature named `name` with nothing in it; its id, or `None` after a
+    /// status note.
+    pub(crate) fn create_signature(&mut self, name: &str, cx: &mut Context<Self>) -> Option<i64> {
+        let document = signatures::document_json(&RichDocument::default());
+        let created = self.db.create_signature(name, &document);
+        if let (Ok(id), Some(cached)) = (&created, self.signature_cache.get_mut()) {
+            cached.push(SignatureEntry {
+                id: *id,
+                name: name.to_string(),
+                document: RichDocument::default(),
+            });
+        }
+        self.after_signature_change(created.map(Some), true, cx)
+    }
+
+    /// Saves signature `id`. Messages being written keep the copy they have.
+    ///
+    /// The cache and an open compose window take it at once; the database gets it
+    /// from a background writer (encoding its images is the heavy part), the latest
+    /// edit of each signature only.
+    pub(crate) fn save_signature(
+        &mut self,
+        id: i64,
+        name: &str,
+        document: &RichDocument,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.signature_edited(id, name, document, cx);
+        self.signature_writes
+            .insert(id, (generation, name.to_string(), document.clone()));
+        self.write_signatures_in_background(cx);
+    }
+
+    /// [`Self::save_signature`] written before it returns (a page going away).
+    pub(crate) fn save_signature_now(
+        &mut self,
+        id: i64,
+        name: &str,
+        document: &RichDocument,
+        cx: &mut Context<Self>,
+    ) {
+        self.signature_edited(id, name, document, cx);
+        self.signature_writes.remove(&id);
+        let written = self
+            .db
+            .update_signature(id, name, &signatures::document_json(document));
+        self.signature_write_result(written, cx);
+    }
+
+    /// Writes every signature edit still waiting, before the app quits.
+    pub(crate) fn flush_signature_writes(&mut self) {
+        for (id, (_, name, document)) in std::mem::take(&mut self.signature_writes) {
+            let written =
+                self.db
+                    .update_signature(id, &name, &signatures::document_json(&document));
+            if let Err(error) = written {
+                eprintln!("BGMail: could not save the signature: {error}");
+            }
+        }
+    }
+
+    /// Starts the writer of `signature_writes` unless it runs: one at a time, the
+    /// JSON (images in base64) built on the background executor, the row written
+    /// here only if no newer edit of that signature came meanwhile.
+    fn write_signatures_in_background(&mut self, cx: &mut Context<Self>) {
+        if self.signature_writer.is_some() {
+            return;
+        }
+        self.signature_writer = Some(cx.spawn(async move |this, cx| loop {
+            let next = this.update(cx, |root, _| {
+                let next = root.signature_writes.pop_first();
+                if next.is_none() {
+                    root.signature_writer = None;
+                }
+                next
+            });
+            let Ok(Some((id, (generation, name, document)))) = next else {
+                break;
+            };
+            let json = cx
+                .background_executor()
+                .spawn(async move { signatures::document_json(&document) })
+                .await;
+            let written = this.update(cx, |root, cx| {
+                if root.signature_latest.get(&id) == Some(&generation) {
+                    let written = root.db.update_signature(id, &name, &json);
+                    root.signature_write_result(written, cx);
+                }
+            });
+            if written.is_err() {
+                break;
+            }
+        }));
+    }
+
+    fn signature_write_result(&mut self, written: rusqlite::Result<()>, cx: &mut Context<Self>) {
+        if let Err(error) = written {
+            let note = format!("{}: {error}", Key::SignatureSaveFailed.tr(cx.language()));
+            self.set_status_note(note, cx);
+        }
+    }
+
+    /// Takes an edit of a signature in the cache and an open compose window, and
+    /// returns its generation.
+    fn signature_edited(
+        &mut self,
+        id: i64,
+        name: &str,
+        document: &RichDocument,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        self.signature_generation += 1;
+        let generation = self.signature_generation;
+        self.signature_latest.insert(id, generation);
+        // Only this one changed: the cache and an open compose window take it as it
+        // is, without reading and decoding every signature again.
+        let entry = SignatureEntry {
+            id,
+            name: name.to_string(),
+            document: document.clone(),
+        };
+        if let Some(cached) = self.signature_cache.get_mut() {
+            match cached.iter_mut().find(|known| known.id == id) {
+                Some(known) => *known = entry.clone(),
+                None => cached.push(entry.clone()),
+            }
+        }
+        let _ = self.with_compose_window(cx, |view, _, cx| view.update_signature(entry, cx));
+        generation
+    }
+
+    /// Deletes signature `id`; the accounts that used it go without one.
+    pub(crate) fn delete_signature(&mut self, id: i64, cx: &mut Context<Self>) {
+        // An edit still to be written goes with it.
+        self.signature_writes.remove(&id);
+        self.signature_latest.remove(&id);
+        let deleted = self.db.delete_signature(id);
+        if let Some(cached) = self.signature_cache.get_mut() {
+            cached.retain(|entry| entry.id != id);
+        }
+        self.after_signature_change(deleted.map(|()| None), true, cx);
+    }
+
+    /// Which signature account `account_id` puts in new mail and in replies and forwards.
+    pub(crate) fn set_account_signatures(
+        &mut self,
+        account_id: i64,
+        new_mail: Option<i64>,
+        replies: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        let set = self
+            .db
+            .set_account_signatures(account_id, new_mail, replies);
+        self.after_signature_change(set.map(|()| None), false, cx);
+    }
+
+    /// Rereads what a signature change touched (the accounts, and the signatures when
+    /// `signatures_changed`) and hands it to the compose window.
+    fn after_signature_change(
+        &mut self,
+        result: rusqlite::Result<Option<i64>>,
+        signatures_changed: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<i64> {
+        let id = match result {
+            Ok(id) => id,
+            Err(error) => {
+                let note = format!("{}: {error}", Key::SignatureSaveFailed.tr(cx.language()));
+                self.set_status_note(note, cx);
+                return None;
+            }
+        };
+        self.reload_accounts();
+        if self.compose_window.is_some() {
+            let signatures = signatures_changed.then(|| self.signatures());
+            let accounts = self.compose_accounts();
+            let _ = self.with_compose_window(cx, |view, _, cx| {
+                view.set_accounts(accounts);
+                if let Some(signatures) = signatures {
+                    view.set_signatures(signatures, cx);
+                }
+            });
+        }
+        cx.notify();
+        id
     }
 
     pub(crate) fn update_account_secret(
@@ -5133,6 +5393,8 @@ impl RootView {
                 name: account.from_name().to_string(),
                 email: account.email.clone(),
                 can_send: account.provider != storage::PROVIDER_LOCAL,
+                signature_new: account.signature_new,
+                signature_reply: account.signature_reply,
             })
             .collect();
         accounts.sort_by_key(|account| !account.can_send);
@@ -5197,6 +5459,9 @@ impl RootView {
             .map(quotable_html)
             .or_else(|| parsed.text.as_deref().map(quotable_text))
             .filter(|html| kind != ReplyKind::Forward && !html.trim().is_empty());
+        // A forward holds the original in the editor, and so does a reply whose quote
+        // couldn't be kept out of it: the signature goes above it.
+        let quote_in_editor = quoted_html.is_none();
         let quoted_original = quoted_html.map(|html| QuotedOriginal {
             block: std::mem::take(&mut draft.text).trim_start().to_string(),
             attribution: labels.attribution.clone(),
@@ -5208,7 +5473,7 @@ impl RootView {
         if kind == ReplyKind::Forward {
             if let Some(raw) = raw.as_deref() {
                 let shown = visible_attachments(&self.db, Some(&detail));
-                draft.attachments = forwarded_attachments(raw, &parsed, &shown);
+                draft.attachments = forwarded_attachments(raw, &parsed, &shown, false);
             }
         }
         let init = ComposeInit {
@@ -5216,6 +5481,8 @@ impl RootView {
             draft,
             replaces_outgoing: None,
             quoted_original,
+            signature: Some(SignatureSlot::Reply),
+            quote_in_editor,
         };
         self.open_compose_with(Some(init), window, cx);
     }
@@ -5302,6 +5569,7 @@ impl RootView {
         };
         let init = ComposeInit {
             draft,
+            signature: Some(SignatureSlot::NewMail),
             ..Default::default()
         };
         self.open_compose_with(Some(init), window, cx);
@@ -5314,13 +5582,16 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let contacts = self.db.list_contacts().unwrap_or_default();
+        let signatures = self.signatures();
         if let Some(handle) = self.compose_window {
             let init_for_open = init.clone();
             let contacts_for_open = contacts.clone();
             let accounts_for_open = self.compose_accounts();
+            let signatures_for_open = signatures.clone();
             match handle.update(cx, |view, window, cx| {
                 view.set_contacts(contacts_for_open, cx);
                 view.set_accounts(accounts_for_open);
+                view.set_signatures(signatures_for_open, cx);
                 window.activate_window();
                 // A message being written is never replaced by another.
                 let busy = init_for_open.is_some() && view.has_edits();
@@ -5363,7 +5634,16 @@ impl RootView {
             window.set_content_scale(ui_scale, cx);
             let root_for_close = root.clone();
             let view = cx.new(|cx| {
-                ComposeView::new(accounts, contacts, root, compose_white, init, window, cx)
+                ComposeView::new(
+                    accounts,
+                    contacts,
+                    signatures,
+                    root,
+                    compose_white,
+                    init,
+                    window,
+                    cx,
+                )
             });
             let compose = view.downgrade();
             window.on_window_should_close(cx, move |window, cx| {
@@ -9462,6 +9742,15 @@ impl RootView {
         self.compose_window
     }
 
+    /// Drops the read signatures, as a failed read leaves them.
+    pub(crate) fn forget_signatures_for_tests(&mut self) {
+        self.signature_cache.get_mut().take();
+    }
+
+    pub(crate) fn settings_window_for_tests(&self) -> Option<WindowHandle<SettingsView>> {
+        self.settings_window
+    }
+
     pub(crate) fn for_tests(path: &std::path::Path) -> Self {
         Self::new_with_database(Config::default(), path, false)
     }
@@ -11002,7 +11291,7 @@ mod tests {
             Content-Type: image/png\r\nContent-ID: <big@x>\r\n\
             Content-Transfer-Encoding: base64\r\n\r\nAQID\r\n--X--\r\n";
         let parsed = mail_core::parse_message(raw).unwrap();
-        assert!(forwarded_attachments(raw, &parsed, &[]).is_empty());
+        assert!(forwarded_attachments(raw, &parsed, &[], false).is_empty());
         let row = AttachmentRow {
             id: 1,
             message_id: 1,
@@ -11013,7 +11302,7 @@ mod tests {
             content_id: Some("big@x".into()),
             inline: false,
         };
-        assert_eq!(forwarded_attachments(raw, &parsed, &[row]).len(), 1);
+        assert_eq!(forwarded_attachments(raw, &parsed, &[row], false).len(), 1);
     }
 
     #[test]
@@ -11021,7 +11310,7 @@ mod tests {
         let mut raw = b"From: a@b.c\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\nContent-Type: text/plain\r\n\r\nHi\r\n--X\r\nContent-Type: text/csv; charset=iso-8859-1; name=a.csv\r\nContent-Disposition: attachment; filename=a.csv\r\nContent-Transfer-Encoding: 8bit\r\n\r\n".to_vec();
         raw.extend_from_slice(b"S\xe3o\r\n--X--\r\n");
         let parsed = mail_core::parse_message(&raw).unwrap();
-        let forwarded = forwarded_attachments(&raw, &parsed, &[]);
+        let forwarded = forwarded_attachments(&raw, &parsed, &[], false);
         assert_eq!(forwarded[0].mime_type, "text/csv; charset=iso-8859-1");
         assert!(forwarded[0].data.starts_with(b"S\xe3o"));
 
@@ -13877,6 +14166,69 @@ mod tests {
         assert_eq!(init.draft.attachments.len(), 1);
         assert_eq!(init.draft.attachments[0].filename, "a.txt");
         assert_eq!(init.draft.attachments[0].data, b"hello");
+    }
+
+    #[test]
+    fn a_failed_read_of_the_signatures_is_tried_again() {
+        let (_dir, view) = test_view();
+        let id = view.db.create_signature("Ann", "{}").unwrap();
+        view.db
+            .conn()
+            .execute_batch("ALTER TABLE signatures RENAME TO hidden;")
+            .unwrap();
+        assert!(view.signatures().is_empty());
+        view.db
+            .conn()
+            .execute_batch("ALTER TABLE hidden RENAME TO signatures;")
+            .unwrap();
+        let ids: Vec<i64> = view.signatures().iter().map(|entry| entry.id).collect();
+        assert_eq!(ids, [id]);
+    }
+
+    #[test]
+    fn editing_an_unsent_message_keeps_the_images_of_its_body() {
+        let draft = Draft {
+            from: Address::new(Some("Me"), "me@example.com"),
+            to: vec![Address::new(None::<String>, "ana@x.com")],
+            text: "Hi\n\nAnn".into(),
+            html: Some("<div>Hi</div><div><img src=\"cid:ii_1@bgmail\"></div>".into()),
+            inline_images: vec![mail_core::OutgoingInlineImage {
+                content_id: "ii_1@bgmail".into(),
+                filename: "logo.png".into(),
+                mime_type: "image/png".into(),
+                data: vec![1, 2, 3],
+            }],
+            ..Draft::default()
+        };
+        let raw = mail_core::build_message(&draft, "id@example.com", 0);
+        let row = outgoing_row(raw, &["ana@x.com"], OutgoingState::Failed);
+        let parsed = mail_core::parse_message(&row.raw).unwrap();
+        let init = compose_init_from_outgoing(&row, &parsed);
+        assert_eq!(init.draft.attachments.len(), 1);
+        assert_eq!(init.draft.attachments[0].filename, "logo.png");
+        assert_eq!(init.draft.attachments[0].data, [1, 2, 3]);
+        assert_eq!(init.signature, None);
+        assert!(!init.quote_in_editor, "nothing quoted to sign above");
+
+        let reply = Draft {
+            text: "Hi\n\nOn Mon, Zoe wrote:\n> Hello".into(),
+            in_reply_to: Some("orig@x.com".into()),
+            ..draft
+        };
+        let raw = mail_core::build_message(&reply, "id@example.com", 0);
+        let row = outgoing_row(raw, &["ana@x.com"], OutgoingState::Failed);
+        let parsed = mail_core::parse_message(&row.raw).unwrap();
+        assert!(compose_init_from_outgoing(&row, &parsed).quote_in_editor);
+        // A new message quoting something of its own isn't a reply.
+        let own = Draft {
+            text: "Here is the log:\n> error 42".into(),
+            in_reply_to: None,
+            ..reply
+        };
+        let raw = mail_core::build_message(&own, "id@example.com", 0);
+        let row = outgoing_row(raw, &["ana@x.com"], OutgoingState::Failed);
+        let parsed = mail_core::parse_message(&row.raw).unwrap();
+        assert!(!compose_init_from_outgoing(&row, &parsed).quote_in_editor);
     }
 
     #[test]

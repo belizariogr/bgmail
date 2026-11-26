@@ -158,7 +158,7 @@ wiring to `storage`.
   2 s on the UI thread (`UI_LAYOUT_LIMIT`) or 30 s in the background also opens as text, the last
   resort for what no other limit caught. A `mail.db` that can't be opened or give the first frame what
   it needs is kept beside as `mail.db.corrupt`, and a new one starts with what could be read of
-  `accounts` and `outbox` (`Database::replace_corrupt`), with a status note. A page lost elsewhere
+  `signatures`, `accounts` and `outbox` (`Database::replace_corrupt`), with a status note. A page lost elsewhere
   shows as missing mail, as moving everything for it isn't proportional. The sanitizer's
   output is read back with the parser's tokenizer (`mail_html::reads_as_safe`, the last check): if it
   finds what the sanitizer removes, the body shows as text and the quote is left out. `form` and
@@ -173,9 +173,9 @@ wiring to `storage`.
   (`ui::TextInput` To/Cc/Bcc/Subject, `ui::TextArea` body), From picker
   (`ui::ContextMenu`; local accounts listed but can't send), attachments via
   picker / drag-and-drop read off the UI thread (25 MB total cap). Formatting tools on
-  the send button's row, as in Gmail (undo, font, size, B/I/U, color, align, lists, indent) drives
-  `ui::TextArea`; formatted text is sent as HTML with a plain-text version, and
-  unformatted new mail stays plain text. Send (button, `ComposeSend`, Cmd/Ctrl+Enter) validates with
+  the send button's row, as in Gmail (undo, font, size, B/I/U, color, align, lists, indent,
+  image; `format_bar::FormatBar`) drive `ui::TextArea`; formatted text is sent as HTML with a plain-text version, and
+  unformatted new mail without addresses to link stays plain text. Send (button, `ComposeSend`, Cmd/Ctrl+Enter) validates with
   `mail_core::parse_address_list` (inline per-field errors) and hands the
   `Draft` to `RootView::send_draft` in a task (never while root is leased);
   success closes the window, errors show in a banner. Replies prefill from
@@ -199,10 +199,14 @@ wiring to `storage`.
     private temp copies for Open (Unix 0700/0600, stale after a day).
   - `compose`, `command_palette*`, `commands`, `actions`, `shortcuts`,
     `app_menus` — app actions and overlays.
+  - `format_bar` — the formatting toolbar of a rich editor (compose body,
+    signature editor), with Insert image (PNG/JPEG/GIF, file read off the UI thread).
+  - `signatures` — which signature a message gets and where it goes (GPUI-free);
+    `signature_settings` — Settings ▸ Signatures.
   - `window_drag` / `window_frame` — portable window move/CSD; OS code behind
     `cfg`.
   - `startup` — debug startup milestones (keep startup path light).
-  - `settings` — Settings window. Accounts: live list (provider badge,
+  - `settings` — Settings window (Signatures: `signature_settings`). Accounts: live list (provider badge,
     health from `RootView::account_status`/`account_start_error`), per-account
     "Update password" / "Sign in again" (Google OAuth) / "Remove" (confirmed
     with `window.prompt`; local mail is deleted), and the inline "Add account"
@@ -322,6 +326,33 @@ wiring to `storage`.
   good and leaves nothing selected. On hover Reply / Delete appear centered at
   the right, icon-sized and with no background (their icons brighten on hover);
   only the subject shrinks for them, so the date and star stay in place. Trash shows no unread badge.
+- Signatures follow Gmail (product decision from Gmail's settings, the user's
+  preference for Gmail/Thunderbird over asking): Settings ▸ Signatures keeps named
+  signatures written in the compose window's editor (formatting, images up to
+  1 MB each, links), saved by themselves 400 ms after the last edit by a background
+  writer (latest edit per signature; encoding off the UI thread), at once when the
+  page goes and before the app quits. Each account picks one for new mail and one for replies and
+  forwards ("Signature defaults"). A message starts with it in the editor after a
+  blank line, before the quote (above the original when the editor holds it: a
+  forward, or a reply whose quote couldn't be kept out), without the `-- ` line; it
+  sits in the editor's tracked range, so changing From swaps it for that account's
+  and the toolbar's signature menu changes or removes it ("Manage signatures…"
+  opens the settings). Swapping isn't an edit (closing doesn't ask). Which
+  signature the body holds is read from its text, so undo never leaves it stale;
+  an empty signature signs nothing. Changing From replaces even an edited signature,
+  as Gmail does (then it counts as an edit). Edited unsent messages keep the one in
+  their text: when it is the last block above the original it comes back as saved
+  (its logo inline, not re-attached) and the picker changes it; the other images of
+  their body come back as attachments (the editor gets the text back, not the
+  formatting). Signatures are read from the database the first time a message
+  opens or the settings show them, then kept (`RootView::signature_cache`); stored
+  as `RichDocument` JSON (images base64), one that doesn't parse keeps its text.
+- Images in the body (Insert image, a signature's) go out as `cid:` parts of a
+  `multipart/related` (`ii_<salt>_<id>@bgmail`, unique per message), count with
+  the attachments (25 MB), and are left out of the plain-text version. A body with
+  a web or e-mail address goes out as HTML too, so the address is a link. One goes in
+  sized as it shows once turned by its EXIF, and no bigger than 40 megapixels. Web and e-mail addresses go out as
+  links.
 - Replies follow Gmail: the editor holds only what the user writes, and below
   it a `⋯` button reveals the attribution line and the original, rendered behind
   a side bar (read-only, parsed off the UI thread when first shown). The sent

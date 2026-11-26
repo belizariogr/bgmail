@@ -103,7 +103,8 @@ _300 functions/methods documented._
   `ELLIPSIS`, `FOLDER`, `SHIELD_HALVED`, `SHIELD`, `CHECK`, `XMARK`,
   `WINDOW_MINIMIZE`, `WINDOW_MAXIMIZE`, `WINDOW_RESTORE`, and the attachment
   file icons `FILE`, `FILE_IMAGE`, `FILE_PDF`, `FILE_ZIPPER`, `FILE_AUDIO`,
-  `FILE_VIDEO`, `FILE_LINES`. Each value is the
+  `FILE_VIDEO`, `FILE_LINES`, and the editor's `IMAGE` (Insert image) and
+  `SIGNATURE` (signatures). Each value is the
   GPUI asset key (e.g. `"icons/inbox.svg"`).
 - **struct `Assets`**: Zero-sized [`AssetSource`] implementation. Register once
   with `Application::new().with_assets(ui::Assets)` so `gpui::svg()` can load
@@ -178,8 +179,8 @@ _300 functions/methods documented._
   (`Compose`, `Send`, `Search`, `ChevronRight`, `ChevronDown`, `ChevronUp`, `Plus`, `Minus`, `ZoomIn`, `ZoomOut`, …), chrome
   (`Sidebar`, `Settings`, `WindowMinimize`, `WindowMaximize`, `WindowRestore`,
   …), attachment families (`File`, `FileImage`, `FilePdf`, `FileArchive`,
-  `FileAudio`, `FileVideo`, `FileText`). `Sent` and `Send` share the paper-plane artwork but are distinct enum
-  values.
+  `FileAudio`, `FileVideo`, `FileText`), the editor (`Image`, `Signature`). `Sent` and `Send` share the
+  paper-plane artwork but are distinct enum values.
 - **struct `Icon`**: Themed SVG icon element (`IntoElement` + `RenderOnce`).
   Fields: `name`, `size`, `color`.
 
@@ -470,7 +471,20 @@ _300 functions/methods documented._
 - **`prompt`**: `init` (pub); `themed_prompt`, `action_for_key`, `is_cancel`, `ThemedPrompt` (private).
 - **`TextArea::press_outside`** (pub): a press on the page around the text, as one on it.
 - **`font_for_family`** (pub, `text_area`) / **`ContextMenu::in_font`** (pub) / **`FontFamily::ALL`**: previewing the fonts in a menu.
-- **`text_area::rich`** (GPUI-free): `RichText` (`new`, `matches`, `is_plain`, `apply_edit` (by comparing the texts), `apply_edit_at` (the real range, from `TextBuffer::take_single_edit`), `style_at`, `para`, `runs_in`, `all_chars`, `update_chars`, `update_paras`, `list_number`, `list_marker`, `to_plain`, `to_html`), `CharStyle`, `ParaStyle`, `Format`, `FontFamily`, `TextSize` (`scale`), `Align`, `ListKind`, `MAX_INDENT`.
+- **`text_area::rich`** (GPUI-free): `RichText` (`new`, `matches`, `is_plain`, `apply_edit` (by comparing the texts), `apply_edit_at` (the real range, from `TextBuffer::take_single_edit`; also moves the tracked range), `style_at` (never an image), `para`, `runs_in`, `all_chars`, `update_chars`, `update_paras`, `list_number`, `list_marker`, `to_plain` (image lines left out), `to_html` (images as `data:`), `to_html_with` (each image's `src` from a closure; web/e-mail addresses wrapped in `<a href>`)), `CharStyle` (+ `image: Option<u32>`, an index into the text's images), `ParaStyle`, `Format`, `FontFamily`, `TextSize` (`scale`), `Align`, `ListKind`, `MAX_INDENT`. All serde (`#[serde(default)]` on the styles).
+- **Images in `rich`** (pub): `IMAGE_CHAR` (U+FFFC) alone on its line, styled with the image it shows (GPUI can't shape an object inside a line). `InlineImage` (`new`, `id` (process-unique, new on every load, keys decoded copies), `data_uri`; `name`, `mime_type`, `data: Arc<[u8]>` (base64 in JSON via private `base64_bytes`), `width`/`height` shown in CSS px; equality ignores `id`). `RichText::add_image` (index for `CharStyle::image`), `image_at`, `line_image` (a line that is exactly an image char with its image), `images_used` (each once, in order), `image_separators` (the `\n` to put before/after an edit so no image shares its line; one break when a delete would join two), `deletion_range(text, range, forward)` (a single Backspace/Delete widened to take the image whose line it would join when that image is on the side the key deletes toward; `None` when it is on the other side: `delete_toward` then only moves the caret across the break). `is_plain_text(text)`: plain and no address to link (an address needs HTML to go out as a link).
+- **Tracked range in `rich`** (pub): `RichText::tracked` / `set_tracked` — a range that follows edits (`follow_edit`, private: text put before it stays out, text typed right after a non-empty one goes in as in Gmail's signature block, an empty one stays empty, what replaces part of it stays out; never inverted); `tracked_tag` / `set_tracked_tag` — what the owner put there (an id), kept with the formatting so undo restores it. Neither serialized. Compose keeps the signature in it; `TextArea::tracked_tag` / `set_tracked_tag` expose the tag.
+- **`push_image`** (private, `rich`): writes an image line's `<img src width height alt>` (src and alt escaped).
+- **`trim_trailing`** (private, `rich`): a word without the punctuation after it, keeping a closing `)`/`]` that closes one opened in the word (Wikipedia-style URLs), as Gmail links them.
+- **`clipboard_text`** (private, `text_area`): what Copy/Cut put on the clipboard: without the image lines and characters, which other apps show as boxes. When nothing is left (an image alone), Copy keeps the clipboard as it was. Cut of a selection holding an image only copies (pasting couldn't bring the image back; Delete removes it).
+- **`TextBuffer::place_caret`** (pub(crate)): the caret after an edit, without ending the run of typing. `replace_keeping_images` puts it before the break added after the text (typing in front of an image goes on there); the IME path ends the composition there too.
+- **`TextArea::set_link_color`** (pub): the color addresses show in, when the text sits on a page of another color (`None`: the theme's `text_accent`).
+- **`line_bounds`** (private, `rich`): the line holding an offset. `validated` also drops an image style that isn't on an image character alone on its line.
+- **`RichDocument`** (pub, `rich`): `text` + `rich`, serde (a signature's stored form). `plain` (normalized line endings), `validated` (styles that don't describe the text, `\r`, empty runs, a run ending inside a character or a dangling image index → the plain text; otherwise `compacted`), `is_empty`, `to_plain`, `to_html_with`, `images`. `RichText::compacted` keeps only the images the text shows (renumbered in order): the others are only there for undo. `RichText::document_separators`: `image_separators` for a whole document, plus the breaks keeping the document's own first/last image off the text around it. `RichText::splice` replaces a range of a text with a document (styles, images remapped into this text's table, line styles on the lines wholly its own; a joined line keeps its style) and returns the new text.
+- **`link_ranges`** (pub, `rich`) / **`is_email`** (private): web (`http(s)://`, `mailto:`, `www.` → `http://`) and e-mail (`name@domain.tld` → `mailto:`) addresses of a line as Gmail's composer links them, punctuation around them left out (`trim_trailing`).
+- **`TextArea` documents and images** (pub): `formatted_html_with` / `formatted_html` (HTML with each image's `src` from a closure / as `data:`; `None` when `is_plain_text`), `images`, `document` (compacted), `set_document` (like `set_content`: caret at start, history reset, no `Changed`; validates), `replace_range_with_document` (one undoable step with `document_separators` around it, caret after it, programmatic so no `Changed`; returns where the document itself went; nothing for an empty range and document), `insert_image` (on its own line at the caret, in place of the selection; emits `Changed`, a user edit), `tracked_range` / `set_tracked_range`. A click on an image selects it (`TextLayout::image_at_point`).
+- **Image layout** (private, `text_area`): `LineGeometry::image: Option<LineImage>` (`image`, `start` offset, `bounds` relative to the element, aligned like the paragraph); the line is shaped as blanks of the same length and its row is at least the image's height. `image_size` (natural size narrowed to the line, proportions kept), `line_image`. Decoding never runs on the UI thread: prepaint asks `TextLayout::images_to_decode` (marks new ones `Decoded::Pending`, drops the ones no longer laid out and hands their textures to `window.drop_image`), then `TextArea::decode_in_background` runs `decode_image` on the background executor and stores `Ready`/`Failed` only over a `Pending` entry (not if the image left meanwhile or another decode finished first) and notifies. `decode_image(data, fit)`: first frame, turned as its EXIF says (`apply_orientation`, as browsers show it; a damaged EXIF leaves it as stored), within `image::Limits::max_alloc` = `MAX_DECODE_ALLOC` (512 MiB), shrunk to `fit` (`thumbnail`), BGRA. `decode_fit`: the shown CSS size × scale factor, each side within `MAX_DECODED_SIDE` (2048). `x_for_offset` / `offset_for_x` / `row_left` treat an image row as before/after the image. `paint` draws the image, an `element_hover` box while it decodes, a dashed outline when it can't be decoded, and, when focused and selected, an accent overlay (0.35).
+- **`show_links`** (private, `text_area`) / **`LayoutKey::link_color`** (theme `text_accent`): runs of a line with its `link_ranges` underlined in the link color.
 - **`TextArea` formatting** (pub): `format`, `formatted_html`, `plain_export`, `can_undo`, `can_redo`, `toggle_bold`, `toggle_italic`, `toggle_underline`, `set_font_family`, `set_text_color`, `set_text_size`, `set_align`, `toggle_list`, `indent`, `undo_step`, `redo_step`, `set_selection_color`. Actions `ToggleBold`, `ToggleItalic`, `ToggleUnderline` (Cmd/Ctrl+B, I, U).
 - **`Families`** / **`styled_run`** / **`line_runs`** / **`line_left`** / **`LineGeometry`** (private, `text_area`): fonts with real bold faces, runs of a line, and where each line goes.
 - **`TextBuffer::undo_steps`** / **`can_undo`** / **`can_redo`** / **`add_undo_step`** (pub(crate)): history counters and an undo step without a text change.
@@ -1515,11 +1529,25 @@ core lives in `text_area/buffer.rs` and `text_area/rows.rs` (below).
 
 - **`backspace` / `delete`** (private, L668 / L674)
   - Signature: `fn backspace(&mut self, _: &Backspace, …)`, `fn delete(&mut self, _: &Delete, …)`
-  - Purpose: Delete selection or one grapheme before/after the caret via `edit`.
+  - Purpose: `delete_toward(false/true)`.
+
+- **`delete_toward`** (private)
+  - Signature: `fn delete_toward(&mut self, forward: bool, cx: &mut Context<Self>)`
+  - Purpose: Backspace/Delete keeping images alone on their lines.
+  - Behavior: `TextBuffer::deletion`; a single-grapheme delete widens to
+    `RichText::deletion_range` (takes the image whose line it would join), then
+    `replace_keeping_images` with nothing.
+
+- **`replace_keeping_images`** (private)
+  - Signature: `fn replace_keeping_images(&mut self, range: Option<Range<usize>>, text: &str, kind: EditKind, cx: &mut Context<Self>) -> usize`
+  - Purpose: Every text edit (typing, IME commit, newline, paste, cut, deletes).
+  - Behavior: Resolves the range like the buffer, normalizes newlines, adds the
+    line breaks of `RichText::image_separators` around the text, edits through
+    `edit`; returns the bytes put before the text.
 
 - **`newline`** (private, L680)
   - Signature: `fn newline(&mut self, _: &Newline, …)`
-  - Purpose: Inserts `\n` (Typing kind; closes the coalescing run).
+  - Purpose: Inserts `\n` (Typing kind; closes the coalescing run), through `replace_keeping_images`.
 
 - **`undo` / `redo`** (private, L684 / L690)
   - Signature: `fn undo(&mut self, _: &Undo, …)`, `fn redo(&mut self, _: &Redo, …)`
@@ -1527,7 +1555,9 @@ core lives in `text_area/buffer.rs` and `text_area/rows.rs` (below).
 
 - **`paste`** (private, L696)
   - Signature: `fn paste(&mut self, _: &Paste, …)`
-  - Purpose: Inserts clipboard text, keeping newlines (`\r\n`/`\r` → `\n`), one undo step.
+  - Purpose: Inserts clipboard text, keeping newlines (`\r\n`/`\r` → `\n`), one undo step;
+    `IMAGE_CHAR` is stripped (a copied image's character carries no image); nothing left,
+    nothing happens (the selection stays).
 
 - **`copy`** (private, L702)
   - Signature: `fn copy(&mut self, _: &Copy, …)`
@@ -1801,10 +1831,11 @@ GPUI-free editing core: UTF-8 byte offsets throughout.
   - Signature: `pub(crate) fn unmark(&mut self)`
   - Purpose: Drops the marked range.
 
-- **`backspace` / `delete`** (pub(crate), L331 / L347)
-  - Signature: `pub(crate) fn backspace(&mut self) -> bool`, `pub(crate) fn delete(&mut self) -> bool`
-  - Purpose: Delete selection (Other) or one grapheme before/after the caret
-    (Typing). `false` at the document edge with no selection.
+- **`deletion`** (pub(crate))
+  - Signature: `pub(crate) fn deletion(&self, forward: bool) -> Option<(Range<usize>, EditKind)>`
+  - Purpose: What Backspace (`false`) / Delete (`true`) remove: the selection
+    (Other) or one grapheme before/after the caret (Typing); `None` at the
+    document edge with no selection. The caller applies it.
 
 - **`undo`** (pub(crate), L363)
   - Signature: `pub(crate) fn undo(&mut self) -> bool`
@@ -1818,8 +1849,8 @@ GPUI-free editing core: UTF-8 byte offsets throughout.
   - Signature: `fn after_history_step(&mut self)`
   - Purpose: After undo/redo: clear mark, break coalescing, bump revision.
 
-- **`resolve_range`** (private, L397)
-  - Signature: `fn resolve_range(&self, range: Option<Range<usize>>) -> Range<usize>`
+- **`resolve_range`** (pub(crate), L397)
+  - Signature: `pub(crate) fn resolve_range(&self, range: Option<Range<usize>>) -> Range<usize>`
   - Purpose: Given / marked / selected range, clamped to char boundaries and ordered.
 
 - **`apply`** (private, L406)
@@ -1829,7 +1860,8 @@ GPUI-free editing core: UTF-8 byte offsets throughout.
 
 ##### Context: `module` (tests)
 
-- Helpers: **`buffer`** (buffer with text), **`type_text`** (per-char Typing replaces).
+- Helpers: **`buffer`** (buffer with text), **`type_text`** (per-char Typing replaces),
+  **`press_delete`** (applies `deletion`).
 - **`normalize_newlines_converts_crlf_and_cr`**, **`clamp_to_char_boundary_never_splits_code_points`**,
   **`grapheme_boundaries_skip_whole_clusters`** (emoji + skin tone, combining
   accent), **`line_range_at_excludes_newline`**, **`word_range_at_selects_word_or_separator`**,

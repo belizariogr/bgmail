@@ -32,6 +32,7 @@ use crate::data;
 use crate::default_mail_app;
 use crate::locale::{ActiveLanguage, Key, Language};
 use crate::root::RootView;
+use crate::signature_settings::SignaturesPage;
 use auto_update::Status;
 
 /// Pause after the last keystroke in the e-mail field before discovering
@@ -47,15 +48,17 @@ const OAUTH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub(crate) enum SettingsSection {
     General,
     Accounts,
+    Signatures,
     Appearance,
     Notifications,
     Privacy,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 5] = [
+    pub(crate) const ALL: [SettingsSection; 6] = [
         SettingsSection::General,
         SettingsSection::Accounts,
+        SettingsSection::Signatures,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Privacy,
@@ -65,6 +68,7 @@ impl SettingsSection {
         match self {
             SettingsSection::General => Key::SettingsGeneral,
             SettingsSection::Accounts => Key::SettingsAccounts,
+            SettingsSection::Signatures => Key::SettingsSignatures,
             SettingsSection::Appearance => Key::SettingsAppearance,
             SettingsSection::Notifications => Key::SettingsNotifications,
             SettingsSection::Privacy => Key::SettingsPrivacy,
@@ -75,6 +79,7 @@ impl SettingsSection {
         match self {
             SettingsSection::General => IconName::Settings,
             SettingsSection::Accounts => IconName::Account,
+            SettingsSection::Signatures => IconName::Signature,
             SettingsSection::Appearance => IconName::Palette,
             SettingsSection::Notifications => IconName::Flag,
             SettingsSection::Privacy => IconName::Shield,
@@ -292,6 +297,8 @@ pub(crate) struct SettingsView {
     updater_observation: Option<Subscription>,
     /// The password field shown when polkit could not ask for it.
     update_password: Option<Entity<TextInput>>,
+    /// Created the first time the Signatures section shows.
+    signatures_page: Option<Entity<SignaturesPage>>,
 }
 
 impl SettingsView {
@@ -315,6 +322,7 @@ impl SettingsView {
             form_only: false,
             updater_observation: None,
             update_password: None,
+            signatures_page: None,
         }
     }
 
@@ -328,10 +336,21 @@ impl SettingsView {
     /// Switches to `section` (e.g. "Add account" from the welcome screen,
     /// which also opens the form).
     pub(crate) fn show_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
-        self.section = section;
+        self.switch_section(section, cx);
         if section == SettingsSection::Accounts {
             self.form_open = true;
         }
+    }
+
+    /// Shows `section` (the nav); a dropdown left open on the Signatures page closes,
+    /// as its click catcher only covers the page.
+    fn switch_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        if section != self.section {
+            if let Some(page) = &self.signatures_page {
+                page.update(cx, |page, cx| page.close_menus(cx));
+            }
+        }
+        self.section = section;
         cx.notify();
     }
 
@@ -1112,8 +1131,7 @@ impl SettingsView {
                     ))
                     .child(Label::new(section.title_key().tr(language)).size(LabelSize::Small))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.section = section;
-                        cx.notify();
+                        this.switch_section(section, cx);
                     })),
             );
         }
@@ -1151,6 +1169,13 @@ impl SettingsView {
                 .child(self.render_updates(language, window, cx))
                 .into_any_element(),
             SettingsSection::Accounts => self.render_accounts(window, cx).into_any_element(),
+            SettingsSection::Signatures => {
+                let root = self.root.clone();
+                self.signatures_page
+                    .get_or_insert_with(|| cx.new(|cx| SignaturesPage::new(root, cx)))
+                    .clone()
+                    .into_any_element()
+            }
             SettingsSection::Appearance => {
                 let reader_white = self
                     .root
@@ -1930,7 +1955,7 @@ pub(crate) fn default_app_message(
 }
 
 /// Bordered box around a text field; the border follows focus.
-fn input_box(input: &Entity<TextInput>, window: &Window, cx: &App) -> impl IntoElement {
+pub(crate) fn input_box(input: &Entity<TextInput>, window: &Window, cx: &App) -> impl IntoElement {
     let colors = cx.theme().colors();
     let focused = input.read(cx).focus_handle(cx).is_focused(window);
     h_flex()
@@ -2050,6 +2075,41 @@ impl SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn leaving_the_signatures_section_closes_its_dropdowns(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            crate::locale::init(Language::default(), cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let account = storage::Database::open(&path)
+            .unwrap()
+            .create_account("Ann", "ann@x.test", storage::PROVIDER_IMAP, "{}")
+            .unwrap();
+        let (root, cx) = cx.add_window_view(|_, _| RootView::for_tests(&path));
+        let weak = root.downgrade();
+        let settings = cx.new(|cx| {
+            let mut view = SettingsView::new(Vec::new(), weak.clone());
+            view.section = SettingsSection::Signatures;
+            view.signatures_page = Some(cx.new(|cx| SignaturesPage::new(weak, cx)));
+            view
+        });
+        let page = settings.read_with(cx, |view, _| view.signatures_page.clone().unwrap());
+        page.update(cx, |page, cx| {
+            page.toggle_defaults_menu((account, crate::signatures::SignatureSlot::Reply), cx);
+        });
+        settings.update(cx, |view, cx| {
+            view.switch_section(SettingsSection::Appearance, cx)
+        });
+        page.read_with(cx, |page, _| assert!(!page.defaults_menu_open()));
+        // Going to Accounts from the nav doesn't open the "Add account" form.
+        settings.update(cx, |view, cx| {
+            view.switch_section(SettingsSection::Accounts, cx)
+        });
+        settings.read_with(cx, |view, _| assert!(!view.form_open));
+    }
 
     #[test]
     fn default_app_outcomes_tell_the_user_what_to_do() {

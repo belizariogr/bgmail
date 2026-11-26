@@ -15,9 +15,13 @@ unicode-segmentation = "1"
 resvg = { version = "0.45", default-features = false }
 image = { version = "0.25", default-features = false }
 smallvec = "1"
+# Documents of the editor (signatures) are stored as JSON, their images as base64.
+serde.workspace = true
+base64 = "0.22"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"

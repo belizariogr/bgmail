@@ -7,7 +7,8 @@ use crate::membership::{message_ids_in_folder, settle_after_location_loss};
 use crate::types::{Account, Folder, FolderSyncState};
 use crate::Database;
 
-const ACCOUNT_COLUMNS: &str = "id, name, email, provider, config_json, sender_name";
+const ACCOUNT_COLUMNS: &str =
+    "id, name, email, provider, config_json, sender_name, signature_new, signature_reply";
 const FOLDER_COLUMNS: &str = "id, account_id, path, display_name, remote_name, role";
 
 fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
@@ -18,6 +19,9 @@ fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
         provider: crate::database::lossy_text(row, 3)?,
         config_json: crate::database::lossy_text(row, 4)?,
         sender_name: crate::database::lossy_text(row, 5)?,
+        // Leniently, as the names: one damaged value mustn't hide every account.
+        signature_new: row.get_ref(6)?.as_i64_or_null().ok().flatten(),
+        signature_reply: row.get_ref(7)?.as_i64_or_null().ok().flatten(),
     })
 }
 

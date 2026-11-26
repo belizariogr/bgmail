@@ -20,6 +20,9 @@ pub struct Account {
     pub config_json: String,
     /// Name its mail goes out with; blank uses [`Self::name`] (see [`Self::from_name`]).
     pub sender_name: String,
+    /// Signature put in its new mail, and in its replies and forwards.
+    pub signature_new: Option<i64>,
+    pub signature_reply: Option<i64>,
 }
 
 impl Account {
