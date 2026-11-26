@@ -197,6 +197,11 @@ impl FormatBar {
         }
     }
 
+    /// Forgets an image still being picked or read: the text it was for is gone.
+    pub fn cancel_image(&mut self) {
+        self._image_task = None;
+    }
+
     /// Picks an image file and puts it at the caret, read off the UI thread.
     fn pick_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
@@ -868,6 +873,27 @@ mod tests {
         });
         let unsupported = ImageError::Unsupported.message(Language::English);
         assert_eq!(*events.borrow(), [FormatBarEvent::ImageFailed(unsupported)]);
+    }
+
+    #[gpui::test]
+    fn one_dropdown_at_a_time_and_its_owner_can_close_it(cx: &mut gpui::TestAppContext) {
+        let editor = cx.new(|cx| TextArea::new("", cx));
+        let bar = cx.new(|cx| FormatBar::new(editor, 1 << 20, cx));
+        bar.update(cx, |bar, cx| {
+            assert!(!bar.menu_open());
+            bar.toggle_format_menu(FormatMenu::Font, cx);
+            assert_eq!(bar.menu, Some(FormatMenu::Font));
+            bar.toggle_format_menu(FormatMenu::Color, cx);
+            assert_eq!(bar.menu, Some(FormatMenu::Color));
+            bar.toggle_format_menu(FormatMenu::Color, cx);
+            assert!(!bar.menu_open());
+            bar.toggle_format_menu(FormatMenu::Size, cx);
+            bar.close_menu(cx);
+            assert!(!bar.menu_open());
+            bar._image_task = Some(Task::ready(()));
+            bar.cancel_image();
+            assert!(bar._image_task.is_none());
+        });
     }
 
     #[test]

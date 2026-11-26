@@ -36,6 +36,9 @@ const EDITOR_MIN_LINES: usize = 5;
 /// The Signatures section of the settings window.
 pub(crate) struct SignaturesPage {
     root: WeakEntity<RootView>,
+    /// The database, written straight when the page goes with edits still waiting:
+    /// at quit the main view may already be gone.
+    db_path: Option<std::path::PathBuf>,
     signatures: Vec<SignatureEntry>,
     selected: Option<i64>,
     name: Entity<TextInput>,
@@ -80,22 +83,16 @@ impl SignaturesPage {
                     }
                 },
             ),
-            // Closing the window right after typing still keeps what was typed.
-            cx.on_release(|this, cx| {
-                if this.pending_save.is_some() {
-                    let (root, save) = (this.root.clone(), this.edited_signature(cx));
-                    cx.defer(move |cx| {
-                        if let Some((id, name, document)) = save {
-                            let _ = root.update(cx, |root, cx| {
-                                root.save_signature(id, &name, &document, cx);
-                            });
-                        }
-                    });
-                }
-            }),
+            // Closing the window or quitting right after typing still keeps what
+            // was typed.
+            cx.on_release(|this, cx| this.save_on_release(cx)),
         ];
+        let db_path = root
+            .upgrade()
+            .map(|root| root.read(cx).database_path().to_path_buf());
         let mut page = Self {
             root,
+            db_path,
             signatures: Vec::new(),
             selected: None,
             name,
@@ -227,6 +224,25 @@ impl SignaturesPage {
         Some((id, name, self.editor.read(cx).document()))
     }
 
+    /// Writes the edits still waiting when the page goes, on a connection of its own,
+    /// synchronously: nothing after this would save them.
+    fn save_on_release(&mut self, cx: &mut App) {
+        if self.pending_save.take().is_none() {
+            return;
+        }
+        let (Some(path), Some((id, name, document))) =
+            (self.db_path.as_ref(), self.edited_signature(cx))
+        else {
+            return;
+        };
+        let saved = storage::Database::open(path).and_then(|db| {
+            db.update_signature(id, &name, &crate::signatures::document_json(&document))
+        });
+        if let Err(error) = saved {
+            eprintln!("BGMail: could not save the signature: {error}");
+        }
+    }
+
     /// Saves the edits waiting for the pause, if any.
     fn save_now(&mut self, cx: &mut Context<Self>) {
         if self.pending_save.take().is_none() {
@@ -245,12 +261,18 @@ impl SignaturesPage {
         cx.notify();
     }
 
-    fn toggle_defaults_menu(&mut self, key: (i64, SignatureSlot), cx: &mut Context<Self>) {
+    pub(crate) fn toggle_defaults_menu(
+        &mut self,
+        key: (i64, SignatureSlot),
+        cx: &mut Context<Self>,
+    ) {
         self.defaults_menu = (self.defaults_menu != Some(key)).then_some(key);
         cx.notify();
     }
 
-    fn close_menus(&mut self, cx: &mut Context<Self>) {
+    /// Closes the defaults dropdown and the format bar's (also when the section
+    /// changes, as their catcher only covers the page).
+    pub(crate) fn close_menus(&mut self, cx: &mut Context<Self>) {
         self.defaults_menu = None;
         self.format_bar.update(cx, |bar, cx| bar.close_menu(cx));
         cx.notify();
@@ -285,6 +307,11 @@ impl SignaturesPage {
             root.set_account_signatures(account_id, new_mail, replies, cx);
         });
         cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn defaults_menu_open(&self) -> bool {
+        self.defaults_menu.is_some()
     }
 
     fn render_list(&self, language: Language, cx: &mut Context<Self>) -> impl IntoElement {
@@ -675,6 +702,43 @@ mod tests {
             .map(|entry| entry.name)
             .collect();
         assert_eq!(names, ["Work", "Signature 2"]);
+    }
+
+    #[gpui::test]
+    fn edits_still_waiting_are_saved_when_the_page_goes(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, root, page, cx) = page(&dir.path().join("mail.db"), cx);
+        page.update_in(cx, |page, window, cx| {
+            page.create(window, cx);
+            page.name
+                .update(cx, |input, cx| input.set_content("Closing", cx));
+            page.schedule_save(cx);
+        });
+        // The window closes (or the app quits) before the pause is over.
+        drop(page);
+        cx.update(|_, _| {});
+        cx.run_until_parked();
+        let names: Vec<String> = root
+            .read_with(cx, |root, _| root.signatures())
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(names, ["Closing"]);
+    }
+
+    #[gpui::test]
+    fn its_dropdowns_close_together(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (account, _, page, cx) = page(&dir.path().join("mail.db"), cx);
+        page.update(cx, |page, cx| {
+            page.toggle_defaults_menu((account, SignatureSlot::NewMail), cx);
+            assert!(page.defaults_menu_open());
+            page.toggle_defaults_menu((account, SignatureSlot::NewMail), cx);
+            assert!(!page.defaults_menu_open(), "a second click closes it");
+            page.toggle_defaults_menu((account, SignatureSlot::Reply), cx);
+            page.close_menus(cx);
+            assert!(!page.defaults_menu_open());
+        });
     }
 
     #[gpui::test]

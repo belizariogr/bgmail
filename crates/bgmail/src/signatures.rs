@@ -38,11 +38,18 @@ pub fn document_json(document: &RichDocument) -> String {
     serde_json::to_string(document).unwrap_or_default()
 }
 
-/// A stored document; an empty one when it can't be read.
+/// A stored document. One that can't be read as a whole (written by a newer
+/// version, damaged) keeps its text when that can be read, without the formatting;
+/// otherwise it is empty.
 pub fn read_document(json: &str) -> RichDocument {
     serde_json::from_str::<RichDocument>(json)
         .map(RichDocument::validated)
-        .unwrap_or_default()
+        .unwrap_or_else(|_| {
+            serde_json::from_str::<serde_json::Value>(json)
+                .ok()
+                .and_then(|value| value.get("text")?.as_str().map(RichDocument::plain))
+                .unwrap_or_default()
+        })
 }
 
 /// Which of an account's two signatures a message takes.
@@ -67,10 +74,31 @@ pub fn account_signature(account: &ComposeAccount, slot: SignatureSlot) -> Optio
 /// kept out).
 pub fn signature_offset(text: &str, quote_in_editor: bool) -> usize {
     if quote_in_editor {
-        text.len() - text.trim_start_matches('\n').len()
+        original_start(text).unwrap_or_else(|| text.len() - text.trim_start_matches('\n').len())
     } else {
         text.len()
     }
+}
+
+/// Where the original starts in a body that holds it: the forwarded block's header
+/// line (`---------- … ----------`, in any language) or the attribution line of a
+/// `> ` quote (a line ending in `:` followed by one starting with `>`).
+pub fn original_start(text: &str) -> Option<usize> {
+    let mut offset = 0;
+    let mut lines = text.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+        let forward_header = trimmed.len() > 20
+            && trimmed.starts_with("----------")
+            && trimmed.ends_with("----------");
+        let attribution =
+            trimmed.ends_with(':') && lines.peek().is_some_and(|next| next.starts_with('>'));
+        if forward_header || attribution {
+            return Some(offset);
+        }
+        offset += line.len() + 1;
+    }
+    None
 }
 
 /// What goes in at `at` of `text` to add `signature`, and where the signature is in it:
@@ -105,8 +133,9 @@ pub fn body_with_signature(
     quote_in_editor: bool,
     signature: Option<&RichDocument>,
 ) -> (RichDocument, Range<usize>) {
-    let at = signature_offset(text, quote_in_editor);
     let mut body = RichDocument::plain(text);
+    // On the text as the editor holds it (line endings normalized).
+    let at = signature_offset(&body.text, quote_in_editor);
     match signature.filter(|signature| !signature.is_empty()) {
         Some(signature) => {
             let (insertion, range) = signature_insertion(&body.text, at, signature);
@@ -128,11 +157,13 @@ pub enum SignatureInBody {
     Edited,
 }
 
-/// What `text` holds in `tracked`, the editor's range of the signature. Read from
-/// the text itself, so undoing a change of signature can't leave it out of date.
+/// What `text` holds in `tracked`, the editor's range of the signature, put there
+/// as signature `tag`. Read from the text itself (the tag travels with undo), so
+/// undoing a change of signature can't leave it out of date.
 pub fn signature_in_body(
     text: &str,
     tracked: Option<Range<usize>>,
+    tag: Option<i64>,
     signatures: &[SignatureEntry],
 ) -> SignatureInBody {
     let Some(held) = tracked
@@ -141,12 +172,19 @@ pub fn signature_in_body(
     else {
         return SignatureInBody::Nothing;
     };
-    signatures
-        .iter()
-        .find(|entry| !entry.document.is_empty() && entry.document.text == held)
-        .map_or(SignatureInBody::Edited, |entry| {
-            SignatureInBody::Saved(entry.id)
-        })
+    let as_saved =
+        |entry: &&SignatureEntry| !entry.document.is_empty() && entry.document.text == held;
+    // Signatures may share their text: the one put there is the one held.
+    match tag.and_then(|tag| signatures.iter().find(|entry| entry.id == tag)) {
+        Some(entry) if as_saved(&entry) => SignatureInBody::Saved(entry.id),
+        Some(_) => SignatureInBody::Edited,
+        None => signatures
+            .iter()
+            .find(as_saved)
+            .map_or(SignatureInBody::Edited, |entry| {
+                SignatureInBody::Saved(entry.id)
+            }),
+    }
 }
 
 /// Whether the body, holding `held`, must change to have signature `wanted`.
@@ -303,25 +341,21 @@ mod tests {
         };
         let saved = [entry(1, ""), entry(2, "Ann"), entry(3, "Bob")];
         let text = "Hi\n\nAnn";
+        let held = |range, tag| signature_in_body(text, range, tag, &saved);
+        assert_eq!(held(Some(4..7), None), SignatureInBody::Saved(2));
+        assert_eq!(held(Some(4..6), None), SignatureInBody::Edited);
+        assert_eq!(held(Some(7..7), None), SignatureInBody::Nothing);
+        assert_eq!(held(None, None), SignatureInBody::Nothing);
+        assert_eq!(held(Some(4..99), None), SignatureInBody::Nothing);
+        // Two saved with the same text: the one put there is the one held.
+        let twins = [entry(2, "Ann"), entry(4, "Ann")];
         assert_eq!(
-            signature_in_body(text, Some(4..7), &saved),
-            SignatureInBody::Saved(2)
+            signature_in_body(text, Some(4..7), Some(4), &twins),
+            SignatureInBody::Saved(4)
         );
         assert_eq!(
-            signature_in_body(text, Some(4..6), &saved),
+            signature_in_body("Hi\n\nAnnie", Some(4..9), Some(4), &twins),
             SignatureInBody::Edited
-        );
-        assert_eq!(
-            signature_in_body(text, Some(7..7), &saved),
-            SignatureInBody::Nothing
-        );
-        assert_eq!(
-            signature_in_body(text, None, &saved),
-            SignatureInBody::Nothing
-        );
-        assert_eq!(
-            signature_in_body(text, Some(4..99), &saved),
-            SignatureInBody::Nothing
         );
 
         use SignatureInBody::*;
@@ -340,5 +374,35 @@ mod tests {
         let (body, range) = body_with_signature(reply, true, Some(&signature("Bob")));
         assert_eq!(body.text, "\n\nBob\n\nOn Mon, Zoe wrote:\n> Hi");
         assert_eq!(&body.text[range], "Bob");
+    }
+
+    #[test]
+    fn a_re_edited_reply_or_forward_is_signed_above_its_original() {
+        let reply = "Hi\n\nOn Mon, Zoe wrote:\n> Hello\n>\n> Bye";
+        assert_eq!(original_start(reply), Some(4));
+        let (body, range) = body_with_signature(reply, true, Some(&signature("Bob")));
+        assert_eq!(&body.text[range], "Bob");
+        assert!(body.text.starts_with("Hi\n\nBob\n\nOn Mon, Zoe wrote:"));
+        let forward = "Oi\n\n---------- Mensagem encaminhada ----------\nDe: Zoe";
+        assert_eq!(original_start(forward), Some(4));
+        assert_eq!(original_start("Hi: there\nno quote"), None);
+        assert_eq!(original_start("Plain\n\nBob"), None);
+    }
+
+    #[test]
+    fn a_body_with_windows_line_endings_is_signed_inside_it() {
+        let (body, range) = body_with_signature("Hi\r\nBob", false, Some(&signature("Sig")));
+        assert_eq!(body.text, "Hi\nBob\n\nSig");
+        assert_eq!(&body.text[range], "Sig");
+        let (body, range) = body_with_signature("Hi\r\n", false, None);
+        assert_eq!((body.text.as_str(), range), ("Hi\n", 3..3));
+    }
+
+    #[test]
+    fn a_signature_from_a_newer_version_keeps_its_text() {
+        let json =
+            r#"{"text":"Ann\nCEO","rich":{"runs":[[7,{"family":"Futura"}]],"paras":[{},{}]}}"#;
+        assert_eq!(read_document(json), RichDocument::plain("Ann\nCEO"));
+        assert_eq!(read_document("{}"), RichDocument::default());
     }
 }

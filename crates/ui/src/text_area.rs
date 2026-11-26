@@ -326,6 +326,17 @@ const MAX_DECODED_SIDE: f32 = 2048.0;
 /// Memory a single image may take while being decoded.
 const MAX_DECODE_ALLOC: u64 = 512 * 1024 * 1024;
 
+/// `text` as another app gets it: without the lines that are an image's character,
+/// which shows there as a box.
+fn clipboard_text(text: &str) -> String {
+    let image = IMAGE_CHAR.to_string();
+    text.split('\n')
+        .filter(|line| *line != image)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace(IMAGE_CHAR, "")
+}
+
 /// Size `image` shows at: its own, narrowed to `available` keeping its proportions.
 fn image_size(image: &InlineImage, available: Option<Pixels>) -> Size<Pixels> {
     let (width, height) = (image.width as f32, image.height as f32);
@@ -1118,6 +1129,16 @@ impl TextArea {
         self.rich.set_tracked(range);
     }
 
+    /// What the owner noted it put in the tracked range; undo brings it back with it.
+    pub fn tracked_tag(&self) -> Option<i64> {
+        self.rich.tracked_tag()
+    }
+
+    /// See [`RichText::set_tracked_tag`].
+    pub fn set_tracked_tag(&mut self, tag: Option<i64>) {
+        self.rich.set_tracked_tag(tag);
+    }
+
     /// The text for the plain-text version of an e-mail: lists and indents
     /// written out.
     pub fn plain_export(&self) -> String {
@@ -1616,17 +1637,17 @@ impl TextArea {
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.buffer.selected_range().is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.buffer.selected_text().to_owned(),
-            ));
+            cx.write_to_clipboard(ClipboardItem::new_string(clipboard_text(
+                self.buffer.selected_text(),
+            )));
         }
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
         if !self.buffer.selected_range().is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.buffer.selected_text().to_owned(),
-            ));
+            cx.write_to_clipboard(ClipboardItem::new_string(clipboard_text(
+                self.buffer.selected_text(),
+            )));
             self.replace_keeping_images(None, "", EditKind::Other, cx);
         }
     }
@@ -2477,6 +2498,16 @@ mod tests {
         assert_eq!(linked, [false, true, true, false]);
         assert_eq!(shown[1].color, link);
         assert_eq!(show_links(runs.clone(), &[], link), runs);
+    }
+
+    #[test]
+    fn copied_text_leaves_the_images_out() {
+        assert_eq!(
+            clipboard_text(&format!("Bob\n{IMAGE_CHAR}\nCEO")),
+            "Bob\nCEO"
+        );
+        assert_eq!(clipboard_text(&format!("a{IMAGE_CHAR}b")), "ab");
+        assert_eq!(clipboard_text("plain"), "plain");
     }
 
     #[test]

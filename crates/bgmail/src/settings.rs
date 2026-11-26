@@ -336,10 +336,21 @@ impl SettingsView {
     /// Switches to `section` (e.g. "Add account" from the welcome screen,
     /// which also opens the form).
     pub(crate) fn show_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
-        self.section = section;
+        self.switch_section(section, cx);
         if section == SettingsSection::Accounts {
             self.form_open = true;
         }
+    }
+
+    /// Shows `section` (the nav); a dropdown left open on the Signatures page closes,
+    /// as its click catcher only covers the page.
+    fn switch_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        if section != self.section {
+            if let Some(page) = &self.signatures_page {
+                page.update(cx, |page, cx| page.close_menus(cx));
+            }
+        }
+        self.section = section;
         cx.notify();
     }
 
@@ -1120,8 +1131,7 @@ impl SettingsView {
                     ))
                     .child(Label::new(section.title_key().tr(language)).size(LabelSize::Small))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.section = section;
-                        cx.notify();
+                        this.switch_section(section, cx);
                     })),
             );
         }
@@ -2065,6 +2075,41 @@ impl SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn leaving_the_signatures_section_closes_its_dropdowns(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            crate::locale::init(Language::default(), cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let account = storage::Database::open(&path)
+            .unwrap()
+            .create_account("Ann", "ann@x.test", storage::PROVIDER_IMAP, "{}")
+            .unwrap();
+        let (root, cx) = cx.add_window_view(|_, _| RootView::for_tests(&path));
+        let weak = root.downgrade();
+        let settings = cx.new(|cx| {
+            let mut view = SettingsView::new(Vec::new(), weak.clone());
+            view.section = SettingsSection::Signatures;
+            view.signatures_page = Some(cx.new(|cx| SignaturesPage::new(weak, cx)));
+            view
+        });
+        let page = settings.read_with(cx, |view, _| view.signatures_page.clone().unwrap());
+        page.update(cx, |page, cx| {
+            page.toggle_defaults_menu((account, crate::signatures::SignatureSlot::Reply), cx);
+        });
+        settings.update(cx, |view, cx| {
+            view.switch_section(SettingsSection::Appearance, cx)
+        });
+        page.read_with(cx, |page, _| assert!(!page.defaults_menu_open()));
+        // Going to Accounts from the nav doesn't open the "Add account" form.
+        settings.update(cx, |view, cx| {
+            view.switch_section(SettingsSection::Accounts, cx)
+        });
+        settings.read_with(cx, |view, _| assert!(!view.form_open));
+    }
 
     #[test]
     fn default_app_outcomes_tell_the_user_what_to_do() {

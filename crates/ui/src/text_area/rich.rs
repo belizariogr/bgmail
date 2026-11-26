@@ -280,6 +280,10 @@ pub struct RichText {
     /// later (a signature). Not saved.
     #[serde(skip)]
     tracked: Option<Range<usize>>,
+    /// What its owner put in the tracked range (a signature's id), kept with the
+    /// formatting so undo brings back the right one. Not saved.
+    #[serde(skip)]
+    tracked_tag: Option<i64>,
 }
 
 /// Formatted text, whole: what a signature saves and what is inserted with it.
@@ -362,6 +366,7 @@ impl RichText {
             paras: vec![ParaStyle::default(); text.matches('\n').count() + 1],
             images: Vec::new(),
             tracked: None,
+            tracked_tag: None,
         }
     }
 
@@ -503,6 +508,7 @@ impl RichText {
                 .filter_map(|ix| self.images.get(usize::try_from(*ix).ok()?).cloned())
                 .collect(),
             tracked: self.tracked.clone(),
+            tracked_tag: self.tracked_tag,
         }
     }
 
@@ -605,6 +611,16 @@ impl RichText {
     /// text inserted at its edges stays out.
     pub fn set_tracked(&mut self, range: Option<Range<usize>>) {
         self.tracked = range;
+    }
+
+    /// The tag set with [`Self::set_tracked_tag`].
+    pub fn tracked_tag(&self) -> Option<i64> {
+        self.tracked_tag
+    }
+
+    /// Notes what the tracked range was given, to tell apart things with the same text.
+    pub fn set_tracked_tag(&mut self, tag: Option<i64>) {
+        self.tracked_tag = tag;
     }
 
     /// Replaces `range` of `text` with `doc`, its styles and images included, and
@@ -865,7 +881,7 @@ pub fn link_ranges(line: &str) -> Vec<(Range<usize>, String)> {
     let mut offset = 0;
     for token in line.split(' ') {
         let start = offset + (token.len() - token.trim_start_matches(LEADING).len());
-        let word = token.trim_start_matches(LEADING).trim_end_matches(TRAILING);
+        let word = trim_trailing(token.trim_start_matches(LEADING), TRAILING);
         offset += token.len() + 1;
         let lower = word.to_ascii_lowercase();
         let href = if ["http://", "https://", "mailto:"]
@@ -885,6 +901,26 @@ pub fn link_ranges(line: &str) -> Vec<(Range<usize>, String)> {
         }
     }
     links
+}
+
+/// `word` without the punctuation after it; a closing bracket stays while it closes
+/// one opened in the word (`…/Rust_(language)`), as Gmail links it.
+fn trim_trailing<'a>(mut word: &'a str, trailing: &[char]) -> &'a str {
+    while let Some(last) = word.chars().last().filter(|c| trailing.contains(c)) {
+        let opening = match last {
+            ')' => Some('('),
+            ']' => Some('['),
+            _ => None,
+        };
+        if let Some(opening) = opening {
+            let opened = word.matches(opening).count();
+            if opened >= word.matches(last).count() {
+                break;
+            }
+        }
+        word = &word[..word.len() - last.len_utf8()];
+    }
+    word
 }
 
 /// Whether `word` reads as an e-mail address: `name@domain.tld`.
@@ -1427,6 +1463,15 @@ mod tests {
                 ("ann@acme.com", "mailto:ann@acme.com"),
                 ("https://acme.com/a?b=1&c", "https://acme.com/a?b=1&c"),
             ]
+        );
+        let wiki = "(see https://en.wikipedia.org/wiki/Rust_(programming_language)).";
+        let found: Vec<&str> = link_ranges(wiki)
+            .into_iter()
+            .map(|(range, _)| &wiki[range])
+            .collect();
+        assert_eq!(
+            found,
+            ["https://en.wikipedia.org/wiki/Rust_(programming_language)"]
         );
         for plain in ["@", "a@b", "a@.com", "www.", "http://", "x.y", "e-mail"] {
             assert!(link_ranges(plain).is_empty(), "{plain}");

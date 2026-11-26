@@ -473,7 +473,11 @@ impl ComposeView {
         self.drop_quote_view();
         self.errors = ComposeErrors::default();
         self.from_menu_open = false;
-        self.format_bar.update(cx, |bar, cx| bar.close_menu(cx));
+        // An image still being picked or read belongs to the message going away.
+        self.format_bar.update(cx, |bar, cx| {
+            bar.close_menu(cx);
+            bar.cancel_image();
+        });
         self.edited = false;
         let handle = match focus {
             ComposeFocus::To => self.to.focus_handle(cx),
@@ -602,9 +606,11 @@ impl ComposeView {
             self.quote_in_editor,
             entry.as_ref().map(|entry| &entry.document),
         );
+        let tag = entry.as_ref().map(|entry| entry.id);
         self.body.update(cx, |area, cx| {
             area.set_document(body, cx);
             area.set_tracked_range(Some(range));
+            area.set_tracked_tag(tag);
         });
     }
 
@@ -649,6 +655,7 @@ impl ComposeView {
             let caret = area.cursor_offset();
             let landed = area.replace_range_with_document(range.clone(), &insertion, cx);
             area.set_tracked_range(Some(landed.start + signed.start..landed.start + signed.end));
+            area.set_tracked_tag(entry.as_ref().map(|entry| entry.id));
             let inserted_len = area.content().len() + range.len() - text.len();
             area.set_cursor_offset(caret_after_replace(caret, &range, inserted_len), cx);
         });
@@ -658,7 +665,12 @@ impl ComposeView {
     /// What the body holds where its signature goes.
     fn signature_in_body(&self, cx: &App) -> SignatureInBody {
         let area = self.body.read(cx);
-        signature_in_body(&area.content(), area.tracked_range(), &self.signatures)
+        signature_in_body(
+            &area.content(),
+            area.tracked_range(),
+            area.tracked_tag(),
+            &self.signatures,
+        )
     }
 
     /// Takes the saved form of one edited signature; the body keeps its copy.
@@ -2172,6 +2184,76 @@ mod tests {
                 assert_eq!(
                     view.signature_in_body(cx),
                     SignatureInBody::Saved(bob_signature)
+                );
+            })
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn the_signatures_offered_follow_the_settings(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let ([ann, _], [ann_signature, _, _]) = signed_database(&path);
+        let init = ComposeInit {
+            account_id: Some(ann),
+            signature: Some(SignatureSlot::NewMail),
+            ..Default::default()
+        };
+        let (compose, cx) = composing_signed(init, &path, cx);
+        compose
+            .update(cx, |view, _, cx| {
+                let renamed = SignatureEntry {
+                    id: ann_signature,
+                    name: "Ann at work".into(),
+                    document: RichDocument::plain("Ann Smith"),
+                };
+                view.update_signature(renamed, cx);
+                let new = SignatureEntry {
+                    id: 99,
+                    name: "New".into(),
+                    document: RichDocument::plain("N"),
+                };
+                view.update_signature(new.clone(), cx);
+                assert_eq!(view.signatures.len(), 4);
+                assert_eq!(
+                    view.signature_entry(ann_signature).unwrap().name,
+                    "Ann at work"
+                );
+                // The body keeps the copy it has, now edited as far as the catalog knows.
+                assert_eq!(body_text(view, cx), "\n\nAnn");
+                assert_eq!(view.signature_in_body(cx), SignatureInBody::Edited);
+                view.set_signatures(vec![new], cx);
+                assert_eq!(view.signatures.len(), 1);
+            })
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn a_re_edited_reply_is_signed_above_its_quote(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let ([ann, bob], [_, bob_signature, _]) = signed_database(&path);
+        let init = ComposeInit {
+            account_id: Some(ann),
+            draft: mail_core::Draft {
+                text: "Hi\n\nOn Mon, Zoe wrote:\n> Hello".into(),
+                ..Default::default()
+            },
+            replaces_outgoing: Some(7),
+            quote_in_editor: true,
+            ..Default::default()
+        };
+        let (compose, cx) = composing_signed(init, &path, cx);
+        compose
+            .update(cx, |view, window, cx| {
+                // Its own signature stays; changing From doesn't add another.
+                let bob_index = view.accounts.iter().position(|a| a.id == bob).unwrap();
+                view.select_from_account(bob_index, cx);
+                assert_eq!(body_text(view, cx), "Hi\n\nOn Mon, Zoe wrote:\n> Hello");
+                view.pick_signature(Some(bob_signature), window, cx);
+                assert_eq!(
+                    body_text(view, cx),
+                    "Hi\n\nBob\n\nOn Mon, Zoe wrote:\n> Hello"
                 );
             })
             .expect("open");

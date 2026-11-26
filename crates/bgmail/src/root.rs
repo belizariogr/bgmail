@@ -1528,9 +1528,11 @@ fn compose_init_from_outgoing(row: &OutgoingRow, parsed: &ParsedMessage) -> Comp
         },
         replaces_outgoing: Some(row.id),
         quoted_original: None,
-        // Its text has the signature it was written with.
+        // Its text has the signature it was written with; one picked later goes above
+        // the original it may hold.
         signature: None,
-        quote_in_editor: false,
+        quote_in_editor: signatures::original_start(&parsed.text.clone().unwrap_or_default())
+            .is_some(),
     }
 }
 
@@ -2807,12 +2809,7 @@ impl RootView {
 
     /// Re-reads accounts, folders and the current list from the database.
     pub(crate) fn reload_from_database(&mut self) {
-        self.accounts = self.db.list_accounts().unwrap_or_default();
-        if !self.removing_accounts.is_empty() {
-            let removing = &self.removing_accounts;
-            self.accounts
-                .retain(|account| !removing.contains(&account.id));
-        }
+        self.reload_accounts();
         self.folders_by_account = self
             .accounts
             .iter()
@@ -2826,6 +2823,21 @@ impl RootView {
         self.leave_missing_mailboxes();
         self.reload_message_list();
         self.refresh_unsent();
+    }
+
+    /// Re-reads the accounts, without those being removed.
+    fn reload_accounts(&mut self) {
+        self.accounts = self.db.list_accounts().unwrap_or_default();
+        if !self.removing_accounts.is_empty() {
+            let removing = &self.removing_accounts;
+            self.accounts
+                .retain(|account| !removing.contains(&account.id));
+        }
+    }
+
+    /// The database file, for work on its own connection.
+    pub(crate) fn database_path(&self) -> &std::path::Path {
+        &self.db_path
     }
 
     /// What was open may be gone, or may be back under its old name after the server
@@ -3065,7 +3077,7 @@ impl RootView {
     pub(crate) fn create_signature(&mut self, name: &str, cx: &mut Context<Self>) -> Option<i64> {
         let document = signatures::document_json(&RichDocument::default());
         let created = self.db.create_signature(name, &document);
-        self.after_signature_change(created.map(Some), cx)
+        self.after_signature_change(created.map(Some), true, cx)
     }
 
     /// Saves signature `id`. Messages being written keep the copy they have.
@@ -3097,7 +3109,7 @@ impl RootView {
     /// Deletes signature `id`; the accounts that used it go without one.
     pub(crate) fn delete_signature(&mut self, id: i64, cx: &mut Context<Self>) {
         let deleted = self.db.delete_signature(id);
-        self.after_signature_change(deleted.map(|()| None), cx);
+        self.after_signature_change(deleted.map(|()| None), true, cx);
     }
 
     /// Which signature account `account_id` puts in new mail and in replies and forwards.
@@ -3111,13 +3123,15 @@ impl RootView {
         let set = self
             .db
             .set_account_signatures(account_id, new_mail, replies);
-        self.after_signature_change(set.map(|()| None), cx);
+        self.after_signature_change(set.map(|()| None), false, cx);
     }
 
-    /// Rereads what a signature change touched and hands it to the compose window.
+    /// Rereads what a signature change touched (the accounts, and the signatures when
+    /// `signatures_changed`) and hands it to the compose window.
     fn after_signature_change(
         &mut self,
         result: rusqlite::Result<Option<i64>>,
+        signatures_changed: bool,
         cx: &mut Context<Self>,
     ) -> Option<i64> {
         let id = match result {
@@ -3128,18 +3142,15 @@ impl RootView {
                 return None;
             }
         };
-        self.accounts = self.db.list_accounts().unwrap_or_default();
-        if !self.removing_accounts.is_empty() {
-            let removing = &self.removing_accounts;
-            self.accounts
-                .retain(|account| !removing.contains(&account.id));
-        }
+        self.reload_accounts();
         if self.compose_window.is_some() {
-            let signatures = self.signatures();
+            let signatures = signatures_changed.then(|| self.signatures());
             let accounts = self.compose_accounts();
             let _ = self.with_compose_window(cx, |view, _, cx| {
                 view.set_accounts(accounts);
-                view.set_signatures(signatures, cx);
+                if let Some(signatures) = signatures {
+                    view.set_signatures(signatures, cx);
+                }
             });
         }
         cx.notify();
@@ -14033,6 +14044,16 @@ mod tests {
         assert_eq!(init.draft.attachments[0].filename, "logo.png");
         assert_eq!(init.draft.attachments[0].data, [1, 2, 3]);
         assert_eq!(init.signature, None);
+        assert!(!init.quote_in_editor, "nothing quoted to sign above");
+
+        let reply = Draft {
+            text: "Hi\n\nOn Mon, Zoe wrote:\n> Hello".into(),
+            ..draft
+        };
+        let raw = mail_core::build_message(&reply, "id@example.com", 0);
+        let row = outgoing_row(raw, &["ana@x.com"], OutgoingState::Failed);
+        let parsed = mail_core::parse_message(&row.raw).unwrap();
+        assert!(compose_init_from_outgoing(&row, &parsed).quote_in_editor);
     }
 
     #[test]
