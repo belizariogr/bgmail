@@ -462,9 +462,14 @@ impl ComposeView {
         self.quote_in_editor = init.quote_in_editor;
         self.signature_menu_open = false;
         // The caret starts at the start: above the signature and a quoted reply.
-        self.sign_body(&draft.text, cx);
+        let restored = self.sign_body(&draft.text, cx);
         self.show_cc_bcc = !draft.cc.is_empty() || !draft.bcc.is_empty();
         self.attachments = draft.attachments;
+        self.attachments.retain(|attachment| {
+            !restored
+                .iter()
+                .any(|image| *image.data == *attachment.data.as_slice())
+        });
         self.reply = ReplyHeaders {
             in_reply_to: draft.in_reply_to,
             references: draft.references,
@@ -597,7 +602,9 @@ impl ComposeView {
 
     /// The body: `text` with the From account's signature for this message, when it
     /// takes one, in the range the editor tracks to replace it later.
-    fn sign_body(&mut self, text: &str, cx: &mut Context<Self>) {
+    /// Returns the images of a signature put back in an edited unsent message (their
+    /// copies among its attachments are no longer needed).
+    fn sign_body(&mut self, text: &str, cx: &mut Context<Self>) -> Vec<InlineImage> {
         let entry = self
             .signature_follows_account
             .then(|| self.account_signature())
@@ -609,14 +616,20 @@ impl ComposeView {
             self.quote_in_editor,
             entry.as_ref().map(|entry| &entry.document),
         );
-        let mut tracked = (range, entry.as_ref().map(|entry| entry.id));
-        // A message that already has its signature (an edited unsent one): the
-        // picker changes that one.
+        let (mut body, mut tracked) = (body, (range, entry.as_ref().map(|entry| entry.id)));
+        let mut restored = Vec::new();
+        // A message that already has its signature (an edited unsent one): it comes
+        // back as saved, formatting and images included, and the picker changes it.
         if !self.signature_follows_account {
-            if let Some((found, id)) =
-                find_signature(&body.text, self.quote_in_editor, &self.signatures)
-            {
-                tracked = (found, Some(id));
+            let found = find_signature(&body.text, self.quote_in_editor, &self.signatures)
+                .and_then(|(found, id)| Some((found, self.signature_entry(id)?.clone())));
+            if let Some((found, entry)) = found {
+                body.text = body.rich.splice(&body.text, found.clone(), &entry.document);
+                tracked = (
+                    found.start..found.start + entry.document.text.len(),
+                    Some(entry.id),
+                );
+                restored = entry.document.images();
             }
         }
         self.body.update(cx, |area, cx| {
@@ -624,6 +637,7 @@ impl ComposeView {
             area.set_tracked_range(Some(tracked.0));
             area.set_tracked_tag(tracked.1);
         });
+        restored
     }
 
     /// The signature the From account puts in this message.
@@ -2467,6 +2481,52 @@ mod tests {
                 );
                 view.use_signature(Some(bob_signature), cx);
                 assert_eq!(body_text(view, cx), "Hi\n\nBob");
+            })
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn an_unsent_message_gets_its_signature_back_with_its_logo(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let ([ann, _], [_, _, logo_signature]) = signed_database(&path);
+        let init = ComposeInit {
+            account_id: Some(ann),
+            draft: mail_core::Draft {
+                // As it went out in plain text: the logo's line left out.
+                text: "Hi\n\nThanks".into(),
+                attachments: vec![
+                    OutgoingAttachment {
+                        filename: "logo.png".into(),
+                        mime_type: "image/png".into(),
+                        data: vec![1, 2, 3],
+                    },
+                    attachment("report.pdf", 4),
+                ],
+                ..Default::default()
+            },
+            replaces_outgoing: Some(7),
+            ..Default::default()
+        };
+        let (compose, cx) = composing_signed(init, &path, cx);
+        compose
+            .update(cx, |view, _, cx| {
+                assert_eq!(
+                    body_text(view, cx),
+                    format!("Hi\n\nThanks\n{}", ui::IMAGE_CHAR)
+                );
+                assert_eq!(view.body.read(cx).images().len(), 1);
+                assert_eq!(
+                    view.signature_in_body(cx),
+                    SignatureInBody::Saved(logo_signature)
+                );
+                // The logo isn't sent twice; the real attachment stays.
+                let names: Vec<_> = view
+                    .attachments
+                    .iter()
+                    .map(|a| a.filename.as_str())
+                    .collect();
+                assert_eq!(names, ["report.pdf"]);
             })
             .expect("open");
     }

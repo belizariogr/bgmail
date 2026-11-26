@@ -121,6 +121,18 @@ mod tests {
             (account.signature_new, account.signature_reply),
             (Some(work), None)
         );
+        // A damaged value reads as none, and the accounts still list.
+        db.conn()
+            .execute_batch(&format!(
+                "PRAGMA foreign_keys = OFF;
+                 UPDATE accounts SET signature_reply = 'x' WHERE id = {};
+                 PRAGMA foreign_keys = ON;",
+                fx.local_account
+            ))
+            .unwrap();
+        assert_eq!(db.list_accounts().unwrap().len(), 2);
+        let other = db.get_account(fx.local_account).unwrap().unwrap();
+        assert_eq!(other.signature_reply, None);
         // A signature that doesn't exist can't be chosen.
         assert!(db
             .set_account_signatures(fx.account, Some(9999), None)

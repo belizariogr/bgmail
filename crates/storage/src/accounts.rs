@@ -19,8 +19,9 @@ fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
         provider: crate::database::lossy_text(row, 3)?,
         config_json: crate::database::lossy_text(row, 4)?,
         sender_name: crate::database::lossy_text(row, 5)?,
-        signature_new: row.get(6)?,
-        signature_reply: row.get(7)?,
+        // Leniently, as the names: one damaged value mustn't hide every account.
+        signature_new: row.get_ref(6)?.as_i64_or_null().ok().flatten(),
+        signature_reply: row.get_ref(7)?.as_i64_or_null().ok().flatten(),
     })
 }
 

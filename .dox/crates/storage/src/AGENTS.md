@@ -49,7 +49,7 @@ Signatures are authoritative; `Lnn` anchors (where present) are approximate.
 #### Types / constants
 
 - **const `PROVIDER_LOCAL` / `PROVIDER_IMAP` / `PROVIDER_GMAIL`**: `"local"`, `"imap"`, `"gmail"` — values of `accounts.provider`.
-- **struct `Account`**: `id`, `name`, `email`, `provider`, `config_json` (opaque caller JSON, `{}` default), `sender_name`, `signature_new` / `signature_reply` (`Option<i64>`: the signature its new mail / its replies and forwards take).
+- **struct `Account`**: `id`, `name`, `email`, `provider`, `config_json` (opaque caller JSON, `{}` default), `sender_name`, `signature_new` / `signature_reply` (`Option<i64>`: the signature its new mail / its replies and forwards take; read leniently, a value that isn't an integer is `None`, so one damaged row can't hide the accounts).
 - **struct `Folder`**: `id`, `account_id`, storage `path`, `display_name` (empty for system folders), `remote_name: Option<String>` (server mailbox; `None` = local folder), `role: Option<String>` (special-use role or `None`).
 - **struct `MessageListItem`**: list row without body — ids, sender, subject, `preview`, `received_at` display string, `date_ts` (unix seconds, 0 for mock), `thread_id`, `unread`/`starred`/`has_attachment`, `folders_csv`.
 - **struct `MessageDetail`**: reader row — list fields plus `plain_text`, `raw_content`, `raw_format` (`html`/`text`), `to_addrs`/`cc_addrs`/`reply_to` (opaque display lists), `message_id_hdr`, `in_reply_to`, `references_hdr` (space-separated), `thread_id`, `body_state` (0 headers only, 1 body present), `answered`, live `folders_csv`.

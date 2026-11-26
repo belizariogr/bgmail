@@ -1168,6 +1168,9 @@ pub struct RootView {
     /// Handle to the separate compose window while it is open. `None` when it
     /// has never been opened or was closed.
     compose_window: Option<WindowHandle<ComposeView>>,
+    /// The saved signatures as read, kept until one is added or deleted (an edit
+    /// updates its entry): reading means parsing JSON and decoding images.
+    signature_cache: std::cell::RefCell<Option<Vec<SignatureEntry>>>,
     /// Last observed position and size of the compose window, persisted so it
     /// reopens where/how the user left it.
     compose_origin: Point<Pixels>,
@@ -1531,8 +1534,10 @@ fn compose_init_from_outgoing(row: &OutgoingRow, parsed: &ParsedMessage) -> Comp
         // Its text has the signature it was written with; one picked later goes above
         // the original it may hold.
         signature: None,
-        quote_in_editor: signatures::original_start(&parsed.text.clone().unwrap_or_default())
-            .is_some(),
+        quote_in_editor: signatures::holds_original(
+            parsed.text.as_deref().unwrap_or_default(),
+            parsed.in_reply_to.is_some(),
+        ),
     }
 }
 
@@ -1817,6 +1822,7 @@ impl RootView {
             reader_document: None,
             settings_window: None,
             compose_window: None,
+            signature_cache: std::cell::RefCell::new(None),
             compose_origin,
             compose_size,
             list_scroll: UniformListScrollHandle::new(),
@@ -3064,12 +3070,17 @@ impl RootView {
     /// The saved signatures, read now: they're only needed when a message opens or
     /// the settings show them, never at startup.
     pub(crate) fn signatures(&self) -> Vec<SignatureEntry> {
-        self.db
-            .list_signatures()
-            .unwrap_or_default()
-            .iter()
-            .map(SignatureEntry::from_row)
-            .collect()
+        self.signature_cache
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                self.db
+                    .list_signatures()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(SignatureEntry::from_row)
+                    .collect()
+            })
+            .clone()
     }
 
     /// Adds a signature named `name` with nothing in it; its id, or `None` after a
@@ -3077,6 +3088,7 @@ impl RootView {
     pub(crate) fn create_signature(&mut self, name: &str, cx: &mut Context<Self>) -> Option<i64> {
         let document = signatures::document_json(&RichDocument::default());
         let created = self.db.create_signature(name, &document);
+        self.signature_cache.get_mut().take();
         self.after_signature_change(created.map(Some), true, cx)
     }
 
@@ -3096,19 +3108,26 @@ impl RootView {
             self.set_status_note(note, cx);
             return;
         }
-        // Only this one changed: an open compose window takes it as it is, without
-        // reading and decoding every signature again on each pause in typing.
+        // Only this one changed: the cache and an open compose window take it as it
+        // is, without reading and decoding every signature again.
         let entry = SignatureEntry {
             id,
             name: name.to_string(),
             document: document.clone(),
         };
+        if let Some(cached) = self.signature_cache.get_mut() {
+            match cached.iter_mut().find(|known| known.id == id) {
+                Some(known) => *known = entry.clone(),
+                None => cached.push(entry.clone()),
+            }
+        }
         let _ = self.with_compose_window(cx, |view, _, cx| view.update_signature(entry, cx));
     }
 
     /// Deletes signature `id`; the accounts that used it go without one.
     pub(crate) fn delete_signature(&mut self, id: i64, cx: &mut Context<Self>) {
         let deleted = self.db.delete_signature(id);
+        self.signature_cache.get_mut().take();
         self.after_signature_change(deleted.map(|()| None), true, cx);
     }
 
@@ -14048,12 +14067,23 @@ mod tests {
 
         let reply = Draft {
             text: "Hi\n\nOn Mon, Zoe wrote:\n> Hello".into(),
+            in_reply_to: Some("orig@x.com".into()),
             ..draft
         };
         let raw = mail_core::build_message(&reply, "id@example.com", 0);
         let row = outgoing_row(raw, &["ana@x.com"], OutgoingState::Failed);
         let parsed = mail_core::parse_message(&row.raw).unwrap();
         assert!(compose_init_from_outgoing(&row, &parsed).quote_in_editor);
+        // A new message quoting something of its own isn't a reply.
+        let own = Draft {
+            text: "Here is the log:\n> error 42".into(),
+            in_reply_to: None,
+            ..reply
+        };
+        let raw = mail_core::build_message(&own, "id@example.com", 0);
+        let row = outgoing_row(raw, &["ana@x.com"], OutgoingState::Failed);
+        let parsed = mail_core::parse_message(&row.raw).unwrap();
+        assert!(!compose_init_from_outgoing(&row, &parsed).quote_in_editor);
     }
 
     #[test]

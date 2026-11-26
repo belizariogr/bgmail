@@ -340,10 +340,12 @@ wiring to `storage`.
   signature the body holds is read from its text, so undo never leaves it stale;
   an empty signature signs nothing. Changing From replaces even an edited signature,
   as Gmail does (then it counts as an edit). Edited unsent messages keep the one in
-  their text, which the picker recognizes and changes, and the images of their body
-  come back as attachments (the editor gets the text back, not the formatting). Signatures are read from the database only when a message opens or
-  the settings show them; stored as `RichDocument` JSON (images base64), a damaged
-  one reads as empty.
+  their text: when it is the last block above the original it comes back as saved
+  (its logo inline, not re-attached) and the picker changes it; the other images of
+  their body come back as attachments (the editor gets the text back, not the
+  formatting). Signatures are read from the database the first time a message
+  opens or the settings show them, then kept (`RootView::signature_cache`); stored
+  as `RichDocument` JSON (images base64), one that doesn't parse keeps its text.
 - Images in the body (Insert image, a signature's) go out as `cid:` parts of a
   `multipart/related` (`ii_<salt>_<id>@bgmail`, unique per message), count with
   the attachments (25 MB), and are left out of the plain-text version. A body with

@@ -1421,7 +1421,14 @@ impl TextArea {
             .rich
             .image_separators(self.buffer.text(), range.clone(), &text);
         let guarded = format!("{before}{text}{after}");
-        self.edit(cx, |buffer| buffer.replace(Some(range), &guarded, kind));
+        self.edit(cx, |buffer| {
+            buffer.replace(Some(range.clone()), &guarded, kind);
+            // Typing in front of an image goes on before it, not after the break
+            // that keeps it apart.
+            if !after.is_empty() {
+                buffer.place_caret(range.start + before.len() + text.len());
+            }
+        });
         before.len()
     }
 
@@ -1672,10 +1679,21 @@ impl TextArea {
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.buffer.selected_range();
         let copied = clipboard_text(self.buffer.selected_text());
-        // Pasting couldn't bring an image back: it stays (Delete removes it).
         if !copied.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(copied));
+        }
+        // Pasting couldn't bring an image back: with one in the selection, Cut only
+        // copies (Delete removes it).
+        let holds_image = self.buffer.text()[selected.clone()]
+            .match_indices(IMAGE_CHAR)
+            .any(|(at, _)| {
+                self.rich
+                    .image_at(self.buffer.text(), selected.start + at)
+                    .is_some()
+            });
+        if !selected.is_empty() && !holds_image {
             self.replace_keeping_images(None, "", EditKind::Other, cx);
         }
     }
@@ -1842,10 +1860,15 @@ impl EntityInputHandler for TextArea {
         let (before, after) =
             self.rich
                 .image_separators(self.buffer.text(), range.clone(), &new_text);
-        let selected = new_selected_range_utf16.map(|sel| {
-            before.len() + offset_from_utf16(&new_text, sel.start)
-                ..before.len() + offset_from_utf16(&new_text, sel.end)
-        });
+        // Without one, the caret ends the composition: before the break that keeps
+        // an image after it apart.
+        let selected = Some(new_selected_range_utf16.map_or(
+            before.len() + new_text.len()..before.len() + new_text.len(),
+            |sel| {
+                before.len() + offset_from_utf16(&new_text, sel.start)
+                    ..before.len() + offset_from_utf16(&new_text, sel.end)
+            },
+        ));
         let guarded = format!("{before}{new_text}{after}");
         self.edit(cx, |buffer| {
             buffer.replace_and_mark(Some(range), &guarded, selected)
@@ -2498,6 +2521,20 @@ mod tests {
     }
 
     #[gpui::test]
+    fn typing_in_front_of_an_image_stays_on_one_line(cx: &mut gpui::TestAppContext) {
+        let area = area(cx, "");
+        area.update(cx, |area, cx| {
+            area.insert_image(logo(4, 2), cx);
+            area.buffer.move_to(0);
+            for typed in ["h", "i"] {
+                area.replace_keeping_images(None, typed, EditKind::Typing, cx);
+            }
+            assert_eq!(area.buffer.text(), format!("hi\n{IMAGE_CHAR}\n"));
+            assert_eq!(area.cursor_offset(), 2);
+        });
+    }
+
+    #[gpui::test]
     fn an_image_alone_is_neither_copied_nor_cut(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
         let area = area(cx, "");
@@ -2514,6 +2551,17 @@ mod tests {
         let clipboard = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
         assert_eq!(clipboard.as_deref(), Some("kept"));
         area.read_with(cx, |area, _| assert_eq!(area.images().len(), 1));
+        // With text around it, Cut copies the text and keeps everything.
+        area.update_in(cx, |area, window, cx| {
+            area.buffer.move_to(0);
+            area.replace_keeping_images(None, "Bob", EditKind::Typing, cx);
+            area.buffer.select_all();
+            area.cut(&Cut, window, cx);
+            assert_eq!(area.images().len(), 1);
+            assert!(area.buffer.text().starts_with("Bob"));
+        });
+        let clipboard = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(clipboard.as_deref(), Some("Bob\n"));
     }
 
     #[gpui::test]

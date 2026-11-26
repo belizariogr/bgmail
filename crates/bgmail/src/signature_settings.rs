@@ -121,6 +121,10 @@ impl SignaturesPage {
 
     /// Shows signature `id` in the editor, saving the one shown first.
     fn select(&mut self, id: Option<i64>, cx: &mut Context<Self>) {
+        // Its own row: nothing to load, and the editor keeps its undo.
+        if id.is_some() && id == self.selected {
+            return;
+        }
         self.save_now(cx);
         // An image still being picked was for the signature going away.
         self.format_bar.update(cx, |bar, _| bar.cancel_image());
@@ -232,9 +236,16 @@ impl SignaturesPage {
         if self.pending_save.take().is_none() {
             return;
         }
-        let (Some(path), Some((id, name, document))) =
-            (self.db_path.as_ref(), self.edited_signature(cx))
-        else {
+        let Some((id, name, document)) = self.edited_signature(cx) else {
+            return;
+        };
+        // Through the main view while it is there (an open compose window learns of
+        // it); at quit it may be gone.
+        if let Some(root) = self.root.upgrade() {
+            root.update(cx, |root, cx| root.save_signature(id, &name, &document, cx));
+            return;
+        }
+        let Some(path) = self.db_path.as_ref() else {
             return;
         };
         let saved = storage::Database::open(path).and_then(|db| {
@@ -739,6 +750,45 @@ mod tests {
             // Another signature is shown before the file is picked.
             page.create(window, cx);
             assert!(!page.format_bar.read(cx).image_pending());
+        });
+    }
+
+    #[gpui::test]
+    fn at_quit_edits_still_waiting_go_straight_to_the_database(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let (_, root, page, cx) = page(&path, cx);
+        page.update_in(cx, |page, window, cx| {
+            page.create(window, cx);
+            page.name
+                .update(cx, |input, cx| input.set_content("At quit", cx));
+            page.schedule_save(cx);
+            // The main view is already gone.
+            page.root = WeakEntity::new_invalid();
+        });
+        drop(page);
+        cx.update(|_, _| {});
+        cx.run_until_parked();
+        let stored = storage::Database::open(&path)
+            .unwrap()
+            .list_signatures()
+            .unwrap();
+        assert_eq!(stored[0].name, "At quit");
+        drop(root);
+    }
+
+    #[gpui::test]
+    fn clicking_the_signature_shown_keeps_its_undo(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, page, cx) = page(&dir.path().join("mail.db"), cx);
+        page.update_in(cx, |page, window, cx| {
+            page.create(window, cx);
+            page.editor.update(cx, |area, cx| {
+                area.replace_range_with_document(0..0, &RichDocument::plain("Ann"), cx);
+            });
+            page.select(page.selected, cx);
+            assert!(page.editor.read(cx).can_undo());
+            assert_eq!(page.editor.read(cx).content(), "Ann");
         });
     }
 

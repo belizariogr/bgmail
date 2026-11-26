@@ -12,6 +12,7 @@ use std::ops::Range;
 use ui::RichDocument;
 
 use crate::compose::ComposeAccount;
+use crate::locale::{Key, Language};
 
 /// A saved signature, ready to insert.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,25 +81,56 @@ pub fn signature_offset(text: &str, quote_in_editor: bool) -> usize {
     }
 }
 
-/// Where the original starts in a body that holds it: the forwarded block's header
-/// line (`---------- … ----------`, in any language) or the attribution line of a
-/// `> ` quote (a line ending in `:` followed by one starting with `>`).
+/// Where the original starts in a body that holds it: the forward header line BGMail
+/// writes, or the attribution line of the `> ` quote the text ends with.
 pub fn original_start(text: &str) -> Option<usize> {
+    forward_start(text).or_else(|| quote_start(text))
+}
+
+/// Whether a re-opened message holds the original it answers or forwards: the
+/// forward header BGMail writes, or, for a reply (`is_reply`: it has In-Reply-To),
+/// the quote it ends with. The shape of a new message's own text doesn't count.
+pub fn holds_original(text: &str, is_reply: bool) -> bool {
+    forward_start(text).is_some() || (is_reply && quote_start(text).is_some())
+}
+
+/// The line of the forward header BGMail writes (`Key::ForwardHeader`, in any of
+/// its languages).
+fn forward_start(text: &str) -> Option<usize> {
+    let headers: Vec<&str> = Language::ALL
+        .iter()
+        .map(|language| Key::ForwardHeader.tr(*language))
+        .collect();
     let mut offset = 0;
-    let mut lines = text.split('\n').peekable();
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim();
-        let forward_header = trimmed.len() > 20
-            && trimmed.starts_with("----------")
-            && trimmed.ends_with("----------");
-        let attribution =
-            trimmed.ends_with(':') && lines.peek().is_some_and(|next| next.starts_with('>'));
-        if forward_header || attribution {
+    for line in text.split('\n') {
+        if headers.contains(&line.trim()) {
             return Some(offset);
         }
         offset += line.len() + 1;
     }
     None
+}
+
+/// The attribution line of the `> ` quote a reply ends with: the line ending in `:`
+/// right above the block of `>` lines that runs to the end.
+fn quote_start(text: &str) -> Option<usize> {
+    let mut lines: Vec<(usize, &str)> = Vec::new();
+    let mut offset = 0;
+    for line in text.split('\n') {
+        lines.push((offset, line));
+        offset += line.len() + 1;
+    }
+    while lines.last().is_some_and(|(_, line)| line.trim().is_empty()) {
+        lines.pop();
+    }
+    let quoted = lines
+        .iter()
+        .rev()
+        .take_while(|(_, line)| line.starts_with('>'))
+        .count();
+    let attribution = lines.len().checked_sub(quoted + 1)?;
+    let (offset, line) = lines[attribution];
+    (quoted > 0 && line.trim_end().ends_with(':')).then_some(offset)
 }
 
 /// What goes in at `at` of `text` to add `signature`, and where the signature is in it:
@@ -147,8 +179,9 @@ pub fn body_with_signature(
 }
 
 /// The signature a body already has (an edited unsent message): the saved one whose
-/// plain text (as it went out: images left out) ends nearest above the original, or
-/// the end. Its range and id.
+/// plain text (as it went out: images left out) is the last block of what was
+/// written (whole lines, right above the original or at the end), the longest when
+/// several are. Its range and id.
 pub fn find_signature(
     text: &str,
     quote_in_editor: bool,
@@ -159,18 +192,20 @@ pub fn find_signature(
     } else {
         text.len()
     };
-    let searched = &text[..limit];
+    let written = text[..limit].trim_end();
     signatures
         .iter()
         .filter_map(|entry| {
             let plain = entry.document.to_plain();
-            let plain = plain.trim_end_matches('\n');
-            let start = (!plain.trim().is_empty())
-                .then(|| searched.rfind(plain))
-                .flatten()?;
-            Some((start..start + plain.len(), entry.id))
+            let plain = plain.trim_end();
+            if plain.trim().is_empty() || !written.ends_with(plain) {
+                return None;
+            }
+            let start = written.len() - plain.len();
+            (start == 0 || written[..start].ends_with('\n'))
+                .then_some((start..written.len(), entry.id))
         })
-        .max_by_key(|(range, _)| (range.end, range.len()))
+        .max_by_key(|(range, _)| range.len())
 }
 
 /// What the body holds where its signature goes.
@@ -414,6 +449,17 @@ mod tests {
         assert_eq!(original_start(forward), Some(4));
         assert_eq!(original_start("Hi: there\nno quote"), None);
         assert_eq!(original_start("Plain\n\nBob"), None);
+        // A quote of its own inside a new message isn't an original.
+        let own = "Here is the log:\n> error 42\n\nAnn";
+        assert_eq!(original_start(own), None);
+        assert!(!holds_original(own, false));
+        assert!(!holds_original("Log:\n> error", false), "not a reply");
+        assert!(holds_original(reply, true));
+        assert!(holds_original(forward, false));
+        assert!(!holds_original(
+            "----------- dashes of mine -----------",
+            false
+        ));
     }
 
     #[test]
@@ -445,6 +491,9 @@ mod tests {
         let (range, id) = find_signature(reply, true, &saved).unwrap();
         assert_eq!((&reply[range], id), ("Ann Smith\nCEO", 2));
         assert_eq!(find_signature("Hi there", false, &saved), None);
+        // Words of the message itself are never taken for a signature.
+        assert_eq!(find_signature("Thanks, Ann", false, &saved), None);
+        assert_eq!(find_signature("Ann will call\n\nBye", false, &saved), None);
         // With its image, it is found by the text that went out.
         let text = format!("Bob\n{}", ui::IMAGE_CHAR);
         let mut logo = RichDocument::plain(&text);

@@ -270,6 +270,14 @@ impl TextBuffer {
         self.history.coalesce = false;
     }
 
+    /// Puts the caret at `offset` after an edit, without ending the run of typing it
+    /// belongs to (unlike [`Self::move_to`]).
+    pub(crate) fn place_caret(&mut self, offset: usize) {
+        let offset = clamp_to_char_boundary(&self.text, offset);
+        self.selected_range = offset..offset;
+        self.selection_reversed = false;
+    }
+
     /// Moves the caret end of the selection to `offset`, keeping the anchor.
     pub(crate) fn select_to(&mut self, offset: usize) {
         let offset = clamp_to_char_boundary(&self.text, offset);

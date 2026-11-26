@@ -642,6 +642,7 @@ impl RichText {
     /// Follows `range` through later edits: inside it they grow or shrink it, and
     /// text inserted at its edges stays out.
     pub fn set_tracked(&mut self, range: Option<Range<usize>>) {
+        // (See `follow_edit` for how edits move it.)
         self.tracked = range;
     }
 
@@ -980,8 +981,9 @@ fn line_bounds(text: &str, offset: usize) -> Range<usize> {
     start..end
 }
 
-/// Where `range` goes when `removed` is replaced by `inserted_len` bytes: text put at
-/// its edges stays out of it, and what replaces part of it too.
+/// Where `range` goes when `removed` is replaced by `inserted_len` bytes: text put
+/// before it stays out, text typed right after it goes in (an empty range stays
+/// empty), and what replaces part of it stays out.
 fn follow_edit(range: &Range<usize>, removed: &Range<usize>, inserted_len: usize) -> Range<usize> {
     let moved = |offset: usize| offset - removed.len() + inserted_len;
     let start = if range.start < removed.start {
@@ -991,7 +993,10 @@ fn follow_edit(range: &Range<usize>, removed: &Range<usize>, inserted_len: usize
     } else {
         removed.start + inserted_len
     };
-    let end = if range.end <= removed.start {
+    // Typed right after a non-empty range is part of it, as in Gmail's signature
+    // block; an empty one only marks a place.
+    let typed_at_end = range.end == removed.start && removed.is_empty() && !range.is_empty();
+    let end = if range.end <= removed.start && !typed_at_end {
         range.end
     } else if range.end >= removed.end {
         moved(range.end)
@@ -1454,14 +1459,20 @@ mod tests {
         rich.set_tracked(Some(3..6));
         rich.apply_edit("hi\nsig", "hello\nsig", CharStyle::default());
         assert_eq!(rich.tracked(), Some(6..9));
-        // Inside it grows; at its end stays out.
+        // Inside it grows, and typed at its end too (Backspace there and typing again
+        // keeps the signature whole).
         rich.apply_edit_at("hello\nsig", 8..8, "n", CharStyle::default());
         assert_eq!(rich.tracked(), Some(6..10));
         rich.apply_edit_at("hello\nsing", 10..10, "!", CharStyle::default());
-        assert_eq!(rich.tracked(), Some(6..10));
+        assert_eq!(rich.tracked(), Some(6..11));
         // Replacing all of it and more leaves it empty where it was.
         rich.apply_edit_at("hello\nsing!", 4..11, "x", CharStyle::default());
         assert_eq!(rich.tracked(), Some(5..5));
+        // An empty one only marks a place: typing there stays out.
+        let mut rich = RichText::new("ab");
+        rich.set_tracked(Some(2..2));
+        rich.apply_edit_at("ab", 2..2, "c", CharStyle::default());
+        assert_eq!(rich.tracked(), Some(3..3));
         assert_eq!(follow_edit(&(2..5), &(2..4), 1), 3..4);
         assert_eq!(follow_edit(&(2..5), &(3..7), 0), 2..3);
         assert_eq!(follow_edit(&(4..4), &(4..4), 2), 6..6);
