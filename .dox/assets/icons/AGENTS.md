@@ -24,6 +24,8 @@ theme tinting.
   (448-wide → `-32 0 512 512`; 384-wide file icons → `-64 0 512 512`).
 - Attachment chips use the FA 6.7.2 file family: `file`, `file-image`,
   `file-pdf`, `file-zipper`, `file-audio`, `file-video`, `file-lines`.
+- The editor uses FA 6.7.2 `image` (Insert image) and `signature` (signatures;
+  640-wide, centered in a square by `viewBox="0 -64 640 640"`).
 - Do not switch back to icon fonts for cross-platform consistency.
 
 ## Work Guidance

@@ -134,7 +134,7 @@ Domain and protocols do not know about GPUI.
 - [ ] Drafts with auto-save.
 - [ ] Native notifications for new e-mail.
 - [ ] Configurable keyboard shortcuts.
-- [ ] Filters/rules and signatures.
+- [ ] Filters/rules. Signatures: done (Gmail model, see `TODO.md`).
 - [ ] Offline mode with synchronization.
 
 ## 7. Themes

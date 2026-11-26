@@ -70,12 +70,26 @@ an e-mail client, without Zed-scale bloat.
   be GPUI's fallback, which has no weights, even for families it lists as
   installed. `FontFamily` is Gmail's set; the editor shows the closest installed
   font and the sent mail names the font itself with a CSS fallback. Export:
-  `formatted_html` (`None` when plain) and `plain_export`.
+  `formatted_html` / `formatted_html_with` (`None` when plain) and `plain_export`.
+- `TextArea` images: an image is `IMAGE_CHAR` alone on its line, styled with the
+  `InlineImage` it shows; the line is drawn as the image (narrowed to the width,
+  aligned like its paragraph) and its row is the image's height. Every edit keeps
+  it alone (`RichText::image_separators`); Backspace/Delete that would join its
+  line with text take the image; a click selects it; pasted text drops the
+  character. Exported as `<img>` with the `src` the caller gives (`cid:` in a
+  mail, `data:` by default), left out of the plain text. Images decode once per
+  id, first frame only.
+- `RichDocument` (text + `RichText`, serde with base64 images) is what an editor
+  saves and inserts: `set_document`, `document`, `replace_range_with_document`
+  (one undoable step). A tracked range (`set_tracked_range`) follows the edits so
+  its owner can replace that part later; text typed at its edges stays out.
+- Web and e-mail addresses in the text (`rich::link_ranges`) go out as links and
+  show underlined in the theme's `text_accent`, as Gmail's composer does.
 - `TextArea` keeps GPUI-free editing logic (text/selection/undo in
   `text_area/buffer.rs`, soft-wrap row math in `text_area/rows.rs`) separate
   from the element so it is unit-tested without a window; reshaping happens
   only when the `LayoutKey` (text revision, width, font, size, color, IME mark,
-  placeholder) changes, and painting skips rows outside the content mask.
+  placeholder, link color) changes, and painting skips rows outside the content mask.
 
 ## Work Guidance
 

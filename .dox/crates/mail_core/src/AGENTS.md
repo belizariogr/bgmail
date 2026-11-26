@@ -217,13 +217,16 @@ _(none — modules are files; their APIs are cataloged below.)_
 #### Types / constants
 
 - **struct `OutgoingAttachment { filename, mime_type, data: Vec<u8> }`**: serde.
-- **struct `Draft { from, to, cc, bcc, subject, text, html, in_reply_to, references, attachments }`**: ids without `<>`. Default, serde.
+- **struct `OutgoingInlineImage { content_id, filename, mime_type, data: Vec<u8> }`**: serde; an image the HTML shows as `cid:<content_id>` (id without `<>`).
+- **struct `Draft { from, to, cc, bcc, subject, text, html, in_reply_to, references, attachments, inline_images }`**: ids without `<>`. Default, serde; `inline_images` defaults to empty (drafts saved before it still load) and is ignored without `html`.
 - **const `MIME_TABLE`** (private): extension ↔ MIME pairs; first entry per MIME is canonical.
 
 #### Functions
 
 - **`build_message`** (pub) — `pub fn build_message(draft: &Draft, message_id: &str, date_unix: i64) -> Vec<u8>`
-  - Behavior: via `mail-builder`: Message-ID (brackets stripped then re-added), Date, From, To/Cc (omitted when empty), **no Bcc**, Subject (RFC 2047 as needed), In-Reply-To / References as `<id>`; text body always, html → `multipart/alternative`, attachments → `multipart/mixed`. Deterministic except MIME boundaries.
+  - Behavior: via `mail-builder`: Message-ID (brackets stripped then re-added), Date, From, To/Cc (omitted when empty), **no Bcc**, Subject (RFC 2047 as needed), In-Reply-To / References as `<id>`; text body always, html → `multipart/alternative`, attachments → `multipart/mixed`; html with inline images → `related_body`. Deterministic except MIME boundaries.
+- **`related_body`** (private) — `fn related_body<'x>(draft: &'x Draft, html: &'x str) -> MimePart<'x>`
+  - Behavior: as Gmail sends it: `multipart/related` [ `multipart/alternative` [text, html], each image `inline; filename=…` with `Content-ID: <id>` ], inside a `multipart/mixed` with the attachments when there are any.
 - **`new_message_id`** (pub) — `pub fn new_message_id(domain_from_email: &str, unique: u64) -> String`
   - Behavior: `<unix secs>.<unique hex>.bgmail@<domain>` without brackets; domain = text after the last `@` (or the whole input), `localhost` when empty. Reads the system clock.
 - **`envelope_recipients`** (pub) — `pub fn envelope_recipients(draft: &Draft) -> Vec<String>` — to + cc + bcc emails, first spelling wins, case-insensitive dedupe, empty emails skipped.
@@ -234,7 +237,7 @@ _(none — modules are files; their APIs are cataloged below.)_
 
 #### Tests
 
-- `builds_plain_text_message` (Bcc absent, round-trip via `parse_message`), `builds_alternative_and_mixed_with_threading`, `text_plus_attachment_is_mixed_without_alternative`, `message_id_format`, `envelope_dedupes_case_insensitively`, `guesses_mime_types`, `extension_for_mime_uses_canonical_entry`, `strip_brackets_trims`.
+- `builds_plain_text_message` (Bcc absent, round-trip via `parse_message`), `builds_alternative_and_mixed_with_threading`, `images_of_the_html_go_beside_it_as_related_parts` (related, alone or in mixed; parsed back as inline cid images; no related part without html), `a_draft_saved_before_inline_images_still_loads`, `text_plus_attachment_is_mixed_without_alternative`, `message_id_format`, `envelope_dedupes_case_insensitively`, `guesses_mime_types`, `extension_for_mime_uses_canonical_entry`, `strip_brackets_trims`.
 
 ### `src/reply.rs`
 

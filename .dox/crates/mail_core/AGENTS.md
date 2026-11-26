@@ -13,7 +13,8 @@ cancellation (`CancelToken`).
 ## Ownership
 
 - Owns: `Address`, `MessageFlags`, `FolderRole` / `RemoteFolder`,
-  `ParsedMessage` / `AttachmentInfo`, `Draft` / `OutgoingAttachment`,
+  `ParsedMessage` / `AttachmentInfo`, `Draft` / `OutgoingAttachment` /
+  `OutgoingInlineImage`,
   reply/thread helpers, `AccountConfig` (JSON in `accounts.config_json`),
   `CancelToken`, `remote` traits and value types, `fake` test doubles
   (remote, sender, connector).
@@ -50,7 +51,7 @@ cancellation (`CancelToken`).
   `gm_msgid` per raw message.
 - Serde derives only where JSON persistence is expected: `Address`,
   `MessageFlags`, `FolderRole` (lowercase strings), `RemoteFolder`,
-  `AttachmentInfo`, `Draft`, `OutgoingAttachment`.
+  `AttachmentInfo`, `Draft`, `OutgoingAttachment`, `OutgoingInlineImage`.
 
 ## Work Guidance
 

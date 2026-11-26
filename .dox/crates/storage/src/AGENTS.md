@@ -42,14 +42,14 @@ Signatures are authoritative; `Lnn` anchors (where present) are approximate.
 
 ### `src/lib.rs`
 
-- Module declarations (`test_support` only under `cfg(test)`) and re-exports: `Database`, `database_path`, `global_folder_path`, folder helpers, `SCHEMA_VERSION`, search helpers, seed API, `BODY_STATE_FULL` / `BODY_STATE_HEADERS`, and every type in `types.rs` (incl. `RemoteInsert`, `OutgoingState`) plus `PROVIDER_LOCAL` / `PROVIDER_IMAP` / `PROVIDER_GMAIL`. No functions.
+- Module declarations (`test_support` only under `cfg(test)`) and re-exports: `Database`, `database_path`, `global_folder_path`, folder helpers, `SCHEMA_VERSION`, search helpers, seed API, `Signature`, `BODY_STATE_FULL` / `BODY_STATE_HEADERS`, and every type in `types.rs` (incl. `RemoteInsert`, `OutgoingState`) plus `PROVIDER_LOCAL` / `PROVIDER_IMAP` / `PROVIDER_GMAIL`. No functions.
 
 ### `src/types.rs`
 
 #### Types / constants
 
 - **const `PROVIDER_LOCAL` / `PROVIDER_IMAP` / `PROVIDER_GMAIL`**: `"local"`, `"imap"`, `"gmail"` — values of `accounts.provider`.
-- **struct `Account`**: `id`, `name`, `email`, `provider`, `config_json` (opaque caller JSON, `{}` default).
+- **struct `Account`**: `id`, `name`, `email`, `provider`, `config_json` (opaque caller JSON, `{}` default), `sender_name`, `signature_new` / `signature_reply` (`Option<i64>`: the signature its new mail / its replies and forwards take).
 - **struct `Folder`**: `id`, `account_id`, storage `path`, `display_name` (empty for system folders), `remote_name: Option<String>` (server mailbox; `None` = local folder), `role: Option<String>` (special-use role or `None`).
 - **struct `MessageListItem`**: list row without body — ids, sender, subject, `preview`, `received_at` display string, `date_ts` (unix seconds, 0 for mock), `thread_id`, `unread`/`starred`/`has_attachment`, `folders_csv`.
 - **struct `MessageDetail`**: reader row — list fields plus `plain_text`, `raw_content`, `raw_format` (`html`/`text`), `to_addrs`/`cc_addrs`/`reply_to` (opaque display lists), `message_id_hdr`, `in_reply_to`, `references_hdr` (space-separated), `thread_id`, `body_state` (0 headers only, 1 body present), `answered`, live `folders_csv`.
@@ -71,8 +71,10 @@ _(No functions.)_
 
 ### `src/schema.rs`
 
-- **const `SCHEMA_VERSION`**: `9`.
+- **const `SCHEMA_VERSION`**: `10`.
 - **const `V9_OBJECTS`**: `brand_logos (domain TEXT PRIMARY KEY COLLATE NOCASE, svg BLOB, checked_at INTEGER NOT NULL)`.
+- **const `V10_OBJECTS`**: `signatures (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, document TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0)`.
+- **const `V10_COLUMNS`**: `accounts.signature_new` / `accounts.signature_reply`, each `INTEGER REFERENCES signatures(id) ON DELETE SET NULL`.
 - **const `CREATE_ACCOUNTS` / `CREATE_FOLDERS` / `CREATE_MESSAGES` / `CREATE_META`**: v1 base DDL (`IF NOT EXISTS`), the starting point of every database.
 - **const `INDEX_MESSAGES_SEARCH` / `INDEX_MESSAGES_ACCOUNT` / `INDEX_MESSAGES_FOLDERS`**: v1 indexes.
 - **const `V2_COLUMNS`**: `(table, column, definition)` list added in place by the v1→v2 step (accounts: provider/config_json/sort_order; folders: remote_name/role/uid_validity/uid_next/highest_modseq/synced_at; messages: message_id_hdr/in_reply_to/references_hdr/thread_id/to_addrs/cc_addrs/reply_to/date_ts/answered/body_state/gm_msgid/size).
@@ -93,7 +95,7 @@ _(No functions.)_
 
 - **`migrate`** (pub(crate)) — `fn migrate(conn: &Connection) -> rusqlite::Result<()>`
   - Purpose: bring any database to `SCHEMA_VERSION`.
-  - Behavior: one `IMMEDIATE` transaction: runs v1 base DDL, reads `schema_version` (missing → 1), runs `migrate_v1_to_v2` when < 2, `migrate_v2_to_v3` when < 3, then the v4–v9 steps (v9: `V9_OBJECTS`), upserts `meta.schema_version` when it changed or was missing, commits. Newer versions are left untouched.
+  - Behavior: one `IMMEDIATE` transaction: runs v1 base DDL, reads `schema_version` (missing → 1), runs `migrate_v1_to_v2` when < 2, `migrate_v2_to_v3` when < 3, then the v4–v10 steps (v9: `V9_OBJECTS`; v10: `V10_OBJECTS` + `V10_COLUMNS`), upserts `meta.schema_version` when it changed or was missing, commits. Newer versions are left untouched.
 - **`schema_version`** (pub(crate)) — `fn schema_version(conn: &Connection) -> rusqlite::Result<Option<i64>>`
   - Reads and parses `meta.schema_version`; `None` when absent or not an integer.
 - **`migrate_v1_to_v2`** (private) — `fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()>`
@@ -139,6 +141,19 @@ _(No functions.)_
 - **`fts_phrase`** (private) — `fn fts_phrase(text: &str) -> String`: wraps in `"…"` doubling inner quotes so input never parses as FTS syntax.
 - **`list_item_from_row`** (private): maps a `LIST_COLUMNS` row to `MessageListItem`.
 - Tests: `database_path_uses_dot_config_bgmail`, `account_folder_lists_only_that_account`, helpers `search_ids` (also asserts count == list length) / `like_ids` (v1 LIKE oracle), `fts_search_matches_like_semantics` (accents, case, substrings, <3 chars, quotes, FTS keywords), `message_count_for_query_counts_without_loading`, `unread_count_total_spans_accounts`, `open_enables_wal`, `two_connections_read_and_write_concurrently` (sync thread inserts while the UI connection reads and writes).
+
+### `src/signatures.rs`
+
+Signatures the user keeps and which one each account signs with; a signature's
+`document` is the editor's (JSON in BGMail), stored as given.
+
+- **struct `Signature`** (pub): `id`, `name`, `document`.
+- **`Database::list_signatures`** (pub) — `pub fn list_signatures(&self) -> rusqlite::Result<Vec<Signature>>`: every signature by `sort_order, id` (name/document read lossily).
+- **`Database::create_signature`** (pub) — `pub fn create_signature(&self, name: &str, document: &str) -> rusqlite::Result<i64>`: after the others (`sort_order = max + 1`); returns the id.
+- **`Database::update_signature`** (pub) — `pub fn update_signature(&self, id: i64, name: &str, document: &str) -> rusqlite::Result<()>`: replaces name and document; no-op for an unknown id.
+- **`Database::delete_signature`** (pub) — `pub fn delete_signature(&self, id: i64) -> rusqlite::Result<()>`: the accounts that used it go without one (`ON DELETE SET NULL`).
+- **`Database::set_account_signatures`** (pub) — `pub fn set_account_signatures(&self, account_id: i64, new_mail: Option<i64>, replies: Option<i64>) -> rusqlite::Result<()>`: both choices of an account; an id that doesn't exist fails (foreign key).
+- Tests: `signatures_are_kept_in_order_and_edited_in_place`, `each_account_chooses_its_signatures_and_loses_a_deleted_one`; `database.rs` `a_replaced_database_keeps_its_accounts_and_signatures`.
 
 ### `src/accounts.rs`
 
@@ -346,7 +361,7 @@ These edit `folders_csv` directly and work for every message. For a remote messa
 
 ##### Context: `module`
 
-- **`Database::replace_corrupt(path)`** (pub): keeps a damaged file as `<name>.corrupt` with its journals, opens a new one and copies what it can read of `accounts` and `outbox`. **`Database::open_or_replace_corrupt(path)`** (pub): `open`, using it if the file is damaged. **`is_corrupt(error)`** (pub).
+- **`Database::replace_corrupt(path)`** (pub): keeps a damaged file as `<name>.corrupt` with its journals, opens a new one and copies what it can read of `signatures`, `accounts` and `outbox` (`RECOVERED_TABLES`; the columns both files have, foreign keys off meanwhile). **`Database::open_or_replace_corrupt(path)`** (pub): `open`, using it if the file is damaged. **`is_corrupt(error)`** (pub).
 - **`lossy_text(row, index)`** (pub(crate)): a text column whatever it holds, so one damaged value doesn't stop a list or the app.
 - **`fold_for_search`** (pub, L6)
   - Signature: `pub fn fold_for_search(text: &str) -> String`

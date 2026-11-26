@@ -23,7 +23,8 @@ first-run seeding. No GPUI, no network — it stores what a sync engine gives it
 - DB path: `~/.config/BGMail/mail.db` via `database_path` (portable home
   resolution; no GPUI).
 - The database and its config directory are private to the user (`keep_private`, Unix).
-- **Schema v9** (`schema.rs`, `SCHEMA_VERSION = 9`; v9 = `brand_logos`; v4 = contacts, v5 = columns, v6 =
+- **Schema v10** (`schema.rs`, `SCHEMA_VERSION = 10`; v10 = `signatures` + `accounts.signature_new` /
+  `signature_reply` (`ON DELETE SET NULL`); v9 = `brand_logos`; v4 = contacts, v5 = columns, v6 =
   commas of folder paths encoded in `folders_csv`, v7 = `outbox.retry_from`, v8 = `folders.delimiter` and `accounts.folder_prefix`). `migration.rs` applies
   steps by `meta.schema_version` inside one `BEGIN IMMEDIATE` transaction:
   base v1 DDL (`CREATE … IF NOT EXISTS`), then v1→v2 = `ALTER TABLE ADD COLUMN`

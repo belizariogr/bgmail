@@ -409,7 +409,9 @@ window.
 
 - **`ATTACHMENT_LIMIT_BYTES`** (pub, L46)
   - Purpose: Total attachment cap per message (25 MB = 26 214 400 bytes).
-  - Behavior: Checked from file metadata before reading (`read_attachments`) and again on merge (`merge_attachments`).
+  - Behavior: Checked from file metadata before reading (`read_attachments`) and again on merge (`merge_attachments`); `build_draft` checks attachments and the body's images together.
+
+- **`BODY_IMAGE_LIMIT_BYTES`** (pub) — 5 MB, largest image file put in the body (the compose `FormatBar`'s limit).
 
 - **`KEY_CONTEXT`** (private, L49) — `"ComposeView"`, key context of the compose root (scopes the send shortcut).
 
@@ -422,19 +424,19 @@ window.
 - **`BODY_MIN_LINES`** (private, L58) — 12-row minimum body height (big click target).
 
 - **`ComposeAccount`** (pub, L91)
-  - Signature: `pub struct ComposeAccount { id: i64, name, email, can_send: bool }`
+  - Signature: `pub struct ComposeAccount { id: i64, name, email, can_send: bool, signature_new: Option<i64>, signature_reply: Option<i64> }`
   - Purpose: An account offered in the From picker (built by `RootView::compose_accounts`).
   - Behavior: `can_send == false` for local/demo accounts (listed, marked "Can't send", rejected on Send).
 
 - **`ComposeInit`** (pub, L101)
-  - Signature: `pub struct ComposeInit { account_id: Option<i64>, draft: mail_core::Draft, replaces_outgoing: Option<i64> }`
-  - Purpose: Prefill for reply / reply all / forward (built by `RootView::reply_to_selected`) and for editing an unsent message (`compose_init_from_outgoing`, which sets `replaces_outgoing` to its outbox row id).
+  - Signature: `pub struct ComposeInit { account_id: Option<i64>, draft: mail_core::Draft, replaces_outgoing: Option<i64>, quoted_original: Option<QuotedOriginal>, signature: Option<SignatureSlot>, forward: bool }`
+  - Purpose: Prefill for reply / reply all / forward (built by `RootView::reply_to_selected`, `signature: Some(Reply)`, `forward` for forwards), a `mailto:` (`Some(NewMail)`) and for editing an unsent message (`compose_init_from_outgoing`, which sets `replaces_outgoing` to its outbox row id and `signature: None`: its text has its signature).
 
 - **`AddressField`** (private enum, L109) — `To | Cc | Bcc`, the address-list fields.
 
 - **`ComposeFocus`** (private enum, L117) — `To | Body`, initial keyboard focus.
 
-- **`ComposeFields`** (private, L124) — snapshot of to/cc/bcc/subject/body text for validation.
+- **`ComposeFields`** (private, L124) — snapshot of to/cc/bcc/subject/body text for validation, the body's HTML (images as `cid:` of `image_content_id`) and its `images`.
 
 - **`ReplyHeaders`** (private, L134) — `in_reply_to` + `references` carried from the init draft.
 
@@ -489,7 +491,9 @@ window.
 
 - **`build_draft`** (private, L1120)
   - Signature: `fn build_draft(from: Option<&ComposeAccount>, fields: &ComposeFields, reply: &ReplyHeaders, attachments: &[OutgoingAttachment], language: Language) -> Result<Draft, ComposeErrors>`
-  - Behavior: Errors in order: invalid tokens per field; no recipients at all (`ComposeNoRecipients` banner); missing or local From account (`ComposeLocalAccount` banner). On success: `from = Address(name, email)`, trimmed subject, body as `text`, `html: None`, reply headers and a copy of the attachments.
+  - Behavior: Errors in order: invalid tokens per field; no recipients at all (`ComposeNoRecipients` banner); missing or local From account (`ComposeLocalAccount` banner); body over `MAX_BODY_BYTES`; attachments + body images over `ATTACHMENT_LIMIT_BYTES` (`ComposeAttachTooLarge`). On success: `from = Address(name, email)`, trimmed subject, `reply_text` as `text`, `message_html`, reply headers, a copy of the attachments and the body's images as `OutgoingInlineImage`s (only with HTML).
+
+- **`image_content_id`** (private) — `ii_<image id>@bgmail`, the Content-ID an image of the body goes out with (Gmail's `ii_` names).
 
 - **`attachments_total`** (private, L1162) — sum of attachment byte lengths.
 
@@ -506,7 +510,7 @@ window.
 - **`default_mail_app`**: `status()` / `set_default()` (pub, per OS), enums `Status`, `Outcome`, `Error`; on Linux `status_with` / `set_default_with` / `status_from_query` / `application_dirs`.
 - **`instance`**: `mailto_argument` / `lock_profile` / `hand_over` / `listen`, `ProfileLock`, `ACTIVATE` (pub); `lock_at` (file lock at `instance.lock`; I/O failure = `Unavailable`, which starts anyway), `hand_over_through` (retries while the running process starts), `forward_through`, `serve`, `read_message`, `new_token`, `write_private`, `instance_file` (private): one process per profile; a later launch hands over its `mailto:` link, or `ACTIVATE` to show the window, and exits.
 - **`refresh_default_app`** / **`make_default_app`** / **`render_default_mail_app`** / **`default_app_message`** (private, `settings`): the Settings row.
-- **`render_format_bar`** / **`render_style_button`** / **`render_menu_button`** / **`format_dropdown`** / **`format_menu_of`** / **`render_font_picker`** / **`render_size_picker`** / **`render_align_picker`** / **`render_color_picker`** / **`format_body`** / **`toggle_format_menu`** / enum **`FormatMenu`** / **`family_label`** / **`message_html`** / **`body_selection_color`** / **`body_scrollbar_colors`** (private, `compose`): the formatting bar, and what is sent.
+- **`message_html`** / **`body_selection_color`** / **`body_scrollbar_colors`** (private, `compose`): what is sent, and the body's page colors. The formatting bar is `format_bar::FormatBar` (below), held as `format_bar`; its `ImageFailed` goes to the banner.
 - **`has_edits`** (`pub(crate)`, `compose`): whether replacing the content would lose typed text.
 - **`quotable_text`** (pub, `mail_html`): a plain-text original for a reply's quote.
 - **`DocumentColors::dark_page`** (pub, `mail_html`): colors for `html_view` to keep text readable on a dark page.
@@ -518,11 +522,19 @@ window.
 ##### Context: `ComposeView`
 
 - **`new`** (pub, L234)
-  - Signature: `pub fn new(accounts: Vec<ComposeAccount>, root: WeakEntity<RootView>, white_background: bool, init: Option<ComposeInit>, window: &mut Window, cx: &mut Context<Self>) -> Self`
+  - Signature: `pub fn new(accounts: Vec<ComposeAccount>, contacts: Vec<Contact>, signatures: Vec<SignatureEntry>, root: WeakEntity<RootView>, white_background: bool, init: Option<ComposeInit>, window: &mut Window, cx: &mut Context<Self>) -> Self`
   - Behavior: Ensures key bindings, creates the editors (To placeholder `ComposeFieldPlaceholder`, body placeholder `ComposeBodyPlaceholder`, `min_lines(BODY_MIN_LINES)`, `track_scroll`), subscribes to `Changed` (address fields clear their error; all mark edited), picks the From account and calls `apply_init`.
 
 - **`apply_init`** (pub(crate), L305)
-  - Behavior: Replaces every field from `init` (blank when `None`): From via `account_index(init.account_id)`, `replaces_outgoing`, To/Cc/Bcc via `format_address_list`, subject, body (caret at start), attachments, reply headers; shows Cc/Bcc when prefilled; clears errors, picker and `edited`; focuses per `initial_focus`. Root calls it when a reply is opened while the window is already open.
+  - Behavior: Replaces every field from `init` (blank when `None`): From via `account_index(init.account_id)`, `replaces_outgoing`, To/Cc/Bcc via `format_address_list`, subject, body signed by `sign_body` (caret at start), attachments, reply headers; the signature slot (blank → `NewMail`; `init.signature`; `None` → the signature doesn't follow the account) and `forward`; shows Cc/Bcc when prefilled; clears errors, menus and `edited`; focuses per `initial_focus`. Root calls it when a reply is opened while the window is already open.
+
+- **`sign_body`** (private) — the body as `signatures::body_with_signature` of the text with the From account's signature for this slot (when it follows the account), as a document; the signature's range (empty where one goes) becomes the editor's tracked range. Not an edit.
+- **`account_signature`** / **`signature_entry`** (private) — the signature the From account puts in this message; a saved one by id.
+- **`use_signature`** (private) — replaces the tracked range with signature `id`'s document (`None` empties it); into an empty range with the room of `signature_insertion`; the caret stays (`caret_after_replace`). One undoable edit.
+- **`shown_signature`** (private) — the signature the picker checks: the one inserted, while its range isn't empty.
+- **`set_signatures`** (pub(crate)) — replaces the saved signatures offered; the body keeps its copy.
+- **`toggle_signature_menu`** / **`pick_signature`** / **`manage_signatures`** (private) — the toolbar's signature menu; picking uses it and focuses the body; "Manage signatures…" opens Settings ▸ Signatures (deferred, through root).
+- **`render_signature_picker`** (private) — Gmail's "Insert signature": `IconName::Signature` button left of Attach, a `ContextMenu` above it (No signature, each saved one, ✓ on `shown_signature`, Manage signatures…).
 
 - **`set_white_background`** (pub(crate), L340) — updates the cached pref and notifies on change.
 
@@ -532,9 +544,9 @@ window.
 
 - **`toggle_cc_bcc`** (private, L359) — flips Cc/Bcc row visibility.
 
-- **`toggle_from_menu`** / **`close_from_menu`** (private, L364/L369) — open/close the From picker (never opens without accounts).
+- **`toggle_from_menu`** / **`close_from_menu`** (private, L364/L369) — open/close the From picker (never opens without accounts); closing also closes the signature menu and the format bar's dropdown.
 
-- **`select_from_account`** (private, L375) — sets the From index (when in range), clears the banner, closes the picker.
+- **`select_from_account`** (private, L375) — sets the From index (when in range), clears the banner, closes the picker; a new account swaps the body's signature for its own (`use_signature`) when the signature follows the account and differs, as in Gmail.
 
 - **`selected_account`** (private, L383) — the chosen `ComposeAccount`, if any.
 
@@ -568,7 +580,7 @@ window.
 
 - **`sync_title`** (private, L578) — sets the platform title to `title_for_subject` when it changed (follows subject edits and language).
 
-- **`render_toolbar`** (private, L586) — Discard (trash), spacer, "Loading attachments…" while reads run, Attach, Send (dimmed and inert unless `can_send_now`).
+- **`render_toolbar`** (private, L586) — Discard (trash), the `FormatBar`, "Loading attachments…" while reads run, the signature picker, Attach, Send (dimmed and inert unless `can_send_now`).
 
 - **`render_header`** (private, L640) — From picker row, To row (+ Cc/Bcc toggle), optional Cc/Bcc rows, Subject row, each with its inline error.
 
@@ -591,7 +603,7 @@ window.
 ##### Context: `Render for ComposeView`
 
 - **`render`** (private, L970)
-  - Behavior: Defers `root.sync_compose_window_bounds` when bounds changed; syncs menus and title; root has `key_context("ComposeView")`, actions `ComposeSend`/`ComposeAttach`/`ComposeDiscard`/`ComposeClose`, file drop target (`drag_over` highlight + `on_drop::<ExternalPaths>` → `attach_paths`); lays out header, chips, body, banner, toolbar, plus a full-window click catcher while the From picker is open.
+  - Behavior: Defers `root.sync_compose_window_bounds` when bounds changed; syncs menus and title; root has `key_context("ComposeView")`, actions `ComposeSend`/`ComposeAttach`/`ComposeDiscard`/`ComposeClose`, file drop target (`drag_over` highlight + `on_drop::<ExternalPaths>` → `attach_paths`); lays out header, chips, body, banner, toolbar, plus a full-window click catcher while the From picker, the signature menu or a format dropdown is open.
 
 ##### Tests (`#[cfg(test)]`)
 
@@ -599,6 +611,64 @@ window.
 - `account_index_prefers_requested_then_sending_account`, `account_label_shows_name_and_email`, `initial_focus_is_body_for_replies_and_to_otherwise` — From choice and focus.
 - `build_draft_maps_fields_and_reply_headers`, `build_draft_reports_invalid_tokens_per_field`, `build_draft_requires_a_recipient_and_a_sending_account`, `compose_errors_field_mut_targets_the_field`, `invalid_address_message_is_localized` — validation contract.
 - `read_attachments_reads_files_and_reports_failures`, `merge_attachments_enforces_cap`, `attachment_name_uses_file_name`, `attachment_error_message_combines_parts`, `attachment_limit_is_25_mb` — attachments contract.
+- Signatures (helpers `signed_database`, `composing_signed`, `body_text`): `a_new_message_is_signed_and_takes_the_signature_of_its_from` (signed after a blank line, not an edit; From swaps it, caret kept; picker removes and re-adds), `a_reply_is_signed_above_its_quote_and_sends_the_images` (`cid:` before `gmail_quote`, image sent, left out of the plain text), `a_forward_is_signed_above_the_forwarded_message`, `an_edited_unsent_message_keeps_its_own_signature`.
+
+### `src/format_bar.rs`
+
+The formatting toolbar of a rich editor (moved out of `compose`), shared by the
+compose window and the signature editor.
+
+- **const `MAX_IMAGE_WIDTH`** (pub) — 600 CSS px, widest an image goes in at.
+- **`family_label`** (pub(crate)) — menu name of a `FontFamily` (localized generic families; font names as they are).
+- **enum `FormatMenu`** (private) — `Font | Size | Color | Align`, the open dropdown.
+- **enum `ImageError`** (pub) — `TooLarge(limit)`, `Unsupported`, `Unreadable(detail)`; **`message(language)`** localized (`FormatImageTooLarge` + `human_size`, `FormatImageUnsupported`, `FormatImageUnreadable: detail`).
+- **`read_inline_image`** (pub) — `fn read_inline_image(path: &Path, max_bytes: usize) -> Result<InlineImage, ImageError>`: size from metadata first, then reads and calls `inline_image` with the file name.
+- **`inline_image`** (pub) — `fn inline_image(name: String, data: Vec<u8>, max_bytes: usize) -> Result<InlineImage, ImageError>`: PNG, JPEG or GIF only (every mail client shows them; Outlook doesn't show WebP), by content (`image::guess_format`), dimensions from the header, `shown_size`.
+- **`shown_size`** (private) — `width`×`height` narrowed to `MAX_IMAGE_WIDTH`, proportions kept.
+- **enum `FormatBarEvent`** (pub) — `ImageFailed(String)` (localized).
+- **struct `FormatBar`** (pub) — `editor: Entity<TextArea>`, `menu`, `max_image_bytes`, the image task, an observation of the editor (re-renders with its caret).
+  - **`new(editor, max_image_bytes, cx)`** (pub); **`menu_open`** / **`close_menu`** (pub): for the owner's click catcher.
+  - **`pick_image`** (private): file picker (one file), `read_inline_image` on the background executor, then **`finish_image`** (private): `TextArea::insert_image` and focus, or `ImageFailed`.
+  - **`format_body`** / **`toggle_format_menu`** (private): run a formatting command on the editor and keep typing there; open/close a dropdown.
+  - **`render_bar`** (private): undo, redo, font, size, B/I/U, color, align, numbered/bullet lists, indent less/more, Insert image (`IconName::Image`), one row that wraps. **`render_style_button`**, **`render_menu_button`**, **`format_dropdown`** (above its button: the bars sit under their text), **`format_menu_of`**, **`render_font_picker`**, **`render_size_picker`**, **`render_align_picker`**, **`render_color_picker`** (private): its parts.
+- Tests: `every_font_has_a_distinct_label`, `an_image_goes_in_at_its_size_up_to_a_mail_width`, `an_image_mail_clients_cant_show_or_too_big_is_refused`, `a_picked_file_is_read_with_its_name`, `image_errors_read_as_sentences`.
+
+### `src/signatures.rs`
+
+Which signature a message gets and where it goes (GPUI-free). Decided from
+Gmail: per account one for new mail and one for replies/forwards; inserted
+in the editor after what is written and before the quote, without the `-- `
+line ("Insert this signature before quoted text in replies and remove the
+'--' line").
+
+- **struct `SignatureEntry { id, name, document: RichDocument }`** (pub); **`from_row`** (pub): a storage row read back (`read_document`).
+- **`document_json`** / **`read_document`** (pub): a document's stored JSON; reading one that fails or doesn't validate gives an empty document (a damaged signature never blocks a message).
+- **enum `SignatureSlot`** (pub) — `NewMail | Reply` (replies and forwards).
+- **`account_signature(account, slot)`** (pub) — the `ComposeAccount`'s choice.
+- **`signature_offset(text, forward)`** (pub) — end of the text (the quote isn't in the editor), or after the leading line breaks of a forward (above the forwarded message).
+- **`signature_insertion(text, at, signature)`** (pub) — the document to insert at `at` (a blank line before it and a line to type on at the start; a blank line after it when text follows) and the signature's range in it.
+- **`body_with_signature(text, forward, signature)`** (pub) — the body document and the signature's range; without one (or an empty one), the text and the empty range where one goes.
+- **`caret_after_replace(caret, replaced, inserted_len)`** (pub) — the caret stays before, moves with the text after, goes to the start from inside.
+- **`new_signature_name(template, existing)`** (pub) — `template` with `{n}` numbered after the existing ones, skipping a taken name.
+- Tests: `new_mail_and_replies_take_their_own_signature`, `the_signature_follows_a_blank_line_with_a_line_above_to_type_on`, `a_forward_is_signed_above_the_forwarded_message`, `without_a_signature_the_place_for_one_is_kept`, `a_signature_added_later_gets_the_same_room`, `a_signature_brings_its_images`, `the_caret_stays_out_of_a_replaced_signature`, `a_new_signature_is_numbered_after_the_others`.
+
+### `src/signature_settings.rs`
+
+Settings ▸ Signatures (Gmail's signature settings).
+
+- **const `SAVE_DELAY`** (private) — 400 ms after the last edit before it saves.
+- **const `SIGNATURE_IMAGE_LIMIT_BYTES`** (pub) — 1 MB per image: a signature goes out with every message.
+- **const `EDITOR_MIN_LINES`** (private) — 5.
+- **struct `SignaturesPage`** (pub(crate)) — the saved signatures, the selected one, its name `TextInput`, its `TextArea` + `FormatBar` (in a scroll box), the last image error, the pending save, the open defaults dropdown. Created by `SettingsView` on first show.
+  - **`new`** (pub(crate)): editors, subscriptions (name/editor edits → `schedule_save`; `ImageFailed` → message), and `on_release` saving what waits (deferred through root) when the window closes; selects the first signature.
+  - **`reload`** (private): `RootView::signatures`.
+  - **`select`** (private): saves the shown one, then loads `id`'s name and document (not edits).
+  - **`create`** (private): saves, `RootView::create_signature` named `new_signature_name(Key::SignatureDefaultName)`, selects it and selects its name to type over.
+  - **`confirm_delete`** / **`delete`** (private): `window.prompt` (`SignatureDeleteConfirm`, `SignatureDeleteDetail`), then `RootView::delete_signature` (pending edits dropped), selecting the first left.
+  - **`schedule_save`** / **`save_now`** / **`edited_signature`** (private): debounced save through `RootView::save_signature`; a blank name keeps the old one.
+  - **`toggle_defaults_menu`** / **`close_menus`** / **`set_default`** (private): the defaults dropdowns; setting one keeps the account's other choice (`RootView::set_account_signatures`).
+  - **`render_list`**, **`render_editor`** (name field via `settings::input_box`, editor box with the bar under the text, error, Delete), **`render_defaults`** (accounts that can send: name, address, two pickers), **`render_default_picker`** (private). `Render`: hint, list, New signature, editor, defaults, and a click catcher while a dropdown is open.
+- Tests (helper `page`): `a_new_signature_is_named_and_saves_its_edits` (debounced save, blank name kept, switching saves at once), `each_account_picks_its_signatures_and_deleting_one_clears_them`.
 
 
 ### `src/config.rs`
@@ -1139,7 +1209,7 @@ Message dates in the local zone (chrono `clock`); the formatting core takes expl
 - **`Key`** (pub, L38)
   - Signature: `pub enum Key { … }` (66 UI string keys)
   - Purpose: Typed catalog of translatable UI chrome strings.
-  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`), plain-text fallback notices (`NoticeTooDeep`, `NoticeCrashed`), status strings, Settings ▸ Accounts (`Account*`: form labels, provider notes, health, errors), `NotificationsHint`, Settings ▸ General ▸ Updates (`Updates*`, `{version}` placeholders filled by `auto_update_ui::status_text`) and the status bar's `StatusUpdate*`.
+  - Behavior: Each variant maps to per-language text via `tr`; covers mailboxes, settings (incl. the Privacy note on blocked remote images), toolbar, commands, compose, the reader context menu (`CtxCopy`, `CtxSelectAll`, `CtxOpenLink`, `CtxCopyLink`), the find bar (`FindPlaceholder`, `FindMatches` "{} of {}", `FindNoMatches`), plain-text fallback notices (`NoticeTooDeep`, `NoticeCrashed`), status strings, Settings ▸ Accounts (`Account*`: form labels, provider notes, health, errors), `NotificationsHint`, Settings ▸ General ▸ Updates (`Updates*`, `{version}` placeholders filled by `auto_update_ui::status_text`), the status bar's `StatusUpdate*`, Settings ▸ Signatures (`SettingsSignatures`, `Signature*`: `SignatureDefaultName` has `{n}`, `SignatureDeleteConfirm` has `{}`), the compose signature menu (`ComposeSignature`, `ComposeManageSignatures`) and Insert image (`FormatImage*`).
 
 - **`GlobalLanguage`** (private, L332)
   - Signature: `struct GlobalLanguage(Language)`
@@ -1857,7 +1927,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
   - Signature: `pub(crate) fn open_compose_with(&mut self, init: Option<ComposeInit>, _window, cx: &mut Context<Self>)`
   - Guard: a message being written (`has_edits`) is never replaced by `init`: the window is activated and `Key::StatusComposeBusy` shown instead.
   - Purpose: Opens the compose window, optionally prefilled (reply / reply all / forward).
-  - Behavior: New windows carry `app_id: COMPOSE_WINDOW_APP_ID`. When a compose window is open, hands a `Some(init)` to it via `ComposeView::apply_init` and activates it. Otherwise opens a window with persisted bounds, the localized title and `ComposeView::new(self.compose_accounts(), root, compose_white_background, init, window, cx)`; `on_window_should_close` notifies `on_compose_window_closed`.
+  - Behavior: New windows carry `app_id: COMPOSE_WINDOW_APP_ID`. When a compose window is open, refreshes its contacts, accounts and signatures, hands a `Some(init)` to it via `ComposeView::apply_init` and activates it. Otherwise opens a window with persisted bounds, the localized title and `ComposeView::new(self.compose_accounts(), contacts, self.signatures(), root, compose_white_background, init, window, cx)`; `on_window_should_close` notifies `on_compose_window_closed`.
 
 - **`select_mailbox`** (private, L1780)
   - Signature: `fn select_mailbox(&mut self, selection: Selection, cx: &mut Context<Self>)`
@@ -2015,7 +2085,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`is_actual_size`** / **`RootView::reader_zoom_of`** / **`remember_reader_zoom`** / **`set_reader_zoom`** / **`step_reader_zoom`** (private): the per-message page zoom: whether a zoom is 100%; a message's zoom (1 without an entry); recording one (100% drops the entry); setting the open message's (touches the view only when `reader_document` is that message, so a build in flight leaves the previous message alone); stepping it through `zoom_step`. `reader_document` is set from `BuiltReader::message` in `install_reader` and names who a `ZoomChanged` belongs to, since the selection moves first.
 - **`reader_zoom_icon`** (private): the zoom button's magnifier: `ZoomOut` below 100%, else `ZoomIn`.
 - **`ReaderZoomMenu`** / **`open_reader_zoom_menu`** / **`close_reader_zoom_menu`** / **`render_reader_zoom`** / **`render_reader_zoom_step`** / **`render_reader_zoom_menu`** (private): the zoom `IconButton` at the right end of the subject row, after the privacy shield's slot (only when not 100% or while its popover is open; tooltip `status_zoom`; overhangs the row so its icon lines up with the date) and its popover (holds the focus, returning it on close): `zoom_percent`, −/+ (dead at the end of the levels) and Reset, closed by Escape, a mouse-down outside, Reset, and by `sync_reader` when another message shows or the command palette or folder dialog opens.
-- **`open_mailto`** (`pub(crate)`): prefilled compose from a `mailto:` link, through `open_compose_with`.
+- **`open_mailto`** (`pub(crate)`): prefilled compose from a `mailto:` link (signed as new mail), through `open_compose_with`.
 - **`request_delete`** (`pub(crate)`) / **`confirm_delete_forever`** / **`delete_row_message`** (private): Delete from anywhere: to the Trash, or for good, confirmed, for what is already there.
 - **`short_recipient`** / **`unique_recipients`** (private, `root`): the reader's recipients line, as in Gmail. Each name is muted and turns to the default text color under the pointer (`hovered_recipient`, set by **`hover_recipient`**, which a name left behind doesn't clear for the next; a GPUI hover style can't recolor text, laid out before the hover is known); its tooltip has the address.
 - **`set_account_names`** (`pub(crate)`) / **`begin_names_edit`** / **`save_names`** (`settings`, private): editing an account's names.
@@ -2339,8 +2409,10 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 - **`run_message_action(cx, action)`** (private): runs a `mail_sync::actions` function on the selected message (an error, e.g. "database is locked", becomes a `StatusActionFailed: {error}` status note), reloads the list; see `apply_message_action` for the selection.
 - **`toggle_message_read(cx)`** (pub(crate)): read ↔ unread for the selected message (stays selected).
 - Message actions `restore_message`, `archive_message`, `mark_message_junk`, `toggle_message_flag`, `move_message_to_folder` go through `run_message_action`, and `delete_message_to_trash` and the permanent deletion through `delete_selection` (local change now, server op queued).
-- **`compose_accounts()`** (pub(crate)): `ComposeAccount`s (sending accounts first; local ones `can_send = false`).
-- **`reply_to_selected(kind, window, cx)`** (pub(crate)): parses the stored raw message (or `parsed_from_detail`), builds a `mail_core::prepare_reply` draft with localized quote labels (`locale::reply_attribution`, `Key::Quote*`, `Key::ForwardHeader`), carries attachments on forward, opens compose with it. A forward of a message with only headers asks for the body and shows `Key::StatusForwardNeedsBody` instead.
+- **`compose_accounts()`** (pub(crate)): `ComposeAccount`s (sending accounts first; local ones `can_send = false`), with each account's `signature_new` / `signature_reply`.
+- **`signatures()`** (pub(crate)): the saved signatures as `SignatureEntry`s, read from the database when asked (a message opening, the settings page), never at startup.
+- **`create_signature(name)`** / **`save_signature(id, name, document)`** / **`delete_signature(id)`** / **`set_account_signatures(account_id, new_mail, replies)`** (pub(crate)): the signature catalog and each account's choice, through `storage`; then **`after_signature_change`** (private) rereads the accounts (minus those being removed) and hands accounts and signatures to an open compose window (its body keeps its copy); a failure is a status note (`SignatureSaveFailed: error`).
+- **`reply_to_selected(kind, window, cx)`** (pub(crate)): parses the stored raw message (or `parsed_from_detail`), builds a `mail_core::prepare_reply` draft with localized quote labels (`locale::reply_attribution`, `Key::Quote*`, `Key::ForwardHeader`), carries attachments on forward, opens compose with it (`signature: Some(SignatureSlot::Reply)`, `forward` for a forward). A forward of a message with only headers asks for the body and shows `Key::StatusForwardNeedsBody` instead.
 - **`send_draft(account_id, draft, replaces_outgoing, cx)`** (pub(crate)): refuses local accounts / no recipients (localized errors), builds the RFC 822 message (`new_message_id` + `unique_token`, `build_message`), then queues it and wakes the worker. With `replaces_outgoing` (an edited unsent message) queueing is `replace_outgoing`, atomic with removing the original; when the original was retried meanwhile nothing is queued and `ComposeOriginalSending` is returned, so both can't go out.
 - **`open_settings_section(section, window, cx)`** (pub(crate)): focuses the open settings window on `section`, or opens a new one **deferred** (`cx.defer`) — the settings view reads `RootView` while rendering and GPUI renders a new window synchronously, which would re-enter the entity being updated (panic found in the GUI run). The settings window carries `app_id: WINDOW_APP_ID`.
 - **`render_recipients(message, cx)`** (private): "To:"/"Cc:" lines under the sender (hidden when empty).
@@ -2352,7 +2424,7 @@ Desktop notifications for new mail through `notify-rust` (D-Bus / macOS / WinRT 
 
 ### `src/settings.rs`
 
-Settings window (General, Accounts, Appearance, Notifications, Privacy).
+Settings window (General, Accounts, Signatures, Appearance, Notifications, Privacy).
 Accounts and preferences live in `RootView`; this view reads them through a
 weak handle and re-renders when the root notifies. Network work (discovery,
 login tests, Google sign-in) runs on the background executor; decisions are
@@ -2361,7 +2433,7 @@ in `account_setup`.
 #### Types / constants
 
 - **consts `DISCOVERY_DELAY`** (600 ms debounce after the last e-mail keystroke), **`DISCOVERY_TIMEOUT`** (8 s per autoconfig request), **`OAUTH_TIMEOUT`** (5 min browser sign-in).
-- **enum `SettingsSection`** (pub(crate)): General, Accounts, Appearance, Notifications, Privacy; `ALL` in nav order.
+- **enum `SettingsSection`** (pub(crate)): General, Accounts, Signatures, Appearance, Notifications, Privacy; `ALL` in nav order. Signatures renders `signature_settings::SignaturesPage`, kept in `SettingsView::signatures_page` (created on first show).
 - **struct `AccountForm`** (private): the inline "Add account" form — `TextInput`s (name, e-mail, masked password, IMAP/SMTP host+port, username), IMAP/SMTP `Security`, `show_manual`, `manual_edited` (user typed in a server field → discovery stops overwriting), `gmail_app_password` (Gmail over IMAP instead of Google sign-in), cached `google_client` (`oauth_provider("google")`), discovery `discovery_seq`/`looking_up`/task, `checking` + connect task, current `FailureMessage`, input subscriptions.
 - **enum `OAuthTarget`** (private): `NewAccount` or `Account(id)` (re-sign-in).
 - **struct `OAuthFlow`** (private): running sign-in — target, `CancelToken`, `user_cancelled`, finish + browser-opener tasks. Only one at a time (it owns a loopback port).
@@ -2372,7 +2444,7 @@ in `account_setup`.
 ##### Context: `SettingsSection`
 
 - **`title_key`** (private): locale key of the section title.
-- **`icon`** (private): nav icon (Settings/Account/Palette/Flag/Shield).
+- **`icon`** (private): nav icon (Settings/Account/Signature/Palette/Flag/Shield).
 
 ##### Context: `AccountForm`
 
@@ -2421,7 +2493,7 @@ in `account_setup`.
 ##### Context: `module`
 
 - **`settings_row(label, value)`** (private): muted label / value row.
-- **`input_box(input, window, cx)`** (private): bordered field box; border follows focus.
+- **`input_box(input, window, cx)`** (pub(crate)): bordered field box; border follows focus (also the signature name field).
 - **`labeled_field(label, input, window, cx)`** (private): small muted caption above an `input_box`.
 - **`security_picker(imap, selected, language, cx)`** (private): TLS / STARTTLS / None segmented buttons → `set_security`.
 - **`badge_element(label, cx)`** (private): provider badge.
