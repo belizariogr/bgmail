@@ -31,16 +31,20 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     actions, fill, point, px, relative, size, App, AvailableSpace, Bounds, ClipboardItem, Context,
-    CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
+    Corners, CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, GlobalElementId, Hsla,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels,
-    Point, Render, ScrollHandle, SharedString, Style, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window, WrappedLine,
+    Point, Render, RenderImage, ScrollHandle, SharedString, Size, Style, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
-use rich::{Align, CharStyle, FontFamily, Format, ListKind, ParaStyle, RichText, TextSize};
+use rich::{
+    Align, CharStyle, FontFamily, Format, InlineImage, ListKind, ParaStyle, RichDocument, RichText,
+    TextSize, IMAGE_CHAR,
+};
 use theme::ActiveTheme;
 
 use crate::prelude::*;
@@ -268,6 +272,18 @@ struct LineGeometry {
     top: Pixels,
     /// List marker, drawn left of its text.
     marker: Option<SharedString>,
+    /// The image an image line shows instead of text.
+    image: Option<LineImage>,
+}
+
+/// The image of an image line, placed.
+#[derive(Clone, Debug)]
+struct LineImage {
+    image: InlineImage,
+    /// Offset of its character in the text.
+    start: usize,
+    /// Where it is drawn, relative to the element origin.
+    bounds: Bounds<Pixels>,
 }
 
 /// Shaped lines + visual rows of the last layout, shared between the
@@ -287,6 +303,28 @@ struct TextLayout {
     measured_without_width: bool,
     /// Resolved once: fonts installed don't change while the app runs.
     families: Option<Families>,
+    /// Images decoded for painting, by [`InlineImage::id`]; `None` when one can't be.
+    decoded: HashMap<u64, Option<Arc<RenderImage>>>,
+}
+
+/// Size `image` shows at: its own, narrowed to `available` keeping its proportions.
+fn image_size(image: &InlineImage, available: Option<Pixels>) -> Size<Pixels> {
+    let (width, height) = (image.width as f32, image.height as f32);
+    let scale = available.map_or(1.0, |available| {
+        (f32::from(available) / width).clamp(0.0, 1.0)
+    });
+    size(px(width * scale), px((height * scale).max(1.0)))
+}
+
+/// `data` as the BGRA image GPUI paints, first frame only.
+fn decode_image(data: &[u8]) -> Option<Arc<RenderImage>> {
+    let mut pixels = image::load_from_memory(data).ok()?.into_rgba8();
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Some(Arc::new(RenderImage::new(smallvec::smallvec![
+        image::Frame::new(pixels)
+    ])))
 }
 
 /// Runs of `range` of the text: its styles over the key's font and color, with
@@ -444,16 +482,25 @@ impl TextLayout {
             let width = key
                 .wrap_width
                 .map(|width| (width - left).max(px(MIN_WRAP_WIDTH)));
-            let runs = line_runs(&key, &rich, start..start + content.len(), &families);
+            let range = start..start + content.len();
+            let image = rich.line_image(&text, range.clone()).cloned();
+            // An image line keeps its character's length, shaped as blanks it never paints.
+            let (shaped_text, runs) = match &image {
+                Some(_) => (
+                    SharedString::from(" ".repeat(content.len())),
+                    vec![TextRun {
+                        len: content.len(),
+                        ..styled_run(&key, &CharStyle::default(), &families)
+                    }],
+                ),
+                None => (
+                    SharedString::from(content.to_string()),
+                    line_runs(&key, &rich, range.clone(), &families),
+                ),
+            };
             let line = window
                 .text_system()
-                .shape_text(
-                    SharedString::from(content.to_string()),
-                    font_size,
-                    &runs,
-                    width,
-                    None,
-                )
+                .shape_text(shaped_text, font_size, &runs, width, None)
                 .ok()
                 .and_then(|shaped| shaped.into_iter().next());
             start += content.len() + 1;
@@ -468,6 +515,26 @@ impl TextLayout {
                 })
                 .collect();
             let row_count = wraps.iter().filter(|&&w| w > 0 && w < line.len()).count() + 1;
+            let image = image.map(|image| {
+                let shown = image_size(&image, width);
+                let free = width.map_or(Pixels::ZERO, |width| {
+                    (width - shown.width).max(Pixels::ZERO)
+                });
+                let x = left
+                    + match para.align {
+                        Align::Left => Pixels::ZERO,
+                        Align::Center => free / 2.,
+                        Align::Right => free,
+                    };
+                LineImage {
+                    image,
+                    start: range.start,
+                    bounds: Bounds::new(point(x, top), shown),
+                }
+            });
+            let line_height = image.as_ref().map_or(line_height, |image| {
+                image.bounds.size.height.max(line_height)
+            });
             for row in 0..row_count {
                 row_tops.push(top + line_height * row as f32);
             }
@@ -483,6 +550,7 @@ impl TextLayout {
                 line_height,
                 top,
                 marker: rich.list_marker(ix).map(SharedString::from),
+                image,
             });
             rows_input.push((line.len(), wraps));
             top += line_height * row_count as f32;
@@ -494,7 +562,10 @@ impl TextLayout {
         self.max_width = lines
             .iter()
             .zip(&geometry)
-            .map(|(line, geometry)| line.width() + geometry.left)
+            .map(|(line, geometry)| match &geometry.image {
+                Some(image) => image.bounds.right(),
+                None => line.width() + geometry.left,
+            })
             .fold(Pixels::ZERO, Pixels::max);
         self.lines = lines;
         self.geometry = geometry;
@@ -538,6 +609,9 @@ impl TextLayout {
         else {
             return Pixels::ZERO;
         };
+        if let Some(image) = &geometry.image {
+            return image.bounds.left();
+        }
         let layout = &line.unwrapped_layout;
         let row_width = layout.x_for_index(row.range.end - row.line_start)
             - layout.x_for_index(row.range.start - row.line_start);
@@ -560,9 +634,34 @@ impl TextLayout {
         let Some(line) = self.lines.get(row.line) else {
             return Pixels::ZERO;
         };
+        if let Some(image) = self.line_image(row.line) {
+            return if offset > row.line_start {
+                image.bounds.right()
+            } else {
+                image.bounds.left()
+            };
+        }
         let layout = &line.unwrapped_layout;
         self.row_left(row_ix) + layout.x_for_index(offset.saturating_sub(row.line_start))
             - layout.x_for_index(row.range.start - row.line_start)
+    }
+
+    fn line_image(&self, line: usize) -> Option<&LineImage> {
+        self.geometry
+            .get(line)
+            .and_then(|geometry| geometry.image.as_ref())
+    }
+
+    /// Offset of the image under `position` (relative to the element origin).
+    fn image_at_point(&self, position: Point<Pixels>) -> Option<usize> {
+        if self.showing_placeholder() {
+            return None;
+        }
+        self.geometry
+            .iter()
+            .filter_map(|geometry| geometry.image.as_ref())
+            .find(|image| image.bounds.contains(&position))
+            .map(|image| image.start)
     }
 
     /// Caret position of `offset`, relative to the element origin.
@@ -582,6 +681,13 @@ impl TextLayout {
         let Some(line) = self.lines.get(row.line) else {
             return text.len();
         };
+        if let Some(image) = self.line_image(row.line) {
+            return if x < image.bounds.left() + image.bounds.size.width / 2. {
+                row.line_start
+            } else {
+                row.range.end
+            };
+        }
         let layout = &line.unwrapped_layout;
         let row_x = layout.x_for_index(row.range.start - row.line_start);
         let x = (x - self.row_left(row_ix)).max(Pixels::ZERO);
@@ -767,9 +873,97 @@ impl TextArea {
         }
     }
 
-    /// The text as e-mail HTML, when anything is formatted.
+    /// The text as e-mail HTML, when anything is formatted; images as `data:` URIs.
     pub fn formatted_html(&self) -> Option<String> {
         (!self.rich.is_plain()).then(|| self.rich.to_html(self.buffer.text()))
+    }
+
+    /// The text as e-mail HTML, when anything is formatted, each image's `src` from
+    /// `image_src` (a `cid:` of the mail).
+    pub fn formatted_html_with(
+        &self,
+        image_src: impl Fn(&InlineImage) -> String,
+    ) -> Option<String> {
+        (!self.rich.is_plain()).then(|| self.rich.to_html_with(self.buffer.text(), image_src))
+    }
+
+    /// The images the text shows, each once, in order.
+    pub fn images(&self) -> Vec<InlineImage> {
+        self.rich.images_used().into_iter().cloned().collect()
+    }
+
+    /// The text with its formatting.
+    pub fn document(&self) -> RichDocument {
+        RichDocument {
+            text: self.buffer.text().to_owned(),
+            rich: self.rich.clone(),
+        }
+    }
+
+    /// Replaces the text and its formatting, like [`Self::set_content`]: caret at the
+    /// start, history reset, no [`TextAreaEvent::Changed`].
+    pub fn set_document(&mut self, document: RichDocument, cx: &mut Context<Self>) {
+        let document = document.validated();
+        self.set_content(&document.text, cx);
+        self.rich = document.rich;
+    }
+
+    /// Replaces `range` with `document`, formatting and images included, as one step
+    /// that can be undone; the caret goes after it.
+    pub fn replace_range_with_document(
+        &mut self,
+        range: Range<usize>,
+        document: &RichDocument,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.buffer.text();
+        let start = buffer::clamp_to_char_boundary(text, range.start.min(range.end));
+        let end = buffer::clamp_to_char_boundary(text, range.end.max(range.start));
+        let document = document.clone().validated();
+        if start == end && document.is_empty() {
+            return;
+        }
+        let before_text = text.to_owned();
+        let before_rich = self.rich.clone();
+        self.buffer
+            .replace(Some(start..end), &document.text, EditKind::Other);
+        self.buffer.take_single_edit();
+        let tracked = self.rich.tracked();
+        let after = self.rich.splice(&before_text, start..end, &document);
+        if after != self.buffer.text() {
+            // Can't happen with a validated document; never style the wrong bytes.
+            self.rich = RichText::new(self.buffer.text());
+            self.rich.set_tracked(tracked);
+        }
+        self.push_rich_undo(before_rich);
+        self.format_revision += 1;
+        self.after_move(cx);
+        cx.emit(TextAreaEvent::Changed);
+    }
+
+    /// Inserts `image` on its own line at the caret, in place of the selection.
+    pub fn insert_image(&mut self, image: InlineImage, cx: &mut Context<Self>) {
+        let selected = self.buffer.selected_range();
+        let text = self.buffer.text();
+        let at_line_start = selected.start == 0 || text.as_bytes()[selected.start - 1] == b'\n';
+        let before = if at_line_start { "" } else { "\n" };
+        let mut document = RichDocument::plain(&format!("{before}{IMAGE_CHAR}\n"));
+        let index = document.rich.add_image(image);
+        let image_range = before.len()..before.len() + IMAGE_CHAR.len_utf8();
+        document
+            .rich
+            .update_chars(image_range, move |style| style.image = Some(index));
+        self.replace_range_with_document(selected, &document, cx);
+    }
+
+    /// The range set with [`Self::set_tracked_range`], as the edits since left it.
+    pub fn tracked_range(&self) -> Option<Range<usize>> {
+        self.rich.tracked()
+    }
+
+    /// Follows `range` through the edits to come (see [`RichText::set_tracked`]).
+    pub fn set_tracked_range(&mut self, range: Option<Range<usize>>) {
+        self.rich.set_tracked(range);
     }
 
     /// The text for the plain-text version of an e-mail: lists and indents
@@ -993,9 +1187,10 @@ impl TextArea {
         let steps = self.buffer.undo_steps();
         let before_text = self.buffer.text().to_owned();
         let before_rich = self.rich.clone();
-        let typed = self
+        let mut typed = self
             .pending_style
             .unwrap_or_else(|| self.rich.style_at(self.buffer.selected_range().start));
+        typed.image = None;
         self.buffer.take_single_edit();
         f(&mut self.buffer);
         if self.buffer.revision() != revision {
@@ -1018,6 +1213,38 @@ impl TextArea {
         if self.buffer.revision() != revision {
             cx.emit(TextAreaEvent::Changed);
         }
+    }
+
+    /// Replaces `range` (the marked text or the selection when `None`) with `text`,
+    /// keeping every image alone on its line. Returns how many bytes went before `text`.
+    fn replace_keeping_images(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        kind: EditKind,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let range = self.buffer.resolve_range(range);
+        let text = buffer::normalize_newlines(text);
+        let (before, after) = self
+            .rich
+            .image_separators(self.buffer.text(), range.clone(), &text);
+        let guarded = format!("{before}{text}{after}");
+        self.edit(cx, |buffer| buffer.replace(Some(range), &guarded, kind));
+        before.len()
+    }
+
+    /// Backspace (`forward == false`) or Delete: the selection, or the grapheme next
+    /// to the caret with the image whose line it would join.
+    fn delete_toward(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some((range, kind)) = self.buffer.deletion(forward) else {
+            return;
+        };
+        let range = match kind {
+            EditKind::Typing => self.rich.deletion_range(self.buffer.text(), range),
+            EditKind::Other => range,
+        };
+        self.replace_keeping_images(Some(range), "", kind, cx);
     }
 
     /// Target of a horizontal move: with a selection, its edge; otherwise
@@ -1192,15 +1419,11 @@ impl TextArea {
     }
 
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit(cx, |buffer| {
-            buffer.backspace();
-        });
+        self.delete_toward(false, cx);
     }
 
     fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit(cx, |buffer| {
-            buffer.delete();
-        });
+        self.delete_toward(true, cx);
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
@@ -1208,7 +1431,7 @@ impl TextArea {
             self.update_paras(|para| para.list = None, cx);
             return;
         }
-        self.edit(cx, |buffer| buffer.replace(None, "\n", EditKind::Typing));
+        self.replace_keeping_images(None, "\n", EditKind::Typing, cx);
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -1233,7 +1456,9 @@ impl TextArea {
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.edit(cx, |buffer| buffer.replace(None, &text, EditKind::Other));
+            // The clipboard has the character of a copied image, not the image.
+            let text = text.replace(IMAGE_CHAR, "");
+            self.replace_keeping_images(None, &text, EditKind::Other, cx);
         }
     }
 
@@ -1250,7 +1475,7 @@ impl TextArea {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.buffer.selected_text().to_owned(),
             ));
-            self.edit(cx, |buffer| buffer.replace(None, "", EditKind::Other));
+            self.replace_keeping_images(None, "", EditKind::Other, cx);
         }
     }
 
@@ -1287,8 +1512,19 @@ impl TextArea {
         cx.stop_propagation();
         self.is_selecting = true;
         let offset = self.offset_for_mouse(event.position);
+        let image = self.last_bounds.and_then(|bounds| {
+            self.layout
+                .borrow()
+                .image_at_point(event.position - bounds.origin)
+        });
         let text = self.buffer.text();
         match event.click_count {
+            // A click on an image selects it, as in Gmail: Delete then removes it.
+            1 if image.is_some() && !event.modifiers.shift => {
+                let start = image.unwrap_or_default();
+                self.buffer
+                    .select_range(start, start + IMAGE_CHAR.len_utf8());
+            }
             2 => {
                 let word = word_range_at(text, offset);
                 self.buffer.select_range(word.start, word.end);
@@ -1385,9 +1621,7 @@ impl EntityInputHandler for TextArea {
             return;
         }
         let range = range_utf16.map(|range| self.range_from_utf16(&range));
-        self.edit(cx, |buffer| {
-            buffer.replace(range, new_text, EditKind::Typing)
-        });
+        self.replace_keeping_images(range, new_text, EditKind::Typing, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -1398,13 +1632,22 @@ impl EntityInputHandler for TextArea {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16.map(|range| self.range_from_utf16(&range));
-        // The selection is relative to `new_text`, so convert within it.
+        let range = self
+            .buffer
+            .resolve_range(range_utf16.map(|range| self.range_from_utf16(&range)));
+        // The selection is relative to `new_text`, so convert within it, past the
+        // line break that keeps an image apart.
+        let new_text = buffer::normalize_newlines(new_text);
+        let (before, after) =
+            self.rich
+                .image_separators(self.buffer.text(), range.clone(), &new_text);
         let selected = new_selected_range_utf16.map(|sel| {
-            offset_from_utf16(new_text, sel.start)..offset_from_utf16(new_text, sel.end)
+            before.len() + offset_from_utf16(&new_text, sel.start)
+                ..before.len() + offset_from_utf16(&new_text, sel.end)
         });
+        let guarded = format!("{before}{new_text}{after}");
         self.edit(cx, |buffer| {
-            buffer.replace_and_mark(range, new_text, selected)
+            buffer.replace_and_mark(Some(range), &guarded, selected)
         });
     }
 
@@ -1550,6 +1793,17 @@ impl Element for TextAreaElement {
         let area = self.area.read(cx);
         let mut layout = area.layout.borrow_mut();
         layout.ensure(key, || area.display_text(), window);
+        let undecoded: Vec<InlineImage> = layout
+            .geometry
+            .iter()
+            .filter_map(|geometry| geometry.image.as_ref())
+            .filter(|image| !layout.decoded.contains_key(&image.image.id()))
+            .map(|image| image.image.clone())
+            .collect();
+        for image in undecoded {
+            // Small and decoded once: a signature's logo, a picture put in the text.
+            layout.decoded.insert(image.id(), decode_image(&image.data));
+        }
 
         if std::mem::take(&mut layout.measured_without_width) {
             // The height was guessed without a width; lay out again now that
@@ -1624,10 +1878,16 @@ impl Element for TextAreaElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus_handle, layout) = {
+        let (focus_handle, layout, selected) = {
             let area = self.area.read(cx);
-            (area.focus_handle.clone(), area.layout.clone())
+            (
+                area.focus_handle.clone(),
+                area.layout.clone(),
+                area.buffer.selected_range(),
+            )
         };
+        let focused = focus_handle.is_focused(window);
+        let image_selection = cx.theme().colors().accent.opacity(0.35);
         window.handle_input(
             &focus_handle,
             ElementInputHandler::new(bounds, self.area.clone()),
@@ -1666,18 +1926,41 @@ impl Element for TextAreaElement {
                     continue;
                 }
                 let origin = point(bounds.left() + geometry.left, y);
-                let align_bounds = geometry
-                    .width
-                    .map(|width| Bounds::new(origin, size(width, height)));
-                line.paint(
-                    origin,
-                    geometry.line_height,
-                    geometry.align,
-                    align_bounds,
-                    window,
-                    cx,
-                )
-                .ok();
+                if let Some(image) = &geometry.image {
+                    let shown = Bounds::new(bounds.origin + image.bounds.origin, image.bounds.size);
+                    if let Some(Some(decoded)) = layout.decoded.get(&image.image.id()) {
+                        window
+                            .paint_image(shown, Corners::default(), decoded.clone(), 0, false)
+                            .ok();
+                    } else {
+                        // What can't be decoded still shows where it is, and can be selected.
+                        window.paint_quad(gpui::outline(
+                            shown,
+                            marker_color.opacity(0.4),
+                            gpui::BorderStyle::Dashed,
+                        ));
+                    }
+                    let image_range = image.start..image.start + IMAGE_CHAR.len_utf8();
+                    if focused
+                        && selected.start <= image_range.start
+                        && selected.end >= image_range.end
+                    {
+                        window.paint_quad(fill(shown, image_selection));
+                    }
+                } else {
+                    let align_bounds = geometry
+                        .width
+                        .map(|width| Bounds::new(origin, size(width, height)));
+                    line.paint(
+                        origin,
+                        geometry.line_height,
+                        geometry.align,
+                        align_bounds,
+                        window,
+                        cx,
+                    )
+                    .ok();
+                }
                 if let Some(marker) = &geometry.marker {
                     let run = TextRun {
                         len: marker.len(),
@@ -1847,6 +2130,140 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().size_full().child(self.0.clone())
         }
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(width, height))
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    fn logo(width: u32, height: u32) -> InlineImage {
+        InlineImage::new("logo.png", "image/png", png(width, height), width, height)
+    }
+
+    #[gpui::test]
+    fn an_image_goes_on_its_own_line_and_out_as_a_cid(cx: &mut gpui::TestAppContext) {
+        let area = area(cx, "ab");
+        area.update(cx, |area, cx| {
+            area.buffer.move_to(1);
+            area.insert_image(logo(4, 2), cx);
+            assert_eq!(area.buffer.text(), format!("a\n{IMAGE_CHAR}\nb"));
+            assert_eq!(area.cursor_offset(), area.buffer.text().len() - 1);
+            let html = area
+                .formatted_html_with(|image| format!("cid:{}", image.name))
+                .unwrap();
+            assert!(
+                html.contains("<img src=\"cid:logo.png\" width=\"4\" height=\"2\""),
+                "{html}"
+            );
+            assert_eq!(area.plain_export(), "a\nb");
+            assert_eq!(area.images().len(), 1);
+            area.undo_step(cx);
+            assert_eq!(area.buffer.text(), "ab");
+            assert_eq!(area.formatted_html(), None);
+            area.redo_step(cx);
+            assert_eq!(area.images().len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn typing_or_deleting_next_to_an_image_keeps_it_alone(cx: &mut gpui::TestAppContext) {
+        let area = area(cx, "");
+        area.update(cx, |area, cx| {
+            area.insert_image(logo(4, 2), cx);
+            assert_eq!(area.buffer.text(), format!("{IMAGE_CHAR}\n"));
+            area.buffer.move_to(IMAGE_CHAR.len_utf8());
+            area.replace_keeping_images(None, "x", EditKind::Typing, cx);
+            assert_eq!(area.buffer.text(), format!("{IMAGE_CHAR}\nx\n"));
+            assert_eq!(area.formatted_html().unwrap().matches("<img").count(), 1);
+            // Backspace at the start of "x" takes the image, not just the break.
+            area.buffer.move_to(IMAGE_CHAR.len_utf8() + 1);
+            area.delete_toward(false, cx);
+            assert_eq!(area.buffer.text(), "x\n");
+            assert!(area.images().is_empty());
+            // Pasted text never carries the character of an image.
+            area.insert_image(logo(4, 2), cx);
+            area.buffer.move_to(0);
+            area.replace_keeping_images(None, "y", EditKind::Other, cx);
+            assert!(area.buffer.text().starts_with(&format!("y\n{IMAGE_CHAR}")));
+        });
+    }
+
+    #[gpui::test]
+    fn documents_round_trip_and_replace_what_is_tracked(cx: &mut gpui::TestAppContext) {
+        let area = area(cx, "");
+        let signature = area.update(cx, |area, cx| {
+            area.insert_image(logo(4, 2), cx);
+            area.buffer.select_all();
+            area.toggle_bold(cx);
+            area.document()
+        });
+        let other = area.update(cx, |area, cx| {
+            area.set_content("Hi\n\nBob", cx);
+            area.toggle_italic(cx);
+            area.document()
+        });
+        area.update(cx, |area, cx| {
+            area.set_document(signature.clone(), cx);
+            assert_eq!(area.document(), signature);
+            assert!(!area.can_undo());
+
+            area.set_content("Hi\n\nBob", cx);
+            area.set_tracked_range(Some(4..7));
+            area.buffer.move_to(0);
+            area.replace_keeping_images(None, "Oh ", EditKind::Typing, cx);
+            assert_eq!(area.tracked_range(), Some(7..10));
+            area.replace_range_with_document(7..10, &signature, cx);
+            assert_eq!(area.buffer.text(), format!("Oh Hi\n\n{IMAGE_CHAR}\n"));
+            assert_eq!(area.images().len(), 1);
+            area.undo_step(cx);
+            assert_eq!(area.buffer.text(), "Oh Hi\n\nBob");
+            assert_eq!(area.tracked_range(), Some(7..10));
+            assert_eq!(other.text, "Hi\n\nBob");
+        });
+    }
+
+    #[gpui::test]
+    fn an_image_paints_and_a_click_selects_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
+        let area = area(cx, "");
+        area.update(cx, |area, cx| {
+            area.insert_image(logo(40, 30), cx);
+            area.buffer.move_to(area.buffer.text().len());
+        });
+        let (_, cx) = cx.add_window_view(|_, _| DragHost(area.clone()));
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| {
+            let layout = area.layout.borrow();
+            let image = layout.line_image(0).expect("an image line");
+            assert_eq!(image.bounds.size, size(px(40.), px(30.)));
+            assert!(layout.row_height(0) >= px(30.));
+            assert!(matches!(layout.decoded.values().next(), Some(Some(_))));
+        });
+        cx.simulate_mouse_down(
+            point(px(10.0), px(10.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| {
+            assert_eq!(area.selected_range(), 0..IMAGE_CHAR.len_utf8());
+        });
+    }
+
+    #[test]
+    fn a_wide_image_narrows_to_the_line() {
+        let image = InlineImage::new("a", "image/png", vec![0], 600, 200);
+        assert_eq!(image_size(&image, Some(px(300.))), size(px(300.), px(100.)));
+        assert_eq!(image_size(&image, Some(px(900.))), size(px(600.), px(200.)));
+        assert_eq!(image_size(&image, None), size(px(600.), px(200.)));
+        assert!(decode_image(b"not an image").is_none());
     }
 
     #[gpui::test]

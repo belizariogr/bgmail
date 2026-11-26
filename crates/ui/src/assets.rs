@@ -90,6 +90,8 @@ icon_assets! {
     (FILE_AUDIO, "icons/file-audio.svg"),
     (FILE_VIDEO, "icons/file-video.svg"),
     (FILE_LINES, "icons/file-lines.svg"),
+    (IMAGE, "icons/image.svg"),
+    (SIGNATURE, "icons/signature.svg"),
 }
 
 /// Asset source that serves the UI crate's embedded SVGs. Register it once with

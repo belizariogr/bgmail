@@ -331,36 +331,20 @@ impl TextBuffer {
         self.marked_range = None;
     }
 
-    /// Deletes the selection, or the grapheme before the caret. Returns whether
-    /// the text changed.
-    pub(crate) fn backspace(&mut self) -> bool {
-        if self.selected_range.is_empty() {
-            let cursor = self.cursor();
-            if cursor == 0 {
-                return false;
-            }
-            let start = previous_grapheme_boundary(&self.text, cursor);
-            self.replace(Some(start..cursor), "", EditKind::Typing);
-        } else {
-            self.replace(None, "", EditKind::Other);
+    /// What Backspace (`forward == false`) or Delete removes: the selection, or the
+    /// grapheme next to the caret (an edit that coalesces with typing). `None` at the
+    /// edge of the text.
+    pub(crate) fn deletion(&self, forward: bool) -> Option<(Range<usize>, EditKind)> {
+        if !self.selected_range.is_empty() {
+            return Some((self.selected_range.clone(), EditKind::Other));
         }
-        true
-    }
-
-    /// Deletes the selection, or the grapheme after the caret. Returns whether
-    /// the text changed.
-    pub(crate) fn delete(&mut self) -> bool {
-        if self.selected_range.is_empty() {
-            let cursor = self.cursor();
-            if cursor == self.text.len() {
-                return false;
-            }
-            let end = next_grapheme_boundary(&self.text, cursor);
-            self.replace(Some(cursor..end), "", EditKind::Typing);
+        let cursor = self.cursor();
+        let range = if forward {
+            cursor..next_grapheme_boundary(&self.text, cursor)
         } else {
-            self.replace(None, "", EditKind::Other);
-        }
-        true
+            previous_grapheme_boundary(&self.text, cursor)..cursor
+        };
+        (!range.is_empty()).then_some((range, EditKind::Typing))
     }
 
     /// Reverts the last edit and restores the selection it started from.
@@ -424,7 +408,8 @@ impl TextBuffer {
         self.revision += 1;
     }
 
-    fn resolve_range(&self, range: Option<Range<usize>>) -> Range<usize> {
+    /// `range`, or the marked range, or the selection, on character boundaries.
+    pub(crate) fn resolve_range(&self, range: Option<Range<usize>>) -> Range<usize> {
         let range = range
             .or_else(|| self.marked_range.clone())
             .unwrap_or_else(|| self.selected_range.clone());
@@ -691,24 +676,34 @@ mod tests {
         assert_eq!(buffer.text(), "ab", "whole composition is one undo step");
     }
 
+    fn press_delete(buffer: &mut TextBuffer, forward: bool) -> bool {
+        match buffer.deletion(forward) {
+            Some((range, kind)) => {
+                buffer.replace(Some(range), "", kind);
+                true
+            }
+            None => false,
+        }
+    }
+
     #[test]
     fn backspace_and_delete_handle_graphemes_and_edges() {
         let mut buffer = buffer("a👍🏽b");
         buffer.move_to(1 + "👍🏽".len());
-        assert!(buffer.backspace());
+        assert!(press_delete(&mut buffer, false));
         assert_eq!(buffer.text(), "ab");
         buffer.move_to(0);
-        assert!(!buffer.backspace());
-        assert!(buffer.delete());
+        assert!(!press_delete(&mut buffer, false));
+        assert!(press_delete(&mut buffer, true));
         assert_eq!(buffer.text(), "b");
         buffer.move_to(1);
-        assert!(!buffer.delete());
+        assert!(!press_delete(&mut buffer, true));
         buffer.select_all();
-        assert!(buffer.backspace());
+        assert!(press_delete(&mut buffer, false));
         assert_eq!(buffer.text(), "");
         buffer.set_text("xy");
         buffer.select_all();
-        assert!(buffer.delete());
+        assert!(press_delete(&mut buffer, true));
         assert_eq!(buffer.text(), "");
     }
 
@@ -733,7 +728,7 @@ mod tests {
     fn typing_coalesces_until_caret_moves() {
         let mut buffer = buffer("");
         type_text(&mut buffer, "abc");
-        buffer.backspace();
+        press_delete(&mut buffer, false);
         type_text(&mut buffer, "d");
         buffer.move_to(0);
         type_text(&mut buffer, "X");
