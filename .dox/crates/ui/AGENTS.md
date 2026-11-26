@@ -77,11 +77,14 @@ an e-mail client, without Zed-scale bloat.
   it alone (`RichText::image_separators`); Backspace/Delete that would join its
   line with text take the image; a click selects it; pasted text drops the
   character. Exported as `<img>` with the `src` the caller gives (`cid:` in a
-  mail, `data:` by default), left out of the plain text. Images decode once per
-  id, first frame only.
+  mail, `data:` by default), left out of the plain text. Images decode on the
+  background executor (never the UI thread), first frame only, turned as their EXIF
+  says and only as big as they show; the ones that leave the text are evicted with
+  their textures.
 - `RichDocument` (text + `RichText`, serde with base64 images) is what an editor
-  saves and inserts: `set_document`, `document`, `replace_range_with_document`
-  (one undoable step). A tracked range (`set_tracked_range`) follows the edits so
+  saves and inserts: `set_document`, `document` (without the images kept only for
+  undo), `replace_range_with_document` (one undoable step that keeps images alone
+  on their lines; programmatic, so no `Changed`). A tracked range (`set_tracked_range`) follows the edits so
   its owner can replace that part later; text typed at its edges stays out.
 - Web and e-mail addresses in the text (`rich::link_ranges`) go out as links and
   show underlined in the theme's `text_accent`, as Gmail's composer does.

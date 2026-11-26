@@ -43,8 +43,9 @@ use crate::locale::{ActiveLanguage, Key, Language};
 use crate::root::{clipped_text, RootView};
 use crate::settings::SettingsSection;
 use crate::signatures::{
-    account_signature, body_with_signature, caret_after_replace, signature_insertion,
-    signature_offset, SignatureEntry, SignatureSlot,
+    account_signature, body_with_signature, caret_after_replace, needs_signature_change,
+    signature_in_body, signature_insertion, signature_offset, SignatureEntry, SignatureInBody,
+    SignatureSlot,
 };
 
 /// Default width of the compose window on first open, in pixels.
@@ -135,8 +136,9 @@ pub struct ComposeInit {
     /// Which of the account's signatures the message starts with; `None` for one
     /// that has its own already (an edited unsent message).
     pub signature: Option<SignatureSlot>,
-    /// A forward: its signature goes above the forwarded message, in the editor.
-    pub forward: bool,
+    /// The editor holds the original (a forward, or a reply whose quote couldn't be
+    /// kept out of it): the signature goes above it.
+    pub quote_in_editor: bool,
 }
 
 /// Width the quoted original is first laid out at, before the real one is known.
@@ -187,6 +189,8 @@ struct ComposeFields {
     body_html: Option<String>,
     /// Images the HTML shows (`cid:` of [`image_content_id`]).
     images: Vec<InlineImage>,
+    /// What makes the images' Content-IDs this message's own.
+    cid_salt: u64,
 }
 
 /// Threading headers carried over from the message being answered.
@@ -299,10 +303,8 @@ pub struct ComposeView {
     /// The signature follows the From account (not for an edited unsent message,
     /// which has its own in its text).
     signature_follows_account: bool,
-    /// A forward: the signature goes above the forwarded message.
-    forward: bool,
-    /// The signature in the body, in the editor's tracked range.
-    signature: Option<i64>,
+    /// The editor holds the original: the signature goes above it.
+    quote_in_editor: bool,
     signature_menu_open: bool,
     /// The quoted original, parsed the first time it is shown.
     quote_view: Option<Entity<HtmlView>>,
@@ -414,8 +416,7 @@ impl ComposeView {
             signatures,
             signature_slot: SignatureSlot::NewMail,
             signature_follows_account: true,
-            forward: false,
-            signature: None,
+            quote_in_editor: false,
             signature_menu_open: false,
             quote_view: None,
             _quote_task: None,
@@ -457,7 +458,7 @@ impl ComposeView {
         };
         self.signature_slot = slot;
         self.signature_follows_account = follows;
-        self.forward = init.forward;
+        self.quote_in_editor = init.quote_in_editor;
         self.signature_menu_open = false;
         // The caret starts at the start: above the signature and a quoted reply.
         self.sign_body(&draft.text, cx);
@@ -598,10 +599,9 @@ impl ComposeView {
             .cloned();
         let (body, range) = body_with_signature(
             text,
-            self.forward,
+            self.quote_in_editor,
             entry.as_ref().map(|entry| &entry.document),
         );
-        self.signature = entry.map(|entry| entry.id);
         self.body.update(cx, |area, cx| {
             area.set_document(body, cx);
             area.set_tracked_range(Some(range));
@@ -614,23 +614,26 @@ impl ComposeView {
             .and_then(|account| account_signature(account, self.signature_slot))
     }
 
+    /// A saved signature with something in it (an empty one signs nothing).
     fn signature_entry(&self, id: i64) -> Option<&SignatureEntry> {
-        self.signatures.iter().find(|entry| entry.id == id)
+        self.signatures
+            .iter()
+            .find(|entry| entry.id == id && !entry.document.is_empty())
     }
 
     /// Puts signature `id` in place of the one in the body (`None` takes it out),
-    /// where it is or, without one, where it goes. The caret stays where it was.
+    /// where it is or, without one, where it goes. The caret stays where it was. Not
+    /// an edit: it loses nothing the user typed.
     fn use_signature(&mut self, id: Option<i64>, cx: &mut Context<Self>) {
         let entry = id.and_then(|id| self.signature_entry(id)).cloned();
-        self.signature = entry.as_ref().map(|entry| entry.id);
-        let forward = self.forward;
+        let quote_in_editor = self.quote_in_editor;
         self.body.update(cx, |area, cx| {
             let text = area.content();
             let range = area
                 .tracked_range()
-                .filter(|range| range.end <= text.len())
+                .filter(|range| text.get(range.clone()).is_some())
                 .unwrap_or_else(|| {
-                    let at = signature_offset(&text, forward);
+                    let at = signature_offset(&text, quote_in_editor);
                     at..at
                 });
             let (insertion, signed) = match &entry {
@@ -644,21 +647,31 @@ impl ComposeView {
                 return;
             }
             let caret = area.cursor_offset();
-            area.replace_range_with_document(range.clone(), &insertion, cx);
-            area.set_tracked_range(Some(range.start + signed.start..range.start + signed.end));
-            area.set_cursor_offset(caret_after_replace(caret, &range, insertion.text.len()), cx);
+            let landed = area.replace_range_with_document(range.clone(), &insertion, cx);
+            area.set_tracked_range(Some(landed.start + signed.start..landed.start + signed.end));
+            let inserted_len = area.content().len() + range.len() - text.len();
+            area.set_cursor_offset(caret_after_replace(caret, &range, inserted_len), cx);
         });
         cx.notify();
     }
 
-    /// The signature the picker checks: the one in the body, while any of it is there.
-    fn shown_signature(&self, cx: &App) -> Option<i64> {
-        self.signature.filter(|_| {
-            self.body
-                .read(cx)
-                .tracked_range()
-                .is_some_and(|range| !range.is_empty())
-        })
+    /// What the body holds where its signature goes.
+    fn signature_in_body(&self, cx: &App) -> SignatureInBody {
+        let area = self.body.read(cx);
+        signature_in_body(&area.content(), area.tracked_range(), &self.signatures)
+    }
+
+    /// Takes the saved form of one edited signature; the body keeps its copy.
+    pub(crate) fn update_signature(&mut self, entry: SignatureEntry, cx: &mut Context<Self>) {
+        match self
+            .signatures
+            .iter_mut()
+            .find(|known| known.id == entry.id)
+        {
+            Some(known) => *known = entry,
+            None => self.signatures.push(entry),
+        }
+        cx.notify();
     }
 
     /// Replaces the saved signatures offered; the body keeps the one it has.
@@ -766,8 +779,13 @@ impl ComposeView {
             let changed = index != self.from_account;
             self.from_account = index;
             self.errors.banner = None;
-            let wanted = self.account_signature();
-            if changed && self.signature_follows_account && wanted != self.signature {
+            let wanted = self
+                .account_signature()
+                .filter(|id| self.signature_entry(*id).is_some());
+            if changed
+                && self.signature_follows_account
+                && needs_signature_change(self.signature_in_body(cx), wanted)
+            {
                 self.use_signature(wanted, cx);
             }
         }
@@ -778,7 +796,8 @@ impl ComposeView {
         self.accounts.get(self.from_account)
     }
 
-    fn fields(&self, cx: &App) -> ComposeFields {
+    /// The editors' content; the body's images named for this message with `cid_salt`.
+    fn fields(&self, cx: &App, cid_salt: u64) -> ComposeFields {
         ComposeFields {
             to: self.to.read(cx).content(cx),
             cc: self.cc.read(cx).content(cx),
@@ -788,8 +807,9 @@ impl ComposeView {
             body_html: self
                 .body
                 .read(cx)
-                .formatted_html_with(|image| format!("cid:{}", image_content_id(image))),
+                .formatted_html_with(|image| format!("cid:{}", image_content_id(image, cid_salt))),
             images: self.body.read(cx).images(),
+            cid_salt,
         }
     }
 
@@ -806,7 +826,8 @@ impl ComposeView {
             return;
         }
         let language = cx.language();
-        let fields = self.fields(cx);
+        let cid_salt = crate::root::unique_token();
+        let fields = self.fields(cx, cid_salt);
         let draft = build_draft(
             self.selected_account(),
             &fields,
@@ -1048,7 +1069,7 @@ impl ComposeView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let menu = self.signature_menu_open.then(|| {
-            let current = self.shown_signature(cx);
+            let held = self.signature_in_body(cx);
             let view = cx.weak_entity();
             let pick = |id: Option<i64>| {
                 let view = view.clone();
@@ -1066,14 +1087,14 @@ impl ComposeView {
             let mut menu = entry(
                 ContextMenu::new(),
                 Key::SignatureNone.tr(language).into(),
-                current.is_none(),
+                held == SignatureInBody::Nothing,
                 None,
             );
             for signature in &self.signatures {
                 menu = entry(
                     menu,
                     signature.name.clone().into(),
-                    current == Some(signature.id),
+                    held == SignatureInBody::Saved(signature.id),
                     Some(signature.id),
                 );
             }
@@ -1777,7 +1798,7 @@ fn build_draft(
         .iter()
         .filter(|_| html.is_some())
         .map(|image| OutgoingInlineImage {
-            content_id: image_content_id(image),
+            content_id: image_content_id(image, fields.cid_salt),
             filename: image.name.clone(),
             mime_type: image.mime_type.clone(),
             data: image.data.to_vec(),
@@ -1803,9 +1824,10 @@ fn build_draft(
     })
 }
 
-/// The Content-ID an image of the body goes out with, as Gmail names them.
-fn image_content_id(image: &InlineImage) -> String {
-    format!("ii_{}@bgmail", image.id())
+/// The Content-ID an image of the body goes out with, named as Gmail's (`ii_…`) and
+/// unique to the message through `salt` (RFC 2045 wants it unique everywhere).
+fn image_content_id(image: &InlineImage, salt: u64) -> String {
+    format!("ii_{salt:x}_{}@bgmail", image.id())
 }
 
 /// Whether a message's body is over the limit for all mail, attachments apart.
@@ -2079,14 +2101,134 @@ mod tests {
                 view.select_from_account(bob_index, cx);
                 assert_eq!(body_text(view, cx), "Hi\n\nBob");
                 assert_eq!(view.body.read(cx).cursor_offset(), 2);
-                assert!(view.fields(cx).body_html.unwrap().contains("<b>Bob</b>"));
+                assert!(view.fields(cx, 1).body_html.unwrap().contains("<b>Bob</b>"));
                 // The picker takes it out and puts one back where it goes.
                 view.use_signature(None, cx);
                 assert_eq!(body_text(view, cx), "Hi\n\n");
-                assert_eq!(view.shown_signature(cx), None);
+                assert_eq!(view.signature_in_body(cx), SignatureInBody::Nothing);
                 view.use_signature(Some(ann_signature), cx);
                 assert_eq!(body_text(view, cx), "Hi\n\nAnn");
-                assert_eq!(view.shown_signature(cx), Some(ann_signature));
+                assert_eq!(
+                    view.signature_in_body(cx),
+                    SignatureInBody::Saved(ann_signature)
+                );
+            })
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn changing_from_on_an_untouched_message_leaves_it_untouched(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let ([ann, bob], _) = signed_database(&path);
+        let init = ComposeInit {
+            account_id: Some(ann),
+            signature: Some(SignatureSlot::NewMail),
+            ..Default::default()
+        };
+        let (compose, cx) = composing_signed(init, &path, cx);
+        compose
+            .update(cx, |view, _, cx| {
+                let bob_index = view.accounts.iter().position(|a| a.id == bob).unwrap();
+                view.select_from_account(bob_index, cx);
+            })
+            .expect("open");
+        cx.run_until_parked();
+        compose
+            .update(cx, |view, _, cx| {
+                assert_eq!(body_text(view, cx), "\n\nBob");
+                assert!(!view.has_edits(), "closing it or a reply mustn't ask");
+            })
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn after_undoing_a_change_of_from_the_next_one_still_signs_right(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let ([ann, bob], [ann_signature, bob_signature, _]) = signed_database(&path);
+        let init = ComposeInit {
+            account_id: Some(ann),
+            signature: Some(SignatureSlot::NewMail),
+            ..Default::default()
+        };
+        let (compose, cx) = composing_signed(init, &path, cx);
+        compose
+            .update(cx, |view, _, cx| {
+                let ann_index = view.accounts.iter().position(|a| a.id == ann).unwrap();
+                let bob_index = view.accounts.iter().position(|a| a.id == bob).unwrap();
+                view.select_from_account(bob_index, cx);
+                view.body.update(cx, |area, cx| area.undo_step(cx));
+                assert_eq!(body_text(view, cx), "\n\nAnn");
+                assert_eq!(
+                    view.signature_in_body(cx),
+                    SignatureInBody::Saved(ann_signature)
+                );
+                // Back on Ann the body has hers; on Bob, his again.
+                view.select_from_account(ann_index, cx);
+                view.select_from_account(bob_index, cx);
+                assert_eq!(
+                    view.signature_in_body(cx),
+                    SignatureInBody::Saved(bob_signature)
+                );
+            })
+            .expect("open");
+    }
+
+    #[gpui::test]
+    fn the_signature_menu_picks_removes_and_leads_to_the_settings(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let ([ann, _], [_, bob_signature, _]) = signed_database(&path);
+        let empty_document = crate::signatures::document_json(&RichDocument::default());
+        let empty = storage::Database::open(&path)
+            .unwrap()
+            .create_signature("Empty", &empty_document)
+            .unwrap();
+        let init = ComposeInit {
+            account_id: Some(ann),
+            signature: Some(SignatureSlot::NewMail),
+            ..Default::default()
+        };
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            crate::locale::init(Language::default(), cx);
+        });
+        let (root, cx) = cx.add_window_view(|_, _| RootView::for_tests(&path));
+        root.update_in(cx, |root, window, cx| {
+            root.open_compose_with(Some(init), window, cx);
+        });
+        cx.run_until_parked();
+        let compose = root
+            .read_with(cx, |root, _| root.compose_window_for_tests())
+            .expect("the compose window opened");
+        compose
+            .update(cx, |view, window, cx| {
+                view.toggle_from_menu(cx);
+                view.toggle_signature_menu(cx);
+                assert!(view.signature_menu_open && !view.from_menu_open);
+                view.pick_signature(Some(bob_signature), window, cx);
+                assert!(!view.signature_menu_open);
+                assert_eq!(body_text(view, cx), "\n\nBob");
+                assert!(view.body.read(cx).focus_handle(cx).is_focused(window));
+                // An empty one signs nothing, as none.
+                view.pick_signature(Some(empty), window, cx);
+                assert_eq!(body_text(view, cx), "\n\n");
+                assert_eq!(view.signature_in_body(cx), SignatureInBody::Nothing);
+                view.toggle_signature_menu(cx);
+                view.manage_signatures(window, cx);
+                assert!(!view.signature_menu_open);
+            })
+            .expect("open");
+        cx.run_until_parked();
+        let settings = root
+            .read_with(cx, |root, _| root.settings_window_for_tests())
+            .expect("the settings opened");
+        settings
+            .update(cx, |view, _, _| {
+                assert_eq!(view.section, SettingsSection::Signatures);
             })
             .expect("open");
     }
@@ -2120,7 +2262,7 @@ mod tests {
                     body_text(view, cx),
                     format!("\n\nThanks\n{}", ui::IMAGE_CHAR)
                 );
-                let fields = view.fields(cx);
+                let fields = view.fields(cx, 7);
                 let draft = build_draft(
                     view.selected_account(),
                     &fields,
@@ -2137,6 +2279,13 @@ mod tests {
                     (image.filename.as_str(), image.data.as_slice()),
                     ("logo.png", &[1, 2, 3][..])
                 );
+                // Named for this message: another one names the same image apart.
+                assert!(
+                    image.content_id.starts_with("ii_7_"),
+                    "{}",
+                    image.content_id
+                );
+                assert_ne!(view.fields(cx, 8).body_html, Some(html.clone()));
                 // The plain version leaves the image out.
                 assert_eq!(draft.text, "\n\nThanks\n\nZoe wrote:\n> Hello");
             })
@@ -2155,7 +2304,7 @@ mod tests {
                 ..Default::default()
             },
             signature: Some(SignatureSlot::Reply),
-            forward: true,
+            quote_in_editor: true,
             ..Default::default()
         };
         let (compose, cx) = composing_signed(init, &path, cx);

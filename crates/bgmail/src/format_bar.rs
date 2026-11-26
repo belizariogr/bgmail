@@ -23,6 +23,10 @@ use crate::locale::{ActiveLanguage, Key, Language};
 /// shows scaled down, its proportions kept.
 pub const MAX_IMAGE_WIDTH: u32 = 600;
 
+/// Most pixels an image put in the text may have: a small file can hold a huge
+/// picture (a decompression bomb), and showing it means decoding it.
+pub const MAX_IMAGE_PIXELS: u64 = 40_000_000;
+
 /// Name of a font in the menu; the fonts' own names aren't translated.
 pub(crate) fn family_label(family: FontFamily, language: Language) -> &'static str {
     match family {
@@ -56,6 +60,8 @@ pub enum ImageError {
     TooLarge(usize),
     /// Not PNG, JPEG or GIF.
     Unsupported,
+    /// More than [`MAX_IMAGE_PIXELS`].
+    TooManyPixels,
     Unreadable(String),
 }
 
@@ -68,6 +74,7 @@ impl ImageError {
                 human_size(*limit as u64, language)
             ),
             ImageError::Unsupported => Key::FormatImageUnsupported.tr(language).to_string(),
+            ImageError::TooManyPixels => Key::FormatImageTooManyPixels.tr(language).to_string(),
             ImageError::Unreadable(detail) => {
                 format!("{}: {detail}", Key::FormatImageUnreadable.tr(language))
             }
@@ -91,8 +98,9 @@ pub fn read_inline_image(path: &Path, max_bytes: usize) -> Result<InlineImage, I
 }
 
 /// `data` as an image of the text: PNG, JPEG or GIF only, which every mail client
-/// shows (Outlook doesn't show WebP), at most `max_bytes`, and at most
-/// [`MAX_IMAGE_WIDTH`] wide.
+/// shows (Outlook doesn't show WebP), at most `max_bytes` and [`MAX_IMAGE_PIXELS`],
+/// at most [`MAX_IMAGE_WIDTH`] wide, sized as it shows once turned as its EXIF says
+/// (a phone's portrait photo is stored on its side).
 pub fn inline_image(
     name: String,
     data: Vec<u8>,
@@ -108,11 +116,33 @@ pub fn inline_image(
         image::ImageFormat::Gif => "image/gif",
         _ => return Err(ImageError::Unsupported),
     };
-    let (width, height) = image::ImageReader::with_format(Cursor::new(&data), format)
-        .into_dimensions()
-        .map_err(|error| ImageError::Unreadable(error.to_string()))?;
+    let unreadable = |error: image::ImageError| ImageError::Unreadable(error.to_string());
+    let mut decoder = image::ImageReader::with_format(Cursor::new(&data), format)
+        .into_decoder()
+        .map_err(unreadable)?;
+    let (width, height) = image::ImageDecoder::dimensions(&decoder);
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+        return Err(ImageError::TooManyPixels);
+    }
+    let orientation = image::ImageDecoder::orientation(&mut decoder)
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    drop(decoder);
+    let (width, height) = if turns_sideways(orientation) {
+        (height, width)
+    } else {
+        (width, height)
+    };
     let (width, height) = shown_size(width, height);
     Ok(InlineImage::new(name, mime_type, data, width, height))
+}
+
+/// Whether `orientation` shows the picture a quarter turn from how it is stored.
+fn turns_sideways(orientation: image::metadata::Orientation) -> bool {
+    use image::metadata::Orientation::*;
+    matches!(
+        orientation,
+        Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH
+    )
 }
 
 /// `width`×`height` narrowed to [`MAX_IMAGE_WIDTH`], keeping the proportions.
@@ -727,6 +757,71 @@ mod tests {
         ));
     }
 
+    /// A JPEG of `width`×`height` whose EXIF says to turn it a quarter clockwise
+    /// (Orientation 6, as phones store portrait photos).
+    fn turned_jpeg(width: u32, height: u32) -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(width, height))
+            .write_to(&mut Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .unwrap();
+        let tiff: Vec<u8> = [
+            b"II*\0".as_slice(),
+            &8u32.to_le_bytes(),
+            &1u16.to_le_bytes(),
+            &0x0112u16.to_le_bytes(),
+            &3u16.to_le_bytes(),
+            &1u32.to_le_bytes(),
+            &6u16.to_le_bytes(),
+            &[0, 0],
+            &0u32.to_le_bytes(),
+        ]
+        .concat();
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend(tiff);
+        let length = u16::try_from(app1.len() + 2).unwrap();
+        let mut out = jpeg[..2].to_vec();
+        out.extend([0xFF, 0xE1]);
+        out.extend(length.to_be_bytes());
+        out.extend(app1);
+        out.extend(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn a_phone_photo_goes_in_the_way_it_shows() {
+        let image = inline_image("photo.jpg".into(), turned_jpeg(80, 60), 1 << 20).unwrap();
+        assert_eq!((image.width, image.height), (60, 80));
+        assert_eq!(image.mime_type, "image/jpeg");
+    }
+
+    #[test]
+    fn a_small_file_with_a_huge_picture_is_refused() {
+        // A PNG whose header claims 10000×10000 pixels, its checksum fixed.
+        let crc32 = |bytes: &[u8]| {
+            let mut crc = 0xFFFF_FFFFu32;
+            for byte in bytes {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 {
+                        (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        };
+        let mut header = png(1, 1);
+        header[16..20].copy_from_slice(&10_000u32.to_be_bytes());
+        header[20..24].copy_from_slice(&10_000u32.to_be_bytes());
+        let crc = crc32(&header[12..29]);
+        header[29..33].copy_from_slice(&crc.to_be_bytes());
+        assert_eq!(
+            inline_image("bomb.png".into(), header, 1 << 20).unwrap_err(),
+            ImageError::TooManyPixels
+        );
+    }
+
     #[test]
     fn a_picked_file_is_read_with_its_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -744,6 +839,37 @@ mod tests {
         ));
     }
 
+    #[gpui::test]
+    fn a_read_image_goes_in_and_a_refused_one_is_reported(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::Appearance::Dark, cx);
+            crate::locale::init(Language::default(), cx);
+        });
+        let (bar, cx) = cx.add_window_view(|_, cx| {
+            let editor = cx.new(|cx| TextArea::new("", cx));
+            FormatBar::new(editor, 1 << 20, cx)
+        });
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&bar, move |_, event: &FormatBarEvent, _| {
+                seen.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        let image = inline_image("logo.png".into(), png(4, 2), 1 << 20).unwrap();
+        bar.update_in(cx, |bar, window, cx| {
+            bar.finish_image(Ok(image), window, cx);
+            bar.finish_image(Err(ImageError::Unsupported), window, cx);
+        });
+        cx.run_until_parked();
+        bar.read_with(cx, |bar, cx| {
+            assert_eq!(bar.editor.read(cx).images().len(), 1);
+        });
+        let unsupported = ImageError::Unsupported.message(Language::English);
+        assert_eq!(*events.borrow(), [FormatBarEvent::ImageFailed(unsupported)]);
+    }
+
     #[test]
     fn image_errors_read_as_sentences() {
         let language = Language::English;
@@ -751,6 +877,7 @@ mod tests {
             .message(language)
             .contains("1.0 MB"));
         assert!(!ImageError::Unsupported.message(language).is_empty());
+        assert!(!ImageError::TooManyPixels.message(language).is_empty());
         assert!(ImageError::Unreadable("boom".into())
             .message(language)
             .ends_with("boom"));

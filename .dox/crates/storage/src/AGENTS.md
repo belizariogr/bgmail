@@ -153,7 +153,7 @@ Signatures the user keeps and which one each account signs with; a signature's
 - **`Database::update_signature`** (pub) — `pub fn update_signature(&self, id: i64, name: &str, document: &str) -> rusqlite::Result<()>`: replaces name and document; no-op for an unknown id.
 - **`Database::delete_signature`** (pub) — `pub fn delete_signature(&self, id: i64) -> rusqlite::Result<()>`: the accounts that used it go without one (`ON DELETE SET NULL`).
 - **`Database::set_account_signatures`** (pub) — `pub fn set_account_signatures(&self, account_id: i64, new_mail: Option<i64>, replies: Option<i64>) -> rusqlite::Result<()>`: both choices of an account; an id that doesn't exist fails (foreign key).
-- Tests: `signatures_are_kept_in_order_and_edited_in_place`, `each_account_chooses_its_signatures_and_loses_a_deleted_one`; `database.rs` `a_replaced_database_keeps_its_accounts_and_signatures`.
+- Tests: `signatures_are_kept_in_order_and_edited_in_place`, `each_account_chooses_its_signatures_and_loses_a_deleted_one`; `database.rs` `a_replaced_database_keeps_its_accounts_and_signatures`, `a_replaced_database_drops_the_choice_of_a_signature_it_lost`.
 
 ### `src/accounts.rs`
 
@@ -361,7 +361,7 @@ These edit `folders_csv` directly and work for every message. For a remote messa
 
 ##### Context: `module`
 
-- **`Database::replace_corrupt(path)`** (pub): keeps a damaged file as `<name>.corrupt` with its journals, opens a new one and copies what it can read of `signatures`, `accounts` and `outbox` (`RECOVERED_TABLES`; the columns both files have, foreign keys off meanwhile). **`Database::open_or_replace_corrupt(path)`** (pub): `open`, using it if the file is damaged. **`is_corrupt(error)`** (pub).
+- **`Database::replace_corrupt(path)`** (pub): keeps a damaged file as `<name>.corrupt` with its journals, opens a new one and copies what it can read of `signatures`, `accounts` and `outbox` (`RECOVERED_TABLES`; the columns both files have, foreign keys off meanwhile), then clears an account's signature choice whose signature didn't come back (its id would go to the next one created). **`Database::open_or_replace_corrupt(path)`** (pub): `open`, using it if the file is damaged. **`is_corrupt(error)`** (pub).
 - **`lossy_text(row, index)`** (pub(crate)): a text column whatever it holds, so one damaged value doesn't stop a list or the app.
 - **`fold_for_search`** (pub, L6)
   - Signature: `pub fn fold_for_search(text: &str) -> String`

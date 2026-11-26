@@ -182,6 +182,14 @@ impl Database {
                 "INSERT OR IGNORE INTO {table} ({columns}) SELECT {columns} FROM old.{table} {only};"
             ));
         }
+        // A signature that couldn't be read leaves its accounts without one: its id
+        // would go to the next signature created, which nobody chose.
+        let _ = self.conn.execute_batch(
+            "UPDATE accounts SET signature_new = NULL
+                 WHERE signature_new NOT IN (SELECT id FROM signatures);
+             UPDATE accounts SET signature_reply = NULL
+                 WHERE signature_reply NOT IN (SELECT id FROM signatures);",
+        );
         let _ = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
         let _ = self.conn.execute_batch("DETACH DATABASE old;");
     }
@@ -997,6 +1005,29 @@ mod tests {
         assert_eq!(accounts[0].signature_new, Some(signature));
         assert_eq!(db.list_signatures().unwrap()[0].name, "Ann");
         assert!(dir.path().join("mail.db.corrupt").exists());
+    }
+
+    #[test]
+    fn a_replaced_database_drops_the_choice_of_a_signature_it_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let old = rusqlite::Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT, email TEXT,
+                 signature_new INTEGER, signature_reply INTEGER);
+             INSERT INTO accounts VALUES (1, 'Ann', 'ann@x.test', 1, 2);",
+        )
+        .unwrap();
+        drop(old);
+        let db = Database::replace_corrupt(&path).unwrap();
+        let account = db.list_accounts().unwrap()[0].clone();
+        assert_eq!(
+            (account.signature_new, account.signature_reply),
+            (None, None)
+        );
+        db.create_signature("New", "").unwrap();
+        let account = db.list_accounts().unwrap()[0].clone();
+        assert_eq!(account.signature_new, None, "the new one wasn't chosen");
     }
 
     #[test]

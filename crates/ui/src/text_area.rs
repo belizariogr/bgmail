@@ -305,9 +305,26 @@ struct TextLayout {
     measured_without_width: bool,
     /// Resolved once: fonts installed don't change while the app runs.
     families: Option<Families>,
-    /// Images decoded for painting, by [`InlineImage::id`]; `None` when one can't be.
-    decoded: HashMap<u64, Option<Arc<RenderImage>>>,
+    /// Images decoded for painting, by [`InlineImage::id`].
+    decoded: HashMap<u64, Decoded>,
 }
+
+/// An image of the text, decoded for painting.
+#[derive(Clone)]
+enum Decoded {
+    /// On a background thread; a placeholder shows meanwhile.
+    Pending,
+    Ready(Arc<RenderImage>),
+    /// Not an image it can show.
+    Failed,
+}
+
+/// Longest side an image is decoded at, in device pixels: GPU textures have a
+/// limit, and the editor never shows one bigger.
+const MAX_DECODED_SIDE: f32 = 2048.0;
+
+/// Memory a single image may take while being decoded.
+const MAX_DECODE_ALLOC: u64 = 512 * 1024 * 1024;
 
 /// Size `image` shows at: its own, narrowed to `available` keeping its proportions.
 fn image_size(image: &InlineImage, available: Option<Pixels>) -> Size<Pixels> {
@@ -318,15 +335,36 @@ fn image_size(image: &InlineImage, available: Option<Pixels>) -> Size<Pixels> {
     size(px(width * scale), px((height * scale).max(1.0)))
 }
 
-/// `data` as the BGRA image GPUI paints, first frame only.
-fn decode_image(data: &[u8]) -> Option<Arc<RenderImage>> {
-    let mut pixels = image::load_from_memory(data).ok()?.into_rgba8();
+/// Device pixels `image` is decoded at: the size it shows at on this screen.
+fn decode_fit(image: &InlineImage, scale_factor: f32) -> (u32, u32) {
+    let side = |css: u32| (css as f32 * scale_factor).clamp(1.0, MAX_DECODED_SIDE) as u32;
+    (side(image.width), side(image.height))
+}
+
+/// `data` as the BGRA image GPUI paints: first frame only, turned as its EXIF
+/// says (as browsers show it), and no bigger than `fit` (a photo is never kept at
+/// full size to be shown small).
+fn decode_image(data: &[u8], fit: (u32, u32)) -> Option<RenderImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = image::ImageDecoder::orientation(&mut decoder).ok()?;
+    let mut decoded = image::DynamicImage::from_decoder(decoder).ok()?;
+    decoded.apply_orientation(orientation);
+    if decoded.width() > fit.0 || decoded.height() > fit.1 {
+        decoded = decoded.thumbnail(fit.0.max(1), fit.1.max(1));
+    }
+    let mut pixels = decoded.into_rgba8();
     for pixel in pixels.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
-    Some(Arc::new(RenderImage::new(smallvec::smallvec![
-        image::Frame::new(pixels)
-    ])))
+    Some(RenderImage::new(smallvec::smallvec![image::Frame::new(
+        pixels
+    )]))
 }
 
 /// Runs of `range` of the text: its styles over the key's font and color, with
@@ -695,6 +733,34 @@ impl TextLayout {
             - layout.x_for_index(row.range.start - row.line_start)
     }
 
+    /// The images laid out that still need decoding (now marked pending), and the
+    /// decoded ones no longer laid out, dropped from the cache for their textures to go.
+    fn images_to_decode(&mut self) -> (Vec<InlineImage>, Vec<Arc<RenderImage>>) {
+        let shown: Vec<&InlineImage> = self
+            .geometry
+            .iter()
+            .filter_map(|geometry| geometry.image.as_ref())
+            .map(|image| &image.image)
+            .collect();
+        let mut stale = Vec::new();
+        self.decoded.retain(|id, decoded| {
+            let keep = shown.iter().any(|image| image.id() == *id);
+            if let (false, Decoded::Ready(image)) = (keep, &decoded) {
+                stale.push(image.clone());
+            }
+            keep
+        });
+        let mut pending = Vec::new();
+        for image in shown {
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.decoded.entry(image.id())
+            {
+                entry.insert(Decoded::Pending);
+                pending.push(image.clone());
+            }
+        }
+        (pending, stale)
+    }
+
     fn line_image(&self, line: usize) -> Option<&LineImage> {
         self.geometry
             .get(line)
@@ -941,11 +1007,11 @@ impl TextArea {
         self.rich.images_used().into_iter().cloned().collect()
     }
 
-    /// The text with its formatting.
+    /// The text with its formatting, without the images it no longer shows.
     pub fn document(&self) -> RichDocument {
         RichDocument {
             text: self.buffer.text().to_owned(),
-            rich: self.rich.clone(),
+            rich: self.rich.compacted(),
         }
     }
 
@@ -958,28 +1024,36 @@ impl TextArea {
     }
 
     /// Replaces `range` with `document`, formatting and images included, as one step
-    /// that can be undone; the caret goes after it.
+    /// that can be undone; the caret goes after it. With the line breaks that keep
+    /// every image alone on its line, and, being programmatic, without
+    /// [`TextAreaEvent::Changed`]. Returns where `document` itself went.
     pub fn replace_range_with_document(
         &mut self,
         range: Range<usize>,
         document: &RichDocument,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Range<usize> {
         let text = self.buffer.text();
         let start = buffer::clamp_to_char_boundary(text, range.start.min(range.end));
         let end = buffer::clamp_to_char_boundary(text, range.end.max(range.start));
         let document = document.clone().validated();
         if start == end && document.is_empty() {
-            return;
+            return start..start;
+        }
+        let (before, after) = self.rich.document_separators(text, start..end, &document);
+        let mut whole = RichDocument::plain(before);
+        for part in [&document, &RichDocument::plain(after)] {
+            let at = whole.text.len();
+            whole.text = whole.rich.splice(&whole.text, at..at, part);
         }
         let before_text = text.to_owned();
         let before_rich = self.rich.clone();
         self.buffer
-            .replace(Some(start..end), &document.text, EditKind::Other);
+            .replace(Some(start..end), &whole.text, EditKind::Other);
         self.buffer.take_single_edit();
         let tracked = self.rich.tracked();
-        let after = self.rich.splice(&before_text, start..end, &document);
-        if after != self.buffer.text() {
+        let spliced = self.rich.splice(&before_text, start..end, &whole);
+        if spliced != self.buffer.text() {
             // Can't happen with a validated document; never style the wrong bytes.
             self.rich = RichText::new(self.buffer.text());
             self.rich.set_tracked(tracked);
@@ -987,7 +1061,8 @@ impl TextArea {
         self.push_rich_undo(before_rich);
         self.format_revision += 1;
         self.after_move(cx);
-        cx.emit(TextAreaEvent::Changed);
+        let landed = start + before.len();
+        landed..landed + document.text.len()
     }
 
     /// Inserts `image` on its own line at the caret, in place of the selection.
@@ -1003,6 +1078,34 @@ impl TextArea {
             .rich
             .update_chars(image_range, move |style| style.image = Some(index));
         self.replace_range_with_document(selected, &document, cx);
+        cx.emit(TextAreaEvent::Changed);
+    }
+
+    /// Decodes `images` off the UI thread, each at its size on this screen; the
+    /// element shows a placeholder until one is ready.
+    fn decode_in_background(
+        &mut self,
+        images: Vec<InlineImage>,
+        scale_factor: f32,
+        cx: &mut Context<Self>,
+    ) {
+        for image in images {
+            let id = image.id();
+            let fit = decode_fit(&image, scale_factor);
+            let decode = cx.background_spawn(async move { decode_image(&image.data, fit) });
+            cx.spawn(async move |this, cx| {
+                let decoded = decode.await;
+                let _ = this.update(cx, |area, cx| {
+                    // Unless the image left the text meanwhile.
+                    if let Some(state) = area.layout.borrow_mut().decoded.get_mut(&id) {
+                        *state = decoded
+                            .map_or(Decoded::Failed, |image| Decoded::Ready(Arc::new(image)));
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     /// The range set with [`Self::set_tracked_range`], as the edits since left it.
@@ -1840,20 +1943,24 @@ impl Element for TextAreaElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let key = self.layout_key(Some(bounds.size.width), window, cx);
+        let (pending, stale) = {
+            let area = self.area.read(cx);
+            let mut layout = area.layout.borrow_mut();
+            layout.ensure(key.clone(), || area.display_text(), window);
+            layout.images_to_decode()
+        };
+        for image in stale {
+            window.drop_image(image).ok();
+        }
+        if !pending.is_empty() {
+            let scale_factor = window.scale_factor();
+            self.area.update(cx, |area, cx| {
+                area.decode_in_background(pending, scale_factor, cx);
+            });
+        }
         let area = self.area.read(cx);
         let mut layout = area.layout.borrow_mut();
         layout.ensure(key, || area.display_text(), window);
-        let undecoded: Vec<InlineImage> = layout
-            .geometry
-            .iter()
-            .filter_map(|geometry| geometry.image.as_ref())
-            .filter(|image| !layout.decoded.contains_key(&image.image.id()))
-            .map(|image| image.image.clone())
-            .collect();
-        for image in undecoded {
-            // Small and decoded once: a signature's logo, a picture put in the text.
-            layout.decoded.insert(image.id(), decode_image(&image.data));
-        }
 
         if std::mem::take(&mut layout.measured_without_width) {
             // The height was guessed without a width; lay out again now that
@@ -1938,6 +2045,7 @@ impl Element for TextAreaElement {
         };
         let focused = focus_handle.is_focused(window);
         let image_selection = cx.theme().colors().accent.opacity(0.35);
+        let image_pending = cx.theme().colors().element_hover;
         window.handle_input(
             &focus_handle,
             ElementInputHandler::new(bounds, self.area.clone()),
@@ -1978,17 +2086,21 @@ impl Element for TextAreaElement {
                 let origin = point(bounds.left() + geometry.left, y);
                 if let Some(image) = &geometry.image {
                     let shown = Bounds::new(bounds.origin + image.bounds.origin, image.bounds.size);
-                    if let Some(Some(decoded)) = layout.decoded.get(&image.image.id()) {
-                        window
-                            .paint_image(shown, Corners::default(), decoded.clone(), 0, false)
-                            .ok();
-                    } else {
+                    match layout.decoded.get(&image.image.id()) {
+                        Some(Decoded::Ready(decoded)) => {
+                            window
+                                .paint_image(shown, Corners::default(), decoded.clone(), 0, false)
+                                .ok();
+                        }
+                        Some(Decoded::Pending) | None => {
+                            window.paint_quad(fill(shown, image_pending))
+                        }
                         // What can't be decoded still shows where it is, and can be selected.
-                        window.paint_quad(gpui::outline(
+                        Some(Decoded::Failed) => window.paint_quad(gpui::outline(
                             shown,
                             marker_color.opacity(0.4),
                             gpui::BorderStyle::Dashed,
-                        ));
+                        )),
                     }
                     let image_range = image.start..image.start + IMAGE_CHAR.len_utf8();
                     if focused
@@ -2280,6 +2392,41 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_document_put_beside_text_keeps_its_image_apart_and_is_not_an_edit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let area = area(cx, "HiAnn");
+        let edits = Rc::new(RefCell::new(0));
+        let counted = edits.clone();
+        cx.update(|cx| {
+            cx.subscribe(&area, move |_, _: &TextAreaEvent, _| {
+                *counted.borrow_mut() += 1
+            })
+            .detach();
+        });
+        let mut signature = RichDocument::plain(&format!("{IMAGE_CHAR}\nThanks"));
+        let index = signature.rich.add_image(logo(4, 2));
+        signature
+            .rich
+            .update_chars(0..IMAGE_CHAR.len_utf8(), move |style| {
+                style.image = Some(index)
+            });
+        area.update(cx, |area, cx| {
+            let landed = area.replace_range_with_document(2..5, &signature, cx);
+            assert_eq!(area.buffer.text(), format!("Hi\n{IMAGE_CHAR}\nThanks"));
+            assert_eq!(landed, 3..area.buffer.text().len());
+            assert!(area.formatted_html().unwrap().contains("<img"));
+            area.insert_image(logo(4, 2), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *edits.borrow(),
+            1,
+            "only the image the user put in is an edit"
+        );
+    }
+
+    #[gpui::test]
     fn an_image_paints_and_a_click_selects_it(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| theme::init(theme::Appearance::Dark, cx));
         let area = area(cx, "");
@@ -2294,7 +2441,10 @@ mod tests {
             let image = layout.line_image(0).expect("an image line");
             assert_eq!(image.bounds.size, size(px(40.), px(30.)));
             assert!(layout.row_height(0) >= px(30.));
-            assert!(matches!(layout.decoded.values().next(), Some(Some(_))));
+            assert!(matches!(
+                layout.decoded.values().next(),
+                Some(Decoded::Ready(_))
+            ));
         });
         cx.simulate_mouse_down(
             point(px(10.0), px(10.0)),
@@ -2335,7 +2485,56 @@ mod tests {
         assert_eq!(image_size(&image, Some(px(300.))), size(px(300.), px(100.)));
         assert_eq!(image_size(&image, Some(px(900.))), size(px(600.), px(200.)));
         assert_eq!(image_size(&image, None), size(px(600.), px(200.)));
-        assert!(decode_image(b"not an image").is_none());
+        assert!(decode_image(b"not an image", (10, 10)).is_none());
+    }
+
+    /// A JPEG of `width`×`height` whose EXIF says to turn it a quarter clockwise
+    /// (Orientation 6, as phones store portrait photos).
+    fn turned_jpeg(width: u32, height: u32) -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(width, height))
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        let tiff: Vec<u8> = [
+            b"II*\0".as_slice(),
+            &8u32.to_le_bytes(),
+            &1u16.to_le_bytes(),
+            &0x0112u16.to_le_bytes(),
+            &3u16.to_le_bytes(),
+            &1u32.to_le_bytes(),
+            &6u16.to_le_bytes(),
+            &[0, 0],
+            &0u32.to_le_bytes(),
+        ]
+        .concat();
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend(tiff);
+        let length = u16::try_from(app1.len() + 2).unwrap();
+        let mut out = jpeg[..2].to_vec();
+        out.extend([0xFF, 0xE1]);
+        out.extend(length.to_be_bytes());
+        out.extend(app1);
+        out.extend(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn an_image_decodes_turned_as_its_exif_says_and_only_as_big_as_it_shows() {
+        let size_of = |image: RenderImage| {
+            let size = image.size(0);
+            (size.width.0, size.height.0)
+        };
+        let turned = decode_image(&turned_jpeg(40, 20), (1000, 1000)).unwrap();
+        assert_eq!(size_of(turned), (20, 40));
+        let big = decode_image(&png(1000, 500), (100, 100)).unwrap();
+        assert_eq!(size_of(big), (100, 50));
+        let image = InlineImage::new("a", "image/png", vec![0], 300, 100);
+        assert_eq!(decode_fit(&image, 2.0), (600, 200));
+        let huge = InlineImage::new("a", "image/png", vec![0], 9000, 10);
+        assert_eq!(decode_fit(&huge, 1.0), (2048, 10));
     }
 
     #[gpui::test]

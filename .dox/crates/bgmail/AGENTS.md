@@ -332,16 +332,21 @@ wiring to `storage`.
   1 MB each, links), saved by themselves 400 ms after the last edit (and when the
   window closes). Each account picks one for new mail and one for replies and
   forwards ("Signature defaults"). A message starts with it in the editor after a
-  blank line, before the quote (above the forwarded message of a forward), without
-  the `-- ` line; it sits in the editor's tracked range, so changing From swaps it
-  for that account's and the toolbar's signature menu changes or removes it
-  ("Manage signatures…" opens the settings). Edited unsent messages keep the one in
-  their text. Signatures are read from the database only when a message opens or
+  blank line, before the quote (above the original when the editor holds it: a
+  forward, or a reply whose quote couldn't be kept out), without the `-- ` line; it
+  sits in the editor's tracked range, so changing From swaps it for that account's
+  and the toolbar's signature menu changes or removes it ("Manage signatures…"
+  opens the settings). Swapping isn't an edit (closing doesn't ask). Which
+  signature the body holds is read from its text, so undo never leaves it stale;
+  an empty signature signs nothing. Edited unsent messages keep the one in their
+  text, and the images of their body come back as attachments (the editor gets the
+  text back, not the formatting). Signatures are read from the database only when a message opens or
   the settings show them; stored as `RichDocument` JSON (images base64), a damaged
   one reads as empty.
 - Images in the body (Insert image, a signature's) go out as `cid:` parts of a
-  `multipart/related` (`ii_<id>@bgmail`), count with the attachments (25 MB),
-  and are left out of the plain-text version. Web and e-mail addresses go out as
+  `multipart/related` (`ii_<salt>_<id>@bgmail`, unique per message), count with
+  the attachments (25 MB), and are left out of the plain-text version. One goes in
+  sized as it shows once turned by its EXIF, and no bigger than 40 megapixels. Web and e-mail addresses go out as
   links.
 - Replies follow Gmail: the editor holds only what the user writes, and below
   it a `⋯` button reveals the attribution line and the original, rendered behind

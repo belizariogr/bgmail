@@ -62,10 +62,11 @@ pub fn account_signature(account: &ComposeAccount, slot: SignatureSlot) -> Optio
 }
 
 /// Where a message's signature goes in `text`: after what is written, so at the end
-/// of a new message or a reply (its quote stays out of the editor), and before the
-/// forwarded message of a forward, which the editor holds.
-pub fn signature_offset(text: &str, forward: bool) -> usize {
-    if forward {
+/// of a new message or a reply whose quote stays out of the editor, and above the
+/// original when the editor holds it (a forward, or a reply whose quote couldn't be
+/// kept out).
+pub fn signature_offset(text: &str, quote_in_editor: bool) -> usize {
+    if quote_in_editor {
         text.len() - text.trim_start_matches('\n').len()
     } else {
         text.len()
@@ -101,10 +102,10 @@ pub fn signature_insertion(
 /// took. Without one, the empty range where one would go.
 pub fn body_with_signature(
     text: &str,
-    forward: bool,
+    quote_in_editor: bool,
     signature: Option<&RichDocument>,
 ) -> (RichDocument, Range<usize>) {
-    let at = signature_offset(text, forward);
+    let at = signature_offset(text, quote_in_editor);
     let mut body = RichDocument::plain(text);
     match signature.filter(|signature| !signature.is_empty()) {
         Some(signature) => {
@@ -113,6 +114,47 @@ pub fn body_with_signature(
             (body, at + range.start..at + range.end)
         }
         None => (body, at..at),
+    }
+}
+
+/// What the body holds where its signature goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignatureInBody {
+    /// Nothing: none was put there, or it was deleted.
+    Nothing,
+    /// A saved signature, as saved.
+    Saved(i64),
+    /// Text that isn't a saved signature as saved: one the user edited.
+    Edited,
+}
+
+/// What `text` holds in `tracked`, the editor's range of the signature. Read from
+/// the text itself, so undoing a change of signature can't leave it out of date.
+pub fn signature_in_body(
+    text: &str,
+    tracked: Option<Range<usize>>,
+    signatures: &[SignatureEntry],
+) -> SignatureInBody {
+    let Some(held) = tracked
+        .filter(|range| !range.is_empty())
+        .and_then(|range| text.get(range))
+    else {
+        return SignatureInBody::Nothing;
+    };
+    signatures
+        .iter()
+        .find(|entry| !entry.document.is_empty() && entry.document.text == held)
+        .map_or(SignatureInBody::Edited, |entry| {
+            SignatureInBody::Saved(entry.id)
+        })
+}
+
+/// Whether the body, holding `held`, must change to have signature `wanted`.
+pub fn needs_signature_change(held: SignatureInBody, wanted: Option<i64>) -> bool {
+    match (held, wanted) {
+        (SignatureInBody::Nothing, None) => false,
+        (SignatureInBody::Saved(id), Some(wanted)) => id != wanted,
+        _ => true,
     }
 }
 
@@ -250,5 +292,53 @@ mod tests {
             new_signature_name("Signature {n}", &[entry("Signature 2")]),
             "Signature 3"
         );
+    }
+
+    #[test]
+    fn the_signature_in_the_body_is_read_from_its_text() {
+        let entry = |id: i64, text: &str| SignatureEntry {
+            id,
+            name: String::new(),
+            document: RichDocument::plain(text),
+        };
+        let saved = [entry(1, ""), entry(2, "Ann"), entry(3, "Bob")];
+        let text = "Hi\n\nAnn";
+        assert_eq!(
+            signature_in_body(text, Some(4..7), &saved),
+            SignatureInBody::Saved(2)
+        );
+        assert_eq!(
+            signature_in_body(text, Some(4..6), &saved),
+            SignatureInBody::Edited
+        );
+        assert_eq!(
+            signature_in_body(text, Some(7..7), &saved),
+            SignatureInBody::Nothing
+        );
+        assert_eq!(
+            signature_in_body(text, None, &saved),
+            SignatureInBody::Nothing
+        );
+        assert_eq!(
+            signature_in_body(text, Some(4..99), &saved),
+            SignatureInBody::Nothing
+        );
+
+        use SignatureInBody::*;
+        assert!(!needs_signature_change(Nothing, None));
+        assert!(!needs_signature_change(Saved(2), Some(2)));
+        assert!(needs_signature_change(Saved(2), Some(3)));
+        assert!(needs_signature_change(Saved(2), None));
+        assert!(needs_signature_change(Edited, None));
+        assert!(needs_signature_change(Edited, Some(2)));
+        assert!(needs_signature_change(Nothing, Some(2)));
+    }
+
+    #[test]
+    fn a_reply_holding_its_quote_is_signed_above_it() {
+        let reply = "\n\nOn Mon, Zoe wrote:\n> Hi";
+        let (body, range) = body_with_signature(reply, true, Some(&signature("Bob")));
+        assert_eq!(body.text, "\n\nBob\n\nOn Mon, Zoe wrote:\n> Hi");
+        assert_eq!(&body.text[range], "Bob");
     }
 }

@@ -237,6 +237,7 @@ pub enum Key {
     FormatImage,
     FormatImageTooLarge,
     FormatImageUnsupported,
+    FormatImageTooManyPixels,
     FormatImageUnreadable,
     SettingsSignatures,
     SignaturesHint,
@@ -789,6 +790,8 @@ impl Key {
             (FormatImageTooLarge, E) => "The image is larger than",
             (FormatImageTooLarge, P) => "A imagem passa de",
             (FormatImageUnsupported, E) => "Only PNG, JPEG and GIF images can go in the text, as every mail app shows them.",
+            (FormatImageTooManyPixels, E) => "The image is too big to go in the text (over 40 megapixels).",
+            (FormatImageTooManyPixels, P) => "A imagem é grande demais para ir no texto (mais de 40 megapixels).",
             (FormatImageUnsupported, P) => "Só imagens PNG, JPEG e GIF podem ir no texto, pois todo app de e-mail as mostra.",
             (FormatImageUnreadable, E) => "Could not read the image",
             (FormatImageUnreadable, P) => "Não foi possível ler a imagem",
@@ -1279,7 +1282,7 @@ mod tests {
         assert_eq!(Language::from_code(""), Language::default());
     }
 
-    const ALL_KEYS: [Key; 327] = [
+    const ALL_KEYS: [Key; 328] = [
         Key::StatusDatabaseReplaced,
         Key::ViewZoomIn,
         Key::ViewZoomOut,
@@ -1445,6 +1448,7 @@ mod tests {
         Key::FormatImage,
         Key::FormatImageTooLarge,
         Key::FormatImageUnsupported,
+        Key::FormatImageTooManyPixels,
         Key::FormatImageUnreadable,
         Key::SettingsSignatures,
         Key::SignaturesHint,

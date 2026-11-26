@@ -646,6 +646,8 @@ mod tests {
             bold.rich.update_chars(0..3, |style| style.bold = true);
             page.editor.update(cx, |area, cx| {
                 area.replace_range_with_document(0..0, &bold, cx);
+                // As typing does.
+                cx.emit(TextAreaEvent::Changed);
             });
             page.name
                 .update(cx, |input, cx| input.set_content("  ", cx));

@@ -300,19 +300,25 @@ impl RichDocument {
     }
 
     /// The document if its styles describe its text, else its text alone: a saved
-    /// one may be damaged or come from another version.
+    /// one may be damaged or come from another version. Images it doesn't show go.
     pub fn validated(self) -> Self {
         let images = self.rich.images.len();
+        let mut end = 0;
         let valid = !self.text.contains('\r')
             && self.rich.matches(&self.text)
-            && self.rich.runs.iter().all(|(len, _)| *len > 0)
-            && self.rich.runs.iter().all(|(_, style)| {
-                style
-                    .image
-                    .is_none_or(|ix| usize::try_from(ix).is_ok_and(|ix| ix < images))
+            && self.rich.runs.iter().all(|(len, style)| {
+                end += len;
+                *len > 0
+                    && self.text.is_char_boundary(end)
+                    && style
+                        .image
+                        .is_none_or(|ix| usize::try_from(ix).is_ok_and(|ix| ix < images))
             });
         if valid {
-            self
+            Self {
+                rich: self.rich.compacted(),
+                text: self.text,
+            }
         } else {
             Self::plain(&self.text)
         }
@@ -470,6 +476,36 @@ impl RichText {
             .flatten()
     }
 
+    /// The same formatting keeping only the images the text shows: the others are
+    /// there for undo, and a saved document would carry them for good.
+    pub fn compacted(&self) -> RichText {
+        let mut used: Vec<u32> = Vec::new();
+        let runs = self
+            .runs
+            .iter()
+            .map(|(len, style)| {
+                let mut style = *style;
+                style.image = style.image.map(|ix| {
+                    let position = used.iter().position(|seen| *seen == ix).unwrap_or_else(|| {
+                        used.push(ix);
+                        used.len() - 1
+                    });
+                    u32::try_from(position).unwrap_or(u32::MAX)
+                });
+                (*len, style)
+            })
+            .collect();
+        RichText {
+            runs,
+            paras: self.paras.clone(),
+            images: used
+                .iter()
+                .filter_map(|ix| self.images.get(usize::try_from(*ix).ok()?).cloned())
+                .collect(),
+            tracked: self.tracked.clone(),
+        }
+    }
+
     /// The images the text shows, each once, in order.
     pub fn images_used(&self) -> Vec<&InlineImage> {
         let mut seen = Vec::new();
@@ -516,6 +552,33 @@ impl RichText {
                 if after { "\n" } else { "" },
             ),
         }
+    }
+
+    /// [`Self::image_separators`] for a whole document put in place of `range`: also
+    /// the breaks that keep the document's own first or last image off the text
+    /// around it.
+    pub fn document_separators(
+        &self,
+        text: &str,
+        range: Range<usize>,
+        document: &RichDocument,
+    ) -> (&'static str, &'static str) {
+        let (mut before, mut after) = self.image_separators(text, range.clone(), &document.text);
+        let previous = text[..range.start].chars().last();
+        let next = text[range.end..].chars().next();
+        let inserted = &document.text;
+        if document.rich.image_at(inserted, 0).is_some() && previous.is_some_and(|c| c != '\n') {
+            before = "\n";
+        }
+        let last_image = inserted.len() >= IMAGE_LEN
+            && document
+                .rich
+                .image_at(inserted, inserted.len() - IMAGE_LEN)
+                .is_some();
+        if last_image && next.is_some_and(|c| c != '\n') {
+            after = "\n";
+        }
+        (before, after)
     }
 
     /// What a Backspace or Delete of `range` takes: the image next to it too when
@@ -1379,5 +1442,52 @@ mod tests {
             .to_html(text)
             .contains("Mail <a href=\"mailto:ann@acme.com\"><b>ann</b>@acme.com</a> now"));
         assert_eq!(rich.to_plain(text), text);
+    }
+
+    #[test]
+    fn a_run_ending_inside_a_character_makes_a_saved_document_plain() {
+        let text = "é".to_string();
+        let mut rich = RichText::new(&text);
+        rich.runs = vec![(1, BOLD), (1, CharStyle::default())];
+        let damaged = RichDocument { text, rich };
+        assert_eq!(damaged.validated(), RichDocument::plain("é"));
+    }
+
+    #[test]
+    fn images_no_longer_shown_are_left_out_of_a_saved_document() {
+        let mut doc = image_doc("a\n", "\nb");
+        // Two images tried before the one kept, which is now the third.
+        doc.rich
+            .images
+            .insert(0, InlineImage::new("x", "image/png", vec![9], 1, 1));
+        doc.rich
+            .images
+            .insert(0, InlineImage::new("y", "image/png", vec![8], 1, 1));
+        doc.rich.update_chars(2..5, |style| style.image = Some(2));
+        let compact = doc.clone().validated();
+        assert_eq!(compact.rich.images.len(), 1);
+        assert_eq!(compact.images()[0].name, "logo.png");
+        assert_eq!(
+            compact.to_html_with(|image| image.name.clone()),
+            doc.to_html_with(|image| image.name.clone())
+        );
+    }
+
+    #[test]
+    fn a_document_starting_or_ending_with_an_image_stays_off_the_text_around() {
+        let logo = image_doc("", "");
+        let ends_with_logo = image_doc("Thanks\n", "");
+        let rich = RichText::new("HiAnn");
+        assert_eq!(rich.document_separators("HiAnn", 2..5, &logo), ("\n", ""));
+        assert_eq!(
+            rich.document_separators("Hi\nAnn", 3..3, &ends_with_logo),
+            ("", "\n")
+        );
+        assert_eq!(
+            rich.document_separators("Hi\n\n", 4..4, &ends_with_logo),
+            ("", "")
+        );
+        let plain = RichDocument::plain("Bob");
+        assert_eq!(rich.document_separators("HiAnn", 2..5, &plain), ("", ""));
     }
 }

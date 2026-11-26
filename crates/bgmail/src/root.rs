@@ -1387,6 +1387,7 @@ fn forwarded_attachments(
     raw: &[u8],
     parsed: &ParsedMessage,
     shown: &[AttachmentRow],
+    keep_inline: bool,
 ) -> Vec<mail_core::OutgoingAttachment> {
     // What the reader lists goes too: an image too big to embed is inline to the parser.
     let mime_type = |info: &mail_core::AttachmentInfo| match &info.charset {
@@ -1397,7 +1398,7 @@ fn forwarded_attachments(
     let attachments: Vec<_> = parsed
         .attachments
         .iter()
-        .filter(|info| !info.inline || listed.contains(&(info.index as i64)))
+        .filter(|info| keep_inline || !info.inline || listed.contains(&(info.index as i64)))
         .collect();
     let indexes: Vec<usize> = attachments.iter().map(|info| info.index).collect();
     attachments
@@ -1520,19 +1521,21 @@ fn compose_init_from_outgoing(row: &OutgoingRow, parsed: &ParsedMessage) -> Comp
             html: None,
             in_reply_to: parsed.in_reply_to.clone(),
             references: parsed.references.clone(),
-            attachments: forwarded_attachments(&row.raw, parsed, &[]),
+            // The editor gets the text back, not the formatting: the images of the body
+            // come back as attachments rather than be lost.
+            attachments: forwarded_attachments(&row.raw, parsed, &[], true),
             inline_images: Vec::new(),
         },
         replaces_outgoing: Some(row.id),
         quoted_original: None,
         // Its text has the signature it was written with.
         signature: None,
-        forward: false,
+        quote_in_editor: false,
     }
 }
 
 /// Process-unique number for Message-IDs (time + counter + random seed).
-fn unique_token() -> u64 {
+pub(crate) fn unique_token() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -3076,7 +3079,19 @@ impl RootView {
         let saved = self
             .db
             .update_signature(id, name, &signatures::document_json(document));
-        self.after_signature_change(saved.map(|()| None), cx);
+        if let Err(error) = saved {
+            let note = format!("{}: {error}", Key::SignatureSaveFailed.tr(cx.language()));
+            self.set_status_note(note, cx);
+            return;
+        }
+        // Only this one changed: an open compose window takes it as it is, without
+        // reading and decoding every signature again on each pause in typing.
+        let entry = SignatureEntry {
+            id,
+            name: name.to_string(),
+            document: document.clone(),
+        };
+        let _ = self.with_compose_window(cx, |view, _, cx| view.update_signature(entry, cx));
     }
 
     /// Deletes signature `id`; the accounts that used it go without one.
@@ -5291,6 +5306,9 @@ impl RootView {
             .map(quotable_html)
             .or_else(|| parsed.text.as_deref().map(quotable_text))
             .filter(|html| kind != ReplyKind::Forward && !html.trim().is_empty());
+        // A forward holds the original in the editor, and so does a reply whose quote
+        // couldn't be kept out of it: the signature goes above it.
+        let quote_in_editor = quoted_html.is_none();
         let quoted_original = quoted_html.map(|html| QuotedOriginal {
             block: std::mem::take(&mut draft.text).trim_start().to_string(),
             attribution: labels.attribution.clone(),
@@ -5302,7 +5320,7 @@ impl RootView {
         if kind == ReplyKind::Forward {
             if let Some(raw) = raw.as_deref() {
                 let shown = visible_attachments(&self.db, Some(&detail));
-                draft.attachments = forwarded_attachments(raw, &parsed, &shown);
+                draft.attachments = forwarded_attachments(raw, &parsed, &shown, false);
             }
         }
         let init = ComposeInit {
@@ -5311,7 +5329,7 @@ impl RootView {
             replaces_outgoing: None,
             quoted_original,
             signature: Some(SignatureSlot::Reply),
-            forward: kind == ReplyKind::Forward,
+            quote_in_editor,
         };
         self.open_compose_with(Some(init), window, cx);
     }
@@ -9571,6 +9589,10 @@ impl RootView {
         self.compose_window
     }
 
+    pub(crate) fn settings_window_for_tests(&self) -> Option<WindowHandle<SettingsView>> {
+        self.settings_window
+    }
+
     pub(crate) fn for_tests(path: &std::path::Path) -> Self {
         Self::new_with_database(Config::default(), path, false)
     }
@@ -11111,7 +11133,7 @@ mod tests {
             Content-Type: image/png\r\nContent-ID: <big@x>\r\n\
             Content-Transfer-Encoding: base64\r\n\r\nAQID\r\n--X--\r\n";
         let parsed = mail_core::parse_message(raw).unwrap();
-        assert!(forwarded_attachments(raw, &parsed, &[]).is_empty());
+        assert!(forwarded_attachments(raw, &parsed, &[], false).is_empty());
         let row = AttachmentRow {
             id: 1,
             message_id: 1,
@@ -11122,7 +11144,7 @@ mod tests {
             content_id: Some("big@x".into()),
             inline: false,
         };
-        assert_eq!(forwarded_attachments(raw, &parsed, &[row]).len(), 1);
+        assert_eq!(forwarded_attachments(raw, &parsed, &[row], false).len(), 1);
     }
 
     #[test]
@@ -11130,7 +11152,7 @@ mod tests {
         let mut raw = b"From: a@b.c\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\nContent-Type: text/plain\r\n\r\nHi\r\n--X\r\nContent-Type: text/csv; charset=iso-8859-1; name=a.csv\r\nContent-Disposition: attachment; filename=a.csv\r\nContent-Transfer-Encoding: 8bit\r\n\r\n".to_vec();
         raw.extend_from_slice(b"S\xe3o\r\n--X--\r\n");
         let parsed = mail_core::parse_message(&raw).unwrap();
-        let forwarded = forwarded_attachments(&raw, &parsed, &[]);
+        let forwarded = forwarded_attachments(&raw, &parsed, &[], false);
         assert_eq!(forwarded[0].mime_type, "text/csv; charset=iso-8859-1");
         assert!(forwarded[0].data.starts_with(b"S\xe3o"));
 
@@ -13986,6 +14008,31 @@ mod tests {
         assert_eq!(init.draft.attachments.len(), 1);
         assert_eq!(init.draft.attachments[0].filename, "a.txt");
         assert_eq!(init.draft.attachments[0].data, b"hello");
+    }
+
+    #[test]
+    fn editing_an_unsent_message_keeps_the_images_of_its_body() {
+        let draft = Draft {
+            from: Address::new(Some("Me"), "me@example.com"),
+            to: vec![Address::new(None::<String>, "ana@x.com")],
+            text: "Hi\n\nAnn".into(),
+            html: Some("<div>Hi</div><div><img src=\"cid:ii_1@bgmail\"></div>".into()),
+            inline_images: vec![mail_core::OutgoingInlineImage {
+                content_id: "ii_1@bgmail".into(),
+                filename: "logo.png".into(),
+                mime_type: "image/png".into(),
+                data: vec![1, 2, 3],
+            }],
+            ..Draft::default()
+        };
+        let raw = mail_core::build_message(&draft, "id@example.com", 0);
+        let row = outgoing_row(raw, &["ana@x.com"], OutgoingState::Failed);
+        let parsed = mail_core::parse_message(&row.raw).unwrap();
+        let init = compose_init_from_outgoing(&row, &parsed);
+        assert_eq!(init.draft.attachments.len(), 1);
+        assert_eq!(init.draft.attachments[0].filename, "logo.png");
+        assert_eq!(init.draft.attachments[0].data, [1, 2, 3]);
+        assert_eq!(init.signature, None);
     }
 
     #[test]
